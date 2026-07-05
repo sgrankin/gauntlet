@@ -646,3 +646,167 @@ func TestAPIRetry_MethodNotAllowed405(t *testing.T) {
 		t.Errorf("expected error field: %s", body)
 	}
 }
+
+// --- POST /api/v1/cancel (Feature 1: manual operator cancellation) --------
+// Mirrors the retry suite above exactly: same wiring (dashboard.Channel),
+// same request/response shape, differing only in core.Command.Kind.
+
+func TestAPICancel_RoundTrip(t *testing.T) {
+	ch := dashboard.NewChannel()
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithChannel(ch))
+
+	resp, body := postJSON(t, h, "/api/v1/cancel", `{"target":"main","ref":"refs/heads/for/main/alice/feat-a"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	assertJSONContentType(t, resp)
+	m := decodeJSON(t, body)
+	if m["status"] != "queued" {
+		t.Errorf("status field = %v", m["status"])
+	}
+
+	select {
+	case cmd := <-ch.Commands():
+		if cmd.Kind != core.CommandCancel || cmd.Target != "main" || cmd.Ref != "refs/heads/for/main/alice/feat-a" {
+			t.Errorf("cmd = %+v", cmd)
+		}
+	default:
+		t.Fatalf("no command enqueued on ch.Commands()")
+	}
+}
+
+func TestAPICancel_NoChannelStillAccepted(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := postJSON(t, h, "/api/v1/cancel", `{"target":"main","ref":"refs/heads/for/main/alice/feat-a"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+}
+
+func TestAPICancel_MissingFields400(t *testing.T) {
+	ch := dashboard.NewChannel()
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithChannel(ch))
+
+	for _, body := range []string{
+		`{"target":"main"}`,
+		`{"ref":"refs/heads/for/main/alice/feat-a"}`,
+		`{}`,
+	} {
+		resp, respBody := postJSON(t, h, "/api/v1/cancel", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, resp:\n%s", body, resp.StatusCode, respBody)
+		}
+	}
+
+	select {
+	case cmd := <-ch.Commands():
+		t.Errorf("expected no command enqueued, got %+v", cmd)
+	default:
+	}
+}
+
+func TestAPICancel_InvalidJSON400(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := postJSON(t, h, "/api/v1/cancel", `not json`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+}
+
+func TestAPICancel_MethodNotAllowed405(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := get(t, h, "/api/v1/cancel")
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	assertJSONContentType(t, resp)
+	m := decodeJSON(t, body)
+	if m["error"] == nil {
+		t.Errorf("expected error field: %s", body)
+	}
+}
+
+// --- POST /api/v1/hooks/cancel (Feature 1: hook cancellation) -------------
+
+func TestAPIHookCancel_NoHookCancelWiredIs503(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := postJSON(t, h, "/api/v1/hooks/cancel", `{"target":"main"}`)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["error"] != "hooks disabled" {
+		t.Errorf("error field = %v, want %q", m["error"], "hooks disabled")
+	}
+}
+
+func TestAPIHookCancel_Cancelled(t *testing.T) {
+	var gotTarget string
+	hookCancel := func(target string) bool {
+		gotTarget = target
+		return true
+	}
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithHookCancel(hookCancel))
+
+	resp, body := postJSON(t, h, "/api/v1/hooks/cancel", `{"target":"main"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["status"] != "cancelled" {
+		t.Errorf("status field = %v, want %q", m["status"], "cancelled")
+	}
+	if gotTarget != "main" {
+		t.Errorf("hookCancel called with target = %q, want main", gotTarget)
+	}
+}
+
+func TestAPIHookCancel_NoOpWhenNothingRunning(t *testing.T) {
+	hookCancel := func(target string) bool { return false }
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithHookCancel(hookCancel))
+
+	resp, body := postJSON(t, h, "/api/v1/hooks/cancel", `{"target":"main"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["status"] != "no-op" {
+		t.Errorf("status field = %v, want %q", m["status"], "no-op")
+	}
+}
+
+func TestAPIHookCancel_MissingTarget400(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithHookCancel(func(string) bool { return true }))
+
+	resp, body := postJSON(t, h, "/api/v1/hooks/cancel", `{}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+}
+
+func TestAPIHookCancel_InvalidJSON400(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := postJSON(t, h, "/api/v1/hooks/cancel", `not json`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+}
+
+func TestAPIHookCancel_MethodNotAllowed405(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := get(t, h, "/api/v1/hooks/cancel")
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	assertJSONContentType(t, resp)
+	m := decodeJSON(t, body)
+	if m["error"] == nil {
+		t.Errorf("expected error field: %s", body)
+	}
+}

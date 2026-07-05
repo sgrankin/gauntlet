@@ -2,7 +2,9 @@
 // protocol (docs/plans/phase23.md §4.4): outbound, it threads one root
 // message per run, threaded replies for each check, and edits the root to
 // its final verdict; inbound, it turns a ":recycle:" reaction on an owned
-// root message into a core.Command{Kind: core.CommandRetry}.
+// root message into a core.Command{Kind: core.CommandRetry}, and an ":x:"
+// reaction into a core.Command{Kind: core.CommandCancel} (Feature 1, manual
+// operator cancellation).
 //
 // It uses github.com/slack-go/slack + its socketmode subpackage: an
 // app-level token opens the socket-mode WebSocket (via
@@ -158,8 +160,9 @@ func (s *Slack) Emit(ctx context.Context, ev core.Event) error {
 	return nil
 }
 
-// Commands returns the channel core.Command values (currently only
-// core.CommandRetry, from an owned ":recycle:" reaction) are delivered on.
+// Commands returns the channel core.Command values (core.CommandRetry from
+// an owned ":recycle:" reaction, core.CommandCancel from an owned ":x:"
+// reaction) are delivered on.
 func (s *Slack) Commands() <-chan core.Command {
 	return s.cmds
 }
@@ -505,8 +508,19 @@ func (s *Slack) handleSocketEvent(evt socketmode.Event) {
 		return
 	}
 	reaction, ok := apiEvent.InnerEvent.Data.(*slackevents.ReactionAddedEvent)
-	if !ok || reaction.Reaction != "recycle" {
-		// Unknown reactions (and every other inner event type) ignored.
+	if !ok {
+		return
+	}
+	// ":recycle:" -> retry (re-queue the same SHA); ":x:" -> cancel (park it
+	// and stop whatever is currently in flight for it). Every other reaction
+	// (and every other inner event type) is ignored.
+	var kind string
+	switch reaction.Reaction {
+	case "recycle":
+		kind = core.CommandRetry
+	case "x":
+		kind = core.CommandCancel
+	default:
 		return
 	}
 
@@ -519,10 +533,10 @@ func (s *Slack) handleSocketEvent(evt socketmode.Event) {
 		return
 	}
 
-	cmd := core.Command{Kind: core.CommandRetry, Target: info.Target, Ref: info.Ref}
+	cmd := core.Command{Kind: kind, Target: info.Target, Ref: info.Ref}
 	select {
 	case s.cmds <- cmd:
 	default:
-		s.logf("slack: cmds buffer full (%d), dropping retry target=%s ref=%s", cmdsBuffer, info.Target, info.Ref)
+		s.logf("slack: cmds buffer full (%d), dropping %s target=%s ref=%s", cmdsBuffer, kind, info.Target, info.Ref)
 	}
 }

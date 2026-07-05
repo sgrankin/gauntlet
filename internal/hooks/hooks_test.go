@@ -981,3 +981,176 @@ func TestRunner_CancelPolicy_CancelsRunningLandingMidHook(t *testing.T) {
 		t.Fatalf("run-2 hook calls = %v, want %v", run2Names, want)
 	}
 }
+
+// TestRunner_CancelCurrent_CancelsRunningLandingMidHook drives Runner for
+// PolicyCancel and cancels run-1's in-flight hook via CancelCurrent
+// (Feature 1's operator-triggered counterpart to PolicyCancel's own
+// automatic supersede-cancel) instead of a superseding landing: the blocked
+// "deploy" hook must be interrupted immediately (mid-hook), its remaining
+// "notify" hook must never run, and its EventHookFinished must carry the
+// Err the executor returns on cancellation plus a Detail naming the
+// operator, not another landing.
+func TestRunner_CancelCurrent_CancelsRunningLandingMidHook(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &blockingExecutor{
+		blockName: "hook:deploy",
+		blockRun:  "run-1",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}), // never closed: must be cancelled, not released
+	}
+	emit := &recordingEmit{}
+	var logBuf boundedLogBuf
+
+	r := New(Params{
+		Hooks: map[string][]Hook{"main": {
+			{Name: "deploy", Command: []string{"true"}},
+			{Name: "notify", Command: []string{"true"}},
+		}},
+		Policies: map[string]Policy{"main": PolicyCancel},
+		Git:      git,
+		Exec:     exec,
+		Emit:     emit.fn,
+		WorkDir:  t.TempDir(),
+		Log:      &logBuf,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	rec1 := &core.RunRecord{RunID: "run-1", Target: "main", MergeSHA: "merge-1",
+		Candidate: core.Candidate{Target: "main", Topic: "t1", SHA: "sha1"}}
+	if err := r.Emit(ctx, landedEvent("main", rec1)); err != nil {
+		t.Fatalf("Emit run-1: %v", err)
+	}
+	<-exec.started // run-1's deploy hook is now blocked in flight, ctx not yet cancelled
+
+	if !r.CancelCurrent("main") {
+		t.Fatal("CancelCurrent = false, want true (run-1's landing is running right now)")
+	}
+
+	// Wait for run-1's own EventHookFinished specifically — NOT a plain
+	// callCount check (jobs already recorded 1 entry the moment "deploy"
+	// blocked, before CancelCurrent ever ran, so that would return
+	// immediately and prove nothing) and NOT the outer ctx cancel (cancelling
+	// the Run loop's own parent context would race the causality chain this
+	// test is verifying: inbox send -> supersede send -> execLanding's own
+	// per-landing cancel -> RunCheck unblocks -> runLanding reads supersede).
+	// Waiting for the actual emitted event is the one signal that's
+	// synchronized with runLanding having already computed Detail.
+	waitFor(t, func() bool {
+		for _, ev := range emit.snapshot() {
+			if ev.RunID == "run-1" && ev.CheckName == "deploy" {
+				return true
+			}
+		}
+		return false
+	})
+
+	for _, j := range exec.jobs {
+		if j.RunID == "run-1" && j.Name == "hook:notify" {
+			t.Fatal("run-1's notify hook ran; CancelCurrent must skip remaining hooks")
+		}
+	}
+
+	events := emit.snapshot()
+	var run1Deploy *core.Event
+	for i, ev := range events {
+		if ev.RunID == "run-1" && ev.CheckName == "deploy" {
+			run1Deploy = &events[i]
+		}
+	}
+	if run1Deploy == nil {
+		t.Fatal("no EventHookFinished for run-1's deploy hook")
+	}
+	if run1Deploy.Check == nil || run1Deploy.Check.Err == nil {
+		t.Fatalf("run-1 deploy event = %+v, want a Check with Err set (the cancellation)", run1Deploy)
+	}
+	if !errors.Is(run1Deploy.Check.Err, context.Canceled) {
+		t.Errorf("run-1 deploy Check.Err = %v, want context.Canceled", run1Deploy.Check.Err)
+	}
+	if run1Deploy.Detail != "superseded by operator-cancel@manual" {
+		t.Errorf("run-1 deploy Detail = %q, want %q", run1Deploy.Detail, "superseded by operator-cancel@manual")
+	}
+
+	if !logBuf.contains("cancelling in-flight landing run=run-1, superseded by operator-cancel@manual") {
+		t.Errorf("log = %q, want a cancellation line naming the operator-cancel", logBuf.String())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+}
+
+// TestRunner_CancelCurrent_NoRunningLandingIsFalse covers the common,
+// expected-not-an-error case: nothing is running for target right now (no
+// landing has arrived at all), so CancelCurrent has nothing to signal.
+func TestRunner_CancelCurrent_NoRunningLandingIsFalse(t *testing.T) {
+	r := New(Params{
+		Hooks:    map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Policies: map[string]Policy{"main": PolicyCancel},
+		Git:      &fakeGitRepo{},
+		Exec:     &fakeExecutor{},
+		WorkDir:  t.TempDir(),
+	})
+	if r.CancelCurrent("main") {
+		t.Fatal("CancelCurrent = true, want false (no landing is running for this target)")
+	}
+	if r.CancelCurrent("unconfigured-target") {
+		t.Fatal("CancelCurrent = true for an unconfigured target, want false")
+	}
+}
+
+// TestRunner_CancelCurrent_NonCancelPolicyIsFalse covers CancelCurrent's
+// documented scope: it only ever cancels a PolicyCancel landing's mid-hook
+// execution, since that's the only Policy execLanding registers a monitor
+// for. A PolicyQueue target's currently-running landing has no
+// cancellation mechanism to wrap at all, so CancelCurrent reports false —
+// not an error, just "there's nothing this can do here" — and the running
+// landing's hooks are left to finish undisturbed.
+func TestRunner_CancelCurrent_NonCancelPolicyIsFalse(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &blockingExecutor{
+		blockName: "hook:deploy",
+		blockRun:  "run-1",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	r := New(Params{
+		Hooks:    map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Policies: map[string]Policy{"main": PolicyQueue},
+		Git:      git,
+		Exec:     exec,
+		WorkDir:  t.TempDir(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	rec1 := &core.RunRecord{RunID: "run-1", Target: "main", MergeSHA: "merge-1",
+		Candidate: core.Candidate{Target: "main", Topic: "t1", SHA: "sha1"}}
+	if err := r.Emit(ctx, landedEvent("main", rec1)); err != nil {
+		t.Fatalf("Emit run-1: %v", err)
+	}
+	<-exec.started // run-1's deploy hook is blocked in flight
+
+	if r.CancelCurrent("main") {
+		t.Fatal("CancelCurrent = true, want false (PolicyQueue registers no monitor to cancel)")
+	}
+
+	close(exec.release) // let it finish normally so Run can drain cleanly
+	waitFor(t, func() bool { return exec.callCount() >= 1 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+}

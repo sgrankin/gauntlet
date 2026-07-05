@@ -145,6 +145,7 @@ func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
 func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[string]string) {
 	targetTip := refs[targetRefName(t)]
 	cands := discoverCandidates(t.Name, refs)
+	d.seedParksOnce(t.Name)
 	d.syncBookkeeping(ctx, t, cands)
 
 	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
@@ -193,6 +194,48 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 		order[ref] = d.seq
 		d.seq++
 		d.emit(ctx, core.Event{Kind: core.EventQueued, At: d.now(), Target: t.Name, Candidate: cands[ref]})
+	}
+}
+
+// seedParksOnce consults Config.SeedParks for target exactly once per
+// Daemon lifetime (Feature 2, "park persistence across restarts"): every
+// later reconcileTarget call for this target returns immediately via
+// d.seeded. Seeds are written straight into d.done — the very next call in
+// reconcileTarget, syncBookkeeping, already drops any entry (seeded or not)
+// whose ref has vanished or moved to a new SHA since, so this needs no SHA
+// check of its own beyond the red-family filter below.
+func (d *Daemon) seedParksOnce(target string) {
+	if d.seeded[target] {
+		return
+	}
+	d.seeded[target] = true
+
+	if d.cfg.SeedParks == nil {
+		return
+	}
+	for _, seed := range d.cfg.SeedParks(target) {
+		if !isRedOutcome(seed.Outcome) {
+			continue // a landed or skipped ref was never sticky; don't seed one
+		}
+		m := d.done[target]
+		if m == nil {
+			m = make(map[string]parkEntry)
+			d.done[target] = m
+		}
+		m[seed.Ref] = parkEntry{SHA: seed.SHA, Outcome: seed.Outcome, Reason: seed.Reason, At: seed.At}
+	}
+}
+
+// isRedOutcome reports whether o is one of the park-worthy "red family"
+// outcomes (matching the script DSL's cmdAssertSlotParked and §9.1's own
+// park semantics): a ref parks on Rejected, Conflict, or Error, never on
+// Landed or Skipped.
+func isRedOutcome(o core.Outcome) bool {
+	switch o {
+	case core.OutcomeRejected, core.OutcomeConflict, core.OutcomeError:
+		return true
+	default:
+		return false
 	}
 }
 

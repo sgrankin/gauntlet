@@ -338,6 +338,69 @@ func (s *Store) DepthSeries(target string, since time.Time) ([]DepthPoint, error
 	return out, nil
 }
 
+// RefVerdict is one candidate ref's most recent terminal run outcome for a
+// target (LatestTerminalPerRef) — the read side of Feature 2's boot-time
+// park seeding (queue.Config.SeedParks): Outcome is the raw stored string
+// (outcomeString's vocabulary: landed|rejected|conflict|skipped|error), left
+// unparsed here since history never imports internal/core (cmd's SeedParks
+// closure, the sole caller, maps it back to core.Outcome).
+type RefVerdict struct {
+	Ref     string
+	SHA     string
+	Outcome string
+	Detail  string
+	EndedAt time.Time
+}
+
+// LatestTerminalPerRef returns, for every distinct candidate_ref recorded
+// against target, that ref's single most recent run row: "most recent" by
+// started_at, tie-broken by run_id (both monotonic enough for this purpose —
+// newRunID's timestamp+counter scheme, internal/queue/reconcile.go). One row
+// per ref, unordered.
+//
+// Interleaved histories resolve exactly as the window function's
+// PARTITION BY/ORDER BY says they should: a ref rejected then later landed
+// has its landed row win (no park candidate); a ref landed then later
+// rejected again has the rejection win (a park candidate); a ref rejected
+// multiple times in a row has only the LATEST rejection win, never an
+// earlier one. The caller (queue.Config.SeedParks, wired in cmd/gauntlet)
+// is responsible for filtering to red-family outcomes before treating a
+// result as a park seed — this method itself returns every ref's latest
+// verdict regardless of outcome, landed included.
+func (s *Store) LatestTerminalPerRef(target string) ([]RefVerdict, error) {
+	rows, err := s.db.Query(`
+SELECT candidate_ref, candidate_sha, outcome, detail, ended_at
+FROM (
+	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at,
+	       ROW_NUMBER() OVER (
+	           PARTITION BY candidate_ref
+	           ORDER BY started_at DESC, run_id DESC
+	       ) AS rn
+	FROM runs
+	WHERE target = ?
+)
+WHERE rn = 1`, target)
+	if err != nil {
+		return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
+	}
+	defer rows.Close()
+
+	var out []RefVerdict
+	for rows.Next() {
+		var v RefVerdict
+		var endedMS int64
+		if err := rows.Scan(&v.Ref, &v.SHA, &v.Outcome, &v.Detail, &endedMS); err != nil {
+			return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
+		}
+		v.EndedAt = time.UnixMilli(endedMS)
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
+	}
+	return out, nil
+}
+
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, letting
 // scanRunRow serve both RecentRuns (multi-row) and Run (single-row).
 type rowScanner interface {

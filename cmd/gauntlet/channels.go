@@ -10,8 +10,10 @@ import (
 	"strings"
 
 	"github.com/sgrankin/gauntlet/internal/config"
+	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/ghstatus"
 	"github.com/sgrankin/gauntlet/internal/history"
+	"github.com/sgrankin/gauntlet/internal/queue"
 	"github.com/sgrankin/gauntlet/internal/slack"
 	"github.com/sgrankin/gauntlet/internal/summarize"
 )
@@ -81,6 +83,63 @@ func buildSlackChannel(cfg *config.Daemon) (*slack.Slack, error) {
 		AppToken: appToken,
 		BotToken: botToken,
 	}), nil
+}
+
+// buildSeedParks returns the queue.Config.SeedParks closure (Feature 2,
+// "park persistence across restarts"): for a target, it asks store's
+// LatestTerminalPerRef for every candidate ref's most recent verdict and
+// maps each back to a queue.ParkSeed, string outcome parsed back to
+// core.Outcome via parseOutcome. queue.Daemon itself is what actually
+// filters to red-family outcomes (Rejected/Conflict/Error) before seeding
+// anything — this closure hands over every verdict, landed included, and
+// lets that filtering live in one place (internal/queue/reconcile.go's
+// seedParksOnce).
+//
+// A query failure degrades to "no seeds" (logged, not fatal) rather than
+// failing daemon startup: this is efficiency state, never correctness state
+// (DESIGN.md's decision ledger) — worst case, a broken history db just costs
+// some avoidable re-tests on this restart, exactly as if history had never
+// been configured at all.
+func buildSeedParks(store *history.Store) func(target string) []queue.ParkSeed {
+	return func(target string) []queue.ParkSeed {
+		verdicts, err := store.LatestTerminalPerRef(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gauntlet: history: seed parks %s: %v\n", target, err)
+			return nil
+		}
+		out := make([]queue.ParkSeed, 0, len(verdicts))
+		for _, v := range verdicts {
+			outcome, ok := parseOutcome(v.Outcome)
+			if !ok {
+				continue // an outcome string history never actually writes; defensive only
+			}
+			out = append(out, queue.ParkSeed{
+				Ref: v.Ref, SHA: v.SHA, Outcome: outcome, Reason: v.Detail, At: v.EndedAt,
+			})
+		}
+		return out
+	}
+}
+
+// parseOutcome maps history's stored outcome string (history.outcomeString's
+// vocabulary; unexported there, since internal/history never imports
+// internal/core) back to a core.Outcome. ok is false for anything else —
+// defensive only, since history never writes any other value.
+func parseOutcome(s string) (core.Outcome, bool) {
+	switch s {
+	case "landed":
+		return core.OutcomeLanded, true
+	case "rejected":
+		return core.OutcomeRejected, true
+	case "conflict":
+		return core.OutcomeConflict, true
+	case "skipped":
+		return core.OutcomeSkipped, true
+	case "error":
+		return core.OutcomeError, true
+	default:
+		return 0, false
+	}
 }
 
 // buildSummarizer constructs the optional Claude-written merge-commit-body

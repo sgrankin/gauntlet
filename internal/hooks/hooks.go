@@ -395,6 +395,57 @@ func (r *Runner) execLanding(parent context.Context, ev core.Event) {
 	<-monitorDone
 }
 
+// CancelCurrent cancels target's currently-running landing's hooks, if one
+// is running right now, and reports whether it found one to signal
+// (Feature 1, manual operator cancellation) — an operator-triggered
+// counterpart to PolicyCancel's own automatic supersede-cancel, wrapped
+// around the exact same mechanism: r.monitors[target] is only ever
+// non-nil for the duration of a PolicyCancel landing's execLanding call
+// (see that method's doc), so this only ever does anything for a target
+// configured with PolicyCancel that has a landing in flight this instant.
+// For PolicyQueue/PolicyCoalesce, or a PolicyCancel target that's currently
+// idle, there is nothing running to interrupt — CancelCurrent returns false,
+// a normal, expected outcome, not an error (there is no separate
+// cancellation mechanism to fall back to for those cases; runLanding's
+// stop-at-first-failure behavior only ever triggers on a real check
+// failure or a genuine supersede).
+//
+// The synthetic Event sent through the monitor's inbox plays the same role
+// execLanding's own newer-landing signal does — its landingRef becomes the
+// "superseded by ..." Detail runLanding attaches to the interrupted hook's
+// EventHookFinished (cancelDetail's queue-side counterpart: an operator, not
+// another landing, is what superseded it here).
+//
+// TOCTOU caveat, inherited verbatim from Emit's own supersede pattern (a
+// map read under mu, the send outside it): the landing can finish normally
+// in the window between this method's map read and its send — the monitors
+// entry is only deleted after the monitor goroutine exits, so the send can
+// still land in the (cap-1) inbox and this reports true ("cancelled") for
+// hooks that had, by then, already completed on their own. Functionally
+// harmless (cancel() on an already-done context is a no-op; no work is
+// disturbed), but callers should read true as "a cancel signal was
+// delivered", not a guarantee the hook was actually interrupted mid-flight.
+func (r *Runner) CancelCurrent(target string) bool {
+	r.mu.Lock()
+	inbox := r.monitors[target]
+	r.mu.Unlock()
+	if inbox == nil {
+		return false
+	}
+
+	ev := core.Event{
+		Target:    target,
+		Candidate: core.Candidate{Topic: "operator-cancel", SHA: "manual"},
+		Detail:    "cancelled by operator",
+	}
+	select {
+	case inbox <- ev:
+		return true
+	default:
+		return false // a cancellation is already in flight for this target
+	}
+}
+
 // landingRef formats ev as "<topic>@<shortSHA>" for log lines and
 // EventHookFinished.Detail — a compact, human-scannable identifier for
 // which landing superseded which.

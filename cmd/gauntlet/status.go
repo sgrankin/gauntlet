@@ -1,12 +1,14 @@
-// `gauntlet status` and `gauntlet retry` are client-side porcelain, like
-// `gauntlet land` (cmd/gauntlet/land.go): thin HTTP clients over the
-// dashboard's JSON API (internal/dashboard/api.go, work chunk E4), for
-// agents, scripts, and humans who don't want to open a browser. Neither
-// talks to git, config, or the queue directly — everything they know comes
-// from the API response. Kept intentionally thin: net/http + encoding/json
-// only, no shared internal/dashboard types (so a change to the API's Go
-// structs can't silently break the CLI's JSON decoding — they're coupled
-// only through the wire format, which is the point of a JSON API).
+// `gauntlet status`, `gauntlet retry`, `gauntlet cancel`, and
+// `gauntlet hooks-cancel` are client-side porcelain, like `gauntlet land`
+// (cmd/gauntlet/land.go): thin HTTP clients over the dashboard's JSON API
+// (internal/dashboard/api.go, work chunk E4 plus Feature 1's cancel/
+// hooks-cancel routes), for agents, scripts, and humans who don't want to
+// open a browser. None talk to git, config, or the queue directly —
+// everything they know comes from the API response. Kept intentionally thin:
+// net/http + encoding/json only, no shared internal/dashboard types (so a
+// change to the API's Go structs can't silently break the CLI's JSON
+// decoding — they're coupled only through the wire format, which is the
+// point of a JSON API).
 package main
 
 import (
@@ -218,6 +220,131 @@ func runRetry(args []string) error {
 	}
 
 	res, err := http.Post(f.url+"/api/v1/retry", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode >= 300 {
+		return fmt.Errorf("%s: %s", res.Status, bytes.TrimSpace(body))
+	}
+	fmt.Fprintln(os.Stdout, string(bytes.TrimSpace(body)))
+	return nil
+}
+
+// --- gauntlet cancel ------------------------------------------------------
+
+type cancelFlags struct {
+	url    string
+	target string
+	ref    string
+}
+
+func parseCancelFlags(args []string) (cancelFlags, error) {
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	var f cancelFlags
+	fs.StringVar(&f.url, "url", defaultDashboardURL, "dashboard base URL")
+	fs.StringVar(&f.target, "target", "", "target name, matching a `target` in the daemon's gauntlet.kdl [required]")
+	fs.StringVar(&f.ref, "ref", "", "candidate ref, e.g. refs/heads/for/main/alice/topic [required]")
+	if err := fs.Parse(args); err != nil {
+		return cancelFlags{}, err
+	}
+	if f.target == "" {
+		return cancelFlags{}, fmt.Errorf("-target is required")
+	}
+	if f.ref == "" {
+		return cancelFlags{}, fmt.Errorf("-ref is required")
+	}
+	return f, nil
+}
+
+// cancelRequestBody mirrors dashboard.cancelRequest's JSON shape
+// (internal/dashboard/api.go) — see retryRequestBody's doc on why this is a
+// separate type rather than a shared import.
+type cancelRequestBody struct {
+	Target string `json:"target"`
+	Ref    string `json:"ref"`
+}
+
+// runCancel implements "gauntlet cancel": POST the dashboard's
+// /api/v1/cancel with {target, ref} — stops whatever is currently
+// happening to that candidate and parks it at its current SHA (Feature 1,
+// manual operator cancellation; see "Cancellation" in the README).
+func runCancel(args []string) error {
+	f, err := parseCancelFlags(args)
+	if err != nil {
+		return err
+	}
+
+	reqBody, err := json.Marshal(cancelRequestBody{Target: f.target, Ref: f.ref})
+	if err != nil {
+		return err
+	}
+
+	res, err := http.Post(f.url+"/api/v1/cancel", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode >= 300 {
+		return fmt.Errorf("%s: %s", res.Status, bytes.TrimSpace(body))
+	}
+	fmt.Fprintln(os.Stdout, string(bytes.TrimSpace(body)))
+	return nil
+}
+
+// --- gauntlet hooks-cancel --------------------------------------------------
+
+type hooksCancelFlags struct {
+	url    string
+	target string
+}
+
+func parseHooksCancelFlags(args []string) (hooksCancelFlags, error) {
+	fs := flag.NewFlagSet("hooks-cancel", flag.ContinueOnError)
+	var f hooksCancelFlags
+	fs.StringVar(&f.url, "url", defaultDashboardURL, "dashboard base URL")
+	fs.StringVar(&f.target, "target", "", "target name, matching a `target` in the daemon's gauntlet.kdl [required]")
+	if err := fs.Parse(args); err != nil {
+		return hooksCancelFlags{}, err
+	}
+	if f.target == "" {
+		return hooksCancelFlags{}, fmt.Errorf("-target is required")
+	}
+	return f, nil
+}
+
+// hooksCancelRequestBody mirrors dashboard.hookCancelRequest's JSON shape
+// (internal/dashboard/api.go).
+type hooksCancelRequestBody struct {
+	Target string `json:"target"`
+}
+
+// runHooksCancel implements "gauntlet hooks-cancel": POST the dashboard's
+// /api/v1/hooks/cancel with {target} — cancels that target's currently
+// running post-land hook execution, if any (Feature 1's hook-cancel
+// surface, hooks.Runner.CancelCurrent).
+func runHooksCancel(args []string) error {
+	f, err := parseHooksCancelFlags(args)
+	if err != nil {
+		return err
+	}
+
+	reqBody, err := json.Marshal(hooksCancelRequestBody{Target: f.target})
+	if err != nil {
+		return err
+	}
+
+	res, err := http.Post(f.url+"/api/v1/hooks/cancel", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return err
 	}

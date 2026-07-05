@@ -92,6 +92,43 @@ type Config struct {
 	// API/MCP path) — retention/pruning is a separate mechanism, not the
 	// reconcile loop's job.
 	LogDir string
+
+	// SeedParks, if non-nil, is consulted once per target — on that
+	// target's very first reconcileTarget call this Daemon instance ever
+	// makes, never again — to pre-seed d.done (the park list) from run
+	// history before that first pass's own pick even happens (Feature 2,
+	// "park persistence across restarts").
+	//
+	// This is efficiency state, never correctness state (DESIGN.md's
+	// decision ledger, "SQLite for history only", sharpened): Invariant 4's
+	// crash recovery already reconstructs every correctness-relevant fact
+	// from refs alone, with or without this. What a restart loses today is
+	// purely a pointless re-test of a SHA already proven red before the
+	// crash — SeedParks exists only to skip that, by asking history
+	// (internal/history's LatestTerminalPerRef) for each candidate ref's
+	// most recent verdict. Every seed is filtered twice before it can do
+	// anything: reconcileTarget only keeps seeds whose Outcome is
+	// red-family (Rejected/Conflict/Error) — a landed or skipped ref is
+	// never seeded — and then the very next call, syncBookkeeping's
+	// existing SHA-currency check, drops any seed whose ref has since
+	// vanished or moved to a new SHA, exactly as it already does to a live
+	// park on a re-push. A stale or missing db therefore costs at most some
+	// avoidable re-tests; it can never manufacture a landing or suppress a
+	// real one. nil (the default, and every pre-Feature-2 Daemon) disables
+	// seeding entirely — byte-identical startup behavior.
+	SeedParks func(target string) []ParkSeed
+}
+
+// ParkSeed is one candidate ref's park state as derived from run history at
+// boot (Config.SeedParks). Fields mirror parkEntry's own shape; exported so
+// cmd's history-backed SeedParks closure can build one without importing
+// any unexported queue type.
+type ParkSeed struct {
+	Ref     string
+	SHA     string
+	Outcome core.Outcome
+	Reason  string
+	At      time.Time
 }
 
 // checkInFlight is the currently-running check within an in-flight run: its
@@ -210,6 +247,13 @@ type Daemon struct {
 	// on).
 	batchFallback map[string]bool
 
+	// seeded marks, per target, whether Config.SeedParks has already been
+	// consulted for it (Feature 2): set true the first time reconcileTarget
+	// runs for that target, regardless of whether SeedParks is nil or
+	// returned anything — so seeding is attempted at most once per target
+	// per Daemon lifetime, never on a later restart-free reconcile pass.
+	seeded map[string]bool
+
 	// snap holds the most recently published Snapshot (docs/plans/phase23.md
 	// §2.1); nil until the first successful ReconcileOnce pass completes.
 	snap atomic.Pointer[Snapshot]
@@ -272,6 +316,7 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		ignoredRefs:   make(map[string]string),
 		lanes:         make(map[string]*lane),
 		batchFallback: make(map[string]bool),
+		seeded:        make(map[string]bool),
 	}, nil
 }
 
@@ -337,7 +382,7 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 		return fmt.Errorf("queue: list refs: %w", err)
 	}
 
-	d.drainCommands(ctx)
+	d.drainCommands(ctx, refs)
 	d.checkIgnoredRefs(ctx, refs)
 
 	for _, t := range d.cfg.Targets {

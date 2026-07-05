@@ -1,15 +1,15 @@
 // Package mcp exposes gauntlet's live queue state and run history to AI
-// agents over the Model Context Protocol (chunk E5): four tools — status,
-// runs, run, retry — mounted at /mcp on the daemon's existing dashboard HTTP
-// port, right alongside the read-only HTML dashboard and its JSON API
-// (internal/dashboard/api.go, chunk E4).
+// agents over the Model Context Protocol (chunk E5): six tools — status,
+// runs, run, retry, cancel, hook_cancel — mounted at /mcp on the daemon's
+// existing dashboard HTTP port, right alongside the read-only HTML dashboard
+// and its JSON API (internal/dashboard/api.go, chunk E4).
 //
 // This package deliberately does not import internal/dashboard: its Params
 // are the same two read sources (a live queue.Snapshot and an optional
-// *history.Store) plus one write path (a retry func), wired independently
-// in cmd/gauntlet/dashboard.go so an agent talking MCP and a human looking
-// at the dashboard both feed off the same daemon state without either
-// package depending on the other. The status tool's view structs
+// *history.Store) plus three write paths (retry/cancel/hook_cancel funcs),
+// wired independently in cmd/gauntlet/dashboard.go so an agent talking MCP
+// and a human looking at the dashboard both feed off the same daemon state
+// without either package depending on the other. The status tool's view structs
 // deliberately mirror api.go's JSON field names (lowerCamel) so an agent and
 // a script hitting the HTTP API see the same vocabulary for the same data —
 // see api.go's statusResponse/targetStatus family, duplicated here rather
@@ -69,6 +69,19 @@ type Params struct {
 	// buffer — never blocks). Nil disables the retry tool.
 	Retry func(core.Command) bool
 
+	// Cancel enqueues a cancel command for (Command.Target, Command.Ref)
+	// (Feature 1, manual operator cancellation) and reports whether it was
+	// accepted, same backpressure contract as Retry. Nil disables the
+	// cancel tool.
+	Cancel func(core.Command) bool
+
+	// HookCancel cancels a target's currently-running post-land hook
+	// execution, if any (hooks.Runner.CancelCurrent, wired in nil-safely by
+	// cmd/gauntlet when hooks are configured), and reports whether a
+	// running landing was actually found and signalled. Nil disables the
+	// hook_cancel tool.
+	HookCancel func(target string) bool
+
 	// LogRoot mirrors dashboard.WithLogRoot: when non-empty, the run tool's
 	// checks gain a logUrl pointing at the dashboard's
 	// GET /run/{id}/log/{check} route (mounted on the same HTTP server this
@@ -116,6 +129,26 @@ func New(p Params) http.Handler {
 			"effect as a Slack \":recycle:\" reaction or POST /api/v1/retry.",
 	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in retryIn) (*sdkmcp.CallToolResult, retryOut, error) {
 		out, err := handleRetry(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "cancel",
+		Description: "Cancel (target, ref): stop its in-flight run (parking the candidate at its current " +
+			"SHA) or, if it's only queued, park it before it's ever picked up. Same effect as a Slack \":x:\" " +
+			"reaction or POST /api/v1/cancel. A retry later clears the park.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in cancelIn) (*sdkmcp.CallToolResult, cancelOut, error) {
+		out, err := handleCancel(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "hook_cancel",
+		Description: "Cancel target's currently-running post-land hook execution, if any. Same effect as " +
+			"POST /api/v1/hooks/cancel. Reports \"no-op\" (not an error) when nothing is running for that " +
+			"target right now.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in hookCancelIn) (*sdkmcp.CallToolResult, hookCancelOut, error) {
+		out, err := handleHookCancel(p, in)
 		return nil, out, err
 	})
 
@@ -498,6 +531,53 @@ func handleRetry(p Params, in retryIn) (retryOut, error) {
 		return retryOut{}, errors.New("retry queue is full; try again")
 	}
 	return retryOut{Status: "queued"}, nil
+}
+
+// --- cancel -------------------------------------------------------------------
+
+type cancelIn struct {
+	Target string `json:"target" jsonschema:"the target the candidate is queued against"`
+	Ref    string `json:"ref" jsonschema:"the candidate's ref, e.g. refs/heads/for/main/alice/topic"`
+}
+
+type cancelOut struct {
+	Status string `json:"status"`
+}
+
+func handleCancel(p Params, in cancelIn) (cancelOut, error) {
+	if in.Target == "" || in.Ref == "" {
+		return cancelOut{}, errors.New("target and ref are required")
+	}
+	if p.Cancel == nil {
+		return cancelOut{}, errors.New("cancel is disabled")
+	}
+	if !p.Cancel(core.Command{Kind: core.CommandCancel, Target: in.Target, Ref: in.Ref}) {
+		return cancelOut{}, errors.New("cancel queue is full; try again")
+	}
+	return cancelOut{Status: "queued"}, nil
+}
+
+// --- hook_cancel ----------------------------------------------------------------
+
+type hookCancelIn struct {
+	Target string `json:"target" jsonschema:"the target whose currently-running post-land hooks should be cancelled"`
+}
+
+type hookCancelOut struct {
+	Status string `json:"status"` // "cancelled" or "no-op"
+}
+
+func handleHookCancel(p Params, in hookCancelIn) (hookCancelOut, error) {
+	if in.Target == "" {
+		return hookCancelOut{}, errors.New("target is required")
+	}
+	if p.HookCancel == nil {
+		return hookCancelOut{}, errors.New("hook cancel is disabled")
+	}
+	if p.HookCancel(in.Target) {
+		return hookCancelOut{Status: "cancelled"}, nil
+	}
+	return hookCancelOut{Status: "no-op"}, nil
 }
 
 // --- shared -------------------------------------------------------------------

@@ -116,12 +116,15 @@ jj git push -b for/main/$USER/my-feature
 (`-r @` if you're landing the change you just described; `-r @-` if you've
 already moved on to a new empty commit on top of it.)
 
-**Cancellation** is ref deletion — nothing more:
+**Author cancellation** is ref deletion — nothing more:
 
 ```sh
 git push origin --delete for/main/$USER/my-feature
 # or: jj bookmark delete for/main/$USER/my-feature && jj git push -b for/main/$USER/my-feature
 ```
+
+(See "Operator cancellation" below for the other kind — an operator stopping
+someone else's in-flight candidate without touching the ref at all.)
 
 **Retry semantics.** Red (or a conflict) parks the ref at that SHA — the
 daemon won't re-test it again on its own. To retry: push a new SHA (amend
@@ -129,6 +132,27 @@ and re-push the same ref name; the SHA change is what un-parks it), or, once
 the Slack channel is configured (see "Configuration reference" below), react
 `:recycle:` on the run's root message to re-queue the same SHA without a new
 push.
+
+**Operator cancellation.** An operator (not the author) can stop
+a candidate that's currently being tested, or pull one out of the queue
+before it's ever picked up, without deleting the ref: react `:x:` on the
+run's root message in Slack, `POST /api/v1/cancel`, the MCP `cancel` tool, or
+`gauntlet cancel`. This parks the ref at its current SHA exactly like a red
+verdict (`Detail: "cancelled by operator"`) — the same retry semantics above
+clear it. Per queueing discipline: serial and speculate park the cancelled
+run itself (a speculation window's suffix behind it re-queues, unparked,
+same as a real bubble); batch parks only the named member and re-queues its
+batch-mates (unparked, "batch member cancelled"). See "API"/"MCP" below for
+the wire shape, and `docs/plans` for the full per-mode semantics.
+
+Post-land hooks (below) have their own, separate cancel surface —
+`POST /api/v1/hooks/cancel`, the MCP `hook_cancel` tool, or
+`gauntlet hooks-cancel` — since a hook stage has no candidate ref to name,
+only a target whose currently-running hook execution should be interrupted.
+It only ever has anything to cancel for a target configured with
+`hooks-policy "cancel"` (below) that has a landing's hooks running right
+now — every other policy has no in-flight cancellation mechanism to wrap, so
+the call reports a no-op rather than an error.
 
 ## Configuration reference
 
@@ -218,7 +242,8 @@ summarize {
   authenticate.
 - **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
   threaded run messages in the given channel ID, root edited to a
-  pass/fail mark on landing, `:recycle:` on the root re-queues via retry.
+  pass/fail mark on landing, `:recycle:` on the root re-queues via retry,
+  `:x:` on the root cancels it (see "Operator cancellation" above).
   `app-token-env`/`bot-token-env` name the environment variables holding the
   app-level (socket mode) and bot tokens (defaults `SLACK_APP_TOKEN` /
   `SLACK_BOT_TOKEN`). **Channel absent ⇒ disabled.** Once `channel` is set,
@@ -540,8 +565,36 @@ lowerCamel field names; errors are always `{"error": "..."}`.
     -d '{"target":"main","ref":"refs/heads/for/main/alice/my-feature"}'
   ```
 
-**`gauntlet status`** and **`gauntlet retry`** are thin CLI wrappers over
-the same API (client-side porcelain, like `gauntlet land`):
+- **`POST /api/v1/cancel`** — stops whatever is currently happening to a
+  candidate and parks it at its current SHA (see "Operator cancellation" above), same
+  effect as reacting `:x:` in Slack. Body: `{"target": "main", "ref":
+  "refs/heads/for/main/alice/my-feature"}`. `202 {"status":"queued"}` on
+  success; `400` if `target` or `ref` is missing or the body isn't valid
+  JSON; `405` for any method but `POST`.
+
+  ```sh
+  curl -s -X POST http://localhost:8080/api/v1/cancel \
+    -H 'content-type: application/json' \
+    -d '{"target":"main","ref":"refs/heads/for/main/alice/my-feature"}'
+  ```
+
+- **`POST /api/v1/hooks/cancel`** — cancels a target's currently-running
+  post-land hook execution, if any (see "Operator cancellation" above). Body:
+  `{"target": "main"}`. `202 {"status":"cancelled"}` if a running landing
+  was found and signalled, `202 {"status":"no-op"}` if nothing was running
+  for that target (not an error); `400` if `target` is missing or the body
+  isn't valid JSON; `503 {"error":"hooks disabled"}` if no target configures
+  any hooks; `405` for any method but `POST`.
+
+  ```sh
+  curl -s -X POST http://localhost:8080/api/v1/hooks/cancel \
+    -H 'content-type: application/json' \
+    -d '{"target":"main"}'
+  ```
+
+**`gauntlet status`**, **`gauntlet retry`**, **`gauntlet cancel`**, and
+**`gauntlet hooks-cancel`** are thin CLI wrappers over the same API
+(client-side porcelain, like `gauntlet land`):
 
 ```sh
 gauntlet status -url http://localhost:8080                  # compact per-target summary
@@ -549,6 +602,8 @@ gauntlet status -url http://localhost:8080 -target main     # one target only
 gauntlet status -url http://localhost:8080 -json            # raw API response
 
 gauntlet retry -url http://localhost:8080 -target main -ref refs/heads/for/main/alice/my-feature
+gauntlet cancel -url http://localhost:8080 -target main -ref refs/heads/for/main/alice/my-feature
+gauntlet hooks-cancel -url http://localhost:8080 -target main
 ```
 
 **Trust model.** Same as the dashboard itself: the API has no
@@ -556,7 +611,9 @@ authentication of its own, so bind it to a trusted interface and put it
 behind your proxy/tailnet if you need one. `retry` is non-destructive — it
 only re-queues an already-parked ref for another trial-merge-and-check
 pass; it never touches the target branch, force-lands anything, or bypasses
-a check.
+a check. `cancel`/`hooks-cancel` are the same kind of non-destructive
+operational control — they park a ref or interrupt a hook command, never
+delete anything or touch the target branch.
 
 ## MCP
 
@@ -570,7 +627,7 @@ can connect directly:
 claude mcp add --transport http gauntlet http://localhost:8080/mcp
 ```
 
-Four tools are exposed, mirroring the JSON API above (same lowerCamel field
+Six tools are exposed, mirroring the JSON API above (same lowerCamel field
 names, so an agent reading both sees one vocabulary):
 
 - **`status`** (`target` optional) — every target's live queue state, or
@@ -588,12 +645,23 @@ names, so an agent reading both sees one vocabulary):
   current SHA, the same effect as `POST /api/v1/retry` or a Slack
   `:recycle:` reaction. Returns `{"status": "queued"}` on success, or an
   error if retry isn't wired up or the retry queue is full.
+- **`cancel`** (`target` and `ref` required) — stops whatever is currently
+  happening to a candidate and parks it, the same effect as
+  `POST /api/v1/cancel` or a Slack `:x:` reaction. Returns
+  `{"status": "queued"}` on success, or an error if cancel isn't wired up or
+  the cancel queue is full.
+- **`hook_cancel`** (`target` required) — cancels a target's currently
+  running post-land hook execution, the same effect as
+  `POST /api/v1/hooks/cancel`. Returns `{"status": "cancelled"}` or
+  `{"status": "no-op"}` (nothing was running — not an error), or an error if
+  hook cancellation isn't wired up.
 
 **Trust model.** Same as the dashboard and its JSON API: no authentication
 of its own, so bind it to a trusted interface and put it behind your
-proxy/tailnet if agents need to reach it remotely. `retry` is the only tool
-that mutates anything, and it's non-destructive in the same way `POST
-/api/v1/retry` is — see "Trust model" above.
+proxy/tailnet if agents need to reach it remotely. `retry`, `cancel`, and
+`hook_cancel` are the only tools that mutate anything, and each is
+non-destructive in the same way its `POST /api/v1/*` counterpart is — see
+"Trust model" above.
 
 ## Manual verification / setup guides
 
@@ -633,7 +701,9 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
    the root is edited to a ✅/❌ (with a final thread reply) on landing or
    rejection; reacting `:recycle:` on the root re-queues that ref at its
    current SHA (a retry command), which you'll see as a fresh run starting
-   without pushing anything.
+   without pushing anything; reacting `:x:` on the root instead cancels it —
+   the in-flight check aborts and the ref parks (a cancel command), visible
+   as the root editing to ❌ with a "cancelled by operator" detail.
 
 ### Container executor
 

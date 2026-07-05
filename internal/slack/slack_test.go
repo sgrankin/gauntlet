@@ -343,6 +343,31 @@ func TestSlack_RecycleReactionOnOwnedRootProducesRetryCommand(t *testing.T) {
 	}
 }
 
+// TestSlack_XReactionOnOwnedRootProducesCancelCommand mirrors
+// TestSlack_RecycleReactionOnOwnedRootProducesRetryCommand exactly (Feature
+// 1: manual operator cancellation) — same wiring, differing only in the
+// reaction name and the resulting Command.Kind.
+func TestSlack_XReactionOnOwnedRootProducesCancelCommand(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/carol/thing", Target: "main", User: "carol", Topic: "thing", SHA: "beadface"}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: "run-cancel"})
+	posts := fake.waitForPosts(1, testTimeout)
+	root := posts[0]
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "x", root.ts)
+
+	select {
+	case cmd := <-s.Commands():
+		if cmd.Kind != core.CommandCancel || cmd.Target != "main" || cmd.Ref != cand.Ref {
+			t.Fatalf("Command = %+v, want cancel for target=main ref=%s", cmd, cand.Ref)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for a cancel Command")
+	}
+}
+
 func TestSlack_ReactionOnUnownedTimestampIgnored(t *testing.T) {
 	s, fake, _ := newTestSlack(t, nil)
 	conn := fake.waitForConn(testTimeout)

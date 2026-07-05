@@ -595,3 +595,108 @@ func TestRetry_BufferFull_ErrorResult(t *testing.T) {
 		t.Errorf("expected Retry to be called once, got %d", calls)
 	}
 }
+
+// --- cancel (Feature 1: manual operator cancellation) ----------------------
+// Mirrors the retry suite above exactly: same wiring, same request/response
+// shape, differing only in core.Command.Kind.
+
+func TestCancel_CommandLandsOnChannel(t *testing.T) {
+	ch := dashboard.NewChannel()
+	session := connect(t, mcpsrv.Params{
+		Snapshot: func() *queue.Snapshot { return nil },
+		Cancel:   ch.TrySend,
+	})
+
+	res := callTool(t, session, "cancel", map[string]any{"target": "main", "ref": "refs/heads/for/main/alice/feat-a"})
+	if res.IsError {
+		t.Fatalf("cancel errored: %s", textOf(t, res))
+	}
+	if !strings.Contains(textOf(t, res), "queued") {
+		t.Errorf("expected \"queued\" in cancel result, got: %s", textOf(t, res))
+	}
+
+	select {
+	case cmd := <-ch.Commands():
+		if cmd.Kind != core.CommandCancel || cmd.Target != "main" || cmd.Ref != "refs/heads/for/main/alice/feat-a" {
+			t.Errorf("unexpected command: %+v", cmd)
+		}
+	default:
+		t.Fatal("expected a command on the channel, got none")
+	}
+}
+
+func TestCancel_NilCancelFunc_ErrorResult(t *testing.T) {
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }})
+
+	res := callTool(t, session, "cancel", map[string]any{"target": "main", "ref": "refs/heads/for/main/alice/feat-a"})
+	if !res.IsError {
+		t.Fatalf("expected error result when cancel is disabled, got: %s", textOf(t, res))
+	}
+}
+
+func TestCancel_BufferFull_ErrorResult(t *testing.T) {
+	calls := 0
+	session := connect(t, mcpsrv.Params{
+		Snapshot: func() *queue.Snapshot { return nil },
+		Cancel: func(core.Command) bool {
+			calls++
+			return false // simulate a full buffer
+		},
+	})
+
+	res := callTool(t, session, "cancel", map[string]any{"target": "main", "ref": "refs/heads/for/main/alice/feat-a"})
+	if !res.IsError {
+		t.Fatalf("expected error result when cancel reports backpressure, got: %s", textOf(t, res))
+	}
+	if calls != 1 {
+		t.Errorf("expected Cancel to be called once, got %d", calls)
+	}
+}
+
+// --- hook_cancel ------------------------------------------------------------
+
+func TestHookCancel_Cancelled(t *testing.T) {
+	var gotTarget string
+	session := connect(t, mcpsrv.Params{
+		Snapshot: func() *queue.Snapshot { return nil },
+		HookCancel: func(target string) bool {
+			gotTarget = target
+			return true
+		},
+	})
+
+	res := callTool(t, session, "hook_cancel", map[string]any{"target": "main"})
+	if res.IsError {
+		t.Fatalf("hook_cancel errored: %s", textOf(t, res))
+	}
+	if !strings.Contains(textOf(t, res), "cancelled") {
+		t.Errorf("expected \"cancelled\" in hook_cancel result, got: %s", textOf(t, res))
+	}
+	if gotTarget != "main" {
+		t.Errorf("HookCancel called with target = %q, want main", gotTarget)
+	}
+}
+
+func TestHookCancel_NoOpWhenNothingRunning(t *testing.T) {
+	session := connect(t, mcpsrv.Params{
+		Snapshot:   func() *queue.Snapshot { return nil },
+		HookCancel: func(string) bool { return false },
+	})
+
+	res := callTool(t, session, "hook_cancel", map[string]any{"target": "main"})
+	if res.IsError {
+		t.Fatalf("hook_cancel errored: %s", textOf(t, res))
+	}
+	if !strings.Contains(textOf(t, res), "no-op") {
+		t.Errorf("expected \"no-op\" in hook_cancel result, got: %s", textOf(t, res))
+	}
+}
+
+func TestHookCancel_NilHookCancelFunc_ErrorResult(t *testing.T) {
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }})
+
+	res := callTool(t, session, "hook_cancel", map[string]any{"target": "main"})
+	if !res.IsError {
+		t.Fatalf("expected error result when hook cancel is disabled, got: %s", textOf(t, res))
+	}
+}

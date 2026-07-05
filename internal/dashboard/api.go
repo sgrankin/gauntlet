@@ -130,6 +130,15 @@ func WithLogRoot(root string) Option {
 	return func(d *dash) { d.logRoot = root }
 }
 
+// WithHookCancel wires fn so POST /api/v1/hooks/cancel can cancel a target's
+// currently-running post-land hook execution (Feature 1: hooks.Runner.
+// CancelCurrent, cmd/gauntlet's nil-safe wiring when hooks are configured).
+// Without this option the route always responds 503 "hooks disabled" — see
+// handleAPIHookCancel.
+func WithHookCancel(fn func(target string) bool) Option {
+	return func(d *dash) { d.hookCancel = fn }
+}
+
 // mountAPIRoutes registers the JSON API beside the HTML routes New already
 // registers. /api/v1/retry is registered without a method verb (unlike the
 // GET-only routes) because its handler needs full control over the 405
@@ -140,6 +149,8 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/runs", d.handleAPIRuns)
 	mux.HandleFunc("GET /api/v1/run/{id}", d.handleAPIRun)
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
+	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
+	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
 }
 
 // --- GET /api/v1/status ------------------------------------------------------
@@ -510,6 +521,93 @@ func (d *dash) handleAPIRetry(w http.ResponseWriter, r *http.Request) {
 		d.ch.enqueue(core.Command{Kind: core.CommandRetry, Target: req.Target, Ref: req.Ref})
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
+// --- POST /api/v1/cancel ------------------------------------------------------
+
+// cancelRequest mirrors retryRequest's shape (Feature 1, manual operator
+// cancellation): same (target, ref) pair, a different Command.Kind.
+type cancelRequest struct {
+	Target string `json:"target"`
+	Ref    string `json:"ref"`
+}
+
+// handleAPICancel mirrors handleAPIRetry exactly but enqueues a
+// core.CommandCancel instead of a core.CommandRetry — see command.go's
+// applyCancel for what the queue does with it (cancel an in-flight run and
+// park its member, or park a waiting ref directly).
+func (d *dash) handleAPICancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req cancelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Target == "" || req.Ref == "" {
+		writeJSONError(w, http.StatusBadRequest, "target and ref are required")
+		return
+	}
+
+	if d.ch != nil {
+		d.ch.enqueue(core.Command{Kind: core.CommandCancel, Target: req.Target, Ref: req.Ref})
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
+// --- POST /api/v1/hooks/cancel ------------------------------------------------
+
+// hookCancelRequest is POST /api/v1/hooks/cancel's body: just the target,
+// since hooks.Runner.CancelCurrent (what this ultimately calls, via
+// WithHookCancel) only ever cancels whatever landing's hooks are running for
+// that target right now — there is no ref/run to name (a hook stage has no
+// notion of "which candidate", only "which target's backlog").
+type hookCancelRequest struct {
+	Target string `json:"target"`
+}
+
+// handleAPIHookCancel cancels target's currently-running post-land hook
+// execution, if any (Feature 1's hook-cancel surface, hooks.Runner.
+// CancelCurrent via WithHookCancel). Unlike handleAPICancel/handleAPIRetry
+// (which enqueue a Command for the next reconcile pass to apply), this calls
+// straight through synchronously and its result is known immediately:
+// "cancelled" if a running landing was found and signalled, "no-op"
+// otherwise (nothing running for this target right now — a normal,
+// expected outcome, not an error). 503 {"error":"hooks disabled"} when
+// WithHookCancel was never wired up at all (no target configures any
+// hooks, or hooks aren't compiled in for this deployment) — the one case
+// this route can't do anything meaningful, mirroring handleAPIRuns/
+// handleAPIRun's "history disabled" 503.
+func (d *dash) handleAPIHookCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req hookCancelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Target == "" {
+		writeJSONError(w, http.StatusBadRequest, "target is required")
+		return
+	}
+	if d.hookCancel == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "hooks disabled")
+		return
+	}
+
+	status := "no-op"
+	if d.hookCancel(req.Target) {
+		status = "cancelled"
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
 }
 
 // --- shared JSON helpers -----------------------------------------------------

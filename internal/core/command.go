@@ -11,4 +11,19 @@ const (
 	// for this ("a channel `retry` command (phase 2) will clear parks
 	// explicitly").
 	CommandRetry = "retry"
+
+	// CommandCancel is manual operator cancellation for
+	// (Command.Target, Command.Ref): stop whatever is currently happening to
+	// this candidate and park it at its current SHA, exactly like a red
+	// verdict (Detail "cancelled by operator") — so it stays out of the
+	// queue until a retry or a re-push, the same as any other park.
+	//
+	//   - A member of an in-flight run: that run is cancelled (the same
+	//     invalidation machinery a ref move uses); serial/speculate park
+	//     the member directly, batch parks only the named member and
+	//     re-queues its siblings (Skipped, unparked).
+	//   - A ref that's only queued (not yet picked): parked directly at its
+	//     current SHA — cancel-before-start, so it's never picked up at all.
+	//   - Unknown, or already parked at its current SHA: a no-op (idempotent).
+	CommandCancel = "cancel"
 )

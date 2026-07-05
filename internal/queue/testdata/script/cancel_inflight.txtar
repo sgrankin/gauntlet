@@ -1,0 +1,54 @@
+# Manual operator cancellation of an in-flight run (Feature 1,
+# core.CommandCancel): cancelling the candidate currently being tested
+# cancels its check and parks it at its current SHA (Rejected, "cancelled by
+# operator") — the same park machinery a real rejection uses, distinguished
+# only by Detail. Unlike a red verdict or a re-push, the ref itself is never
+# touched (no delete, no CAS) — only parked, exactly like a rejection.
+
+push-candidate main alice widget files/v1
+tick                            # trial starts
+
+await-started test
+cancel main alice widget
+tick                            # drains the cancel: aborts the check, parks (ref, sha)
+
+assert-event rejected
+assert-slot-parked main alice widget
+! assert-event landed
+
+# Parked candidates are never re-tested on their own — spin a couple of
+# ticks and confirm nothing new happens.
+tick
+tick
+! assert-event landed
+
+# A second cancel on the same (already-parked) ref is a silent no-op —
+# idempotent, exactly like a second retry on an already-cleared park.
+cancel main alice widget
+tick
+! assert-event landed
+
+# The retry story still applies: a re-push clears the cancel-park and lands
+# normally, exactly as it would clear a rejection's park.
+repush main alice widget files/v2
+tick
+
+await-started test
+release-check test passed
+
+assert-event landed
+assert-target-is-merge main
+assert-slot-gone main alice widget
+
+-- files/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/v1/NOTES.md --
+first attempt: will be cancelled mid-check
+-- files/v2/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/v2/NOTES.md --
+second attempt: after re-push

@@ -40,7 +40,7 @@ is agent-written and *how the branch got there* is data worth keeping.
 | **KEPT** | Go daemon on git plumbing, bare repo | The daemon's whole VCS surface is `ls-remote`, `fetch`, `merge-tree --write-tree`, `commit-tree`, CAS `push` — porcelain-free, no working copy. Requires git ≥ 2.38. |
 | **KILLED** | jj as the daemon's VCS backend | jj's value is managing *evolving human work* (working copies, conflicts-as-data, rewrites). The daemon has no working copy and rewrites nothing; jj can't operate bare and adds a binary dep. jj stays first-class **client-side** (`land` alias) and for developing gauntlet itself. |
 | **KILLED** | Temporal / durable-workflow engine | The daemon is a **reconcile loop over durable ground truth** (Kubernetes-controller style): desired state re-read from refs, in-flight state is one small fact per run, every action CAS'd and idempotent. Crash recovery = rescan + reattach-or-rerun. Temporal's cluster + Postgres buys nothing at this scale and kills the single-static-binary story. |
-| **KEPT** | SQLite for history only | Run records, verdicts, timings — feeds the dashboard and red-rate analysis. Never the source of truth for anything live; refs are. |
+| **KEPT** | SQLite for history only | Run records, verdicts, timings — feeds the dashboard and red-rate analysis. Never the source of truth for anything live; refs are. The rule, sharpened: SQLite never holds *correctness* state — only *efficiency* state may ever be derived from it. Boot-time park seeding (`queue.Config.SeedParks`, fed by `internal/history`'s `LatestTerminalPerRef`) is the one place history feeds back into the live queue: a restarted daemon pre-seeds `done` from each ref's latest red verdict so it skips one doomed re-test per still-parked ref. A stale or missing db just costs that re-test back — every seed is re-validated against the ref's CURRENT SHA (the same `syncBookkeeping` check that drops a live park on a re-push) before it's ever trusted, so this can never manufacture a landing or suppress a real one; worst case is a wasted trial-merge-and-check cycle, never a correctness gap. |
 | **KEPT** | Persistent warm builder as the *primary* executor model | The fly.io builder insight: a dedicated box (local or cloud) with persistent caches on fast storage (GOCACHE, GOMODCACHE, NuGet, docker images) beats hermetic-ephemeral on speed by a lot. Threat model is our own code, not hostile tenants. Containers (docker / podman / Apple `container`) are wrappers with named cache volumes, not isolation theater. Host docker socket mounted in for testcontainers workloads. |
 | **KEPT** | Executor as plugin interface | "Run this suite against this tree, return verdict + logs." Impls: local command (v1), container-on-builder, GitHub Actions dispatch-and-await (reuse existing workflow defs at work). What "green" means is the executor's contract; the core never knows. |
 | **KEPT** | Channels as the duplex plugin abstraction | Events out (queued / testing / verdict), commands in (retry, cancel, clean-build, status). Slack (socket mode — outbound websocket, no ingress; threading; reaction commands like `:recycle:` = retry), GitHub commit status (PAT, v1) → Checks API (App, later), web dashboard, CLI, stdout — all siblings of one interface. Commands defined by the core; channels transport. |
@@ -129,7 +129,33 @@ The review checklist. Every plan and every implementation gets graded against th
 - **`core.Command` carries no SHA** — a delayed retry clears whatever park
   currently exists at the ref. Benign today (parks are keyed to the current
   SHA and a re-push already clears them); matters if commands ever queue for
-  long or gain more destructive kinds.
+  long or gain more destructive kinds. `core.CommandCancel` (manual operator
+  cancellation) is now that more-destructive kind, and inherits this exact
+  gap unchanged: same by-ref, no-SHA addressing, same benign consequence.
+- **Batch members share one `run_id`, so history keeps only the last
+  member's row.** The queue reuses one RunID verbatim across every member of
+  a batch (it doubles as BatchID), but `runs.run_id` is the history table's
+  PRIMARY KEY and writes are `INSERT OR REPLACE` — each member's terminal
+  event clobbers the previous member's row (fresh-context review, 2026-07,
+  confirmed empirically: 3 member events sharing one run_id leave exactly 1
+  row). `history.Store`'s own tests fixture distinct per-member RunIDs
+  sharing a BatchID — the shape the schema assumes; the queue never
+  produces it. Effects: per-member batch history/dashboard rows are
+  silently lost, and boot-time park seeding (`LatestTerminalPerRef`) only
+  ever sees a past batch's last-emitted member — benign for correctness (a
+  missing row just means "no seed") but it defeats the seeding benefit for
+  most batch members. Likely fix: mint each member its own RunID and keep
+  BatchID as the grouping key.
+- **Park-seed resurrection edge** (`queue.Config.SeedParks`, Feature 2): retry
+  a parked ref, then restart the daemon before any new verdict lands for it
+  — the retry cleared the in-memory park, but history's latest row for that
+  (ref, SHA) is still the old red verdict, so `SeedParks` re-parks it on
+  boot. Rare (needs a restart racing right after a retry, before the next
+  reconcile pass even runs) and self-healing (another retry clears it again,
+  exactly as it did the first time) — no correctness impact either way
+  (Invariant 4 still holds; this only ever costs one extra doomed-retest
+  cycle avoided or one extra retry needed), but worth knowing about if an
+  operator reports a just-retried ref looking parked again after a restart.
 - **`extractTar` writes symlink entries verbatim** — a candidate tree can
   plant a symlink escaping the export dir that a later check follows. Within
   the own-code threat model; revisit if the threat model widens.

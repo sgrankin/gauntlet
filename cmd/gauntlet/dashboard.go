@@ -50,22 +50,38 @@ const dashboardShutdownTimeout = 5 * time.Second
 // into. This is unconditional: full logging is wired up regardless of
 // whether the dashboard/history are configured (main.go), so log serving
 // is available whenever the dashboard itself is.
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, wg *sync.WaitGroup) {
+//
+// hookCancel, if non-nil (hooks are configured, main.go's buildHooksRunner
+// returned a *hooks.Runner), is wired straight into both dashboard.
+// WithHookCancel (POST /api/v1/hooks/cancel) and gauntletmcp.Params.
+// HookCancel (the hook_cancel tool) — hooks.Runner.CancelCurrent itself,
+// nil-safely: nil here degrades both surfaces to their documented
+// "hooks disabled"/"hook cancel is disabled" responses, exactly as
+// store == nil already degrades every history-backed view.
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
 
 	var opts []dashboard.Option
-	var retry func(core.Command) bool
+	var retryOrCancel func(core.Command) bool
 	if dashCh != nil {
 		opts = append(opts, dashboard.WithChannel(dashCh))
-		retry = dashCh.TrySend
+		// dashCh.TrySend enqueues any core.Command verbatim (Invariant 8:
+		// the channel is command-agnostic), so the exact same func value
+		// backs both the retry and cancel write paths below — POST
+		// /api/v1/retry and POST /api/v1/cancel differ only in which Kind
+		// their own handler constructs before calling d.ch.enqueue
+		// (internal/dashboard/api.go), and the MCP retry/cancel tools
+		// differ the same way.
+		retryOrCancel = dashCh.TrySend
 	}
 	// version is main.go's package var (version.go), stamped at build time
 	// via -ldflags; "devel" for a plain `go build`. Surfaced in the
 	// dashboard footer purely as an operator convenience (docs/deploy.md).
 	opts = append(opts, dashboard.WithVersion(version))
 	opts = append(opts, dashboard.WithLogRoot(logDir))
+	opts = append(opts, dashboard.WithHookCancel(hookCancel))
 
 	// The MCP server (chunk E5) is mounted at /mcp on the same listener as
 	// the dashboard, since it's meant for agents that already know the
@@ -74,7 +90,10 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	// "GET /{$}" for its index rather than a catch-all, so it doesn't
 	// shadow /mcp.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", gauntletmcp.New(gauntletmcp.Params{Snapshot: snapshot, Store: store, Retry: retry, LogRoot: logDir}))
+	mux.Handle("/mcp", gauntletmcp.New(gauntletmcp.Params{
+		Snapshot: snapshot, Store: store, LogRoot: logDir,
+		Retry: retryOrCancel, Cancel: retryOrCancel, HookCancel: hookCancel,
+	}))
 	mux.Handle("/", dashboard.New(snapshot, store, opts...))
 
 	srv := &http.Server{

@@ -81,6 +81,10 @@ type dash struct {
 	// (run.html, GET /api/v1/run/{id}) stay disabled/absent in that case —
 	// see WithLogRoot's doc (api.go) and handleRunLog below.
 	logRoot string
+
+	// hookCancel is nil unless New was called with WithHookCancel: POST
+	// /api/v1/hooks/cancel responds 503 "hooks disabled" in that case (api.go).
+	hookCancel func(target string) bool
 }
 
 // --- / --------------------------------------------------------------------

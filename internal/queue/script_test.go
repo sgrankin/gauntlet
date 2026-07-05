@@ -38,6 +38,12 @@
 //	delete-candidate <target> <user> <topic>
 //	    Delete the candidate ref, as if the author cancelled.
 //
+//	cancel <target> <user> <topic>
+//	    Send a core.CommandCancel for the candidate ref (Feature 1, manual
+//	    operator cancellation) — the channel-agnostic equivalent of a Slack
+//	    ":x:" reaction or POST /api/v1/cancel. Applied on the next "tick",
+//	    exactly like a retry command.
+//
 //	direct-push <target> <dir>
 //	    Commit <dir>'s files directly onto target's branch, bypassing CAS —
 //	    a human or a second daemon racing the queue.
@@ -202,6 +208,12 @@ type scriptHarness interface {
 	// topic) is currently parked (a sticky Daemon.done entry) at its
 	// current SHA — assert-slot-parked-none's data source.
 	slotParked(target, user, topic string) bool
+
+	// cancel sends a core.CommandCancel for (target, user, topic)'s
+	// candidate ref (Feature 1, manual operator cancellation) — the DSL's
+	// "cancel" command backing implementation. Draining/applying it happens
+	// on the next "tick", exactly like SendCommand/CommandRetry.
+	cancel(target, user, topic string)
 }
 
 // --- fakeScriptHarness: adapts testHarness (daemon_test.go) ---
@@ -291,6 +303,10 @@ func (f fakeScriptHarness) slotParked(target, user, topic string) bool {
 	}
 	entry, ok := f.h.d.done[target][ref]
 	return ok && entry.SHA == sha
+}
+
+func (f fakeScriptHarness) cancel(target, user, topic string) {
+	f.h.ch.SendCommand(core.Command{Kind: core.CommandCancel, Target: target, Ref: candidateRef(target, user, topic)})
 }
 
 // --- realScriptHarness: adapts integrationHarness (integration_test.go) ---
@@ -383,6 +399,10 @@ func (r realScriptHarness) slotParked(target, user, topic string) bool {
 	}
 	entry, ok := r.h.d.done[target][ref]
 	return ok && entry.SHA == sha
+}
+
+func (r realScriptHarness) cancel(target, user, topic string) {
+	r.h.ch.SendCommand(core.Command{Kind: core.CommandCancel, Target: target, Ref: candidateRef(target, user, topic)})
 }
 
 // snapshotPipelineDepth reads len(lane.runs) for target out of d's most
@@ -514,6 +534,7 @@ func commands() map[string]func(ts *testscript.TestScript, neg bool, args []stri
 		"push-candidate":          cmdPushCandidate,
 		"repush":                  cmdRepush,
 		"delete-candidate":        cmdDeleteCandidate,
+		"cancel":                  cmdCancel,
 		"direct-push":             cmdDirectPush,
 		"tick":                    cmdTick,
 		"await-started":           cmdAwaitStarted,
@@ -615,6 +636,16 @@ func cmdDeleteCandidate(ts *testscript.TestScript, neg bool, args []string) {
 		ts.Fatalf("usage: delete-candidate <target> <user> <topic>")
 	}
 	getHarness(ts).deleteCandidate(args[0], args[1], args[2])
+}
+
+func cmdCancel(ts *testscript.TestScript, neg bool, args []string) {
+	if neg {
+		ts.Fatalf("cancel does not support !")
+	}
+	if len(args) != 3 {
+		ts.Fatalf("usage: cancel <target> <user> <topic>")
+	}
+	getHarness(ts).cancel(args[0], args[1], args[2])
 }
 
 func cmdDirectPush(ts *testscript.TestScript, neg bool, args []string) {

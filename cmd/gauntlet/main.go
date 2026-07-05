@@ -32,10 +32,11 @@ import (
 )
 
 func main() {
-	// "land", "status", "retry", and "version" are client-side porcelain
-	// (cmd/gauntlet/land.go, cmd/gauntlet/status.go, cmd/gauntlet/version.go):
-	// thin HTTP/git clients (or, for "version", pure local info) that don't
-	// run the daemon. Everything else is the daemon itself.
+	// "land", "status", "retry", "cancel", "hooks-cancel", and "version" are
+	// client-side porcelain (cmd/gauntlet/land.go, cmd/gauntlet/status.go,
+	// cmd/gauntlet/version.go): thin HTTP/git clients (or, for "version",
+	// pure local info) that don't run the daemon. Everything else is the
+	// daemon itself.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "land":
@@ -53,6 +54,18 @@ func main() {
 		case "retry":
 			if err := runRetry(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "gauntlet retry:", err)
+				os.Exit(1)
+			}
+			return
+		case "cancel":
+			if err := runCancel(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet cancel:", err)
+				os.Exit(1)
+			}
+			return
+		case "hooks-cancel":
+			if err := runHooksCancel(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet hooks-cancel:", err)
 				os.Exit(1)
 			}
 			return
@@ -212,11 +225,18 @@ func run() error {
 	// the snapshot is taken.
 	notifyChans := append([]core.Channel(nil), chans...)
 	hooksDir := filepath.Join(*statePath, "hooks")
-	if hr := buildHooksRunner(cfg, repo, ex, hooksDir, logsDir, func(ctx context.Context, ev core.Event) {
+	hr := buildHooksRunner(cfg, repo, ex, hooksDir, logsDir, func(ctx context.Context, ev core.Event) {
 		for _, ch := range notifyChans {
 			_ = ch.Emit(ctx, ev)
 		}
-	}); hr != nil {
+	})
+	// hookCancel is hr.CancelCurrent, threaded into the dashboard/MCP hook-
+	// cancel surface (Feature 1) nil-safely when hooks aren't configured at
+	// all — mirrors how Retry/mergeBody above are only non-nil when their
+	// own optional feature is wired up.
+	var hookCancel func(target string) bool
+	if hr != nil {
+		hookCancel = hr.CancelCurrent
 		// Mirrors trialsDir above (F2): hooksDir only ever holds
 		// ephemeral per-landing exports for whatever hook is currently
 		// running, never anything that needs to survive a restart, so
@@ -253,6 +273,15 @@ func run() error {
 			return sum.MergeBody(cctx, cand, baseOID)
 		}
 	}
+	// SeedParks (Feature 2, "park persistence across restarts") is only
+	// wired up when history is enabled: with no store there is nothing to
+	// seed from, and a nil SeedParks is queue.Daemon's own documented
+	// "disabled" state (byte-identical startup behavior).
+	var seedParks func(target string) []queue.ParkSeed
+	if store != nil {
+		seedParks = buildSeedParks(store)
+	}
+
 	d, err := queue.New(repo, ex, chans, queue.Config{
 		Targets:      cfg.Targets,
 		CheckSpec:    cfg.CheckSpec,
@@ -261,6 +290,7 @@ func run() error {
 		MergeBody:    mergeBody,
 		WorkDir:      trialsDir,
 		LogDir:       logsDir,
+		SeedParks:    seedParks,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
@@ -274,7 +304,7 @@ func run() error {
 	// docs/plans/phase23.md): sampler exits, dashboard's graceful Shutdown
 	// completes, then — only then — the store closes.
 	var wg sync.WaitGroup
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, &wg)
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}

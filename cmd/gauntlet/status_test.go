@@ -92,6 +92,77 @@ func TestParseRetryFlags_DefaultURL(t *testing.T) {
 	}
 }
 
+// --- gauntlet cancel / hooks-cancel flag parsing (Feature 1) ---------------
+// Mirrors the retry flag tests above exactly: same shape, same defaults.
+
+func TestParseCancelFlags_RequiresTargetAndRef(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"neither", nil},
+		{"target only", []string{"-target", "main"}},
+		{"ref only", []string{"-ref", "refs/heads/for/main/alice/topic"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := parseCancelFlags(c.args); err == nil {
+				t.Errorf("expected error, got none")
+			}
+		})
+	}
+}
+
+func TestParseCancelFlags_Valid(t *testing.T) {
+	f, err := parseCancelFlags([]string{
+		"-url", "http://example:1234",
+		"-target", "main",
+		"-ref", "refs/heads/for/main/alice/topic",
+	})
+	if err != nil {
+		t.Fatalf("parseCancelFlags: %v", err)
+	}
+	if f.url != "http://example:1234" || f.target != "main" || f.ref != "refs/heads/for/main/alice/topic" {
+		t.Errorf("f = %+v", f)
+	}
+}
+
+func TestParseCancelFlags_DefaultURL(t *testing.T) {
+	f, err := parseCancelFlags([]string{"-target", "main", "-ref", "refs/heads/for/main/alice/topic"})
+	if err != nil {
+		t.Fatalf("parseCancelFlags: %v", err)
+	}
+	if f.url != defaultDashboardURL {
+		t.Errorf("url = %q, want %q", f.url, defaultDashboardURL)
+	}
+}
+
+func TestParseHooksCancelFlags_RequiresTarget(t *testing.T) {
+	if _, err := parseHooksCancelFlags(nil); err == nil {
+		t.Errorf("expected error, got none")
+	}
+}
+
+func TestParseHooksCancelFlags_Valid(t *testing.T) {
+	f, err := parseHooksCancelFlags([]string{"-url", "http://example:1234", "-target", "main"})
+	if err != nil {
+		t.Fatalf("parseHooksCancelFlags: %v", err)
+	}
+	if f.url != "http://example:1234" || f.target != "main" {
+		t.Errorf("f = %+v", f)
+	}
+}
+
+func TestParseHooksCancelFlags_DefaultURL(t *testing.T) {
+	f, err := parseHooksCancelFlags([]string{"-target", "main"})
+	if err != nil {
+		t.Fatalf("parseHooksCancelFlags: %v", err)
+	}
+	if f.url != defaultDashboardURL {
+		t.Errorf("url = %q, want %q", f.url, defaultDashboardURL)
+	}
+}
+
 func TestShortSHA(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", "-"},
