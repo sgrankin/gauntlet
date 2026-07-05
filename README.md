@@ -175,7 +175,7 @@ executor "container" {
 summarize {
     model "claude-haiku-4-5"
     api-key-env "ANTHROPIC_API_KEY"
-    timeout "10s"
+    timeout "5s"
 }
 ```
 
@@ -254,6 +254,14 @@ subject line and the `Gauntlet-Ref`/`Gauntlet-Run` trailers. The
 `--first-parent` ledger view (`DESIGN.md`) then carries a real one-paragraph
 description of each landing, not just a topic/author subject line.
 
+The summary is generated **synchronously, before checks run**, once per
+clean trial (not just landings that go on to succeed): the merge commit has
+to carry it, and landing the already-tested SHA forbids amending the commit
+afterward to attach one. That call runs on gauntlet's single-threaded
+reconcile loop, so its `timeout` bounds a stall of the *entire* loop —
+every target, not just the one being summarized — for up to that duration
+on every clean trial. Keep it well under `poll-interval`.
+
 Configuration (all fields optional; defaults shown in the example above):
 
 - **`model`** — the Claude model ID to call. Defaults to `claude-haiku-4-5`
@@ -263,8 +271,9 @@ Configuration (all fields optional; defaults shown in the example above):
 - **`api-key-env`** — the environment variable holding the Anthropic API
   key. Defaults to `ANTHROPIC_API_KEY`. The daemon reads this at startup,
   once; it is never read from the config file itself.
-- **`timeout`** — the per-call budget for the Messages API request.
-  Defaults to `10s`.
+- **`timeout`** — the per-call budget for the Messages API request, and
+  therefore the worst-case stall of the whole reconcile loop described
+  above. Defaults to `5s`.
 
 **Degradation guarantee:** summarization is best-effort, by contract, all
 the way down. Any failure gathering the branch's own git history, any HTTP

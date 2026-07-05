@@ -65,6 +65,17 @@ containerize (topology (b), below).
    `"720h"`; see README's "Configuration reference"), swept once at startup
    and then hourly for the rest of the process's lifetime. None of this
    needs backing up; see "Backups" below.
+
+   **Log files are keyed by absolute path.** History's per-check rows store
+   each log file's full path as written at run time — moving or renaming
+   the `-state` directory (or the volume it lives on) orphans every
+   existing history row's log link: the dashboard's "full log" link 404s as
+   if the file had been pruned, since from the server's perspective it now
+   is missing. Retention pruning has the same dangling-link shape by
+   design — once a run's log directory ages out, its history rows keep
+   existing (history has no retention of its own) but their log links 404
+   the same way. Neither case is treated as an error; both just mean "no
+   log file to serve for this row anymore."
 4. **Install the systemd unit** (adjust paths/`ExecStart` to match step 3):
 
    ```ini

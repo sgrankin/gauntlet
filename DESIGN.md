@@ -152,6 +152,12 @@ First live run (crashtest demo, 2026-07-05) surfaced three more:
 - **Apple `container` has no named volumes** — cache "volumes" work as
   host-path bind mounts (an absolute path in the cache name slot). Config
   semantics should acknowledge both forms explicitly per runtime.
+- **`summarize`'s Messages API call runs synchronously on the reconcile
+  loop**, before checks start, once per clean trial — its `timeout`
+  (default 5s, down from 10s) bounds a stall of *every* target's
+  reconciliation, not just the one being summarized. Fine while it's a
+  single small call with a tight timeout; revisit (async summarize, or
+  move it off the reconcile loop) if it ever grows slower or less optional.
 
 ## Open spikes
 

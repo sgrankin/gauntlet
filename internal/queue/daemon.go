@@ -80,7 +80,9 @@ type Config struct {
 
 	// LogDir is the directory full per-check log files are written under
 	// (DESIGN.md "Full per-check log files"): each check's job gets
-	// LogPath = filepath.Join(LogDir, runID, sanitized-check-name+".log"),
+	// LogPath = filepath.Join(LogDir, runID, "<seq>-<sanitized-name>.log")
+	// — seq is the check's 1-based position in the spec, so two names that
+	// sanitize identically never alias onto one file (reconcile.go) —
 	// and the executor tees the check's combined output there in addition
 	// to the tail-capped in-band CheckResult.Output. Empty disables log
 	// files entirely (CheckJob.LogPath stays "" for every check),

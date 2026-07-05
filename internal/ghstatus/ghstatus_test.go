@@ -330,6 +330,35 @@ func TestChannel_EmitDropsUnreachableServerErrors(t *testing.T) {
 	}
 }
 
+// A post-land hook failure must not repaint an already-green landing status
+// (closing-review FIX 1): EventHookFinished is deliberately ignored, so Emit
+// must never issue an HTTP request for it, pass or fail.
+func TestChannel_HookFinishedDoesNotPost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := New(Params{Owner: "acme", Repo: "widgets", Token: "tok", APIURL: srv.URL, Log: io.Discard})
+
+	for _, check := range []*core.CheckResult{
+		{Name: "deploy", Status: core.CheckFailed},
+		{Name: "deploy", Status: core.CheckPassed},
+	} {
+		ev := core.Event{
+			Kind:      core.EventHookFinished,
+			Target:    "main",
+			Candidate: core.Candidate{SHA: "deadbeef"},
+			RunID:     "run-1",
+			CheckName: "deploy",
+			Check:     check,
+		}
+		if err := c.Emit(context.Background(), ev); err != nil {
+			t.Fatalf("Emit(%+v): %v", check, err)
+		}
+	}
+}
+
 func TestChannel_CommandsNeverYields(t *testing.T) {
 	c := New(Params{Owner: "a", Repo: "b", Token: "t", Log: io.Discard})
 	select {

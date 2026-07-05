@@ -24,14 +24,19 @@ const logPruneInterval = 1 * time.Hour
 
 // pruneLogFiles deletes every directory entry directly under logDir whose
 // modtime is at or before cutoff. Each such entry is one run's full-log
-// directory (queue.Config.LogDir's <runID>/<check>.log layout,
+// directory (queue.Config.LogDir's <runID>/<seq>-<check>.log layout,
 // internal/queue/reconcile.go's job.LogPath assignment): the directory is
-// created once, when the first check of that run opens its log file
-// (internal/executor/logfile.go's openCheckLog, via os.MkdirAll), and never
-// written to again afterward — so its modtime is a faithful "how long ago
-// this run's logs were captured" timestamp, exactly what an age-based
-// retention policy needs. Non-directory entries directly under logDir
-// (there shouldn't be any, by construction) are left alone.
+// created when the first check of that run opens its log file
+// (internal/executor/logfile.go's openCheckLog, via os.MkdirAll), and its
+// modtime ADVANCES again every time a later check's log file is created
+// inside it (creating a directory entry bumps the parent directory's
+// mtime) — the safe direction: a still-in-flight multi-check run keeps
+// pushing its directory's modtime forward, so it can never look stale and
+// get swept mid-run. Once the last check's file lands, the directory stops
+// advancing, and its modtime becomes a faithful "how long ago this run's
+// logs finished landing" timestamp, exactly what an age-based retention
+// policy needs. Non-directory entries directly under logDir (there
+// shouldn't be any, by construction) are left alone.
 //
 // A logDir that doesn't exist yet (a fresh state directory, or one where no
 // run has ever assigned a log path) is not an error: it reports success

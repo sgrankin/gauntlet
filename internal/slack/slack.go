@@ -235,6 +235,8 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 		s.postCheckReply(ctx, ev)
 	case ev.Kind == core.EventIgnoredRef:
 		s.logf("slack: ignored ref target=%s ref=%s", ev.Target, ev.Candidate.Ref)
+	case ev.Kind == core.EventHookFinished:
+		s.postHookFinished(ctx, ev)
 	}
 }
 
@@ -311,6 +313,29 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 	}
 
 	s.forget(ev.RunID, rootTS)
+}
+
+// postHookFinished posts a standalone (non-threaded) channel message for a
+// failed post-land hook (closing-review FIX 1). By hook time the run's root
+// ts is already forgotten — postTerminal's forget call runs at landing time,
+// before any hook has even started, and that cleanup is correct as-is — so
+// there is no thread to reply on; this posts a fresh top-level message
+// instead. A passed hook posts nothing here: the log channel already renders
+// every hook result (pass and fail), and posting on every pass would spam
+// the channel for no operational value.
+func (s *Slack) postHookFinished(ctx context.Context, ev core.Event) {
+	if ev.Check == nil || (ev.Check.Status != core.CheckFailed && ev.Check.Err == nil) {
+		return
+	}
+
+	text := fmt.Sprintf("⚠ hook %s failed after landing %s (%s) → %s", ev.CheckName, ev.Candidate.Topic, displayUser(ev.Candidate.User), ev.Target)
+	if tail := core.FailureTail(ev.Check, failureTailMaxLines, failureTailMaxBytes); tail != "" {
+		text += fmt.Sprintf("\n```\n%s\n```", tail)
+	}
+
+	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false)); err != nil {
+		s.logf("slack: hook-failed post failed run=%s hook=%s: %v", ev.RunID, ev.CheckName, err)
+	}
 }
 
 // lookupRoot returns the root ts recorded for runID, if any.

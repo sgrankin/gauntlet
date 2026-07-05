@@ -281,9 +281,15 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	// free-form config, so it's sanitized the same way container names are
 	// (core.SanitizeName) before becoming a path component — the trailing
 	// ".log" suffix additionally guarantees the sanitized name can never
-	// resolve to "." or "..".
+	// resolve to "." or "..". The filename is prefixed with the check's
+	// 1-based position in the spec (r.idx+1), stable and matching history's
+	// per-check seq column: two check names that sanitize to the same
+	// string (e.g. "lint go" and "lint/go", both -> "lint-go") would
+	// otherwise alias onto the same O_TRUNC'd file, with both checks'
+	// history rows pointing at whichever happened to write last
+	// (closing-review FIX 3).
 	if d.cfg.LogDir != "" {
-		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, core.SanitizeName(check.Name)+".log")
+		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, fmt.Sprintf("%d-%s.log", r.idx+1, core.SanitizeName(check.Name)))
 	}
 
 	result := make(chan core.CheckResult, 1)

@@ -45,10 +45,16 @@ type Params struct {
 	Exec core.Executor
 
 	// Emit fans a hook-outcome event (EventHookFinished) out to the
-	// daemon's other channels (Slack/log/ghstatus), so hook failures
-	// reach the same notification surfaces a check failure would. Built
-	// by cmd from the same channel slice queue.Daemon uses, minus this
-	// Runner itself (no self-feedback).
+	// daemon's other channels. Each channel renders it differently
+	// (closing-review FIX 1): the log channel renders every hook result,
+	// pass and fail; Slack renders only failures, as a standalone channel
+	// message (no thread to reply on — the run's root ts is already
+	// forgotten by hook time); ghstatus deliberately ignores
+	// EventHookFinished entirely — the commit status describes the
+	// landing, and a post-land hook failure must not repaint an
+	// already-green landing red (the CD hand-off boundary, DESIGN.md's
+	// decision ledger). Built by cmd from the same channel slice
+	// queue.Daemon uses, minus this Runner itself (no self-feedback).
 	Emit func(context.Context, core.Event)
 
 	// WorkDir is the scratch directory each landing's tree is exported

@@ -148,9 +148,17 @@ func statusFor(ev core.Event) (s state, description string, ok bool) {
 		return stateFailure, "trial merge conflict", true
 	case core.EventError:
 		return stateError, capDescription(detailOf(ev)), true
+	case core.EventHookFinished:
+		// Deliberately ignored (closing-review FIX 1): the commit status
+		// describes the LANDING, and a post-land hook failure must not
+		// repaint an already-green landing status red — that's the CD
+		// hand-off boundary (DESIGN.md's decision ledger, "Deployments as
+		// post-land hooks"). A failed hook is Slack's and the log
+		// channel's job to surface, not ghstatus's.
+		return "", "", false
 	default:
 		// core.EventSkipped and every non-terminal kind (Queued,
-		// CheckStarted, CheckFinished): no post.
+		// CheckStarted, CheckFinished, IgnoredRef): no post.
 		return "", "", false
 	}
 }

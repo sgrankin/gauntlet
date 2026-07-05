@@ -110,7 +110,9 @@ func reconcileUntilRecord(t *testing.T, d *Daemon, ch *channel.RecordingChannel,
 
 // TestReconcile_LogDir_AssignsJobLogPath is F-a's core queue-side contract:
 // when Config.LogDir is set, CheckJob.LogPath must be
-// <LogDir>/<runID>/<check>.log, and the resulting RunRecord's CheckResult
+// <LogDir>/<runID>/<seq>-<check>.log — seq is the check's 1-based position
+// in the spec (closing-review FIX 3, so colliding sanitized names don't
+// alias onto the same file) — and the resulting RunRecord's CheckResult
 // (threaded back from the executor) must carry the same path.
 func TestReconcile_LogDir_AssignsJobLogPath(t *testing.T) {
 	logDir := t.TempDir()
@@ -126,7 +128,7 @@ func TestReconcile_LogDir_AssignsJobLogPath(t *testing.T) {
 	if !ok {
 		t.Fatal("check \"test\" never ran")
 	}
-	want := filepath.Join(logDir, rec.RunID, "test.log")
+	want := filepath.Join(logDir, rec.RunID, "1-test.log")
 	if job.LogPath != want {
 		t.Fatalf("CheckJob.LogPath = %q, want %q", job.LogPath, want)
 	}
@@ -189,6 +191,53 @@ func TestReconcile_LogDir_SanitizesCheckNamePathTraversal(t *testing.T) {
 	}
 	if strings.ContainsRune(filepath.Base(job.LogPath), filepath.Separator) {
 		t.Fatalf("sanitized log file name %q still contains a path separator", filepath.Base(job.LogPath))
+	}
+}
+
+// TestReconcile_LogDir_CollidingSanitizedNamesGetDistinctFiles is
+// closing-review FIX 3's regression test: two check names that sanitize to
+// the same string ("lint go" and "lint/go" both -> "lint-go") must not
+// alias onto the same O_TRUNC'd log file — each check's history row would
+// otherwise point at whichever happened to write last. The 1-based seq
+// prefix (this check's position in the spec) keeps them distinct.
+func TestReconcile_LogDir_CollidingSanitizedNamesGetDistinctFiles(t *testing.T) {
+	logDir := t.TempDir()
+	git, exec, ch, d := newLogDirHarness(t, logDir)
+	git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	git.pushCandidate(ref, "", checkSpecFile("lint go", "lint/go"))
+
+	before := len(ch.Records())
+	rec := reconcileUntilRecord(t, d, ch, before)
+
+	first, ok := exec.job("lint go")
+	if !ok {
+		t.Fatal("check \"lint go\" never ran")
+	}
+	second, ok := exec.job("lint/go")
+	if !ok {
+		t.Fatal("check \"lint/go\" never ran")
+	}
+
+	if first.LogPath == second.LogPath {
+		t.Fatalf("both colliding checks got the same LogPath %q, want distinct files", first.LogPath)
+	}
+	wantFirst := filepath.Join(logDir, rec.RunID, "1-lint-go.log")
+	wantSecond := filepath.Join(logDir, rec.RunID, "2-lint-go.log")
+	if first.LogPath != wantFirst {
+		t.Errorf("first check LogPath = %q, want %q", first.LogPath, wantFirst)
+	}
+	if second.LogPath != wantSecond {
+		t.Errorf("second check LogPath = %q, want %q", second.LogPath, wantSecond)
+	}
+
+	if len(rec.Checks) != 2 {
+		t.Fatalf("RunRecord.Checks = %+v, want 2 checks", rec.Checks)
+	}
+	for _, cr := range rec.Checks {
+		if _, err := os.Stat(cr.LogPath); err != nil {
+			t.Errorf("log file %q for check %q must exist: %v", cr.LogPath, cr.Name, err)
+		}
 	}
 }
 

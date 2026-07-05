@@ -253,6 +253,52 @@ func TestSlack_LandedFinalSummaryHasNoCodeBlock(t *testing.T) {
 	waitForStatsZero(t, s, testTimeout)
 }
 
+func TestSlack_HookFailedPostsStandaloneMessageWithTail(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/grace/deploy", Target: "main", User: "grace", Topic: "deploy", SHA: "feedface"}
+
+	check := &core.CheckResult{Name: "deploy", Status: core.CheckFailed, Duration: 3 * time.Second, Output: "connection refused: 10.0.0.1:443\n"}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-fail", CheckName: "deploy", Check: check})
+
+	posts := fake.waitForPosts(1, testTimeout)
+	post := posts[0]
+	if post.method != "chat.postMessage" || post.threadTS != "" {
+		t.Fatalf("hook-failed post = %+v, want a standalone (non-threaded) chat.postMessage", post)
+	}
+	for _, want := range []string{"deploy", "deploy", "grace", "main"} {
+		if !strings.Contains(post.text, want) {
+			t.Errorf("hook-failed text = %q, want it to contain %q", post.text, want)
+		}
+	}
+	wantBlock := "```\nconnection refused: 10.0.0.1:443\n```"
+	if !strings.Contains(post.text, wantBlock) {
+		t.Errorf("hook-failed text = %q, want it to contain the code block %q", post.text, wantBlock)
+	}
+}
+
+func TestSlack_HookPassedPostsNothing(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/henry/deploy", Target: "main", User: "henry", Topic: "deploy", SHA: "0ff1ce"}
+
+	check := &core.CheckResult{Name: "deploy", Status: core.CheckPassed, Duration: time.Second}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-pass", CheckName: "deploy", Check: check})
+
+	// Synchronize on notify (fires once the drainer has fully handled the
+	// event) rather than a wall-clock sleep before asserting absence.
+	s.mu.Lock()
+	wake := s.notify
+	s.mu.Unlock()
+	select {
+	case <-wake:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the event to be processed")
+	}
+
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no Slack post for a passed hook, got %+v", got)
+	}
+}
+
 func TestSlack_TerminalWithoutKnownRootIsANoOp(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 

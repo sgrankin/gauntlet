@@ -55,5 +55,10 @@ executor "container" {
 // summarize {
 //     model "claude-haiku-4-5"          // optional; default shown
 //     api-key-env "ANTHROPIC_API_KEY"   // optional; default shown
-//     timeout "10s"                     // optional; default shown
+//     timeout "5s"                      // optional; default shown — runs
+//                                        // synchronously on the reconcile
+//                                        // loop before checks start, on
+//                                        // every clean trial; bounds a
+//                                        // stall of ALL targets' loop, so
+//                                        // keep it well under poll-interval
 // }

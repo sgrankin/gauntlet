@@ -48,7 +48,15 @@ const (
 	// 2-6 sentence summarization task.
 	defaultSummarizeModel     = "claude-haiku-4-5"
 	defaultSummarizeAPIKeyEnv = "ANTHROPIC_API_KEY"
-	defaultSummarizeTimeout   = 10 * time.Second
+
+	// defaultSummarizeTimeout bounds the one Messages API call
+	// Config.MergeBody makes, synchronously, on the single-threaded
+	// reconcile loop, before that trial's checks even start (closing-review
+	// FIX 2) — every target's reconciliation stalls behind it. Kept well
+	// under defaultPoll so a slow-but-not-hung summarizer call never eats
+	// a whole poll interval; see the Summarize.Timeout field doc and
+	// README.md's Summaries section for the full contract.
+	defaultSummarizeTimeout = 5 * time.Second
 
 	// defaultDepthRetention is how long queue_depth samples are kept before
 	// the depth sampler prunes them (docs/plans phase23 E1). Runs/checks
@@ -169,10 +177,25 @@ type Cache struct {
 // from the document) disables it entirely; see the field doc on Daemon for
 // why presence, not any single field's non-emptiness, is the enable
 // signal.
+//
+// The summary is generated synchronously, on the reconcile loop, right
+// before a trial's merge commit is built (queue/reconcile.go): the merge
+// commit must carry it, and landing the already-tested SHA forbids amending
+// the commit later to attach one after the fact. It fires on every clean
+// trial, not just landings that go on to succeed — a trial rejected by a
+// later check still paid for one summarize call. See Timeout below and
+// README.md's Summaries section for the full stall contract.
 type Summarize struct {
-	Model     string        `kdl:"model"`                // default defaultSummarizeModel
-	APIKeyEnv string        `kdl:"api-key-env"`          // default "ANTHROPIC_API_KEY"
-	Timeout   time.Duration `kdl:"timeout,format:units"` // default 10s
+	Model     string `kdl:"model"`       // default defaultSummarizeModel
+	APIKeyEnv string `kdl:"api-key-env"` // default "ANTHROPIC_API_KEY"
+
+	// Timeout bounds the single Messages API call per trial (default 5s).
+	// Because that call runs synchronously on gauntlet's single-threaded
+	// reconcile loop, before checks start, this timeout bounds a stall of
+	// the ENTIRE loop — every target, not just the one being summarized —
+	// for up to its duration on every clean trial. Keep it well under
+	// poll-interval.
+	Timeout time.Duration `kdl:"timeout,format:units"`
 }
 
 // Target is one target branch the daemon reconciles candidates onto. Name
