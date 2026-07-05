@@ -16,6 +16,17 @@ target "main" branch="main" {
     // hook "deploy" {
     //     command "make" "deploy"
     // }
+
+    // hooks-policy (optional; default "queue"; only meaningful with at
+    // least one hook above) controls what happens to this target's hook
+    // backlog when landings outpace hook execution (e.g. deploys slower
+    // than merges) — see README's "Backlog policies": "queue" runs every
+    // landing's hooks, none dropped; "coalesce" drops a still-queued
+    // landing once a newer one for this target queues behind it, keeping
+    // only the newest; "cancel" additionally cancels a landing's hooks
+    // mid-run when a newer one arrives, so a slow deploy never blocks the
+    // latest candidate from deploying next.
+    // hooks-policy "coalesce"
 }
 target "release" branch="release/v2"
 

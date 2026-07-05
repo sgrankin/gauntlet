@@ -41,6 +41,13 @@ const (
 	defaultRuntime        = "container"
 	defaultWorkdir        = "/workspace"
 
+	// defaultHooksPolicy is applied to a target's hooks-policy whenever
+	// the target has at least one hook and left hooks-policy unset (see
+	// Target.HooksPolicy and applyDefaults) — "queue" reproduces the
+	// pre-policy behavior (internal/hooks, hooks v2's decision ledger):
+	// every landing's hooks run, in order, none ever dropped.
+	defaultHooksPolicy = "queue"
+
 	// defaultSummarizeModel matches internal/summarize.DefaultModel
 	// (duplicated here, not imported, per this file's existing pattern of
 	// owning its own defaults — see defaultGitHubTokenEnv et al.):
@@ -88,6 +95,16 @@ const (
 // models (which includes defaultSummarizeModel). validate() checks against
 // this set; "" is impossible for a loaded config because applyDefaults
 // always fills it in first when the "summarize" section is present.
+// validHooksPolicies are the legal Target.HooksPolicy values
+// (internal/hooks.Policy, duplicated here per this file's existing pattern
+// of owning its own defaults/valid-sets — see validSummarizeEfforts).
+// validate() rejects any other value for a target that has hooks.
+var validHooksPolicies = map[string]bool{
+	"queue":    true,
+	"coalesce": true,
+	"cancel":   true,
+}
+
 var validSummarizeEfforts = map[string]bool{
 	// "none" omits the effort field from API requests entirely — the escape
 	// hatch for models that reject output_config.effort (e.g. claude-haiku-4-5).
@@ -245,6 +262,19 @@ type Target struct {
 	// order against the landed tree once a candidate lands. Nil/empty
 	// means no hooks — the phase-1/2/3 behavior, unchanged.
 	Hooks []Hook `kdl:"hook,multiple"`
+
+	// HooksPolicy controls what happens to this target's hook backlog
+	// when landings outpace hook execution (e.g. deploys slower than
+	// merges) — internal/hooks.Policy: "queue" (default; every landing's
+	// hooks run, none dropped), "coalesce" (a newer landing queued behind
+	// an older one drops the older; what's already running finishes
+	// undisturbed), or "cancel" (coalesce, plus the currently running
+	// landing's hooks are cancelled mid-hook for the newer one). Only
+	// meaningful when Hooks is non-empty — applyDefaults only defaults it
+	// (to "queue") in that case, and validate() rejects it being set on a
+	// target with no hooks at all, since there is no backlog to have a
+	// policy about.
+	HooksPolicy string `kdl:"hooks-policy"`
 }
 
 // Hook is one named command a target runs, in order, once a candidate
@@ -343,6 +373,18 @@ func (d *Daemon) applyDefaults() {
 		}
 	}
 
+	// HooksPolicy only defaults (to "queue") for a target that actually
+	// has hooks — same "required field non-empty is the enable signal"
+	// pattern as GitHub/Slack/etc above. A target with no hooks keeps
+	// HooksPolicy exactly as parsed ("" if absent), so validate() can
+	// still tell "the node was never written" from "queue was written
+	// explicitly" and reject the former when hooks are also absent.
+	for i := range d.Targets {
+		if len(d.Targets[i].Hooks) > 0 && d.Targets[i].HooksPolicy == "" {
+			d.Targets[i].HooksPolicy = defaultHooksPolicy
+		}
+	}
+
 	if d.Summarize != nil {
 		if d.Summarize.Model == "" {
 			d.Summarize.Model = defaultSummarizeModel
@@ -416,6 +458,18 @@ func (d *Daemon) validate() error {
 				return fmt.Errorf("target %q: hook %q: duplicate", t.Name, h.Name)
 			}
 			seenHook[h.Name] = true
+		}
+
+		// hooks-policy is only meaningful alongside at least one hook —
+		// see HooksPolicy's field doc and applyDefaults above, which
+		// leaves it "" (never defaulted) for a target with no hooks so
+		// this can tell "never written" from "written explicitly".
+		if len(t.Hooks) == 0 {
+			if t.HooksPolicy != "" {
+				return fmt.Errorf("target %q: hooks-policy set without any hooks", t.Name)
+			}
+		} else if !validHooksPolicies[t.HooksPolicy] {
+			return fmt.Errorf("target %q: hooks-policy must be one of queue, coalesce, cancel, got %q", t.Name, t.HooksPolicy)
 		}
 	}
 

@@ -170,7 +170,7 @@ func TestRunner_RunsHooksInOrderWithLandedCoordinates(t *testing.T) {
 		MergeSHA: "merge-sha",
 	}
 
-	r.runLanding(context.Background(), landedEvent("main", rec))
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	if got := exec.callNames(); len(got) != 2 || got[0] != "hook:deploy" || got[1] != "hook:notify" {
 		t.Fatalf("callNames = %v, want [hook:deploy hook:notify]", got)
@@ -249,7 +249,7 @@ func TestRunner_FailureStopsRemainingHooks(t *testing.T) {
 	})
 
 	rec := &core.RunRecord{RunID: "run-2", Target: "main", MergeSHA: "merge-sha"}
-	r.runLanding(context.Background(), landedEvent("main", rec))
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	if n := exec.callCount(); n != 1 {
 		t.Fatalf("exec called %d times, want 1 (should stop after deploy fails)", n)
@@ -351,7 +351,7 @@ func TestRunner_ExportDirCleanedUp(t *testing.T) {
 	})
 
 	rec := &core.RunRecord{RunID: "run-3", Target: "main", MergeSHA: "merge-sha"}
-	r.runLanding(context.Background(), landedEvent("main", rec))
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	dir := git.exportedDir()
 	if dir == "" {
@@ -377,7 +377,7 @@ func TestRunner_RecoveredLandingWithoutMergeSHASkipped(t *testing.T) {
 	// Mirrors queue/reconcile.go's recoverLanded: a synthesized landing
 	// with no MergeSHA (the merge already happened in an earlier pass).
 	rec := &core.RunRecord{RunID: "run-4", Target: "main"}
-	r.runLanding(context.Background(), landedEvent("main", rec))
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	if exec.callCount() != 0 {
 		t.Fatalf("exec called %d times, want 0 (no tree to export)", exec.callCount())
@@ -400,7 +400,7 @@ func TestRunner_ExportFailureSkipsHooks(t *testing.T) {
 	})
 
 	rec := &core.RunRecord{RunID: "run-5", Target: "main", MergeSHA: "merge-sha"}
-	r.runLanding(context.Background(), landedEvent("main", rec))
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	if exec.callCount() != 0 {
 		t.Fatalf("exec called %d times, want 0 (export failed)", exec.callCount())
@@ -419,7 +419,7 @@ func TestRunner_NoHooksConfiguredForTargetIsNoop(t *testing.T) {
 	})
 
 	rec := &core.RunRecord{RunID: "run-6", Target: "other", MergeSHA: "merge-sha"}
-	r.runLanding(context.Background(), landedEvent("other", rec))
+	r.runLanding(context.Background(), landedEvent("other", rec), nil)
 
 	if exec.callCount() != 0 || len(git.exported) != 0 {
 		t.Fatalf("expected no export/exec for a target with no configured hooks")
@@ -537,4 +537,330 @@ func (b *boundedLogBuf) contains(substr string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return strings.Contains(string(b.buf), substr)
+}
+
+// --- backlog policies (hooks v2) ---------------------------------------
+
+// blockingExecutor is a fakeExecutor variant for backlog-policy tests: the
+// job named blockName belonging to run blockRun blocks — after recording
+// itself and closing started, so a test can synchronize on "the blocking
+// hook is now in flight" — until either release is closed (simulating a
+// hook that eventually finishes on its own, for coalesce tests) or ctx is
+// cancelled (simulating PolicyCancel's mid-hook cancellation), mirroring
+// LocalExecutor's ctx.Err()-takes-precedence rule
+// (internal/executor/local.go) so a cancelled RunCheck returns promptly
+// with Err set. Every other job passes immediately.
+type blockingExecutor struct {
+	mu        sync.Mutex
+	jobs      []core.CheckJob
+	blockName string
+	blockRun  string
+	started   chan struct{}
+	release   chan struct{}
+}
+
+func (f *blockingExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.CheckResult {
+	f.mu.Lock()
+	f.jobs = append(f.jobs, job)
+	f.mu.Unlock()
+
+	if job.Name == f.blockName && job.RunID == f.blockRun {
+		close(f.started)
+		select {
+		case <-ctx.Done():
+			return core.CheckResult{Name: job.Name, Err: ctx.Err()}
+		case <-f.release:
+		}
+	}
+	return core.CheckResult{Name: job.Name, Status: core.CheckPassed}
+}
+
+func (f *blockingExecutor) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.jobs)
+}
+
+func (f *blockingExecutor) runIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.jobs))
+	for i, j := range f.jobs {
+		out[i] = j.RunID
+	}
+	return out
+}
+
+var _ core.Executor = (*blockingExecutor)(nil)
+
+// waitFor polls cond until it's true or t fails after 2s — used instead of
+// a fixed sleep to synchronize with Run's background goroutine.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("condition not met after timeout")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestApplyBacklogPolicy_PerTargetIndependence exercises applyBacklogPolicy
+// directly (no Run goroutine, no timing): a batch mixing two targets, one
+// PolicyQueue and one PolicyCoalesce, must apply each target's policy
+// independently — the queue target's landings all survive, in order and
+// uncollapsed, regardless of the other target's landings interleaved
+// alongside them in the same batch; the coalesce target's landings
+// collapse to only the newest of the three queued for it.
+func TestApplyBacklogPolicy_PerTargetIndependence(t *testing.T) {
+	var logBuf boundedLogBuf
+	r := New(Params{
+		Hooks: map[string][]Hook{
+			"main":  {{Name: "deploy", Command: []string{"true"}}},
+			"other": {{Name: "deploy", Command: []string{"true"}}},
+		},
+		Policies: map[string]Policy{
+			"main":  PolicyQueue,
+			"other": PolicyCoalesce,
+		},
+		Git:     &fakeGitRepo{},
+		Exec:    &fakeExecutor{},
+		WorkDir: t.TempDir(),
+		Log:     &logBuf,
+	})
+
+	ev := func(target, run, sha string) core.Event {
+		return landedEvent(target, &core.RunRecord{
+			RunID: run, Target: target, MergeSHA: "merge-" + run,
+			Candidate: core.Candidate{Target: target, Topic: "t", SHA: sha},
+		})
+	}
+
+	batch := []core.Event{
+		ev("main", "main-1", "sha-m1"),
+		ev("other", "other-1", "sha-o1"),
+		ev("main", "main-2", "sha-m2"),
+		ev("other", "other-2", "sha-o2"),
+		ev("other", "other-3", "sha-o3"),
+	}
+
+	got := r.applyBacklogPolicy(batch)
+
+	var gotRuns []string
+	for _, e := range got {
+		gotRuns = append(gotRuns, e.RunID)
+	}
+	want := []string{"main-1", "main-2", "other-3"}
+	if len(gotRuns) != len(want) {
+		t.Fatalf("applyBacklogPolicy runIDs = %v, want %v", gotRuns, want)
+	}
+	for i := range want {
+		if gotRuns[i] != want[i] {
+			t.Fatalf("applyBacklogPolicy runIDs = %v, want %v", gotRuns, want)
+		}
+	}
+	if !logBuf.contains("coalesced landing t@sha-o1") {
+		t.Errorf("log = %q, want a coalesce line for other-1", logBuf.String())
+	}
+	if !logBuf.contains("coalesced landing t@sha-o2") {
+		t.Errorf("log = %q, want a coalesce line for other-2", logBuf.String())
+	}
+	if logBuf.contains("coalesced landing t@sha-m1") || logBuf.contains("coalesced landing t@sha-m2") {
+		t.Errorf("log = %q, want no coalesce line for the queue-policy target", logBuf.String())
+	}
+}
+
+// TestRunner_CoalescePolicy_DropsBacklogKeepsNewest drives the whole
+// Runner (Run goroutine + real queue) for PolicyCoalesce: three landings
+// for the same target, with the first's single hook held open until the
+// second and third are both already queued behind it (deterministic via
+// blockingExecutor's started/release synchronization, not sleeps). The
+// first must run to completion undisturbed (coalesce never touches what's
+// already running); the second, still only queued when the third arrives,
+// must be dropped with a log line; the third must run.
+func TestRunner_CoalescePolicy_DropsBacklogKeepsNewest(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &blockingExecutor{
+		blockName: "hook:deploy",
+		blockRun:  "run-1",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	emit := &recordingEmit{}
+	var logBuf boundedLogBuf
+
+	r := New(Params{
+		Hooks:    map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Policies: map[string]Policy{"main": PolicyCoalesce},
+		Git:      git,
+		Exec:     exec,
+		Emit:     emit.fn,
+		WorkDir:  t.TempDir(),
+		Log:      &logBuf,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	rec1 := &core.RunRecord{RunID: "run-1", Target: "main", MergeSHA: "merge-1",
+		Candidate: core.Candidate{Target: "main", Topic: "t1", SHA: "sha1"}}
+	if err := r.Emit(ctx, landedEvent("main", rec1)); err != nil {
+		t.Fatalf("Emit run-1: %v", err)
+	}
+
+	<-exec.started // run-1's deploy hook is now blocked in flight
+
+	rec2 := &core.RunRecord{RunID: "run-2", Target: "main", MergeSHA: "merge-2",
+		Candidate: core.Candidate{Target: "main", Topic: "t2", SHA: "sha2"}}
+	rec3 := &core.RunRecord{RunID: "run-3", Target: "main", MergeSHA: "merge-3",
+		Candidate: core.Candidate{Target: "main", Topic: "t3", SHA: "sha3"}}
+	if err := r.Emit(ctx, landedEvent("main", rec2)); err != nil {
+		t.Fatalf("Emit run-2: %v", err)
+	}
+	if err := r.Emit(ctx, landedEvent("main", rec3)); err != nil {
+		t.Fatalf("Emit run-3: %v", err)
+	}
+
+	close(exec.release) // let run-1 finish
+
+	waitFor(t, func() bool { return exec.callCount() >= 2 })
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+
+	gotRuns := exec.runIDs()
+	want := []string{"run-1", "run-3"}
+	if len(gotRuns) != len(want) || gotRuns[0] != want[0] || gotRuns[1] != want[1] {
+		t.Fatalf("executed runIDs = %v, want %v (run-2 must be dropped, never executed)", gotRuns, want)
+	}
+	if !logBuf.contains("coalesced landing t2@sha2, superseded by t3@sha3") {
+		t.Errorf("log = %q, want a coalesce line naming run-2 superseded by run-3", logBuf.String())
+	}
+
+	events := emit.snapshot()
+	for _, ev := range events {
+		if ev.RunID == "run-2" {
+			t.Errorf("run-2 must never get an EventHookFinished (coalesced away before it ran), got %+v", ev)
+		}
+	}
+}
+
+// TestRunner_CancelPolicy_CancelsRunningLandingMidHook drives the whole
+// Runner for PolicyCancel: run-1's first hook blocks; while it's in
+// flight, run-2 for the same target arrives. That must cancel run-1's
+// hook execution immediately (mid-hook, not after it finishes) — its
+// remaining hook ("notify") must never run — and the cancelled hook's
+// EventHookFinished must carry the Err the executor returns on
+// cancellation plus a "superseded by" Detail naming run-2. run-2 must
+// then run both of its own hooks normally.
+func TestRunner_CancelPolicy_CancelsRunningLandingMidHook(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &blockingExecutor{
+		blockName: "hook:deploy",
+		blockRun:  "run-1",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}), // never closed: run-1 must be cancelled, not released
+	}
+	emit := &recordingEmit{}
+	var logBuf boundedLogBuf
+
+	r := New(Params{
+		Hooks: map[string][]Hook{"main": {
+			{Name: "deploy", Command: []string{"true"}},
+			{Name: "notify", Command: []string{"true"}},
+		}},
+		Policies: map[string]Policy{"main": PolicyCancel},
+		Git:      git,
+		Exec:     exec,
+		Emit:     emit.fn,
+		WorkDir:  t.TempDir(),
+		Log:      &logBuf,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	rec1 := &core.RunRecord{RunID: "run-1", Target: "main", MergeSHA: "merge-1",
+		Candidate: core.Candidate{Target: "main", Topic: "t1", SHA: "sha1"}}
+	if err := r.Emit(ctx, landedEvent("main", rec1)); err != nil {
+		t.Fatalf("Emit run-1: %v", err)
+	}
+
+	<-exec.started // run-1's deploy hook is now blocked in flight, ctx not yet cancelled
+
+	rec2 := &core.RunRecord{RunID: "run-2", Target: "main", MergeSHA: "merge-2",
+		Candidate: core.Candidate{Target: "main", Topic: "t2", SHA: "sha2"}}
+	if err := r.Emit(ctx, landedEvent("main", rec2)); err != nil {
+		t.Fatalf("Emit run-2: %v", err)
+	}
+
+	// run-2's own hooks (deploy+notify) both pass immediately, so once
+	// they've run the whole batch (run-1 cancelled, run-2 completed) is
+	// done draining.
+	waitFor(t, func() bool { return exec.callCount() >= 3 })
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+
+	// run-1's "notify" must never have run: cancellation stopped it after
+	// "deploy", the same stop-at-first-failure path an ordinary failure
+	// takes.
+	for _, j := range exec.jobs {
+		if j.RunID == "run-1" && j.Name == "hook:notify" {
+			t.Fatal("run-1's notify hook ran; cancellation must skip remaining hooks")
+		}
+	}
+
+	events := emit.snapshot()
+	var run1Deploy *core.Event
+	for i, ev := range events {
+		if ev.RunID == "run-1" && ev.CheckName == "deploy" {
+			run1Deploy = &events[i]
+		}
+	}
+	if run1Deploy == nil {
+		t.Fatal("no EventHookFinished for run-1's deploy hook")
+	}
+	if run1Deploy.Check == nil || run1Deploy.Check.Err == nil {
+		t.Fatalf("run-1 deploy event = %+v, want a Check with Err set (the cancellation)", run1Deploy)
+	}
+	if !errors.Is(run1Deploy.Check.Err, context.Canceled) {
+		t.Errorf("run-1 deploy Check.Err = %v, want context.Canceled", run1Deploy.Check.Err)
+	}
+	if run1Deploy.Detail != "superseded by t2@sha2" {
+		t.Errorf("run-1 deploy Detail = %q, want %q", run1Deploy.Detail, "superseded by t2@sha2")
+	}
+
+	if !logBuf.contains("cancelling in-flight landing run=run-1, superseded by t2@sha2") {
+		t.Errorf("log = %q, want a cancellation line naming run-1 superseded by run-2", logBuf.String())
+	}
+
+	// run-2 must have run both its own hooks normally afterward.
+	var run2Names []string
+	for _, j := range exec.jobs {
+		if j.RunID == "run-2" {
+			run2Names = append(run2Names, j.Name)
+		}
+	}
+	want := []string{"hook:deploy", "hook:notify"}
+	if len(run2Names) != len(want) || run2Names[0] != want[0] || run2Names[1] != want[1] {
+		t.Fatalf("run-2 hook calls = %v, want %v", run2Names, want)
+	}
 }

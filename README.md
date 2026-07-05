@@ -363,6 +363,43 @@ target "main" branch="main" {
   landings for one target are already serial, later landings on that
   target) — it never blocks the reconcile loop itself.
 
+### Backlog policies
+
+Hooks always run **serially** — one landing's hooks at a time, never two
+landings' concurrently, no matter what's configured below. `hooks-policy`
+only decides what happens to a target's *backlog* when landings outpace
+hook execution: a `make deploy` that takes five minutes will always fall
+behind a target that merges every thirty seconds. Set it inside the
+`target` block, alongside its `hook` nodes:
+
+```kdl
+target "main" branch="main" {
+    hooks-policy "coalesce"
+    hook "deploy" {
+        command "make" "deploy"
+    }
+}
+```
+
+| Policy | Behavior |
+| --- | --- |
+| `queue` (default) | Every landing's hooks run, in order — nothing is ever dropped. The original, unchanged behavior. |
+| `coalesce` | A landing still *queued* (not yet started) is dropped once a newer landing for the same target is also queued behind it — only the newest queued landing runs next. Whatever is currently *running* always finishes undisturbed. Each drop is logged (`hooks: coalesced landing <topic>@<sha>, superseded by <topic>@<sha>`); no hook result is fabricated for a landing whose hooks never ran. |
+| `cancel` | `coalesce`, plus: the landing currently *running* is cancelled — its in-flight hook command is killed — the instant a newer landing for the same target arrives, rather than waiting for it to finish. The cancelled hook still gets a normal `EventHookFinished` (carrying the `Err` the executor returns on cancellation, same shape as a failure) with a `superseded by ...` detail, and its remaining hooks are skipped, same as an ordinary hook failure. |
+
+The motivating case is deploys slower than merges: three candidates land
+onto `main` while `make deploy` is still running for the first. With
+`queue`, all three deploys eventually run, back to back, each one already
+stale by the time it starts. With `coalesce`, only the newest of the two
+still-queued landings deploys once the first finishes — the operator's
+"deploy the latest successful one next". With `cancel`, the in-progress
+deploy for the *first* landing is killed as soon as the third arrives, so
+the newest candidate starts deploying immediately instead of waiting out
+a deploy that's already obsolete.
+
+`hooks-policy` is only meaningful on a target that has at least one
+`hook` — setting it on a target with none is a config error.
+
 ## API
 
 The dashboard (`internal/dashboard`) exposes a small JSON API under

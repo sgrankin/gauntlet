@@ -19,6 +19,7 @@ import (
 // Run goroutine or register it as a channel at all.
 func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, workDir string, emit func(context.Context, core.Event)) *hooks.Runner {
 	hookMap := make(map[string][]hooks.Hook)
+	policyMap := make(map[string]hooks.Policy)
 	for _, t := range cfg.Targets {
 		if len(t.Hooks) == 0 {
 			continue
@@ -28,15 +29,21 @@ func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, wo
 			hs[i] = hooks.Hook{Name: h.Name, Command: h.Command}
 		}
 		hookMap[t.Name] = hs
+		// config.validate() already rejected any value outside
+		// hooks.Policy's set (and requires it be set at all whenever
+		// Hooks is non-empty), so this cast is always one of
+		// PolicyQueue/PolicyCoalesce/PolicyCancel here.
+		policyMap[t.Name] = hooks.Policy(t.HooksPolicy)
 	}
 	if len(hookMap) == 0 {
 		return nil
 	}
 	return hooks.New(hooks.Params{
-		Hooks:   hookMap,
-		Git:     git,
-		Exec:    ex,
-		Emit:    emit,
-		WorkDir: workDir,
+		Hooks:    hookMap,
+		Policies: policyMap,
+		Git:      git,
+		Exec:     ex,
+		Emit:     emit,
+		WorkDir:  workDir,
 	})
 }

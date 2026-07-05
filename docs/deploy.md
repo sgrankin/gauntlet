@@ -18,6 +18,14 @@ anything past a single running instance are explicitly out of scope for
 gauntlet (docs/plans/phase23.md §8) — front the daemon with your own
 reverse proxy/CD system for those.
 
+If a target's deploy hook runs slower than that target merges (a builder
+box running `make deploy` against a five-minute deploy while candidates
+land every thirty seconds is the common case), see README's ["Backlog
+policies"](../README.md#backlog-policies) (`hooks-policy`): the default
+(`queue`) runs every landing's deploy, back to back, however stale each
+one is by the time it starts; `coalesce`/`cancel` let the backlog collapse
+to "deploy the latest successful one next" instead.
+
 ## Topology (a): warm builder VM — recommended
 
 This is the fly.io-builder pattern from DESIGN.md: a dedicated box (cloud or

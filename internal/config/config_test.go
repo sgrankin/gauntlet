@@ -345,11 +345,57 @@ target "release" branch="release/v2"
 		}
 	}
 
+	// hooks-policy defaults to "queue" whenever the target has hooks and
+	// left it unset (hooks v2, backlog policies).
+	if main.HooksPolicy != "queue" {
+		t.Errorf("main.HooksPolicy = %q, want %q (defaulted)", main.HooksPolicy, "queue")
+	}
+
 	// A target with no hook nodes at all must come back with a nil/empty
-	// Hooks slice, not an error — hooks are opt-in per target.
+	// Hooks slice, not an error — hooks are opt-in per target. Its
+	// HooksPolicy must stay "" (never defaulted): there is no hooks
+	// backlog to have a policy about.
 	release := d.Targets[1]
 	if len(release.Hooks) != 0 {
 		t.Errorf("release.Hooks = %+v, want empty", release.Hooks)
+	}
+	if release.HooksPolicy != "" {
+		t.Errorf("release.HooksPolicy = %q, want empty (not defaulted without hooks)", release.HooksPolicy)
+	}
+}
+
+// TestLoadDaemon_TargetHooksPolicy covers hooks-policy's three legal
+// explicit values (hooks v2, backlog policies) round-tripping through
+// LoadDaemon unchanged.
+func TestLoadDaemon_TargetHooksPolicy(t *testing.T) {
+	for _, policy := range []string{"queue", "coalesce", "cancel"} {
+		t.Run(policy, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/gauntlet.kdl"
+			data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    hooks-policy "` + policy + `"
+    hook "deploy" {
+        command "make" "deploy"
+    }
+}
+`)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d, err := LoadDaemon(path)
+			if err != nil {
+				t.Fatalf("LoadDaemon: %v", err)
+			}
+			if got := d.Targets[0].HooksPolicy; got != policy {
+				t.Errorf("HooksPolicy = %q, want %q", got, policy)
+			}
+		})
 	}
 }
 
@@ -703,6 +749,41 @@ target "main" branch="main" {
 }
 `,
 			wantErr: `target "main": hook "deploy": duplicate`,
+		},
+		{
+			// Semantic validation (hooks v2, backlog policies): hooks-policy
+			// is only meaningful alongside at least one hook.
+			name: "hooks-policy set without any hooks",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    hooks-policy "coalesce"
+}
+`,
+			wantErr: `target "main": hooks-policy set without any hooks`,
+		},
+		{
+			// Semantic validation (hooks v2): hooks-policy must be one of
+			// queue/coalesce/cancel.
+			name: "hooks-policy unknown value",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    hooks-policy "sometimes"
+    hook "deploy" {
+        command "make" "deploy"
+    }
+}
+`,
+			wantErr: `target "main": hooks-policy must be one of queue, coalesce, cancel`,
 		},
 		{
 			// Semantic validation: cache entry missing its required path.
