@@ -355,15 +355,27 @@ func (d *Daemon) Run(ctx context.Context, tick <-chan time.Time) error {
 
 // ReconcileOnce runs one full, non-blocking reconcile pass over every
 // target: Fetch, ListRefs (the tick's snapshot of ground truth, per §3 step
-// 1), drain inbound commands (docs/plans/phase23.md §2.2), flag any
+// 1), seed each target's park list from Config.SeedParks exactly once
+// (Feature 2 — seeded first, before draining commands: see the O1 note
+// below), drain inbound commands (docs/plans/phase23.md §2.2), flag any
 // candidate ref naming an unconfigured target (§10, O4), then per-target
 // state-machine advancement (reconcile.go), and finally publish a Snapshot
 // of the resulting state (§2.1).
 //
+// O1 (the phase-5 review): seeding runs before drainCommands, not after (as
+// it did when it lived inside reconcileTarget, called only once
+// drainCommands had already returned for the whole tick). seedParksOnce
+// itself is idempotent per target regardless of order, but a first-tick
+// operator CommandCancel and a first-tick seed can both name the very same
+// ref — whichever of the two writes d.done[target][ref] LAST wins, and only
+// drainCommands's write carries the "cancelled by operator" Detail
+// (cancelDetail, command.go) that provenance depends on. Seeding first
+// means any first-tick cancel is applied afterward and so always wins.
+//
 // On an early error (Fetch or ListRefs failing) ReconcileOnce returns before
-// draining commands, checking ignored refs, reconciling any target, or
-// publishing a snapshot — the previously published Snapshot (if any) stays
-// current, its staleness visible via Snapshot().At.
+// seeding, draining commands, checking ignored refs, reconciling any
+// target, or publishing a snapshot — the previously published Snapshot (if
+// any) stays current, its staleness visible via Snapshot().At.
 //
 // ctx is also the parent for any run's root span and, transitively (via
 // context.WithCancel), for the context each check goroutine runs under —
@@ -382,6 +394,9 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 		return fmt.Errorf("queue: list refs: %w", err)
 	}
 
+	for _, t := range d.cfg.Targets {
+		d.seedParksOnce(t.Name)
+	}
 	d.drainCommands(ctx, refs)
 	d.checkIgnoredRefs(ctx, refs)
 

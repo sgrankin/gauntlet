@@ -1,8 +1,21 @@
 # Speculate bubble: window 3, the MIDDLE run (bob, lane position 1) goes
-# red. Only bob parks (Rejected) — carol (behind him) is Skipped WITHOUT
-# parking (her base prediction, "bob lands", is now false) and re-queues;
-# alice (ahead of bob) is untouched and keeps running toward landing. Ports
-# docs/plans/phase5.md §5.2's speculate_bubble row.
+# red. Ports docs/plans/phase5.md §5.2's speculate_bubble row, UPDATED for
+# the phase-5 review's F2 ruling (Zuul reset semantics): a red at lane index
+# i>0 is tested against a PREDICTED base (a predecessor's own chainTip, not
+# the real target tip) — its predecessor might be the one actually at fault
+# — so only lane index 0 (proven against reality) parks on red. Bob at index
+# 1 instead Skips WITHOUT parking and re-queues; carol (behind him) also
+# Skips unparked via the usual suffix invalidation; alice (ahead of bob) is
+# untouched and keeps running toward landing.
+#
+# This file used to assert bob parked (Rejected) right here, at lane index
+# 1, with alice still in flight ahead of him — exactly the false-negative
+# park F2 fixes: bob's red was never actually proven against the real target
+# tip at that point, only against alice's still-unlanded, predicted
+# chainTip. The scenario below now runs the story all the way through: bob
+# re-queues, retests once he's genuinely at lane index 0 (alice having
+# landed and the window rebuilt from the real tip), and THEN — only once
+# proven red against reality — parks for real.
 
 set-mode main speculate 3
 direct-push main files/spec
@@ -17,20 +30,33 @@ await-started test
 await-started '@#1' test
 await-started '@#2' test
 
-release-check '@#1' test failed       # bob (middle) goes red: bubble
+release-check '@#1' test failed       # bob (middle, predicted base) goes red: bubble, unparked
 
-assert-event rejected
-! assert-event landed
-assert-slot-parked main bob b
-assert-slot-parked-none main carol c    # Skipped, NOT parked: free to re-queue
-assert-pipeline-depth main 1            # only alice's run survives
-! assert-slot-gone main alice a         # alice hasn't landed yet
+assert-event skipped
+! assert-event rejected                 # not proven against reality yet: no park
+assert-slot-parked-none main bob b       # Skipped, NOT parked: free to re-queue
+assert-slot-parked-none main carol c     # Skipped, NOT parked: free to re-queue
+assert-pipeline-depth main 1             # only alice's run survives
+! assert-slot-gone main alice a          # alice hasn't landed yet
 
 release-check test passed           # alice's own check finally goes green: lands
 assert-landed-order main a
 assert-slot-gone main alice a
 
-tick                                 # next refill: carol re-queues, rebuilt on the corrected (new) tip
+tick                                 # next refill: lane was empty, so bob re-forms at INDEX 0 —
+                                      # against the real (now-advanced) target tip, not a prediction
+assert-pipeline-depth main 2         # bob(#0, real base) -> carol(#1, predicted on bob)
+await-started test                   # bob
+await-started '@#1' test             # carol, chained onto bob's predicted chainTip
+
+release-check test failed            # bob is NOW at lane index 0: red here IS proven against
+                                      # reality, so THIS time it parks for real
+assert-event rejected
+assert-slot-parked main bob b        # real park: proven red against the actual target tip
+assert-slot-parked-none main carol c # carol bubbles again, still not her fault
+assert-pipeline-depth main 0
+
+tick                                  # carol re-queues alone; bob stays parked
 assert-pipeline-depth main 1
 await-started test
 release-check test passed

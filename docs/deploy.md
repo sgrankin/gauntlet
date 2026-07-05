@@ -326,5 +326,29 @@ backup job beyond that.
 Trial merges and chain links are commits with no refs; abandoned ones (red
 batches, invalidated windows, crashes) sit in the daemon's bare repo as loose
 objects until `git gc` collects them. Harmless — but a busy queue's state dir
-benefits from an occasional `git -C <state>/repos/<key> gc` (safe while the
-daemon runs; git locks correctly).
+benefits from an occasional `git -C <state>/repos/<key> gc`.
+
+**Why this is safe while the daemon runs — and why the letter of that claim
+matters.** It is *not* safe because of file locking. An unpushed chain link
+(a batch's intermediate merge commit, or a speculation window's predicted
+base) is reachable only from the daemon's own in-memory `lane.runs` state,
+never from any ref — so from git's perspective, every such object looks
+unreachable the instant it's created, indistinguishable from real garbage.
+What actually protects it is `git gc`'s loose-object prune **grace period**:
+by default `gc.pruneExpire` is `2.weeks.ago`, so a plain `git gc` never
+removes a loose object younger than that, however unreachable it looks. Every
+chain link the daemon might still resume using is, in practice, far younger
+than two weeks old, so a default-configured `git gc` run against a live
+daemon's repo is safe.
+
+**Never run `git gc --prune=now`** (or set `gc.pruneExpire=now`, or any
+value shorter than the daemon's own chain lifetime) **against a repo the
+daemon is actively using.** That discards the grace period entirely and can
+reap an unpushed chain link out from under an in-flight batch or speculation
+window. The daemon has no way to detect or recover from an object it still
+needs simply vanishing from under it — the next operation that touches that
+link (building the next chain link, or the eventual land) just fails,
+surfacing as a spurious check/land failure with no ref-level explanation to
+point at. Keep any `--prune=now` (or otherwise expire-now) gc run for a repo
+you've first confirmed the daemon isn't running against — e.g. planned
+maintenance with the daemon stopped.

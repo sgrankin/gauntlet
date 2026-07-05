@@ -188,3 +188,52 @@ func TestSnapshot_ParkedWithReason(t *testing.T) {
 		t.Error("Parked[0].At is zero")
 	}
 }
+
+// TestSnapshot_WaitingExcludesEveryPipelineMember proves the F3 fix (the
+// phase-5 review): buildTargetSnapshot's old Waiting filter excluded only
+// ts.InFlight.Candidate.Ref — the HEAD run's head member — so a filled
+// speculation window double-counted every OTHER in-flight member as
+// Waiting too, inflating the queue-depth metric this phase's own tuning
+// relies on. A window filled to depth 3 with exactly 3 queued candidates
+// must show all 3 as Pipeline and NONE as Waiting.
+func TestSnapshot_WaitingExcludesEveryPipelineMember(t *testing.T) {
+	h := newHarness(t, speculateTarget(3))
+	pushThreeSpeculateCandidates(h)
+
+	h.reconcile() // window fills: alice(0)->bob(1)->carol(2), all three in flight
+
+	snap := h.d.Snapshot()
+	ts := snap.Targets[0]
+	if len(ts.Pipeline) != 3 {
+		t.Fatalf("Pipeline = %+v, want exactly 3 (window fully filled)", ts.Pipeline)
+	}
+	if len(ts.Waiting) != 0 {
+		t.Fatalf("Waiting = %+v, want none (F3: every pipeline member, not just the head run's, must be excluded)", ts.Waiting)
+	}
+}
+
+// TestSnapshot_WaitingExcludesBatchMembers is TestSnapshot_
+// WaitingExcludesEveryPipelineMember's batch-mode counterpart: a batch's
+// non-head members (bob, carol — chained into the SAME run as alice, not
+// separate pipeline entries) must also not double-count as Waiting.
+func TestSnapshot_WaitingExcludesBatchMembers(t *testing.T) {
+	h := newHarness(t, batchTarget(8))
+	h.git.seed("main", checkSpecFile("test"))
+	refA := candidateRef("main", "alice", "a")
+	refB := candidateRef("main", "bob", "b")
+	refC := candidateRef("main", "carol", "c")
+	h.git.pushCandidate(refA, "", map[string]string{"a.txt": "a\n"})
+	h.git.pushCandidate(refB, "", map[string]string{"b.txt": "b\n"})
+	h.git.pushCandidate(refC, "", map[string]string{"c.txt": "c\n"})
+
+	h.reconcile() // one refill: all three chain into one batch run
+
+	snap := h.d.Snapshot()
+	ts := snap.Targets[0]
+	if len(ts.Pipeline) != 1 || len(ts.Pipeline[0].Members) != 3 {
+		t.Fatalf("Pipeline = %+v, want exactly 1 run with 3 chained members", ts.Pipeline)
+	}
+	if len(ts.Waiting) != 0 {
+		t.Fatalf("Waiting = %+v, want none (F3: a batch's non-head members must not double-count as waiting)", ts.Waiting)
+	}
+}

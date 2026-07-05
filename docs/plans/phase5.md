@@ -182,11 +182,18 @@ Notes:
   (`idx`, one `cur` goroutine — the serial per-run behavior, unchanged), but
   different runs step concurrently across ticks. Batch has one run, so this is
   serial-identical; speculation has up to `window` runs advancing together.
-- **(c) bubble**: only the culprit parks. The suffix is *invalidated*
-  (OutcomeSkipped, unparked) because its base prediction — "everyone ahead of
-  me lands" — is now false. It re-queues and rebuilds next tick on the
-  corrected prediction (constraint 4). Predecessors `0..i-1` never depended on
-  `i` and keep running toward landing.
+- **(c) bubble**: superseded by §10 amendment 6 (phase-5 adversarial review,
+  F2) for `i > 0`: only lane index 0 (proven against the real target tip)
+  parks on red. A red at `i > 0` — tested against a PREDECESSOR's predicted
+  chainTip, not reality — Skips unparked and re-queues instead, parking only
+  once it's genuinely retested at index 0. The pseudocode above,
+  `finishRun(r, Rejected/Error, park=true)` unconditionally, is the
+  pre-amendment (buggy) version; do not implement it as written. The suffix
+  behind the bubbling run is *invalidated* (OutcomeSkipped, unparked)
+  regardless, because its base prediction — "everyone ahead of me lands" — is
+  now false; it re-queues and rebuilds next tick on the corrected prediction
+  (constraint 4). Predecessors `0..i-1` never depended on `i` and keep
+  running toward landing.
 - **(d) prefix drain**: only `runs[0]` may land (FIFO). Landing `runs[0]` moves
   the target tip to `runs[0].chainTip`, which is *exactly* `runs[1].baseOID`
   (its predicted base) — so `runs[1]`'s land CAS is valid the instant it too is
@@ -740,7 +747,11 @@ restart re-forms the pipeline from refs.
     happened are simply idempotent no-ops (the ref is gone). This is exactly
     serial's between-land-and-delete recovery, run per member — `recoverLanded`
     needs only to be reachable per candidate, which the head-pick + prefix
-    logic already provides.
+    logic already provides. (O2, phase-5 review: each member's recovered
+    `RunRecord` is synthesized independently, with `BatchID`/`Position`/
+    `BatchSize` left zero-valued — correct for the recovery itself, but the
+    original batch's grouping is not reconstructed; a crash in this window
+    surfaces as N separate serial-shaped landings, not one batch summary.)
 - **speculate**
   - *Crash mid-window (nothing landed):* all predicted links are unreferenced
     garbage; next tick rebuilds the whole window from the live tip. The
@@ -817,3 +828,4 @@ unaffected (each run reads its own trial tree's spec, exactly like serial).
 3. **Spec-change batch boundary is v1, not a future refinement (overrides §9's recommendation).** "A candidate is tested by its own definition" is a KEPT ledger promise; a batch silently testing member 1 under member 3's modified spec is trust-eroding gating semantics. The mechanism is cheap with existing primitives: while chaining member k, `ReadFileFromTree` the spec from the chain tree before and after the link merge — if adding k changed the spec content, k terminates the batch (k is included, tested under its own change; later picks form the next batch). Speculation remains unaffected (per-run own-tree spec).
 4. **Window bounds builder concurrency — document it (P5-I).** Each speculative run executes at most one check at a time, so `window` is also the max concurrent check processes/containers on the builder. The config docs must say so (an operator sizing `window` is sizing builder load).
 5. **Depth sampler counts lane depth (P5-H).** The cmd sampler's `inFlight` tuple component becomes `len(Pipeline)` (0/1 today), so the queue-depth series — the tuning instrument — reflects pipeline occupancy.
+6. **Bubble step (§2.1c): only lane index 0 parks on red — Zuul reset semantics (phase-5 adversarial review, F2, overrides §2.1c's pseudocode as literally written).** §2.1c's pseudocode parks the culprit unconditionally, at whatever lane index it bubbles at. That's wrong for a speculation window at depth > 1: a run at index `i > 0`'s `baseOID` is a PREDECESSOR's own chainTip — an unpushed prediction, never the real target tip (§2.2's own `runInvalidated` already draws exactly this distinction for move validity) — so a red verdict there proves nothing about that candidate specifically; it may just as well be the predecessor's eventual fault. Parking it anyway is a false-negative park: a candidate that would pass cleanly once retested against reality gets stuck Rejected forever (until an operator notices and retries). Amendment: only index 0 (proven against the real target tip) parks on red, via the existing `finishRun(..., park=true)`. A red at index `i > 0` instead calls `finishRun(r, Skipped, "red on predicted base (behind <head topic>@<sha>); re-queuing for retest", park=false)` — Skipped, unparked, exactly like the suffix behind it already was — then `invalidateSuffix(lane, i+1, "pipeline bubble")` and the truncation to `lane.runs[:i]` proceed unchanged. The re-queued candidate re-forms at the front of some future window and, if it's STILL red once it's genuinely retested at index 0 (against the real target tip), parks for real at that point. Batch runs are always lane index 0 (batch mode holds at most one run in the lane; refillLane's own "busy" guard for every non-speculate mode), so this amendment changes nothing for batch — `finishBatchRed`'s own no-park handling is untouched. `docs/plans/phase5.md`'s §2.1 pseudocode above is superseded by this amendment for the `i > 0` case; treat this entry, not the inline pseudocode, as authoritative.

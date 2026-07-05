@@ -108,13 +108,56 @@ type Slack struct {
 	notify  chan struct{}
 
 	// batchRecs buffers a batch's per-member terminal records, keyed by
-	// BatchID, indexed by Position, until the last member's terminal event
-	// arrives (docs/plans/phase5.md §3.3 addendum): a batch posts ONE final
-	// threaded summary listing every member, not one reply per member. Each
-	// entry is deleted once that summary is posted, so — like runRoot/roots
-	// — this never leaks an entry per finished batch (§9.2).
-	batchRecs map[string][]*core.RunRecord
+	// BatchID, until a flush is triggered (docs/plans/phase5.md §3.3
+	// addendum, hardened by the phase-5 review's F1): a batch posts ONE
+	// final threaded summary listing every member, not one reply per member.
+	// Each entry is deleted once that summary is posted, so — like
+	// runRoot/roots — this never leaks an entry per finished batch (§9.2),
+	// modulo the bounded staleness-sweep window documented on batchEntry.
+	batchRecs map[string]*batchEntry
+
+	// now returns the current time; overridden in tests (batchEntry's
+	// staleness sweep, F1(c)) so the ~10-minute window can be exercised
+	// without a real wall-clock wait. Defaults to time.Now.
+	now func() time.Time
 }
+
+// batchEntry is one in-flight batch's buffered per-member terminal records
+// (F1, the phase-5 review). recs is indexed by Position; Emit's outbox-full
+// drop (§9.2 — "if the outbox is full, the event is logged and dropped") can
+// silently lose ANY one member's terminal event, leaving a nil hole at that
+// index — summarizeBatch tolerates that (F1a). arrived counts every member
+// terminal event actually recorded so far, independent of which Position
+// arrived: postBatchTerminal used to flush only when the record at
+// Position == BatchSize-1 arrived, which both nil-dereferences on a hole
+// before that point (a dropped middle member: summarizeBatch's own fix
+// handles that) AND never fires at all if THAT particular event is the one
+// dropped, leaking this entry (and runRoot/roots) forever (F1b — fixed by
+// flushing on arrived == BatchSize as an alternative trigger). lastTouched
+// is refreshed on every arrival and read by the staleness sweep
+// (collectStaleBatchesLocked, F1c): an entry that never receives its
+// flush-triggering arrival (because that, too, was dropped) is force-flushed
+// with holes once it's older than batchStaleTimeout, so it can't buffer
+// forever even in that doubly-unlucky case. The sweep only runs
+// opportunistically, on some OTHER batch's terminal arrival (no new
+// goroutine or timer) — so the residual worst case is "leaks until the next
+// batch-terminal event for any batch," a bounded, documented trade-off, not
+// an unbounded leak. target is captured once, from the first event's
+// ev.Target, so finishBatch (which renders the root headline) has it
+// available for every batch, including one flushed by the staleness sweep
+// long after its own triggering event's ev.Target has gone out of scope.
+type batchEntry struct {
+	recs        []*core.RunRecord
+	arrived     int
+	lastTouched time.Time
+	target      string
+}
+
+// batchStaleTimeout bounds how long a batch's buffered per-member records
+// wait for a flush-triggering arrival before the staleness sweep
+// (collectStaleBatchesLocked) force-flushes it anyway (F1c). Comfortably
+// longer than any real check suite's per-batch window.
+const batchStaleTimeout = 10 * time.Minute
 
 // New returns a Slack channel configured by p. It performs no I/O; Run
 // starts the socket-mode connection and the outbound drainer.
@@ -141,7 +184,8 @@ func New(p Params) *Slack {
 		runRoot:   make(map[string]string),
 		roots:     make(map[string]rootInfo),
 		notify:    make(chan struct{}),
-		batchRecs: make(map[string][]*core.RunRecord),
+		batchRecs: make(map[string]*batchEntry),
+		now:       time.Now,
 	}
 }
 
@@ -368,47 +412,112 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 // member of a batch shares the same Outcome by construction — landRun/
 // finishRun/finishBatchRed/rejectBatch all assign one outcome to the whole
 // batch, never singling out a member's own verdict (a genuine per-member
-// split doesn't exist: a batch either lands whole or Skips/parks whole) —
-// so the root's headline can be (and is) decided from the FIRST member
-// processed (Position 0), without waiting to see every member's record.
+// split doesn't exist: a batch either lands whole or Skips/parks whole).
 //
 // Rather than one noisy threaded reply per member, each member's record is
-// buffered (keyed by BatchID, indexed by Position so processing order never
-// matters even though every emit site here happens to loop 0..BatchSize-1)
-// until the LAST member (Position == BatchSize-1) arrives, at which point
-// ONE summary reply lists every member and both run-tracking maps — plus
-// this batch's buffered records — are cleaned up (§9.2).
+// buffered (keyed by BatchID, indexed by Position) in a batchEntry until a
+// flush triggers (F1b): either every member has actually arrived
+// (be.arrived == rec.BatchSize) or the nominal last member (Position ==
+// BatchSize-1) has arrived — tracking arrived separately from "did the
+// Position-(BatchSize-1) event show up" means a dropped LAST member (which
+// would never satisfy the old Position-only check) still flushes once every
+// OTHER member is in, and a dropped MIDDLE member still flushes at the real
+// last position instead of blocking forever on a count a drop makes
+// unreachable. The root's headline edit and the one threaded summary reply
+// are both produced together at flush time (finishBatch), from whichever
+// members have actually arrived by then (nil holes tolerated, F1a) — a
+// live-Slack follow-up to F1: the headline used to update eagerly at
+// Position 0's own arrival, using only that one member's info, which is
+// exactly why a batch of one member rendered as "batch <runID> (1 members)
+// → target" instead of the normal single-run phrasing, and a multi-member
+// batch's headline never got to name any of its members. Deferring to
+// flush time fixes both: batchHeadline (below) renders a size-1 batch
+// identically to a serial run, and a size>1 batch's headline lists every
+// member topic that's arrived by flush time. Once flushed, both
+// run-tracking maps — plus this batch's buffered records — are cleaned up
+// (§9.2). Every arrival also opportunistically sweeps for any OTHER batch
+// stuck long enough to be stale (F1c) and flushes those too, so a batch
+// whose own flush-triggering arrival was itself dropped doesn't buffer
+// forever either.
 func (s *Slack) postBatchTerminal(ctx context.Context, ev core.Event, rec *core.RunRecord, rootTS string) {
-	if rec.Position == 0 {
-		headline := fmt.Sprintf("%s batch %s (%d members) → %s", outcomeEmoji(rec.Outcome), rec.BatchID, rec.BatchSize, ev.Target)
+	s.mu.Lock()
+	be := s.batchRecs[rec.BatchID]
+	if be == nil {
+		be = &batchEntry{recs: make([]*core.RunRecord, rec.BatchSize), target: ev.Target}
+		s.batchRecs[rec.BatchID] = be
+	}
+	if rec.Position >= 0 && rec.Position < len(be.recs) {
+		be.recs[rec.Position] = rec
+	}
+	be.arrived++
+	be.lastTouched = s.now()
+	flush := be.arrived >= rec.BatchSize || rec.Position == rec.BatchSize-1
+	target := be.target
+	recs := be.recs
+	stale := s.collectStaleBatchesLocked(rec.BatchID)
+	s.mu.Unlock()
+
+	if flush {
+		s.finishBatch(ctx, rec.BatchID, rootTS, target, recs)
+	}
+	for _, sb := range stale {
+		s.finishBatch(ctx, sb.batchID, sb.rootTS, sb.target, sb.recs)
+	}
+}
+
+// staleBatch is one collectStaleBatchesLocked result: a batch whose
+// buffered records have sat past batchStaleTimeout without a
+// flush-triggering arrival (F1c).
+type staleBatch struct {
+	batchID string
+	rootTS  string // "" if no root is known (defensive; see collectStaleBatchesLocked)
+	target  string
+	recs    []*core.RunRecord
+}
+
+// collectStaleBatchesLocked scans s.batchRecs for every entry other than
+// excludeBatchID (the one postBatchTerminal is already handling this call)
+// whose lastTouched is older than batchStaleTimeout, returning each for the
+// caller to flush-with-holes and forget once s.mu is released. Must be
+// called with s.mu held.
+func (s *Slack) collectStaleBatchesLocked(excludeBatchID string) []staleBatch {
+	var stale []staleBatch
+	now := s.now()
+	for batchID, be := range s.batchRecs {
+		if batchID == excludeBatchID || now.Sub(be.lastTouched) < batchStaleTimeout {
+			continue
+		}
+		// rootTS should always be found here: postBatchTerminal only ever
+		// creates a batchRecs entry after a successful lookupRoot, and
+		// nothing deletes runRoot's entry for a batch out from under a live
+		// batchRecs entry except this same flush path (which deletes both
+		// together). The lookup is defensive, not load-bearing.
+		rootTS := s.runRoot[batchID]
+		stale = append(stale, staleBatch{batchID: batchID, rootTS: rootTS, target: be.target, recs: be.recs})
+	}
+	return stale
+}
+
+// finishBatch posts batchID's final root headline edit and threaded summary
+// (both skipped if rootTS is unknown — nothing to edit or reply to) and
+// forgets every trace of it: batchRecs, runRoot, and roots (§9.2).
+func (s *Slack) finishBatch(ctx context.Context, batchID, rootTS, target string, recs []*core.RunRecord) {
+	if rootTS != "" {
+		headline := batchHeadline(target, recs)
 		if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false)); err != nil {
-			s.logf("slack: chat.update failed batch=%s: %v", rec.BatchID, err)
+			s.logf("slack: chat.update failed batch=%s: %v", batchID, err)
+		}
+
+		summary := summarizeBatch(recs)
+		if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(summary, false), goslack.MsgOptionTS(rootTS)); err != nil {
+			s.logf("slack: final batch summary failed batch=%s: %v", batchID, err)
 		}
 	}
 
 	s.mu.Lock()
-	recs := s.batchRecs[rec.BatchID]
-	if recs == nil {
-		recs = make([]*core.RunRecord, rec.BatchSize)
-		s.batchRecs[rec.BatchID] = recs
-	}
-	recs[rec.Position] = rec
-	last := rec.Position == rec.BatchSize-1
+	delete(s.batchRecs, batchID)
 	s.mu.Unlock()
-
-	if !last {
-		return
-	}
-
-	summary := summarizeBatch(recs)
-	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(summary, false), goslack.MsgOptionTS(rootTS)); err != nil {
-		s.logf("slack: final batch summary failed batch=%s: %v", rec.BatchID, err)
-	}
-
-	s.mu.Lock()
-	delete(s.batchRecs, rec.BatchID)
-	s.mu.Unlock()
-	s.forget(rec.BatchID, rootTS)
+	s.forget(batchID, rootTS)
 }
 
 // postHookFinished posts a standalone (non-threaded) channel message for a
@@ -493,21 +602,87 @@ func summarizeRun(rec *core.RunRecord) string {
 	return b.String()
 }
 
+// firstBatchRec returns the first non-nil record in recs, or nil if every
+// slot is a hole (F1a, the phase-5 review: Emit's outbox-full drop, §9.2,
+// can lose any one member's terminal event). Shared by summarizeBatch and
+// batchHeadline — both need "a representative member" for the fields every
+// member of a batch shares by construction (Outcome, Checks; §3.3).
+func firstBatchRec(recs []*core.RunRecord) *core.RunRecord {
+	for _, r := range recs {
+		if r != nil {
+			return r
+		}
+	}
+	return nil
+}
+
+// batchHeadline renders the root message's final-verdict chat.update text
+// for a batch (F1's live-Slack follow-up, the phase-5 review): a batch
+// formed with exactly one member — max-batch 1, or a queue that only ever
+// offered one candidate; §4.1 promises this "degrades to serial behavior"
+// byte for byte — now renders IDENTICALLY to a serial run's own headline
+// (postTerminal's, below), not "batch <runID> (1 members) → target" (the
+// live bug report: broken grammar, and it drops the topic/user entirely). A
+// genuine multi-member batch instead says "batch of N", naming whichever
+// member topics have actually arrived by flush time (recs may have nil
+// holes — F1a; "reasonable" effort, not a guarantee of completeness, since a
+// dropped middle member's own topic is simply unknown here). The doubly
+// unlucky all-holes case (every member's event dropped — only reachable via
+// the staleness sweep, since a flush trigger requires at least one arrival
+// recorded in-bounds) renders one uniform "(all events dropped)" line with
+// a ⚠️ placeholder, deliberately NOT guessing an outcome emoji: the real
+// outcome is simply unknown here.
+func batchHeadline(target string, recs []*core.RunRecord) string {
+	head := firstBatchRec(recs)
+	if head == nil {
+		return fmt.Sprintf("⚠️ batch of %d (all events dropped) → %s", len(recs), target)
+	}
+	if len(recs) == 1 {
+		return fmt.Sprintf("%s %s (%s) → %s", outcomeEmoji(head.Outcome), head.Candidate.Topic, displayUser(head.Candidate.User), target)
+	}
+	var topics []string
+	for _, r := range recs {
+		if r != nil {
+			topics = append(topics, r.Candidate.Topic)
+		}
+	}
+	return fmt.Sprintf("%s batch of %d (%s) → %s", outcomeEmoji(head.Outcome), len(recs), strings.Join(topics, ", "), target)
+}
+
 // summarizeBatch renders the ONE final threaded reply for a whole batch
-// (§3.3 addendum: "one reply per member is noisy"). recs is indexed by
-// Position (postBatchTerminal's invariant — every slot is filled by the
-// time this runs, since it's only called once Position == BatchSize-1 has
-// arrived). The checks are duplicated onto every member's record (§3.3's own
-// documented shape — the suite ran once, against the chain tip), so the
-// outcome label and check-verdict lines render once, from the head member;
-// each member then gets its own line naming it and its own (now-distinct,
+// (§3.3 addendum: "one reply per member is noisy"). A batch of exactly one
+// member renders identically to a serial run's own summary — the same
+// summarizeRun, on the same RunRecord shape (F1's live-Slack follow-up:
+// §4.1's "degrades to serial behavior" byte for byte, extended to Slack's
+// rendering). A genuine multi-member batch's checks are duplicated onto
+// every member's record (§3.3's own documented shape — the suite ran once,
+// against the chain tip), so the outcome label and check-verdict lines
+// render once, from the first non-nil member found (head, firstBatchRec —
+// recs is indexed by Position, but a slot may be nil, F1a); each present
+// member then gets its own line naming it and its own (now-distinct,
 // post-fix) RunID, plus its own Detail when non-empty — landRun's per-member
 // slot-delete CAS can genuinely differ member to member (a stale delete vs.
-// a clean one), even though Outcome itself never does.
+// a clean one), even though Outcome itself never does. Any nil hole is
+// counted and surfaced as one trailing "…and K member(s) whose events were
+// dropped" line rather than silently omitted.
 func summarizeBatch(recs []*core.RunRecord) string {
-	head := recs[0]
+	if len(recs) == 1 {
+		if recs[0] == nil {
+			return "batch summary unavailable: the only member's event was dropped"
+		}
+		return summarizeRun(recs[0])
+	}
+
+	head := firstBatchRec(recs)
+	if head == nil {
+		// Every member's event was dropped: nothing to render a headline or
+		// check list from. Still worth a message — a silent batch that
+		// never gets a summary at all is worse than one that says so.
+		return fmt.Sprintf("batch summary unavailable: all %d member event(s) were dropped", len(recs))
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s — batch %s (%d members)", outcomeLabel(head.Outcome), head.BatchID, len(recs))
+	fmt.Fprintf(&b, "%s — batch of %d (%s)", outcomeLabel(head.Outcome), len(recs), head.BatchID)
 	for _, c := range head.Checks {
 		fmt.Fprintf(&b, "\n%s %s (%s)", checkEmoji(c.Status), c.Name, c.Duration.Round(time.Millisecond))
 	}
@@ -516,11 +691,19 @@ func summarizeBatch(recs []*core.RunRecord) string {
 			fmt.Fprintf(&b, "\n```\n%s\n```", tail)
 		}
 	}
+	var holes int
 	for _, r := range recs {
+		if r == nil {
+			holes++
+			continue
+		}
 		fmt.Fprintf(&b, "\n%d. %s (%s) — run %s", r.Position, r.Candidate.Topic, displayUser(r.Candidate.User), r.RunID)
 		if r.Detail != "" {
 			fmt.Fprintf(&b, ": %s", r.Detail)
 		}
+	}
+	if holes > 0 {
+		fmt.Fprintf(&b, "\n…and %d member(s) whose events were dropped", holes)
 	}
 	return b.String()
 }

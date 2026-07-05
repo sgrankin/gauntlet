@@ -169,13 +169,28 @@ func TestSpeculateConflictAgainstPredictedBase_Parks(t *testing.T) {
 	_ = refA
 }
 
-// TestSpeculateBubble_CulpritParksSuffixSkipped proves §2.1c's bubble step
-// at depth 3 (this is where P5-C built it lane-general but only ever
-// exercised at depth 1): the middle run goes red -> only it parks
-// (Rejected); everything behind it is Skipped with a Detail of exactly
-// "pipeline bubble" and NOT parked (free to re-queue); everything ahead of
-// it survives untouched, still in flight.
-func TestSpeculateBubble_CulpritParksSuffixSkipped(t *testing.T) {
+// TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest proves
+// §2.1c's bubble step at depth 3 (this is where P5-C built it lane-general
+// but only ever exercised at depth 1), UPDATED for the phase-5 review's F2
+// ruling (Zuul reset semantics).
+//
+// F2 background: this test used to be
+// TestSpeculateBubble_CulpritParksSuffixSkipped and asserted that bob (the
+// middle run, lane index 1) parked (Rejected) the instant his check went
+// red — with alice (lane index 0) still in flight ahead of him. That was
+// the bug: bob's base at index 1 is alice's own PREDICTED (unpushed)
+// chainTip, never the real target tip, so a red there proves nothing about
+// bob himself — it could just as easily be alice's eventual fault. Only
+// lane index 0 is tested against reality (runInvalidated's own rule), so
+// only index 0 may park on red; anything red at index >0 must Skip
+// unparked and re-queue, to be retested for real once it actually reaches
+// index 0.
+//
+// This test now proves both halves of that: the middle-red case Skips
+// without parking and everything behind it bubbles too (unchanged from
+// before), AND — new — once bob re-queues and lands at lane index 0 for a
+// genuine retest against the real target tip, a red THERE parks for real.
+func TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
 	refA, refB, refC := pushThreeSpeculateCandidates(h)
 
@@ -186,15 +201,15 @@ func TestSpeculateBubble_CulpritParksSuffixSkipped(t *testing.T) {
 	}
 	run0, run1 := l.runs[0], l.runs[1]
 
-	h.release(run1.runID, "test", core.CheckResult{Name: "test", Status: core.CheckFailed}) // bob (middle) goes red
+	h.release(run1.runID, "test", core.CheckResult{Name: "test", Status: core.CheckFailed}) // bob (middle, predicted base) goes red
 
 	if l := h.d.lanes["main"]; l == nil || len(l.runs) != 1 || l.runs[0] != run0 {
 		t.Fatalf("lane after the bubble = %+v, want exactly [alice's run] surviving", h.d.lanes["main"])
 	}
 
-	// bob: parked, Rejected.
+	// bob: Skipped, NOT parked — not yet proven against reality.
 	if !h.git.hasRef(refB) {
-		t.Fatal("bob's ref should survive (parked, not deleted)")
+		t.Fatal("bob's ref should survive (unparked, re-queuing)")
 	}
 	var bobRec, carolRec *core.RunRecord
 	for _, r := range h.ch.Records() {
@@ -205,11 +220,19 @@ func TestSpeculateBubble_CulpritParksSuffixSkipped(t *testing.T) {
 			carolRec = r
 		}
 	}
-	if bobRec == nil || bobRec.Outcome != core.OutcomeRejected {
-		t.Fatalf("bob's record = %+v, want Outcome Rejected", bobRec)
+	if bobRec == nil || bobRec.Outcome != core.OutcomeSkipped {
+		t.Fatalf("bob's record = %+v, want Outcome Skipped (unparked: red against a PREDICTED base, not proven)", bobRec)
+	}
+	wantPrefix := "red on predicted base (behind a@"
+	if len(bobRec.Detail) < len(wantPrefix) || bobRec.Detail[:len(wantPrefix)] != wantPrefix {
+		t.Fatalf("bob's Detail = %q, want it to start with %q", bobRec.Detail, wantPrefix)
+	}
+	if _, parked := h.d.done["main"][refB]; parked {
+		t.Fatal("bob must NOT be parked yet (red against a prediction, not reality)")
 	}
 
-	// carol: Skipped, "pipeline bubble" detail, NOT parked.
+	// carol: Skipped, "pipeline bubble" detail, NOT parked — unaffected by
+	// F2 (she was already unparked before the fix too).
 	if carolRec == nil || carolRec.Outcome != core.OutcomeSkipped {
 		t.Fatalf("carol's record = %+v, want Outcome Skipped", carolRec)
 	}
@@ -231,11 +254,53 @@ func TestSpeculateBubble_CulpritParksSuffixSkipped(t *testing.T) {
 		t.Fatal("alice hasn't landed yet")
 	}
 
-	// The freed window slots refill on the very next tick: carol re-queues,
-	// rebuilt on the (still-predicted, alice-not-yet-landed) corrected base.
+	// Window pinned to 1 while alice's release is pending (release's own
+	// doc comment: delivering to GatedExecutor and having advanceChecks
+	// actually observe the result can take several quiet reconcile ticks,
+	// and a quiet tick with room in the window refills right then —
+	// P5-F's own documented behavior change. With the window wide open
+	// (still 3 from setup), such a quiet tick would re-chain bob (and
+	// carol) onto alice's still-in-flight, still-PREDICTED chainTip before
+	// alice actually lands — not wrong, just not the genuine
+	// against-reality retest this test wants to isolate. Pinning the
+	// window to 1 (alice's own single slot) for this release means no room
+	// exists to refill until alice is popped from the lane; it's widened
+	// back to 3 right after, for the refill this test is actually about.
+	h.d.cfg.Targets[0].Window = 1
+	h.release(run0.runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // alice lands
+	if h.d.headRun("main") != nil {
+		t.Fatal("alice's run should be gone (landed) before the next refill")
+	}
+	h.d.cfg.Targets[0].Window = 3
+
+	// Next tick: the lane was empty, so bob re-forms at lane index 0 — this
+	// time against the REAL (now-advanced) target tip, not a prediction.
 	h.reconcile()
-	if l := h.d.lanes["main"]; l == nil || len(l.runs) != 2 {
-		t.Fatalf("lane after refill = %+v, want 2 (alice survives + carol re-queued)", h.d.lanes["main"])
+	l = h.d.lanes["main"]
+	if l == nil || len(l.runs) != 2 {
+		t.Fatalf("lane after refill = %+v, want 2 (bob re-queued at index 0 + carol chained on him)", h.d.lanes["main"])
+	}
+	bobRun := l.runs[0]
+	if bobRun.members[0].cand.Ref != refB {
+		t.Fatalf("lane index 0 = %+v, want bob's re-queued run", bobRun.members[0].cand)
+	}
+	if bobRun.predicted {
+		t.Fatal("bob's re-queued run at index 0 must NOT be predicted: its base is the real target tip")
+	}
+
+	h.release(bobRun.runID, "test", core.CheckResult{Name: "test", Status: core.CheckFailed}) // bob red again — NOW proven against reality
+
+	bobRec = nil
+	for _, r := range h.ch.Records() {
+		if r.Candidate.Ref == refB {
+			bobRec = r // walk forward: keep the most recent
+		}
+	}
+	if bobRec == nil || bobRec.Outcome != core.OutcomeRejected {
+		t.Fatalf("bob's record after the real retest = %+v, want Outcome Rejected (proven red against reality: parks for real)", bobRec)
+	}
+	if entry, parked := h.d.done["main"][refB]; !parked || entry.Outcome != core.OutcomeRejected {
+		t.Fatalf("bob's done entry = %+v (parked=%v), want a real Rejected park now", entry, parked)
 	}
 }
 

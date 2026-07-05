@@ -101,6 +101,36 @@ func waitForStatsZero(t *testing.T, s *Slack, timeout time.Duration) {
 	}
 }
 
+// waitForBatchArrived blocks until batchID's buffered batchEntry has
+// recorded at least want arrivals, synchronizing on s.notify (as
+// waitForStats does) rather than polling with a sleep. Needed whenever a
+// test cares that a SPECIFIC member's terminal event has been fully
+// processed but that event produces no post of its own to wait on (no
+// edit: Position != 0; no flush: neither trigger fires) — waitForPosts/
+// waitForStats alone can be satisfied by an EARLIER member's processing
+// and race ahead of a later one still sitting in the outbox.
+func waitForBatchArrived(t *testing.T, s *Slack, batchID string, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		s.mu.Lock()
+		var got int
+		if be := s.batchRecs[batchID]; be != nil {
+			got = be.arrived
+		}
+		wake := s.notify
+		s.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-wake:
+		case <-deadline:
+			t.Fatalf("batch %s arrived = %d after %s, want %d", batchID, got, timeout, want)
+		}
+	}
+}
+
 func TestSlack_TrialCleanPostsRootCheckThreadsAndTerminalEdit(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 
@@ -613,4 +643,219 @@ func TestSlack_BatchRedSkippedPostsOneRootOneEditOneSummary(t *testing.T) {
 	if got := fake.snapshotPosts(); len(got) != 3 {
 		t.Fatalf("total posts = %d, want exactly 3 (root, edit, one summary)", len(got))
 	}
+}
+
+// TestSlack_BatchSummaryToleratesMiddleMemberHole proves F1a/F1b (the
+// phase-5 review): a batch member's terminal event can be silently lost to
+// Emit's outbox-full drop (§9.2's "if the outbox is full, the event is
+// logged and dropped") — nothing ever re-delivers it. The old
+// summarizeBatch assumed every Position slot was filled and nil-dereferenced
+// on recs[0] the instant any slot was empty (a drainer-goroutine panic,
+// i.e. a process crash). Skipping bob's (Position 1, the middle member's)
+// Emit entirely must not panic; the LAST member's arrival (Position ==
+// BatchSize-1) still triggers the flush, the summary explicitly notes the
+// gap instead of silently omitting bob, and every map still ends up clean.
+func TestSlack_BatchSummaryToleratesMiddleMemberHole(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	batchID, cands, runIDs := batchMembers()
+
+	for _, cand := range cands {
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: batchID})
+	}
+	root := fake.waitForPosts(1, testTimeout)[0]
+	waitForStats(t, s, testTimeout, 1, 1)
+
+	checks := []core.CheckResult{{Name: "test", Status: core.CheckPassed, Duration: 42 * time.Millisecond}}
+	recAt := func(i int) *core.RunRecord {
+		return &core.RunRecord{
+			RunID: runIDs[i], Target: "main", Candidate: cands[i],
+			Outcome: core.OutcomeLanded, Checks: checks,
+			BatchID: batchID, Position: i, BatchSize: len(cands),
+		}
+	}
+
+	// Position 0 (alice) and Position 2 (carol, == BatchSize-1) arrive;
+	// Position 1 (bob) never does.
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cands[0], RunID: runIDs[0], Record: recAt(0)})
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cands[2], RunID: runIDs[2], Record: recAt(2)})
+
+	posts := fake.waitForPosts(3, testTimeout) // root + edit + summary — no panic despite the hole
+	edit := posts[1]
+	if edit.method != "chat.update" || edit.ts != root.ts {
+		t.Fatalf("batch edit = %+v, want a single chat.update on the root", edit)
+	}
+
+	summary := posts[2]
+	if summary.method != "chat.postMessage" || summary.threadTS != root.ts {
+		t.Fatalf("batch summary = %+v, want ONE threaded reply on the root", summary)
+	}
+	for _, want := range []string{"alice", "carol", "1 member(s) whose events were dropped"} {
+		if !strings.Contains(summary.text, want) {
+			t.Errorf("summary text = %q, want it to mention %q", summary.text, want)
+		}
+	}
+	if strings.Contains(summary.text, "bob") {
+		t.Errorf("summary text = %q, must not mention bob (his event never arrived)", summary.text)
+	}
+
+	waitForStatsZero(t, s, testTimeout) // maps clean despite the hole
+	if got := fake.snapshotPosts(); len(got) != 3 {
+		t.Fatalf("total posts = %d, want exactly 3 (root, edit, one summary)", len(got))
+	}
+}
+
+// TestSlack_BatchStaleEntryFlushedOnAnotherBatchArrival proves F1c: a batch
+// whose flush-triggering arrival is ITSELF the event Emit dropped (here,
+// carol's Position == BatchSize-1 terminal event, the old code's ONLY flush
+// trigger) would buffer — and leak its runRoot/roots/batchRecs entries —
+// forever without the staleness sweep. The sweep runs opportunistically, on
+// some OTHER batch's terminal arrival (no dedicated goroutine or timer): a
+// second, unrelated batch's own first terminal event, arriving more than
+// batchStaleTimeout after the stuck batch was last touched, force-flushes
+// the stuck batch (with a hole noted for its missing member) and forgets
+// it, leaving the second batch's own (still mid-flight) state untouched.
+func TestSlack_BatchStaleEntryFlushedOnAnotherBatchArrival(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	batchID, cands, runIDs := batchMembers()
+
+	for _, cand := range cands {
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: batchID})
+	}
+	root1 := fake.waitForPosts(1, testTimeout)[0]
+	waitForStats(t, s, testTimeout, 1, 1)
+
+	checks := []core.CheckResult{{Name: "test", Status: core.CheckPassed, Duration: 42 * time.Millisecond}}
+	recAt := func(i int) *core.RunRecord {
+		return &core.RunRecord{
+			RunID: runIDs[i], Target: "main", Candidate: cands[i],
+			Outcome: core.OutcomeLanded, Checks: checks,
+			BatchID: batchID, Position: i, BatchSize: len(cands),
+		}
+	}
+	// Only Position 0 (alice) and Position 1 (bob) arrive; Position 2
+	// (carol, == BatchSize-1) never does — simulating THAT specific event
+	// being the one Emit dropped, so neither of the two flush triggers
+	// (arrived == BatchSize, or Position == BatchSize-1) is ever satisfied.
+	// Neither arrival posts anything of its own (the root headline edit is
+	// now produced at flush time, alongside the summary — see
+	// postBatchTerminal's own doc comment), so nothing here adds to
+	// fake's post count; waitForBatchArrived is what actually pins "both
+	// arrivals are fully processed" before this test starts fiddling with
+	// s.now below (a race that would otherwise let bob's own
+	// be.lastTouched write land AFTER the override, corrupting the very
+	// staleness this test means to provoke).
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cands[0], RunID: runIDs[0], Record: recAt(0)})
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cands[1], RunID: runIDs[1], Record: recAt(1)})
+	waitForBatchArrived(t, s, batchID, 2, testTimeout)
+	waitForStats(t, s, testTimeout, 1, 1) // batch1's root/run-tracking entries still present; no flush yet
+
+	// Advance the clock 11 minutes (past batchStaleTimeout) relative to
+	// real wall-clock time, directly — the sweep has no timer of its own,
+	// so nothing observes this until some batch's own next terminal
+	// arrival checks it.
+	frozen := time.Now().Add(11 * time.Minute)
+	s.mu.Lock()
+	s.now = func() time.Time { return frozen }
+	s.mu.Unlock()
+
+	batchID2 := "20260705T130000Z-2-def456abc123"
+	cands2 := []core.Candidate{
+		{Ref: "refs/heads/for/main/dave/x", Target: "main", User: "dave", Topic: "x", SHA: "dddd"},
+		{Ref: "refs/heads/for/main/erin/y", Target: "main", User: "erin", Topic: "y", SHA: "eeee"},
+	}
+	for _, cand := range cands2 {
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: batchID2})
+	}
+	fake.waitForPosts(2, testTimeout) // root1, batch2's own root (batch2's own edit is deferred to ITS flush, which never happens in this test)
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cands2[0], RunID: batchID2, Record: &core.RunRecord{
+		RunID: batchID2, Target: "main", Candidate: cands2[0], Outcome: core.OutcomeLanded, Checks: checks,
+		BatchID: batchID2, Position: 0, BatchSize: 2,
+	}})
+
+	// batch2's own Position-0 arrival (not itself a flush trigger: 1 of 2
+	// members in, so it posts nothing of its own) piggybacks the staleness
+	// sweep, which finds batch1 stale and force-flushes it — headline edit
+	// + summary, together — with a hole noted for its missing (carol)
+	// member.
+	posts := fake.waitForPosts(4, testTimeout) // root1, root2, batch1's stale-flush edit + summary
+	var staleSummary *postedMessage
+	for i := range posts {
+		if posts[i].threadTS == root1.ts && posts[i].method == "chat.postMessage" {
+			staleSummary = &posts[i]
+		}
+	}
+	if staleSummary == nil {
+		t.Fatalf("no stale-flush summary posted on batch1's root among %+v", posts)
+	}
+	for _, want := range []string{"alice", "bob", "1 member(s) whose events were dropped"} {
+		if !strings.Contains(staleSummary.text, want) {
+			t.Errorf("stale summary text = %q, want it to mention %q", staleSummary.text, want)
+		}
+	}
+
+	// batch1 is fully forgotten; batch2 is untouched (still mid-batch, 1 of
+	// 2 members in).
+	waitForStats(t, s, testTimeout, 1, 1) // only batch2's root/run-tracking entries remain
+	s.mu.Lock()
+	_, batch1Present := s.batchRecs[batchID]
+	_, batch2Present := s.batchRecs[batchID2]
+	n := len(s.batchRecs)
+	s.mu.Unlock()
+	if batch1Present {
+		t.Fatal("batch1 must be forgotten after the staleness sweep")
+	}
+	if !batch2Present || n != 1 {
+		t.Fatalf("batchRecs = %d entries (batch2 present=%v), want exactly batch2's", n, batch2Present)
+	}
+}
+
+// TestSlack_SingleMemberBatchRendersLikeSerial proves the live-Slack
+// addendum to F1 (the phase-5 review): a batch formed with exactly one
+// member — max-batch 1, or a queue that only ever offered one candidate;
+// §4.1 promises this "degrades to serial behavior" byte for byte — must
+// render its root headline edit and threaded summary IDENTICALLY to a
+// genuine serial run's own messages, not "batch <runID> (1 members) →
+// target" (the live bug: broken grammar, and it drops the topic/user
+// entirely). This drives the exact same candidate/checks/outcome through
+// both the serial path (BatchID == "") and the batch-of-one path (BatchID
+// set, Position 0, BatchSize 1) on two independent Slack instances, and
+// diffs the resulting message text byte for byte.
+func TestSlack_SingleMemberBatchRendersLikeSerial(t *testing.T) {
+	cand := core.Candidate{Ref: "refs/heads/for/main/alice/widget", Target: "main", User: "alice", Topic: "widget", SHA: "deadbeef"}
+	runID := "20260705T130000Z-1-abc123def456"
+	checks := []core.CheckResult{{Name: "test", Status: core.CheckPassed, Duration: 42 * time.Millisecond}}
+
+	serialS, serialFake, serialCtx := newTestSlack(t, nil)
+	mustEmit(t, serialS, serialCtx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	serialFake.waitForPosts(1, testTimeout)
+	mustEmit(t, serialS, serialCtx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cand, RunID: runID, Record: &core.RunRecord{
+		RunID: runID, Target: "main", Candidate: cand, Outcome: core.OutcomeLanded, Checks: checks,
+	}})
+	serialPosts := serialFake.waitForPosts(3, testTimeout) // root, edit, summary
+
+	batchS, batchFake, batchCtx := newTestSlack(t, nil)
+	mustEmit(t, batchS, batchCtx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	batchFake.waitForPosts(1, testTimeout)
+	mustEmit(t, batchS, batchCtx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cand, RunID: runID, Record: &core.RunRecord{
+		RunID: runID, Target: "main", Candidate: cand, Outcome: core.OutcomeLanded, Checks: checks,
+		BatchID: runID, Position: 0, BatchSize: 1,
+	}})
+	batchPosts := batchFake.waitForPosts(3, testTimeout) // root, edit, summary
+
+	serialEdit, batchEdit := serialPosts[1], batchPosts[1]
+	if batchEdit.text != serialEdit.text {
+		t.Fatalf("batch-of-one root edit = %q, want byte-identical to serial's %q", batchEdit.text, serialEdit.text)
+	}
+	if strings.Contains(batchEdit.text, "batch") || strings.Contains(batchEdit.text, "member") {
+		t.Errorf("batch-of-one root edit = %q, must not mention batch/members at all", batchEdit.text)
+	}
+
+	serialSummary, batchSummary := serialPosts[2], batchPosts[2]
+	if batchSummary.text != serialSummary.text {
+		t.Fatalf("batch-of-one summary = %q, want byte-identical to serial's %q", batchSummary.text, serialSummary.text)
+	}
+
+	waitForStatsZero(t, serialS, testTimeout)
+	waitForStatsZero(t, batchS, testTimeout)
 }

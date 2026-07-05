@@ -143,9 +143,12 @@ func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
 // in flight — the one behavioral change this chunk makes to the dispatch
 // itself.
 func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[string]string) {
+	// seedParksOnce runs earlier now, in ReconcileOnce before drainCommands
+	// (O1, the phase-5 review): a first-tick operator cancel must not have
+	// its "cancelled by operator" provenance silently overwritten by a
+	// same-tick seed for the same ref.
 	targetTip := refs[targetRefName(t)]
 	cands := discoverCandidates(t.Name, refs)
-	d.seedParksOnce(t.Name)
 	d.syncBookkeeping(ctx, t, cands)
 
 	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
@@ -199,11 +202,12 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 
 // seedParksOnce consults Config.SeedParks for target exactly once per
 // Daemon lifetime (Feature 2, "park persistence across restarts"): every
-// later reconcileTarget call for this target returns immediately via
-// d.seeded. Seeds are written straight into d.done — the very next call in
-// reconcileTarget, syncBookkeeping, already drops any entry (seeded or not)
-// whose ref has vanished or moved to a new SHA since, so this needs no SHA
-// check of its own beyond the red-family filter below.
+// later call for this target (ReconcileOnce calls it once per target, every
+// tick) returns immediately via d.seeded. Seeds are written straight into
+// d.done — the very next step for this target, syncBookkeeping (called from
+// reconcileTarget), already drops any entry (seeded or not) whose ref has
+// vanished or moved to a new SHA since, so this needs no SHA check of its
+// own beyond the red-family filter below.
 func (d *Daemon) seedParksOnce(target string) {
 	if d.seeded[target] {
 		return
@@ -394,22 +398,49 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 		d.advanceChecks(ctx, t, r)
 	}
 
-	// (c) Bubble: a run that just went red. Only the culprit parks; a
-	// future speculation window's suffix Skips unparked and re-queues. A
-	// genuine multi-member batch (len(members) > 1) instead takes §10
+	// (c) Bubble: a run that just went red. Zuul reset semantics (F2, the
+	// phase-5 review): only lane index 0 parks on a red verdict — its base
+	// is the REAL target tip (runInvalidated's own rule), so a red there is
+	// proven against reality. A red at index i>0 has a PREDICTED base (a
+	// predecessor's own chainTip, never a real ref, per refillSpeculate) —
+	// that predecessor might itself be the one at fault, so parking index i
+	// here would risk sticking a possibly-innocent candidate with a false
+	// rejection. Instead it Skips unparked with a Detail saying so
+	// explicitly, and re-queues; it re-forms at the front of a future
+	// window and, if it's STILL red once it's actually testing against the
+	// real target tip (index 0), parks for real at that point via this same
+	// branch.
+	//
+	// A genuine multi-member batch (len(members) > 1) instead takes §10
 	// amendment 2's serial-fallback path (finishBatchRed): we don't know
 	// which member is guilty, so nothing parks there either — a batch
 	// formed with exactly one member (max-batch 1, or a queue that only
 	// offered one candidate) is NOT a "batch" for this purpose and takes the
 	// normal single-culprit park, since §4.1 promises max-batch 1 "degrades
 	// to serial behavior" byte for byte.
+	//
+	// Invariant, load-bearing for the index-0-only-parks rule below: a
+	// genuine multi-member batch run is always at lane index 0, because
+	// batch mode holds at most one run in the lane (refillLane's own "lane
+	// busy" guard for every mode but speculate) and speculate only ever
+	// builds one-member runs (startRun). The switch is shaped to stay safe
+	// even if that invariant ever broke — the multi-member case routes to
+	// finishBatchRed (no park) regardless of i — but a future mode that
+	// chains multi-member runs at depth > 1 must revisit this step's
+	// predicted-base reasoning for batches too, not just rely on that
+	// fallback.
 	for i, r := range lane.runs {
 		if r.verdict == verdictRejected || r.verdict == verdictErrored {
-			if len(r.members) > 1 {
+			switch {
+			case len(r.members) > 1:
 				d.finishBatchRed(ctx, t, r)
-			} else {
+			case i == 0:
 				outcome, detail := runRejectOutcome(r)
 				d.finishRun(ctx, t, r, outcome, detail, true)
+			default:
+				head := lane.runs[0].members[0].cand
+				detail := fmt.Sprintf("red on predicted base (behind %s@%s); re-queuing for retest", head.Topic, head.SHA)
+				d.finishRun(ctx, t, r, core.OutcomeSkipped, detail, false)
 			}
 			d.invalidateSuffix(ctx, t, lane, i+1, "pipeline bubble")
 			lane.runs = lane.runs[:i]
@@ -1467,6 +1498,18 @@ func (d *Daemon) finalizeRun(r *run) {
 // before, this is a pure recovery action, not a run: no merge ever happens,
 // so BaseOID/MergeSHA/Trial stay zero-valued, matching the other
 // pre-merge synthesized records (rejectPreMerge).
+//
+// O2 (docs/plans/phase5.md §8): called per member (refillBatch/refillSpeculate
+// each check their own head pick with it, same as refillSerialOne), so a
+// batch that crashed between its land push and its slot deletes recovers as
+// N independent serial-shaped landings — each member gets its own
+// synthesized RunRecord here, with BatchID/Position/BatchSize left at their
+// zero values, not the batch identity the original (pre-crash) run had. That
+// is correct for recovery purposes (Invariant 4 only needs each ref's slot
+// cleaned up and a Landed event emitted), but it means the batch grouping
+// itself is NOT reconstructed: the dashboard/Slack will render these as
+// separate landings, not as one batch summary, for any batch that crashes in
+// this window.
 func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.Candidate) {
 	if delErr := d.git.CASUpdate(ctx, cand.Ref, cand.SHA, ""); delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
 		return // transient; retry next tick

@@ -137,10 +137,25 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 	order := d.order[t.Name]
 	done := d.done[t.Name]
 
+	// inFlightRefs is every member of every run already captured in
+	// ts.Pipeline above, not just the head run's own head member (F3 fix,
+	// docs/plans/phase5.md review): a filled speculation window or a
+	// multi-member batch has members beyond ts.InFlight.Candidate that were
+	// still being double-counted as Waiting before this fix, inflating
+	// Waiting's count (and the depth series it feeds, this phase's own
+	// tuning instrument) by however many other in-flight members the
+	// pipeline happened to hold.
+	inFlightRefs := make(map[string]bool)
+	for _, r := range ts.Pipeline {
+		for _, m := range r.Members {
+			inFlightRefs[m.Ref] = true
+		}
+	}
+
 	var waitingRefs []string
 	for ref := range cands {
-		if ts.InFlight != nil && ref == ts.InFlight.Candidate.Ref {
-			continue // in flight, not waiting
+		if inFlightRefs[ref] {
+			continue // in flight (any pipeline member, not just the head run's head), not waiting
 		}
 		if _, parked := done[ref]; parked {
 			continue
