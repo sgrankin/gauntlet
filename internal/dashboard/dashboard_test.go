@@ -2,6 +2,7 @@ package dashboard_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -100,6 +101,150 @@ func testSnapshot() *queue.Snapshot {
 				TargetTip: "",
 			},
 		},
+	}
+}
+
+// pipelineSnapshot builds a queue.Snapshot for target "spec" with a
+// depth-3 speculative pipeline (docs/plans/phase5.md §3.4, §10 amendment
+// 5): run 0 is the head (Predicted false — its base is the real target
+// tip), runs 1 and 2 are downstream window members built on a predicted
+// (unpushed) base. Each run has exactly one member with a distinct topic,
+// so pipeline order is independently verifiable in a rendered page.
+func pipelineSnapshot() *queue.Snapshot {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	mkRun := func(i int, predicted bool) queue.RunSnapshot {
+		cand := core.Candidate{
+			Ref: fmt.Sprintf("refs/heads/for/spec/user%d/topic%d", i, i), Target: "spec",
+			User: fmt.Sprintf("user%d", i), Topic: fmt.Sprintf("topic%d", i), SHA: fmt.Sprintf("sha%d", i),
+		}
+		return queue.RunSnapshot{
+			Candidate: cand,
+			Members:   []core.Candidate{cand},
+			RunID:     fmt.Sprintf("run-spec-%d", i),
+			BaseOID:   fmt.Sprintf("base%d", i),
+			ChainTip:  fmt.Sprintf("chain%d", i),
+			MergeSHA:  fmt.Sprintf("chain%d", i),
+			Predicted: predicted,
+			StartedAt: now.Add(-time.Duration(i+1) * time.Minute),
+			Current:   &queue.CurrentCheck{Name: fmt.Sprintf("check%d", i), StartedAt: now.Add(-time.Duration(i) * time.Second)},
+		}
+	}
+	pipeline := []queue.RunSnapshot{mkRun(0, false), mkRun(1, true), mkRun(2, true)}
+	head := pipeline[0]
+	return &queue.Snapshot{
+		At: now,
+		Targets: []queue.TargetSnapshot{
+			{
+				Name: "spec", Branch: "spec", TargetTip: "tiptiptiptiptiptiptiptiptiptiptiptiptip",
+				InFlight: &head, Pipeline: pipeline,
+			},
+		},
+	}
+}
+
+// batchSnapshot builds a queue.Snapshot for target "rel" with a single
+// batch run of 3 members (docs/plans/phase5.md §3.4, §10 amendment 5).
+func batchSnapshot() *queue.Snapshot {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	members := []core.Candidate{
+		{Ref: "refs/heads/for/rel/user0/topic0", Target: "rel", User: "user0", Topic: "topic0", SHA: "sha0"},
+		{Ref: "refs/heads/for/rel/user1/topic1", Target: "rel", User: "user1", Topic: "topic1", SHA: "sha1"},
+		{Ref: "refs/heads/for/rel/user2/topic2", Target: "rel", User: "user2", Topic: "topic2", SHA: "sha2"},
+	}
+	run := queue.RunSnapshot{
+		Candidate: members[0],
+		Members:   members,
+		RunID:     "run-batch-1",
+		BaseOID:   "base0",
+		ChainTip:  "chain0",
+		MergeSHA:  "chain0",
+		BatchID:   "batch-1",
+		StartedAt: now.Add(-time.Minute),
+	}
+	return &queue.Snapshot{
+		At: now,
+		Targets: []queue.TargetSnapshot{
+			{Name: "rel", Branch: "rel", TargetTip: "tiptip", InFlight: &run, Pipeline: []queue.RunSnapshot{run}},
+		},
+	}
+}
+
+// TestTarget_RendersDepth3Pipeline confirms the target page renders a
+// multi-run pipeline as a stacked list, head first, with the predicted
+// badge only on downstream (non-head) runs (chunk P5-H, docs/plans/
+// phase5.md §3.4).
+func TestTarget_RendersDepth3Pipeline(t *testing.T) {
+	snap := pipelineSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/t/spec")
+
+	i0 := strings.Index(body, "topic0")
+	i1 := strings.Index(body, "topic1")
+	i2 := strings.Index(body, "topic2")
+	if i0 == -1 || i1 == -1 || i2 == -1 {
+		t.Fatalf("expected all three topics in body:\n%s", body)
+	}
+	if !(i0 < i1 && i1 < i2) {
+		t.Errorf("pipeline not rendered head-first: topic0@%d topic1@%d topic2@%d", i0, i1, i2)
+	}
+
+	// Only the non-head runs (indices 1, 2) carry the predicted badge.
+	if n := strings.Count(body, "on predicted base"); n != 2 {
+		t.Errorf("expected 2 \"on predicted base\" badges (runs 1 and 2 only), got %d:\n%s", n, body)
+	}
+
+	for _, want := range []string{"run-spec-0", "run-spec-1", "run-spec-2", "check0", "check1", "check2"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in body:\n%s", want, body)
+		}
+	}
+	// A depth-3 pipeline must never render the "batch of N" badge — no run
+	// here has more than one member.
+	if strings.Contains(body, "batch of") {
+		t.Errorf("unexpected batch badge in a pure-speculation pipeline:\n%s", body)
+	}
+}
+
+// TestTarget_RendersBatchRun confirms a single run with multiple members
+// renders every member (topic/user, short SHA) plus a "batch of N" badge,
+// even though the pipeline itself has depth 1 (chunk P5-H).
+func TestTarget_RendersBatchRun(t *testing.T) {
+	snap := batchSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/t/rel")
+
+	if !strings.Contains(body, "batch of 3") {
+		t.Errorf("expected \"batch of 3\" badge:\n%s", body)
+	}
+	for _, want := range []string{"user0/topic0", "user1/topic1", "user2/topic2"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing member %q in body:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "on predicted base") {
+		t.Errorf("a batch run's own base is the real target tip, never predicted:\n%s", body)
+	}
+}
+
+// TestIndex_PipelineDepthShowsNInFlight confirms the index card's in-flight
+// cell becomes "N in flight" (rather than the head candidate's user/topic)
+// once pipeline depth exceeds 1 (chunk P5-H).
+func TestIndex_PipelineDepthShowsNInFlight(t *testing.T) {
+	snap := pipelineSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/")
+
+	if !strings.Contains(body, "3 in flight") {
+		t.Errorf("expected \"3 in flight\" on the index card:\n%s", body)
+	}
+	if strings.Contains(body, "user0/topic0") {
+		t.Errorf("expected the index card to omit the head candidate's user/topic once pipeline depth > 1:\n%s", body)
+	}
+	if !strings.Contains(body, "check0") {
+		t.Errorf("expected the head run's current check to still render:\n%s", body)
 	}
 }
 

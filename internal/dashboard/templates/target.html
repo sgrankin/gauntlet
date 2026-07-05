@@ -6,7 +6,34 @@
 
 <div class="section">
 <h2>In flight</h2>
-{{if .InFlight}}
+{{if .Pipeline}}
+{{range $i, $run := .Pipeline}}
+<div class="pipeline-run">
+<p>
+<strong>#{{$i}}</strong>
+{{if $run.Predicted}}<span class="tag warn">&#9203; on predicted base</span>{{end}}
+{{if gt (len $run.Members) 1}}<span class="tag neutral">batch of {{len $run.Members}}</span>{{end}}
+&middot; run <code>{{$run.RunID}}</code> &middot; running {{$run.RunElapsed}}
+</p>
+<ul class="pipeline-members">
+{{range $run.Members}}
+<li>{{.User}}/{{.Topic}} (<code title="{{.SHA}}">{{shortSHA .SHA}}</code>)</li>
+{{end}}
+</ul>
+<p>{{if $run.CurrentName}}current check: <strong>{{$run.CurrentName}}</strong> ({{$run.CurrentElapsed}}){{else}}<span class="muted">between checks</span>{{end}}</p>
+{{if $run.Done}}
+<table>
+<tr><th>check</th><th>status</th><th>duration</th><th>err</th></tr>
+{{range $run.Done}}
+<tr><td>{{.Name}}</td><td><span class="tag {{.Status.Class}}">{{.Status.Word}}</span></td><td>{{.Duration}}</td><td class="muted">{{.Err}}</td></tr>
+{{end}}
+</table>
+{{else}}
+<p class="muted">no checks finished yet</p>
+{{end}}
+</div>
+{{end}}
+{{else if .InFlight}}
 <p><strong>{{.InFlight.Candidate.User}}/{{.InFlight.Candidate.Topic}}</strong>
  (<code title="{{.InFlight.Candidate.SHA}}">{{shortSHA .InFlight.Candidate.SHA}}</code>) &middot; run <code>{{.InFlight.RunID}}</code>
  &middot; running {{.InFlight.RunElapsed}}</p>

@@ -107,6 +107,67 @@ func TestAPIStatus_Shape(t *testing.T) {
 	}
 }
 
+// TestAPIStatus_PipelineFieldPresent confirms GET /api/v1/status carries a
+// "pipeline" array per target (docs/plans/phase5.md §3.4, chunk P5-H),
+// additive alongside "inFlight" (which stays the head run for back-compat):
+// each element's RunSnapshot fields (members, chainTip, predicted, batchId,
+// checksDone, currentCheck, startedAt) round-trip through JSON.
+func TestAPIStatus_PipelineFieldPresent(t *testing.T) {
+	snap := pipelineSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	resp, body := get(t, h, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	targets := m["targets"].([]any)
+	var spec map[string]any
+	for _, tv := range targets {
+		tm := tv.(map[string]any)
+		if tm["name"] == "spec" {
+			spec = tm
+		}
+	}
+	if spec == nil {
+		t.Fatalf("spec target missing: %s", body)
+	}
+
+	pipeline, ok := spec["pipeline"].([]any)
+	if !ok || len(pipeline) != 3 {
+		t.Fatalf("pipeline = %v, want a 3-element array", spec["pipeline"])
+	}
+
+	// inFlight stays the head run (back-compat).
+	inFlight := spec["inFlight"].(map[string]any)
+	if inFlight["runID"] != "run-spec-0" {
+		t.Errorf("inFlight.runID = %v, want head run run-spec-0", inFlight["runID"])
+	}
+
+	run0 := pipeline[0].(map[string]any)
+	for _, key := range []string{"members", "chainTip", "predicted", "batchId", "checksDone", "currentCheck", "startedAt"} {
+		if _, ok := run0[key]; !ok {
+			t.Errorf("pipeline[0] missing key %q: %v", key, run0)
+		}
+	}
+	if run0["predicted"] != false {
+		t.Errorf("pipeline[0] (head) predicted = %v, want false", run0["predicted"])
+	}
+	members0, ok := run0["members"].([]any)
+	if !ok || len(members0) != 1 {
+		t.Fatalf("pipeline[0].members = %v", run0["members"])
+	}
+	if run0["currentCheck"] != "check0" {
+		t.Errorf("pipeline[0].currentCheck = %v, want check0", run0["currentCheck"])
+	}
+
+	run1 := pipeline[1].(map[string]any)
+	if run1["predicted"] != true {
+		t.Errorf("pipeline[1] predicted = %v, want true", run1["predicted"])
+	}
+}
+
 func TestAPIStatus_IdleTargetHasNullInFlightAndEmptyLists(t *testing.T) {
 	snap := testSnapshot()
 	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)

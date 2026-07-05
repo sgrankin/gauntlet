@@ -150,12 +150,13 @@ type statusResponse struct {
 }
 
 type targetStatus struct {
-	Name     string          `json:"name"`
-	Branch   string          `json:"branch"`
-	Tip      string          `json:"tip"`
-	InFlight *inFlightStatus `json:"inFlight"`
-	Waiting  []waitingStatus `json:"waiting"`
-	Parked   []parkedStatus  `json:"parked"`
+	Name     string           `json:"name"`
+	Branch   string           `json:"branch"`
+	Tip      string           `json:"tip"`
+	InFlight *inFlightStatus  `json:"inFlight"`
+	Pipeline []pipelineStatus `json:"pipeline"`
+	Waiting  []waitingStatus  `json:"waiting"`
+	Parked   []parkedStatus   `json:"parked"`
 }
 
 type inFlightStatus struct {
@@ -165,6 +166,25 @@ type inFlightStatus struct {
 	CurrentCheck string   `json:"currentCheck"`
 	StartedAt    string   `json:"startedAt"`
 	ChecksDone   []string `json:"checksDone"`
+}
+
+// pipelineStatus mirrors one queue.RunSnapshot within a target's pipeline
+// (docs/plans/phase5.md §3.4): head first, additive alongside inFlight
+// (which stays the head run, back-compat). Field names are RunSnapshot's,
+// lowerCamel.
+type pipelineStatus struct {
+	Members      []pipelineMemberStatus `json:"members"`
+	ChainTip     string                 `json:"chainTip"`
+	Predicted    bool                   `json:"predicted"`
+	BatchID      string                 `json:"batchId"`
+	ChecksDone   []string               `json:"checksDone"`
+	CurrentCheck string                 `json:"currentCheck"`
+	StartedAt    string                 `json:"startedAt"`
+}
+
+type pipelineMemberStatus struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
 }
 
 type waitingStatus struct {
@@ -200,14 +220,18 @@ func (d *dash) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 
 func buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
-		Name:    ts.Name,
-		Branch:  ts.Branch,
-		Tip:     ts.TargetTip,
-		Waiting: make([]waitingStatus, 0, len(ts.Waiting)),
-		Parked:  make([]parkedStatus, 0, len(ts.Parked)),
+		Name:     ts.Name,
+		Branch:   ts.Branch,
+		Tip:      ts.TargetTip,
+		Pipeline: make([]pipelineStatus, 0, len(ts.Pipeline)),
+		Waiting:  make([]waitingStatus, 0, len(ts.Waiting)),
+		Parked:   make([]parkedStatus, 0, len(ts.Parked)),
 	}
 	if ts.InFlight != nil {
 		out.InFlight = buildInFlightStatus(ts.InFlight)
+	}
+	for _, rs := range ts.Pipeline {
+		out.Pipeline = append(out.Pipeline, buildPipelineStatus(rs))
 	}
 
 	// Defensive re-sort by Seq, matching handleTarget's html view: this is
@@ -235,6 +259,30 @@ func buildInFlightStatus(rs *queue.RunSnapshot) *inFlightStatus {
 		RunID:      rs.RunID,
 		StartedAt:  formatRFC3339(rs.StartedAt),
 		ChecksDone: make([]string, 0, len(rs.Done)),
+	}
+	for _, cr := range rs.Done {
+		v.ChecksDone = append(v.ChecksDone, cr.Name)
+	}
+	if rs.Current != nil {
+		v.CurrentCheck = rs.Current.Name
+	}
+	return v
+}
+
+// buildPipelineStatus builds one pipelineStatus from a RunSnapshot, for
+// GET /api/v1/status's additive "pipeline" array (docs/plans/phase5.md
+// §3.4).
+func buildPipelineStatus(rs queue.RunSnapshot) pipelineStatus {
+	v := pipelineStatus{
+		Members:    make([]pipelineMemberStatus, 0, len(rs.Members)),
+		ChainTip:   rs.ChainTip,
+		Predicted:  rs.Predicted,
+		BatchID:    rs.BatchID,
+		ChecksDone: make([]string, 0, len(rs.Done)),
+		StartedAt:  formatRFC3339(rs.StartedAt),
+	}
+	for _, m := range rs.Members {
+		v.Members = append(v.Members, pipelineMemberStatus{Ref: m.Ref, SHA: m.SHA})
 	}
 	for _, cr := range rs.Done {
 		v.ChecksDone = append(v.ChecksDone, cr.Name)

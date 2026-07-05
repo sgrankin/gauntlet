@@ -111,8 +111,25 @@ const depthHeartbeat = 10 * time.Minute
 // depthTuple is the part of a queue_depth sample that matters for
 // change-only sampling: (waiting, in-flight, parked) for one target. Two
 // samples with an equal tuple carry no new information regardless of At.
+//
+// InFlight is len(TargetSnapshot.Pipeline) — the lane's pipeline depth
+// (docs/plans/phase5.md §10 amendment 5), not a 0/1 "is something running"
+// flag: today, before speculation/batching land, Pipeline has at most one
+// element (mirroring InFlight != nil), so this is 0 when idle and 1 when
+// serial-busy, byte-identical to the tuple this sampler recorded before —
+// no series discontinuity. Once a target runs in speculate mode, this
+// becomes the queue-depth series' actual pipeline-occupancy signal, which is
+// the whole point of sampling it: the dashboard's tuning instrument for
+// sizing `window`.
 type depthTuple struct {
 	Waiting, InFlight, Parked int
+}
+
+// buildDepthTuple extracts one target's depthTuple from a fresh snapshot —
+// pulled out as a pure function so the sampler's per-tick decision is
+// testable without spinning up the sampler goroutine.
+func buildDepthTuple(ts queue.TargetSnapshot) depthTuple {
+	return depthTuple{Waiting: len(ts.Waiting), InFlight: len(ts.Pipeline), Parked: len(ts.Parked)}
 }
 
 // depthSample is the last tuple recorded for a target, and when.
@@ -181,11 +198,7 @@ func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() 
 					continue
 				}
 				for _, ts := range snap.Targets {
-					inFlight := 0
-					if ts.InFlight != nil {
-						inFlight = 1
-					}
-					current := depthTuple{Waiting: len(ts.Waiting), InFlight: inFlight, Parked: len(ts.Parked)}
+					current := buildDepthTuple(ts)
 					prev := last[ts.Name]
 					if !shouldRecord(prev.tuple, current, prev.at, snap.At) {
 						continue

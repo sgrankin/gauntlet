@@ -95,11 +95,12 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	for _, ts := range snap.Targets {
 		card := targetCard{
-			Name:         ts.Name,
-			Branch:       ts.Branch,
-			TargetTip:    orDash(ts.TargetTip),
-			WaitingCount: len(ts.Waiting),
-			ParkedCount:  len(ts.Parked),
+			Name:          ts.Name,
+			Branch:        ts.Branch,
+			TargetTip:     orDash(ts.TargetTip),
+			WaitingCount:  len(ts.Waiting),
+			ParkedCount:   len(ts.Parked),
+			PipelineDepth: len(ts.Pipeline),
 		}
 		if ts.InFlight != nil {
 			card.InFlight = buildInFlight(ts.InFlight, snap.At)
@@ -138,6 +139,19 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	if ts.InFlight != nil {
 		data.InFlight = buildInFlight(ts.InFlight, snap.At)
+	}
+
+	// Render the stacked pipeline view (docs/plans/phase5.md §3.4, §10
+	// amendment 5's "P5-H" chunk) only when there's something a single
+	// InFlight card can't show: more than one run in flight (speculation)
+	// or the head run has more than one member (batch). A single-run,
+	// single-member lane — today's only shape and every existing serial
+	// test's fixture — leaves data.Pipeline nil, so the template falls
+	// through to the unchanged .InFlight branch: no visual regression.
+	if len(ts.Pipeline) > 1 || (len(ts.Pipeline) == 1 && len(ts.Pipeline[0].Members) > 1) {
+		for i := range ts.Pipeline {
+			data.Pipeline = append(data.Pipeline, buildPipelineRun(&ts.Pipeline[i], snap.At))
+		}
 	}
 
 	waiting := append([]queue.WaitingEntry(nil), ts.Waiting...)
@@ -705,6 +719,35 @@ func buildInFlight(rs *queue.RunSnapshot, at time.Time) *inFlightView {
 	return v
 }
 
+// buildPipelineRun builds one pipelineRunView from a RunSnapshot for the
+// target page's stacked pipeline list (docs/plans/phase5.md §3.4): every
+// member (topic/user, short SHA), the predicted/batch badges the template
+// renders from Predicted/len(Members), and the same per-run check-progress
+// fields buildInFlight already computes for the single-run case.
+func buildPipelineRun(rs *queue.RunSnapshot, at time.Time) pipelineRunView {
+	v := pipelineRunView{
+		RunID:      rs.RunID,
+		BaseOID:    rs.BaseOID,
+		ChainTip:   rs.ChainTip,
+		Predicted:  rs.Predicted,
+		BatchID:    rs.BatchID,
+		RunElapsed: formatDuration(at.Sub(rs.StartedAt)),
+	}
+	for _, m := range rs.Members {
+		v.Members = append(v.Members, memberView{User: m.User, Topic: m.Topic, SHA: m.SHA})
+	}
+	for i, cr := range rs.Done {
+		v.Done = append(v.Done, checkView{
+			Seq: i, Name: cr.Name, Status: checkTag(cr.Status), Duration: formatDuration(cr.Duration), Err: errText(cr.Err),
+		})
+	}
+	if rs.Current != nil {
+		v.CurrentName = rs.Current.Name
+		v.CurrentElapsed = formatDuration(at.Sub(rs.Current.StartedAt))
+	}
+	return v
+}
+
 // render executes t's "base" template into a buffer first, so a template
 // error never leaves a half-written 200 response on the wire.
 func render(w http.ResponseWriter, t *template.Template, data any) {
@@ -906,6 +949,13 @@ type targetCard struct {
 	WaitingCount, ParkedCount int
 	StoreEnabled              bool
 	RecentRuns                []runSummary
+
+	// PipelineDepth is len(TargetSnapshot.Pipeline): 0 when idle, 1 for
+	// today's ordinary single in-flight run, >1 once speculation lands
+	// (docs/plans/phase5.md §3.4). index.html only changes its rendering
+	// (the in-flight cell becomes "N in flight") when this is >1 — a
+	// single in-flight run renders exactly as before.
+	PipelineDepth int
 }
 
 type inFlightView struct {
@@ -914,6 +964,27 @@ type inFlightView struct {
 	Done                        []checkView
 	CurrentName, CurrentElapsed string
 	RunElapsed                  string
+}
+
+// pipelineRunView is one run within a target's stacked pipeline list
+// (docs/plans/phase5.md §3.4): target.html renders one of these per element
+// of targetData.Pipeline, head first. Predicted/len(Members) drive the
+// "on predicted base" / "batch of N" badges directly in the template.
+type pipelineRunView struct {
+	RunID, BaseOID, ChainTip string
+	Predicted                bool
+	BatchID                  string
+	Members                  []memberView
+
+	Done                        []checkView
+	CurrentName, CurrentElapsed string
+	RunElapsed                  string
+}
+
+// memberView is one candidate within a pipelineRunView's Members list: just
+// enough to render "user/topic (shortSHA)" per member.
+type memberView struct {
+	User, Topic, SHA string
 }
 
 type checkView struct {
@@ -960,6 +1031,13 @@ type targetData struct {
 	Parked                  []parkedView
 	StoreEnabled            bool
 	RecentRuns              []runSummary
+
+	// Pipeline is non-nil only when there's more than one in-flight run or
+	// the head run has more than one member (docs/plans/phase5.md §3.4):
+	// see handleTarget's doc. target.html renders this stacked list instead
+	// of the plain .InFlight card when it's set; a single-run single-member
+	// lane leaves this nil and renders exactly as before.
+	Pipeline []pipelineRunView
 }
 
 type waitingView struct {

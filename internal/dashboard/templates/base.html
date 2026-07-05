@@ -84,6 +84,11 @@ footer { margin-top: 2rem; }
 .chip-neutral { background: var(--neutral); }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; min-width: 0; }
 
+/* --- pipeline stacked list (/t/{target}, docs/plans/phase5.md §3.4) ----- */
+.pipeline-run { border-top: 1px solid var(--border); padding-top: .6rem; margin-top: .6rem; }
+.pipeline-run:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.pipeline-members { margin: .2rem 0 .4rem; padding-left: 1.2rem; }
+
 /* --- per-check output (/run/{id}) --------------------------------------- */
 .checklist { margin: .5rem 0 1rem; border-top: 1px solid var(--border); }
 .check-row, details.check-row summary { display: block; padding: .4rem .2rem; border-bottom: 1px solid var(--border); font-size: .88rem; }

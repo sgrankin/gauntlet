@@ -10,7 +10,11 @@
 <h2><a href="/t/{{.Name}}">{{.Name}}</a></h2>
 <p class="muted">branch <code>{{.Branch}}</code> @ <code title="{{.TargetTip}}">{{shortSHA .TargetTip}}</code></p>
 {{if .InFlight}}
+{{if gt .PipelineDepth 1}}
+<p><span class="tag neutral">{{.PipelineDepth}} in flight</span></p>
+{{else}}
 <p><span class="tag neutral">in flight</span> {{.InFlight.Candidate.User}}/{{.InFlight.Candidate.Topic}}</p>
+{{end}}
 <p>{{if .InFlight.CurrentName}}running <strong>{{.InFlight.CurrentName}}</strong> ({{.InFlight.CurrentElapsed}}){{else}}<span class="muted">between checks</span>{{end}}</p>
 {{else}}
 <p class="muted">idle</p>

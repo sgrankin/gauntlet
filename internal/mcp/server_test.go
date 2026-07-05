@@ -63,6 +63,39 @@ func testSnapshot() *queue.Snapshot {
 	}
 }
 
+// pipelineSnapshot builds a queue.Snapshot for target "spec" with a
+// depth-2 pipeline (docs/plans/phase5.md §3.4, chunk P5-H): run 0 is the
+// head (Predicted false), run 1 is a downstream window member built on a
+// predicted base. Mirrors internal/dashboard's own pipelineSnapshot test
+// helper in shape, not value, since this package can't import that
+// unexported helper.
+func pipelineSnapshot() *queue.Snapshot {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	mkRun := func(i int, predicted bool) queue.RunSnapshot {
+		cand := core.Candidate{
+			Ref: "refs/heads/for/spec/user/topic" + string(rune('0'+i)), Target: "spec",
+			User: "user", Topic: "topic" + string(rune('0'+i)), SHA: "sha" + string(rune('0'+i)),
+		}
+		return queue.RunSnapshot{
+			Candidate: cand,
+			Members:   []core.Candidate{cand},
+			RunID:     "run-spec-" + string(rune('0'+i)),
+			ChainTip:  "chain" + string(rune('0'+i)),
+			Predicted: predicted,
+			StartedAt: now.Add(-time.Duration(i+1) * time.Minute),
+			Current:   &queue.CurrentCheck{Name: "check" + string(rune('0'+i)), StartedAt: now},
+		}
+	}
+	pipeline := []queue.RunSnapshot{mkRun(0, false), mkRun(1, true)}
+	head := pipeline[0]
+	return &queue.Snapshot{
+		At: now,
+		Targets: []queue.TargetSnapshot{
+			{Name: "spec", Branch: "spec", TargetTip: "tip", InFlight: &head, Pipeline: pipeline},
+		},
+	}
+}
+
 func openTestStore(t *testing.T) *history.Store {
 	t.Helper()
 	s, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
@@ -195,6 +228,33 @@ func TestStatus_NoTargetFilter_ReturnsAll(t *testing.T) {
 	res := callTool(t, session, "status", nil)
 	text := textOf(t, res)
 	for _, want := range []string{`"name":"main"`, `"name":"release"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("status content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestStatus_PipelineFieldMirrorsAPI confirms the status tool's "pipeline"
+// array (docs/plans/phase5.md §3.4, chunk P5-H) mirrors dashboard/api.go's
+// field-for-field: members, chainTip, predicted, batchId, checksDone,
+// currentCheck, startedAt, present per run, head first, while inFlight stays
+// the head run for back-compat.
+func TestStatus_PipelineFieldMirrorsAPI(t *testing.T) {
+	snap := pipelineSnapshot()
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }})
+
+	res := callTool(t, session, "status", map[string]any{"target": "spec"})
+	if res.IsError {
+		t.Fatalf("status errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{
+		`"runID":"run-spec-0"`, // inFlight stays the head run
+		`"pipeline"`, `"members"`, `"chainTip"`, `"predicted"`, `"batchId"`,
+		`"checksDone"`, `"currentCheck"`, `"startedAt"`,
+		`"predicted":false`, `"predicted":true`,
+		"check0", "check1",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("status content missing %q:\n%s", want, text)
 		}
