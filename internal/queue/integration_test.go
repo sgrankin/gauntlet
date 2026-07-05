@@ -110,14 +110,20 @@ func (h *integrationHarness) currentRunID() string {
 }
 
 // releaseGated delivers result to gated's call registered on (runID, name),
-// then spins ReconcileOnce until a new event is captured — the same
-// rendezvous problem daemon_test.go's release() solves (Release only
-// enqueues into a buffered channel; nothing synchronizes the executor
-// goroutine actually resuming and delivering into the run's one-shot result
-// channel, which ReconcileOnce reads non-blockingly). Real git makes each
-// spin of ReconcileOnce cost a real fetch, so the bound is wall-clock time
-// rather than a fixed iteration count, but the loop still spins on an
-// observed condition — never a sleep for a guessed duration.
+// then spins ReconcileOnce until (runID, name)'s own EventCheckFinished is
+// observed — the same rendezvous problem daemon_test.go's release() solves
+// (Release only enqueues into a buffered channel; nothing synchronizes the
+// executor goroutine actually resuming and delivering into the run's
+// one-shot result channel, which ReconcileOnce reads non-blockingly). Real
+// git makes each spin of ReconcileOnce cost a real fetch, so the bound is
+// wall-clock time rather than a fixed iteration count, but the loop still
+// spins on an observed condition — never a sleep for a guessed duration.
+//
+// Waits for the specific (runID, name) EventCheckFinished, not "any new
+// event" (checkFinishedObserved, daemon_test.go): a speculate window's
+// quiet-tick refill can inject an unrelated event for a DIFFERENT run in
+// the same lane before this release's own result is actually consumed — see
+// release's doc comment (P5-F finding) for the full story.
 func (h *integrationHarness) releaseGated(gated *executor.GatedExecutor, runID, name string, result core.CheckResult) {
 	h.t.Helper()
 	before := len(h.ch.Events())
@@ -125,11 +131,11 @@ func (h *integrationHarness) releaseGated(gated *executor.GatedExecutor, runID, 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		h.reconcile()
-		if len(h.ch.Events()) > before {
+		if checkFinishedObserved(h.ch.Events()[before:], runID, name) {
 			return
 		}
 		if time.Now().After(deadline) {
-			h.t.Fatalf("no new event after releasing (%s,%s); the check's executor goroutine never seemed to run", runID, name)
+			h.t.Fatalf("no EventCheckFinished for (%s,%s) after releasing; the check's executor goroutine never seemed to run", runID, name)
 		}
 		runtime.Gosched()
 	}

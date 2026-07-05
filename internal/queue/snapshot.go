@@ -33,9 +33,8 @@ type TargetSnapshot struct {
 	InFlight  *RunSnapshot // the HEAD run (lane.runs[0]); nil when the lane is idle
 
 	// Pipeline is every in-flight run for this target, head first: nil/empty
-	// when the lane is idle, exactly one element in today's serial-only code
-	// (mirroring InFlight), and up to Target.Window elements once batching
-	// and speculation land (docs/plans/phase5.md §3.4).
+	// when the lane is idle; at most one element for serial and batch; up to
+	// Target.Window elements for speculate (docs/plans/phase5.md §3.4).
 	Pipeline []RunSnapshot
 
 	Waiting []WaitingEntry // FIFO order; excludes in-flight and parked refs
@@ -122,8 +121,9 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 
 	// Pipeline is every in-flight run for this target, head first
 	// (docs/plans/phase5.md §3.4); InFlight mirrors its head element for
-	// back-compat. Serial (this chunk) holds at most one run, so Pipeline
-	// has at most one element.
+	// back-compat. Serial and batch hold at most one run, so Pipeline has at
+	// most one element for those modes; speculate grows it up to
+	// Target.Window.
 	if l := d.lanes[t.Name]; l != nil {
 		for _, r := range l.runs {
 			ts.Pipeline = append(ts.Pipeline, *buildRunSnapshot(r))
@@ -203,8 +203,8 @@ func buildRunSnapshot(r *run) *RunSnapshot {
 		BaseOID:   r.baseOID,
 		ChainTip:  r.chainTip, // ChainTip == MergeSHA (back-compat, §3.4)
 		MergeSHA:  r.chainTip,
-		Predicted: r.predicted, // always false until speculation lands
-		BatchID:   r.batchID,   // always "" until batching lands
+		Predicted: r.predicted, // true iff this run's base is a predicted, unpushed predecessor chainTip (speculate, non-head)
+		BatchID:   r.batchID,   // "" unless part of a batch
 		Done:      done,
 		Current:   cur,
 		StartedAt: head.rec.StartedAt,

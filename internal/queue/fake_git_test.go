@@ -272,14 +272,30 @@ func (f *fakeGitRepo) deleteCandidate(ref string) {
 	delete(f.refs, ref)
 }
 
-// directPush moves branch's ref straight to a new commit built from files,
-// bypassing CAS — simulating a human (or second daemon) push racing the
-// queue.
+// directPush moves branch's ref straight to a new commit built by layering
+// files on top of branch's current tree, bypassing CAS — simulating a human
+// (or second daemon) push racing the queue. Additive (not a wholesale tree
+// replacement), matching testutil.Remote.DirectPush's real-git semantics
+// exactly (it checks out the branch's existing tip and writes files into
+// that checkout rather than an empty one): a speculate scenario that
+// direct-pushes twice — once to seed a check spec, again later to simulate a
+// human push racing the target — needs the second push to preserve the
+// first's content (docs/plans/phase5.md §5.2's speculate_head_target_moved
+// row), exactly as it would against a real remote.
 func (f *fakeGitRepo) directPush(branch string, files map[string]string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parent := f.refs["refs/heads/"+branch]
-	tree := f.internTree(files)
+	merged := make(map[string]string)
+	if parent != "" {
+		for k, v := range f.trees[f.commits[parent].tree] {
+			merged[k] = v
+		}
+	}
+	for k, v := range files {
+		merged[k] = v
+	}
+	tree := f.internTree(merged)
 	var parents []string
 	if parent != "" {
 		parents = []string{parent}

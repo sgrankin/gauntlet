@@ -1,0 +1,51 @@
+# Speculate pipeline fill: window 3, 3 candidates. One tick fills the whole
+# window — each new run chains onto the previous run's chainTip (a
+# predicted, unpushed predecessor) — so all three checks are running
+# concurrently before any of them lands. Landing then happens strictly FIFO,
+# one release per run, and the final chain is exactly the same shape a batch
+# or a serial walk would have produced. Ports docs/plans/phase5.md §5.2's
+# speculate_pipeline_fill row.
+
+set-mode main speculate 3
+direct-push main files/spec
+
+push-candidate main alice a files/a
+push-candidate main bob b files/b
+push-candidate main carol c files/c
+tick                               # one refill: window fills to 3 (alice->bob->carol chained)
+
+assert-pipeline-depth main 3
+
+# All three checks are running concurrently, not one at a time — the whole
+# point of pipelining.
+await-started test                 # head run (alice, '@#0' == omitted selector)
+await-started '@#1' test             # bob, chained onto alice's PREDICTED chainTip
+await-started '@#2' test             # carol, chained onto bob's PREDICTED chainTip
+
+release-check test passed          # alice (head) goes green: lands
+assert-landed-order main a
+assert-pipeline-depth main 2
+
+release-check '@#0' test passed      # bob is now the head; lands
+assert-landed-order main a b
+assert-pipeline-depth main 1
+
+release-check '@#0' test passed      # carol lands last
+assert-landed-order main a b c
+assert-pipeline-depth main 0
+
+assert-target-chain main a b c     # one merge per topic, oldest first, parent[1] verbatim (Invariant 1/6)
+assert-slot-gone main alice a
+assert-slot-gone main bob b
+assert-slot-gone main carol c
+
+-- files/spec/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/a/a.txt --
+a
+-- files/b/b.txt --
+b
+-- files/c/c.txt --
+c

@@ -140,7 +140,7 @@ type run struct {
 	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch (P5-E, landed)
 	baseOID   string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto
 	chainTip  string      // the tested merge commit == members[len-1].mergeOID (== members[0].mergeOID for len(members)==1)
-	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false until P5-F
+	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false for serial/batch and speculate's own head run
 	batchID   string      // "" unless batch; shared across member records (runID reused verbatim, §3.2)
 	runID     string
 	dir       string // exported trial tree; removed on every terminal transition
@@ -156,9 +156,9 @@ type run struct {
 }
 
 // lane is a target's in-flight pipeline, FIFO: runs[0] is the head (next to
-// land). Serial (this chunk) holds ≤ 1 run; batch/speculate (later chunks)
-// grow it. A nil/absent lane, or one with an empty runs slice, is an idle
-// target — reconstructible from refs every tick, no durable state
+// land). Serial and batch hold ≤ 1 run; speculate grows it up to
+// Target.Window. A nil/absent lane, or one with an empty runs slice, is an
+// idle target — reconstructible from refs every tick, no durable state
 // (docs/plans/phase5.md §3.1).
 type lane struct {
 	runs []*run

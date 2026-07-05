@@ -129,14 +129,28 @@ func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
 // following tick, which re-Fetches/re-ListRefs, avoids that staleness
 // entirely; the cost is at most one idle tick of latency per conclusion,
 // negligible next to the poll interval already inherent to the loop.
+// P5-F (docs/plans/phase5.md §2): dispatch matches the plan's pseudocode
+// exactly now that a lane can hold more than one run. advanceLane's return
+// means "something structural concluded this tick" (a land, a park, a
+// suffix invalidation) — reconcileTarget defers refill to the next tick's
+// fresh Fetch/ListRefs in that case, exactly as before. Otherwise — lane
+// empty, OR lane non-empty but nothing concluded (a "quiet" tick: every
+// surviving run is still mid-check) — refillLane runs too. For serial and
+// batch this is a no-op whenever the lane already holds a run (refillLane's
+// own per-mode "busy" guard, §2.5): those modes hold at most one run, so a
+// quiet tick with a non-empty lane never has room to refill anyway. Only
+// speculate's window actually tops up on a quiet tick with runs still
+// in flight — the one behavioral change this chunk makes to the dispatch
+// itself.
 func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[string]string) {
 	targetTip := refs[targetRefName(t)]
 	cands := discoverCandidates(t.Name, refs)
 	d.syncBookkeeping(ctx, t, cands)
 
 	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
-		d.advanceLane(ctx, t, targetTip, cands, l)
-		return
+		if d.advanceLane(ctx, t, targetTip, cands, l) {
+			return
+		}
 	}
 	d.refillLane(ctx, t, targetTip, cands)
 }
@@ -213,10 +227,12 @@ func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.
 // entries and any ref in inFlight (docs/plans/phase5.md §2.5's
 // pickHead-generalized "pickNext (one, excluding in-flight) + pickUpTo (N)").
 // inFlight may be nil (batch's own refill: the lane is always empty when
-// refillLane runs, so nothing is ever already in flight — the parameter
-// exists so this helper is ready for speculation's window, P5-F, without a
-// second signature). The result may be shorter than n (fewer than n
-// candidates queued) or empty (nothing to pick).
+// refillLane runs, so nothing is ever already in flight). refillSpeculate
+// (via pickNext, this function's n==1 specialization) is the caller that
+// actually needs a non-nil inFlight: its window can hold several runs at
+// once, so each pick must exclude every ref already chained in, not just
+// parked ones. The result may be shorter than n (fewer than n candidates
+// queued) or empty (nothing to pick).
 func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int, inFlight map[string]bool) []core.Candidate {
 	order := d.order[target]
 	done := d.done[target]
@@ -247,14 +263,31 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 	return out
 }
 
+// pickNext returns the single next queued candidate in FIFO order
+// (pickUpTo's one-result specialization, docs/plans/phase5.md §2.5):
+// excludes parked (ref, SHA) entries and any ref already in inFlight. ok is
+// false if nothing is left to pick (queue drained or every remaining
+// candidate is parked/in-flight). Speculate's refill (refillSpeculate)
+// calls this once per window slot, growing inFlight as each pick chains in.
+func (d *Daemon) pickNext(target string, cands map[string]core.Candidate, inFlight map[string]bool) (core.Candidate, bool) {
+	picked := d.pickUpTo(target, cands, 1, inFlight)
+	if len(picked) == 0 {
+		return core.Candidate{}, false
+	}
+	return picked[0], true
+}
+
 // runInvalidated is the generalized Invariant-5 test (docs/plans/phase5.md
 // §2.2): true (with a human-readable reason) iff any member's candidate
 // ref moved or vanished, or — for the lane's head run (laneIndex==0) only —
 // the real target tip moved out from under baseOID. laneIndex is always 0
-// in this chunk (lane.runs has at most one element, matching phase-1's
-// unconditional baseOID==targetTip check); non-head runs in a future
-// speculation window have a *predicted* baseOID, whose validity is
-// transitive through the predecessor instead.
+// for serial/batch (lane.runs has at most one element, matching phase-1's
+// unconditional baseOID==targetTip check). A speculation window's non-head
+// runs (laneIndex > 0) have a *predicted* baseOID — a predecessor's
+// chainTip, never a real ref — so their validity is transitive through the
+// predecessor instead: if index p-1 invalidates, invalidateSuffix already
+// truncates the lane at p, so index p's own baseOID is never independently
+// tested against targetTip here.
 func runInvalidated(r *run, laneIndex int, targetTip string, cands map[string]core.Candidate) (bool, string) {
 	for _, m := range r.members {
 		if cur, ok := cands[m.cand.Ref]; !ok || cur.SHA != m.cand.SHA {
@@ -292,9 +325,16 @@ func runRejectOutcome(r *run) (core.Outcome, string) {
 // suffix invalidation, a bubble, or at least one landing) —
 // reconcileTarget's signal to defer refill to the next tick's fresh Fetch.
 //
-// Degenerate in this chunk: lane.runs has at most one element (serial), so
+// Degenerate for serial/batch: lane.runs has at most one element there, so
 // the bubble step's "suffix behind the culprit" is always empty and the
-// prefix-land loop runs at most once per tick.
+// prefix-land loop runs at most once per tick. Speculate is where this
+// generalizes for real (P5-F): lane.runs can be up to Target.Window deep, so
+// a validity-sweep or bubble truncation can strand a genuine suffix (Skipped
+// unparked, re-queuing next tick), and the prefix-land loop can drain
+// several already-green runs in one tick, each land's CAS base equal to the
+// prior run's own chainTip (constraint 5's structural FIFO) — this function
+// itself needed no change to support either; P5-C already built it
+// lane-general, proven only at depth 1 until now.
 func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, lane *lane) bool {
 	// (a) Validity sweep — before consuming any check result, exactly
 	// reconcileInFlight's move-then-result order.
@@ -371,7 +411,27 @@ func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *la
 // stays none) or, if it was the last check, sets verdict green. It never
 // itself lands, parks, or finishes the run — those stay centralized in
 // advanceLane's bubble/land steps.
+//
+// P5-F multi-run generality fix: r.cur is nil once r's verdict is fully
+// determined (green/rejected/errored) and no further check was started —
+// exactly the steady state of a run waiting its turn to land behind a
+// still-in-flight predecessor. At lane-depth 1 this state is never
+// observed by a SECOND call to advanceChecks: a run can only go green while
+// sitting at lane.runs[0] (the only position that exists), and
+// advanceLane's prefix-drain step lands it that very same tick, before the
+// lane is ever revisited. At depth > 1, a non-head run can resolve (either
+// verdict) before its predecessor does, and then sit one or more further
+// ticks with cur==nil while advanceChecks keeps being called on it every
+// tick regardless (advanceLane's loop iterates every surviving run
+// unconditionally) — a bare `<-r.cur.result` there dereferences a nil
+// *checkInFlight and panics. Discovered via TestSpeculateDepth3RaceSoak
+// (concurrent releases can resolve a non-head run first); guarding here is
+// a no-op for every already-passing serial/batch/speculate case, since none
+// of them previously reached this function with r.cur == nil.
 func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
+	if r.cur == nil {
+		return // verdict already determined; waiting its turn behind a predecessor (see doc comment)
+	}
 	select {
 	case res := <-r.cur.result:
 		obs.EndCheck(r.cur.span, res)
@@ -496,8 +556,8 @@ type chainLink struct {
 // buildChainLink trial-merges cand onto base and, if the trial is clean,
 // builds cand's --no-ff merge commit (docs/plans/phase5.md §1.2): this is
 // tryStartTrial's merge+message+commit logic, factored out of the pick/
-// recovery logic that now lives in refillLane/startRun so later chunks
-// (P5-D/E/F) can call it once per chain link.
+// recovery logic that now lives in refillLane/startRun so batch and
+// speculate can each call it once per chain link.
 //
 // onClean, if trial.Clean, is invoked exactly once, immediately after the
 // clean trial is confirmed and before any message/commit work begins — the
@@ -517,9 +577,10 @@ type chainLink struct {
 // MergeTree and CommitTree resolve any commit-ish from the object store
 // regardless of refs, and MergeTree detects a conflict against a chained
 // base identically to one against a real ref). No change was needed in this
-// function itself to support that — startBatchRun (P5-E, landed) is the
-// first caller that actually builds a multi-link chain; speculation (P5-F)
-// will be the second.
+// function itself to support that — startBatchRun builds one multi-link
+// chain per batch run; refillSpeculate (via startRun, one member at a time)
+// builds one chain per window, each call's base the previous call's
+// mergeOID exactly the same way.
 func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
 	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
 	trial, err := d.git.MergeTree(ctx, base, cand.SHA)
@@ -604,13 +665,29 @@ func (d *Daemon) specChanged(ctx context.Context, prevTree, newTree string) bool
 // is enforced by the caller, exactly as tryStartTrial's implicit
 // precondition was pre-refactor.
 //
-// Dispatches on t.Mode: "batch" forms a chained multi-candidate run
-// (refillBatch) UNLESS this target is in batch-red serial fallback
-// (§2.6, overridden by §10 amendment 2 for the event vocabulary;
-// d.batchFallback), in which case — and for every other mode ("serial"/""
-// the default; "speculate", not yet implemented by this chunk, P5-F) —
-// refillSerialOne runs instead, exactly tryStartTrial's pick-head step.
+// Dispatches on t.Mode: "speculate" tops up the window (refillSpeculate,
+// P5-F) — the one mode whose refill runs even when the lane already holds
+// runs (reconcileTarget calls refillLane on every quiet tick now, not just
+// an empty-lane one; see its own doc comment). Every other mode holds at
+// most one run, so its branch below re-asserts that "lane busy" precondition
+// explicitly rather than relying on the caller to have never called it with
+// runs in flight (true pre-P5-F, no longer true once speculate exists).
+// "batch" then forms a chained multi-candidate run (refillBatch) UNLESS this
+// target is in batch-red serial fallback (§2.6, overridden by §10 amendment
+// 2 for the event vocabulary; d.batchFallback), in which case — and for
+// "serial"/"" the default — refillSerialOne runs instead, exactly
+// tryStartTrial's pick-head step.
 func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
+	l := d.lanes[t.Name]
+
+	if t.Mode == "speculate" {
+		d.refillSpeculate(ctx, t, targetTip, cands, l)
+		return
+	}
+
+	if l != nil && len(l.runs) > 0 {
+		return // serial/batch: at most one run in flight; lane busy
+	}
 	if t.Mode == "batch" && !d.batchFallback[t.Name] {
 		d.refillBatch(ctx, t, targetTip, cands)
 		return
@@ -643,7 +720,7 @@ func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip
 		return
 	}
 
-	d.startRun(ctx, t, targetTip, cand)
+	d.startRun(ctx, t, targetTip, cand, false, "")
 }
 
 // refillBatch fills an idle lane in batch mode (docs/plans/phase5.md §2.5):
@@ -954,6 +1031,105 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 	d.batchFallback[t.Name] = true
 }
 
+// refillSpeculate tops up target's speculation window for one tick
+// (docs/plans/phase5.md §2.5): unlike serial/batch, this runs whenever the
+// window has room, whether the lane started the tick empty or already held
+// some runs (reconcileTarget calls refillLane on every quiet tick, not just
+// an empty-lane one — this is the mode that actually needs that). Each new
+// run's base is the previous run's chainTip — an unpushed, PREDICTED
+// predecessor — once the lane is non-empty; the very first run of an empty
+// lane bases on the live target tip instead (the head run, predicted=false).
+// pickNext excludes every ref already chained into the lane so one window
+// never contains the same candidate twice.
+//
+// The first candidate whose trial conflicts against the chain built so far
+// stops extending the window for this tick: that candidate parks via
+// startRun's normal rejectPreMerge path, with a Detail that says so
+// explicitly when the conflict is against a PREDICTION (a non-head base) —
+// "conflicts with in-flight <topic>@<sha> (predicted base)" — rather than
+// the generic "trial merge conflict" wording serial/batch use, since a
+// predicted-base conflict is conflicting with in-flight, not-yet-landed
+// work, not with anything actually on the target. Later candidates simply
+// wait for a future tick, once the window has room again (a landing, a
+// bubble, or the culprit's own park freeing a slot).
+func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, l *lane) {
+	window := t.Window
+	if window < 1 {
+		// Defensive only: production config (config.LoadDaemon) always
+		// defaults/validates Window >= 1 for Mode=="speculate". Mirrors
+		// refillBatch's maxBatch guard for a hand-built queue.Config.
+		window = 1
+	}
+
+	var runs []*run
+	if l != nil {
+		runs = l.runs
+	}
+	if len(runs) >= window {
+		return
+	}
+
+	inFlight := make(map[string]bool, len(runs))
+	for _, r := range runs {
+		inFlight[r.members[0].cand.Ref] = true
+	}
+
+	// base starts at the live target tip (the head run's own base); once the
+	// lane already holds runs, it becomes the last run's chainTip — a
+	// predicted predecessor, not yet pushed anywhere. predTopic/predSHA name
+	// that predecessor for the conflict-detail message below.
+	base := targetTip
+	var predTopic, predSHA string
+	if n := len(runs); n > 0 {
+		base = runs[n-1].chainTip
+		predTopic = runs[n-1].members[0].cand.Topic
+		predSHA = runs[n-1].members[0].cand.SHA
+	}
+
+	for len(runs) < window {
+		cand, ok := d.pickNext(t.Name, cands, inFlight)
+		if !ok {
+			return // queue drained; refill later as candidates arrive
+		}
+
+		predicted := len(runs) > 0 // base is a predecessor's chainTip, not the live target tip
+
+		if len(runs) == 0 {
+			// IsAncestor recovery (Invariant 4) only applies to a fresh,
+			// wholly empty lane — exactly serial/batch's own head-pick-only
+			// rule (§2.5): a mid-window member that's somehow already landed
+			// is caught the same way once it becomes the head of a future
+			// empty-lane refill.
+			landed, err := d.git.IsAncestor(ctx, cand.SHA, targetTip)
+			if err != nil {
+				d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "is-ancestor: "+err.Error(), nil)
+				return
+			}
+			if landed {
+				d.recoverLanded(ctx, t, cand)
+				return
+			}
+		}
+
+		var conflictDetail string
+		if predicted {
+			conflictDetail = fmt.Sprintf("conflicts with in-flight %s@%s (predicted base)", predTopic, predSHA)
+		}
+
+		r, ok := d.startRun(ctx, t, base, cand, predicted, conflictDetail)
+		if !ok {
+			return // conflict or infra error: this candidate parked, stop extending the window this tick
+		}
+
+		l = d.lanes[t.Name] // startRun created it on the first successful run
+		runs = l.runs
+		inFlight[cand.Ref] = true
+		base = r.chainTip
+		predTopic = cand.Topic
+		predSHA = cand.SHA
+	}
+}
+
 // startRun builds cand's chain link (via buildChainLink) and, on a clean
 // merge, reads and parses its check spec and exports its tree, producing a
 // new one-run, one-member lane entry (docs/plans/phase5.md §3.2) — the
@@ -965,7 +1141,28 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 // phase-1 ruling: backoff/auto-retry is phase 2), and the distinct
 // EventError lets operators tell infra from red; a restart, a re-push, or
 // a CommandRetry clears the park.
-func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, cand core.Candidate) {
+//
+// predicted (P5-F) marks whether base is a predicted, unpushed predecessor
+// chainTip rather than the live target tip — a speculation window's non-head
+// member. It threads onto both run.predicted (RunSnapshot.Predicted, §3.4)
+// and RunRecord.Speculated (§3.3), purely informational for the dashboard;
+// the landed commit is the tested commit either way (Invariant 1). Every
+// caller but refillSpeculate passes false (base is always the real target
+// tip for serial's one-run lane).
+//
+// conflictDetail, if non-empty, replaces the default "trial merge conflict:
+// ..." message on a trial-merge conflict. refillSpeculate uses it to
+// document a conflict against a PREDICTION: a non-head candidate that
+// conflicts with the chain built so far is conflicting with in-flight,
+// not-yet-landed work, which is a materially different situation from a
+// real conflict against the pushed target tip, and its park Detail must say
+// so (docs/plans/phase5.md §2.5).
+//
+// ok reports whether a run was started; false covers every
+// terminal-without-a-run outcome (conflict or any infra error) — the
+// caller's signal to stop extending a window/re-pick, since the candidate
+// that failed has already been parked by this call.
+func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, cand core.Candidate, predicted bool, conflictDetail string) (*run, bool) {
 	// F4 (docs/plans/phase23.md §10): the run's root span starts here,
 	// before MergeTree, so trial-merge is correctly parented as its child
 	// instead of being orphaned under ctx (phase 1's bug: the root span
@@ -1006,23 +1203,27 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	})
 	if err != nil {
 		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, err.Error(), rootSpan)
-		return
+		return nil, false
 	}
 	if !trial.Clean {
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, "trial merge conflict: "+strings.Join(trial.Conflicts, ", "), rootSpan)
-		return
+		detail := "trial merge conflict: " + strings.Join(trial.Conflicts, ", ")
+		if conflictDetail != "" {
+			detail = conflictDetail + ": " + strings.Join(trial.Conflicts, ", ")
+		}
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, detail, rootSpan)
+		return nil, false
 	}
 	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, link.mergeOID))
 
 	specData, err := d.git.ReadFileFromTree(ctx, trial.TreeOID, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
-		return
+		return nil, false
 	}
 	spec, err := config.ParseChecks(specData)
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
-		return
+		return nil, false
 	}
 
 	// F2 (docs/plans/phase23.md §10): trial-tree export dirs are created
@@ -1033,29 +1234,30 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
-		return
+		return nil, false
 	}
 	if err := d.git.ExportTree(ctx, trial.TreeOID, dir); err != nil {
 		_ = os.RemoveAll(dir)
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
-		return
+		return nil, false
 	}
 
 	rec := &core.RunRecord{
-		RunID:     runID,
-		Target:    t.Name,
-		Candidate: cand,
-		BaseOID:   base,
-		MergeSHA:  link.mergeOID,
-		Trial:     trial,
-		StartedAt: d.now(),
+		RunID:      runID,
+		Target:     t.Name,
+		Candidate:  cand,
+		BaseOID:    base,
+		MergeSHA:   link.mergeOID,
+		Trial:      trial,
+		StartedAt:  d.now(),
+		Speculated: predicted,
 	}
 	r := &run{
 		target:    t.Name,
 		members:   []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
 		baseOID:   base,
 		chainTip:  link.mergeOID,
-		predicted: false,
+		predicted: predicted,
 		batchID:   "",
 		runID:     runID,
 		dir:       dir,
@@ -1072,6 +1274,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	}
 	l.runs = append(l.runs, r)
 	d.startCheck(ctx, r)
+	return r, true
 }
 
 // landRun is the generalized land (docs/plans/phase5.md §2.4): one CAS push

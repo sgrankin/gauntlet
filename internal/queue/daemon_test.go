@@ -117,7 +117,7 @@ func (h *testHarness) reconcile() {
 
 // release delivers result to the executor gated on (runID, name) and then
 // spins ReconcileOnce (yielding the scheduler between attempts, never
-// sleeping) until at least one new event appears.
+// sleeping) until (runID, name)'s own EventCheckFinished is observed.
 //
 // This exists because GatedExecutor.Release only enqueues result into a
 // buffered channel — it does not wait for the executor goroutine it
@@ -128,18 +128,64 @@ func (h *testHarness) reconcile() {
 // it exactly once immediately after Release can race ahead of the goroutine
 // and simply observe "still running" — not a logic bug, just two
 // independently-scheduled goroutines with no rendezvous between them.
+//
+// P5-F finding: waiting for "at least one new event" (this helper's
+// pre-speculate condition) is unsound once a target's lane can hold more
+// than one run. A speculate window refills on every quiet tick (§2.5), so
+// the very tick that finally delivers this release's result can race
+// against — and lose to — an unrelated refill for a DIFFERENT run in the
+// same lane, which appears as a new event first (EventTrialClean/
+// EventCheckStarted for the newly-chained candidate) and would satisfy a
+// bare "len(events) > before" check without this release's own check having
+// resolved at all. Waiting specifically for (runID, name)'s own
+// EventCheckFinished — checkFinishedObserved, below — is precise regardless
+// of what else the lane does concurrently, and is a strict tightening of
+// the old condition for serial/batch (there, the very next event was always
+// this one anyway, since only one run/check was ever in flight).
 func (h *testHarness) release(runID, name string, result core.CheckResult) {
 	h.t.Helper()
 	before := len(h.ch.Events())
 	h.exec.Release(runID, name, result)
 	for i := 0; i < 100000; i++ {
 		h.reconcile()
-		if len(h.ch.Events()) > before {
+		if checkFinishedObserved(h.ch.Events()[before:], runID, name) {
 			return
 		}
 		runtime.Gosched()
 	}
-	h.t.Fatalf("no new event after releasing (%s,%s); the check's executor goroutine never seemed to run", runID, name)
+	h.t.Fatalf("no EventCheckFinished for (%s,%s) after releasing; the check's executor goroutine never seemed to run", runID, name)
+}
+
+// checkFinishedObserved reports whether events contains (runID, name)'s own
+// EventCheckFinished, OR any terminal event for runID — the precise "this
+// specific release was fully processed" signal release/releaseGated wait on
+// (see release's doc comment for why a bare "any new event" isn't sound
+// once a lane can hold more than one run).
+//
+// The terminal-event fallback matters for a race integration tests
+// deliberately provoke: a move/target-shift detected by advanceLane's
+// validity sweep (§2.1a) runs BEFORE that tick's advanceChecks even looks at
+// the delivered result, so cancelRun discards it and the run ends via
+// invalidateSuffix's Skip — EventSkipped, never EventCheckFinished, for that
+// specific delivery. Without this fallback, a release raced against exactly
+// that condition (e.g. TestIntegration_ConcurrentDirectPush's direct push
+// arriving before the release's first reconcile) would spin until the
+// helper's own timeout, since the CheckFinished it's waiting for is never
+// coming — the run concluded for an unrelated reason first, and nothing
+// further will ever happen with this particular check delivery.
+func checkFinishedObserved(events []core.Event, runID, name string) bool {
+	for _, e := range events {
+		if e.RunID != runID {
+			continue
+		}
+		if e.Kind == core.EventCheckFinished && e.CheckName == name {
+			return true
+		}
+		if isTerminalEventKind(e.Kind) {
+			return true
+		}
+	}
+	return false
 }
 
 // awaitStarted blocks until the executor gated on (runID, name) has

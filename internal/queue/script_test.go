@@ -45,14 +45,31 @@
 //	tick
 //	    Run one Daemon.ReconcileOnce pass.
 //
-//	await-started <name>
-//	    Block until check <name> has registered as started on the
-//	    currently in-flight run (the gated executor's Started signal).
+//	await-started [@<selector>] <name>
+//	    Block until check <name> has registered as started (the gated
+//	    executor's Started signal) on the run <selector> names — or, with
+//	    no selector, the pipeline's head run (lane.runs[0]), exactly the
+//	    pre-P5-F "currently in-flight run" every existing script assumes.
+//	    See "Run selectors" below.
 //
-//	release-check <name> <passed|failed|skipped>
-//	    Delivers <name>'s verdict on the currently in-flight run, then
-//	    (like the Go harnesses' own release/releaseGated helpers) spins
-//	    ReconcileOnce until a new event lands.
+//	release-check [@<selector>] <name> <passed|failed|skipped>
+//	    Delivers <name>'s verdict on the run <selector> names (head run if
+//	    omitted), then (like the Go harnesses' own release/releaseGated
+//	    helpers) spins ReconcileOnce until a new event lands.
+//
+// Run selectors (docs/plans/phase5.md §5.1): a pipeline can hold more than
+// one run at once (speculate's window), so await-started/release-check take
+// an optional leading "@<selector>" argument naming which one:
+//
+//	@topic:<t>   the run whose head member's Topic == t
+//	@#<i>        the run at 0-based lane position i (lane.runs[i])
+//	(omitted)    the head run (lane.runs[0]) — every script that never
+//	             passes a selector keeps working verbatim, unchanged
+//
+// Resolved via the Daemon's published Snapshot (resolveRunSelector, this
+// file): both suites already expose it identically (scriptHarness's fake and
+// real implementations both read the same *Daemon.Snapshot()), so the
+// selector logic itself is written once, not per harness.
 //
 //	[!] assert-event <kind>
 //	    Assert that an event of <kind> was (or, negated, was never) among
@@ -73,14 +90,22 @@
 //	    Assert the candidate ref still exists and the last run recorded
 //	    against it parked (Rejected, Conflict, or Error) rather than landed.
 //
-//	set-mode <target> <mode> <max-batch>
-//	    Test-only escape hatch (docs/plans/phase5.md P5-E): mutates
-//	    target's Mode/MaxBatch on the already-constructed Daemon. Setup
-//	    builds one fixed target config shared by every script in this
-//	    directory (Mode "", the serial default); batch scenarios call this
-//	    as their first command to switch "main" into batch mode without a
-//	    bespoke Setup per file. max-batch is ignored (but must still parse)
-//	    when mode isn't "batch".
+//	assert-slot-parked-none <target> <user> <topic>
+//	    Assert the candidate ref still exists and is NOT parked (docs/plans/
+//	    phase5.md §5.1): the Skipped-not-parked shape a pipeline bubble, a
+//	    mid-window member move, or a head target move leaves behind — the
+//	    ref is free to re-queue on the very next refill, unlike
+//	    assert-slot-parked's sticky (Rejected/Conflict/Error) case.
+//
+//	set-mode <target> <mode> <n>
+//	    Test-only escape hatch (docs/plans/phase5.md P5-E/P5-F): mutates
+//	    target's Mode/MaxBatch/Window on the already-constructed Daemon.
+//	    Setup builds one fixed target config shared by every script in this
+//	    directory (Mode "", the serial default); batch/speculate scenarios
+//	    call this as their first command to switch "main" into the relevant
+//	    mode without a bespoke Setup per file. n sets MaxBatch when mode is
+//	    "batch", Window when mode is "speculate"; ignored (but must still
+//	    parse) otherwise.
 //
 //	assert-pipeline-depth <target> <n>
 //	    Assert len(lane.runs) for target, via the Daemon's published
@@ -89,7 +114,7 @@
 //	assert-landed-order <target> <topic>...
 //	    Assert EventLanded events for target name candidates by Topic, in
 //	    the given order (FIFO landing order — batch's single-run multi-
-//	    member land, or a future speculation window's sequence).
+//	    member land, or a speculation window's sequence).
 //
 //	assert-target-chain <target> <topic>...
 //	    Assert target's tip is the head of a --no-ff chain with exactly one
@@ -104,6 +129,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/rogpeppe/go-internal/testscript"
@@ -138,13 +165,13 @@ type scriptHarness interface {
 	// tick runs one ReconcileOnce pass.
 	tick()
 
-	// awaitStarted blocks until name has registered as started on the
-	// currently in-flight run.
-	awaitStarted(name string)
+	// awaitStarted blocks until name has registered as started on the run
+	// selector names (resolveRunSelector; "" is the head run).
+	awaitStarted(selector, name string)
 
-	// releaseCheck delivers result for name on the currently in-flight run
-	// and spins until a new event is captured.
-	releaseCheck(name string, status core.CheckStatus)
+	// releaseCheck delivers result for name on the run selector names
+	// ("" is the head run) and spins until a new event is captured.
+	releaseCheck(selector, name string, status core.CheckStatus)
 
 	// events and records return the full RecordingChannel history so far.
 	events() []core.Event
@@ -161,14 +188,20 @@ type scriptHarness interface {
 	// unknown.
 	commitParents(oid string) []string
 
-	// setMode mutates target's Mode/MaxBatch on the already-constructed
-	// Daemon (set-mode's backing implementation; see that command's doc).
-	setMode(target, mode string, maxBatch int)
+	// setMode mutates target's Mode/MaxBatch/Window on the already-
+	// constructed Daemon (set-mode's backing implementation; see that
+	// command's doc).
+	setMode(target, mode string, n int)
 
 	// pipelineDepth returns len(lane.runs) for target via the Daemon's
 	// published Snapshot (0 if idle or unknown) — assert-pipeline-depth's
 	// data source.
 	pipelineDepth(target string) int
+
+	// slotParked reports whether the candidate ref for (target, user,
+	// topic) is currently parked (a sticky Daemon.done entry) at its
+	// current SHA — assert-slot-parked-none's data source.
+	slotParked(target, user, topic string) bool
 }
 
 // --- fakeScriptHarness: adapts testHarness (daemon_test.go) ---
@@ -197,12 +230,24 @@ func (f fakeScriptHarness) directPush(target string, files map[string]string) {
 
 func (f fakeScriptHarness) tick() { f.h.reconcile() }
 
-func (f fakeScriptHarness) awaitStarted(name string) {
-	f.h.awaitStarted(f.h.currentRunID(), name)
+func (f fakeScriptHarness) awaitStarted(selector, name string) {
+	f.h.awaitStarted(f.resolveRunID(selector), name)
 }
 
-func (f fakeScriptHarness) releaseCheck(name string, status core.CheckStatus) {
-	f.h.release(f.h.currentRunID(), name, core.CheckResult{Name: name, Status: status})
+func (f fakeScriptHarness) releaseCheck(selector, name string, status core.CheckStatus) {
+	f.h.release(f.resolveRunID(selector), name, core.CheckResult{Name: name, Status: status})
+}
+
+// resolveRunID resolves selector against the Daemon's published Snapshot
+// (resolveRunSelector), failing the test with a clear message if it names no
+// in-flight run.
+func (f fakeScriptHarness) resolveRunID(selector string) string {
+	f.h.t.Helper()
+	runID := resolveRunSelector(f.h.d.Snapshot(), selector)
+	if runID == "" {
+		f.h.t.Fatalf("run selector %q did not resolve to any in-flight run", selector)
+	}
+	return runID
 }
 
 func (f fakeScriptHarness) events() []core.Event       { return f.h.ch.Events() }
@@ -224,17 +269,28 @@ func (f fakeScriptHarness) commitParents(oid string) []string {
 	return c.parents
 }
 
-func (f fakeScriptHarness) setMode(target, mode string, maxBatch int) {
+func (f fakeScriptHarness) setMode(target, mode string, n int) {
 	for i := range f.h.d.cfg.Targets {
 		if f.h.d.cfg.Targets[i].Name == target {
 			f.h.d.cfg.Targets[i].Mode = mode
-			f.h.d.cfg.Targets[i].MaxBatch = maxBatch
+			f.h.d.cfg.Targets[i].MaxBatch = n
+			f.h.d.cfg.Targets[i].Window = n
 		}
 	}
 }
 
 func (f fakeScriptHarness) pipelineDepth(target string) int {
 	return snapshotPipelineDepth(f.h.d, target)
+}
+
+func (f fakeScriptHarness) slotParked(target, user, topic string) bool {
+	ref := candidateRef(target, user, topic)
+	sha := f.h.git.ref(ref)
+	if sha == "" {
+		return false
+	}
+	entry, ok := f.h.d.done[target][ref]
+	return ok && entry.SHA == sha
 }
 
 // --- realScriptHarness: adapts integrationHarness (integration_test.go) ---
@@ -270,12 +326,24 @@ func (r realScriptHarness) directPush(target string, files map[string]string) {
 
 func (r realScriptHarness) tick() { r.h.reconcile() }
 
-func (r realScriptHarness) awaitStarted(name string) {
-	r.h.awaitStarted(r.gated, r.h.currentRunID(), name)
+func (r realScriptHarness) awaitStarted(selector, name string) {
+	r.h.awaitStarted(r.gated, r.resolveRunID(selector), name)
 }
 
-func (r realScriptHarness) releaseCheck(name string, status core.CheckStatus) {
-	r.h.releaseGated(r.gated, r.h.currentRunID(), name, core.CheckResult{Name: name, Status: status})
+func (r realScriptHarness) releaseCheck(selector, name string, status core.CheckStatus) {
+	r.h.releaseGated(r.gated, r.resolveRunID(selector), name, core.CheckResult{Name: name, Status: status})
+}
+
+// resolveRunID resolves selector against the Daemon's published Snapshot
+// (resolveRunSelector), failing the test with a clear message if it names no
+// in-flight run.
+func (r realScriptHarness) resolveRunID(selector string) string {
+	r.h.t.Helper()
+	runID := resolveRunSelector(r.h.d.Snapshot(), selector)
+	if runID == "" {
+		r.h.t.Fatalf("run selector %q did not resolve to any in-flight run", selector)
+	}
+	return runID
 }
 
 func (r realScriptHarness) events() []core.Event       { return r.h.ch.Events() }
@@ -293,17 +361,28 @@ func (r realScriptHarness) commitParents(oid string) []string {
 	return r.h.remote.Parents(oid)
 }
 
-func (r realScriptHarness) setMode(target, mode string, maxBatch int) {
+func (r realScriptHarness) setMode(target, mode string, n int) {
 	for i := range r.h.d.cfg.Targets {
 		if r.h.d.cfg.Targets[i].Name == target {
 			r.h.d.cfg.Targets[i].Mode = mode
-			r.h.d.cfg.Targets[i].MaxBatch = maxBatch
+			r.h.d.cfg.Targets[i].MaxBatch = n
+			r.h.d.cfg.Targets[i].Window = n
 		}
 	}
 }
 
 func (r realScriptHarness) pipelineDepth(target string) int {
 	return snapshotPipelineDepth(r.h.d, target)
+}
+
+func (r realScriptHarness) slotParked(target, user, topic string) bool {
+	ref := candidateRef(target, user, topic)
+	sha := r.h.remote.Ref(ref)
+	if sha == "" {
+		return false
+	}
+	entry, ok := r.h.d.done[target][ref]
+	return ok && entry.SHA == sha
 }
 
 // snapshotPipelineDepth reads len(lane.runs) for target out of d's most
@@ -320,6 +399,56 @@ func snapshotPipelineDepth(d *Daemon, target string) int {
 		}
 	}
 	return 0
+}
+
+// resolveRunSelector resolves a DSL run selector (docs/plans/phase5.md
+// §5.1) against snap, the Daemon's published Snapshot: "" (omitted) is the
+// head run of the first target with any in-flight runs — every script that
+// never passes a selector keeps addressing "the currently in-flight run"
+// exactly as before P5-F. "topic:<t>" is the run whose head member's Topic
+// == t; "#<i>" is the run at 0-based lane position i. Both are searched
+// across every target's Pipeline: every script in this package drives
+// exactly one target at a time, so there is no ambiguity in practice.
+// Returns "" if snap is nil or the selector names nothing (an out-of-range
+// index, an unknown topic, or no in-flight run at all) — callers turn that
+// into a clear test failure themselves rather than silently addressing the
+// wrong run.
+func resolveRunSelector(snap *Snapshot, selector string) string {
+	if snap == nil {
+		return ""
+	}
+	switch {
+	case selector == "":
+		for _, ts := range snap.Targets {
+			if len(ts.Pipeline) > 0 {
+				return ts.Pipeline[0].RunID
+			}
+		}
+		return ""
+	case strings.HasPrefix(selector, "topic:"):
+		topic := strings.TrimPrefix(selector, "topic:")
+		for _, ts := range snap.Targets {
+			for _, r := range ts.Pipeline {
+				if r.Candidate.Topic == topic {
+					return r.RunID
+				}
+			}
+		}
+		return ""
+	case strings.HasPrefix(selector, "#"):
+		idx, err := strconv.Atoi(strings.TrimPrefix(selector, "#"))
+		if err != nil {
+			return ""
+		}
+		for _, ts := range snap.Targets {
+			if idx >= 0 && idx < len(ts.Pipeline) {
+				return ts.Pipeline[idx].RunID
+			}
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 // --- test entrypoints ---
@@ -382,21 +511,22 @@ func TestScriptReal(t *testing.T) {
 // file for what each one does.
 func commands() map[string]func(ts *testscript.TestScript, neg bool, args []string) {
 	return map[string]func(ts *testscript.TestScript, neg bool, args []string){
-		"push-candidate":         cmdPushCandidate,
-		"repush":                 cmdRepush,
-		"delete-candidate":       cmdDeleteCandidate,
-		"direct-push":            cmdDirectPush,
-		"tick":                   cmdTick,
-		"await-started":          cmdAwaitStarted,
-		"release-check":          cmdReleaseCheck,
-		"assert-event":           cmdAssertEvent,
-		"assert-target-is-merge": cmdAssertTargetIsMerge,
-		"assert-slot-gone":       cmdAssertSlotGone,
-		"assert-slot-parked":     cmdAssertSlotParked,
-		"set-mode":               cmdSetMode,
-		"assert-pipeline-depth":  cmdAssertPipelineDepth,
-		"assert-landed-order":    cmdAssertLandedOrder,
-		"assert-target-chain":    cmdAssertTargetChain,
+		"push-candidate":          cmdPushCandidate,
+		"repush":                  cmdRepush,
+		"delete-candidate":        cmdDeleteCandidate,
+		"direct-push":             cmdDirectPush,
+		"tick":                    cmdTick,
+		"await-started":           cmdAwaitStarted,
+		"release-check":           cmdReleaseCheck,
+		"assert-event":            cmdAssertEvent,
+		"assert-target-is-merge":  cmdAssertTargetIsMerge,
+		"assert-slot-gone":        cmdAssertSlotGone,
+		"assert-slot-parked":      cmdAssertSlotParked,
+		"assert-slot-parked-none": cmdAssertSlotParkedNone,
+		"set-mode":                cmdSetMode,
+		"assert-pipeline-depth":   cmdAssertPipelineDepth,
+		"assert-landed-order":     cmdAssertLandedOrder,
+		"assert-target-chain":     cmdAssertTargetChain,
 	}
 }
 
@@ -509,26 +639,40 @@ func cmdTick(ts *testscript.TestScript, neg bool, args []string) {
 	getHarness(ts).tick()
 }
 
+// parseSelector strips an optional leading "@<selector>" argument
+// (docs/plans/phase5.md §5.1) off args, returning the selector's bare form
+// (the "@" itself stripped, so resolveRunSelector sees "topic:foo" or "#1")
+// and the remaining arguments. No leading "@" means no selector: "" (head
+// run, resolveRunSelector's own "omitted" case).
+func parseSelector(args []string) (selector string, rest []string) {
+	if len(args) > 0 && strings.HasPrefix(args[0], "@") {
+		return strings.TrimPrefix(args[0], "@"), args[1:]
+	}
+	return "", args
+}
+
 func cmdAwaitStarted(ts *testscript.TestScript, neg bool, args []string) {
 	if neg {
 		ts.Fatalf("await-started does not support !")
 	}
-	if len(args) != 1 {
-		ts.Fatalf("usage: await-started <name>")
+	selector, rest := parseSelector(args)
+	if len(rest) != 1 {
+		ts.Fatalf("usage: await-started [@<selector>] <name>")
 	}
-	getHarness(ts).awaitStarted(args[0])
+	getHarness(ts).awaitStarted(selector, rest[0])
 }
 
 func cmdReleaseCheck(ts *testscript.TestScript, neg bool, args []string) {
 	if neg {
 		ts.Fatalf("release-check does not support !")
 	}
-	if len(args) != 2 {
-		ts.Fatalf("usage: release-check <name> <passed|failed|skipped>")
+	selector, rest := parseSelector(args)
+	if len(rest) != 2 {
+		ts.Fatalf("usage: release-check [@<selector>] <name> <passed|failed|skipped>")
 	}
-	name := args[0]
-	status := parseCheckStatus(ts, args[1])
-	getHarness(ts).releaseCheck(name, status)
+	name := rest[0]
+	status := parseCheckStatus(ts, rest[1])
+	getHarness(ts).releaseCheck(selector, name, status)
 }
 
 func parseCheckStatus(ts *testscript.TestScript, s string) core.CheckStatus {
@@ -665,19 +809,42 @@ func cmdAssertSlotParked(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
+// cmdAssertSlotParkedNone asserts the ref-still-exists-but-unparked shape a
+// pipeline bubble or a mid-window invalidation leaves behind (docs/plans/
+// phase5.md §5.1): Skipped, NOT parked, free to re-queue on the very next
+// refill — the complement of cmdAssertSlotParked's sticky Rejected/Conflict/
+// Error case.
+func cmdAssertSlotParkedNone(ts *testscript.TestScript, neg bool, args []string) {
+	if neg {
+		ts.Fatalf("assert-slot-parked-none does not support !; use assert-slot-parked instead")
+	}
+	if len(args) != 3 {
+		ts.Fatalf("usage: assert-slot-parked-none <target> <user> <topic>")
+	}
+	target, user, topic := args[0], args[1], args[2]
+	ref := candidateRef(target, user, topic)
+	h := getHarness(ts)
+	if h.slotRef(target, user, topic) == "" {
+		ts.Fatalf("assert-slot-parked-none: %s does not exist (want present, unparked)", ref)
+	}
+	if h.slotParked(target, user, topic) {
+		ts.Fatalf("assert-slot-parked-none: %s is parked, want unparked (a bubble/invalidation re-queue)", ref)
+	}
+}
+
 func cmdSetMode(ts *testscript.TestScript, neg bool, args []string) {
 	if neg {
 		ts.Fatalf("set-mode does not support !")
 	}
 	if len(args) != 3 {
-		ts.Fatalf("usage: set-mode <target> <mode> <max-batch>")
+		ts.Fatalf("usage: set-mode <target> <mode> <n>")
 	}
 	target, mode := args[0], args[1]
-	var maxBatch int
-	if _, err := fmt.Sscanf(args[2], "%d", &maxBatch); err != nil {
-		ts.Fatalf("set-mode: invalid max-batch %q: %v", args[2], err)
+	var n int
+	if _, err := fmt.Sscanf(args[2], "%d", &n); err != nil {
+		ts.Fatalf("set-mode: invalid n %q: %v", args[2], err)
 	}
-	getHarness(ts).setMode(target, mode, maxBatch)
+	getHarness(ts).setMode(target, mode, n)
 }
 
 func cmdAssertPipelineDepth(ts *testscript.TestScript, neg bool, args []string) {

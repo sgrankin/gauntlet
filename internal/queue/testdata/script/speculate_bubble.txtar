@@ -1,0 +1,49 @@
+# Speculate bubble: window 3, the MIDDLE run (bob, lane position 1) goes
+# red. Only bob parks (Rejected) — carol (behind him) is Skipped WITHOUT
+# parking (her base prediction, "bob lands", is now false) and re-queues;
+# alice (ahead of bob) is untouched and keeps running toward landing. Ports
+# docs/plans/phase5.md §5.2's speculate_bubble row.
+
+set-mode main speculate 3
+direct-push main files/spec
+
+push-candidate main alice a files/a
+push-candidate main bob b files/b
+push-candidate main carol c files/c
+tick                                # window fills: alice(#0)->bob(#1)->carol(#2)
+
+assert-pipeline-depth main 3
+await-started test
+await-started '@#1' test
+await-started '@#2' test
+
+release-check '@#1' test failed       # bob (middle) goes red: bubble
+
+assert-event rejected
+! assert-event landed
+assert-slot-parked main bob b
+assert-slot-parked-none main carol c    # Skipped, NOT parked: free to re-queue
+assert-pipeline-depth main 1            # only alice's run survives
+! assert-slot-gone main alice a         # alice hasn't landed yet
+
+release-check test passed           # alice's own check finally goes green: lands
+assert-landed-order main a
+assert-slot-gone main alice a
+
+tick                                 # next refill: carol re-queues, rebuilt on the corrected (new) tip
+assert-pipeline-depth main 1
+await-started test
+release-check test passed
+assert-landed-order main a c
+assert-slot-gone main carol c
+
+-- files/spec/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/a/a.txt --
+a
+-- files/b/b.txt --
+b
+-- files/c/c.txt --
+c

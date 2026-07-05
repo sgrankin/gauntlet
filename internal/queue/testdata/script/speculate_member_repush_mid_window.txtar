@@ -1,0 +1,58 @@
+# Speculate member re-pushed mid-window: window 3, bob (lane position 1) is
+# force-updated (new SHA, same ref) while his speculative check is still
+# gated. The validity sweep catches the move BEFORE consuming any stale
+# verdict: bob and carol (behind him) are Skipped — NOT parked, a re-queue —
+# while alice (ahead of bob) is untouched and survives to land. The window
+# then refills bob' (new content) and carol on the corrected prediction.
+# Ports docs/plans/phase5.md §5.2's speculate_member_repush_mid_window row.
+
+set-mode main speculate 3
+direct-push main files/spec
+
+push-candidate main alice a files/a
+push-candidate main bob b files/b-v1
+push-candidate main carol c files/c
+tick                                     # window fills: alice(#0)->bob(#1)->carol(#2)
+
+assert-pipeline-depth main 3
+await-started test
+await-started '@#1' test
+await-started '@#2' test
+
+repush main bob b files/b-v2             # bob's ref moves mid-window (member move at lane index 1)
+tick                                      # validity sweep: bob's member moved -> invalidate suffix from index 1
+
+assert-event skipped
+! assert-event rejected
+! assert-event landed
+assert-pipeline-depth main 1             # only alice (index 0) survives
+! assert-slot-gone main alice a
+assert-slot-parked-none main bob b       # unparked: re-queues on the NEW sha
+assert-slot-parked-none main carol c    # unparked: re-queues once the window has room
+
+await-started test                        # alice's check has been gated since the very first tick
+release-check test passed                 # alice lands
+assert-landed-order main a
+assert-slot-gone main alice a
+
+tick                                       # refill: bob' (new content) + carol rebuild as a fresh window
+assert-pipeline-depth main 2
+await-started test                         # bob' is now the head (FIFO: his order predates carol's)
+await-started '@#1' test
+
+release-check test passed                  # bob' lands
+release-check '@#0' test passed              # carol (now head) lands
+assert-landed-order main a b c
+
+-- files/spec/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/a/a.txt --
+a
+-- files/b-v1/NOTES.md --
+first push
+-- files/b-v2/NOTES.md --
+re-pushed mid-window
+-- files/c/c.txt --
+c

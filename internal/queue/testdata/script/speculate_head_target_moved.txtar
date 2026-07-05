@@ -1,0 +1,56 @@
+# Speculate head target moved: window 3 fills, then a human (or a second
+# daemon) direct-pushes to the target branch — moving it out from under the
+# HEAD run's base (Invariant 5: only the head run's baseOID is the live
+# target tip; every other run's base is a prediction). The validity sweep
+# invalidates from index 0, taking the WHOLE window (Skipped, none parked —
+# their base prediction "the target tip is X" is simply wrong now, not
+# anyone's fault); the next refill rebuilds the whole window on the new tip.
+# Ports docs/plans/phase5.md §5.2's speculate_head_target_moved row.
+
+set-mode main speculate 3
+direct-push main files/spec
+
+push-candidate main alice a files/a
+push-candidate main bob b files/b
+push-candidate main carol c files/c
+tick                                     # window fills: alice(#0)->bob(#1)->carol(#2)
+
+assert-pipeline-depth main 3
+await-started test
+await-started '@#1' test
+await-started '@#2' test
+
+direct-push main files/human              # a human push moves the real target tip
+tick                                       # validity sweep: index 0's baseOID != live target tip -> whole window invalidated
+
+assert-event skipped
+! assert-event rejected
+! assert-event landed
+assert-pipeline-depth main 0
+assert-slot-parked-none main alice a
+assert-slot-parked-none main bob b
+assert-slot-parked-none main carol c
+
+tick                                        # refill: whole window rebuilds on the new tip
+assert-pipeline-depth main 3
+await-started test
+await-started '@#1' test
+await-started '@#2' test
+
+release-check test passed
+release-check '@#0' test passed
+release-check '@#0' test passed
+assert-landed-order main a b c
+
+-- files/spec/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/a/a.txt --
+a
+-- files/b/b.txt --
+b
+-- files/c/c.txt --
+c
+-- files/human/human.txt --
+human push
