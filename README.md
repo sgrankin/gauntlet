@@ -235,7 +235,7 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   {"error":"no snapshot yet"}` before the first reconcile pass completes.
 
   ```sh
-  curl -s http://localhost:8899/api/v1/status | jq .
+  curl -s http://localhost:8080/api/v1/status | jq .
   ```
 
 - **`GET /api/v1/runs?target=<name>&limit=<n>`** — a target's recent runs
@@ -244,7 +244,7 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   `history` store is configured.
 
   ```sh
-  curl -s 'http://localhost:8899/api/v1/runs?target=main&limit=5' | jq .
+  curl -s 'http://localhost:8080/api/v1/runs?target=main&limit=5' | jq .
   ```
 
 - **`GET /api/v1/run/{id}`** — one run's full detail, including its
@@ -252,7 +252,7 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   `503 {"error":"history disabled"}` if no `history` store is configured.
 
   ```sh
-  curl -s http://localhost:8899/api/v1/run/<run-id> | jq .
+  curl -s http://localhost:8080/api/v1/run/<run-id> | jq .
   ```
 
 - **`POST /api/v1/retry`** — re-queues a parked ref at its current SHA,
@@ -263,7 +263,7 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   JSON; `405` for any method but `POST`.
 
   ```sh
-  curl -s -X POST http://localhost:8899/api/v1/retry \
+  curl -s -X POST http://localhost:8080/api/v1/retry \
     -H 'content-type: application/json' \
     -d '{"target":"main","ref":"refs/heads/for/main/alice/my-feature"}'
   ```
@@ -272,11 +272,11 @@ lowerCamel field names; errors are always `{"error": "..."}`.
 the same API (client-side porcelain, like `gauntlet land`):
 
 ```sh
-gauntlet status -url http://localhost:8899                  # compact per-target summary
-gauntlet status -url http://localhost:8899 -target main     # one target only
-gauntlet status -url http://localhost:8899 -json            # raw API response
+gauntlet status -url http://localhost:8080                  # compact per-target summary
+gauntlet status -url http://localhost:8080 -target main     # one target only
+gauntlet status -url http://localhost:8080 -json            # raw API response
 
-gauntlet retry -url http://localhost:8899 -target main -ref refs/heads/for/main/alice/my-feature
+gauntlet retry -url http://localhost:8080 -target main -ref refs/heads/for/main/alice/my-feature
 ```
 
 **Trust model.** Same as the dashboard itself: the API has no
@@ -295,7 +295,7 @@ the standard Streamable HTTP transport, so any MCP-capable agent or client
 can connect directly:
 
 ```sh
-claude mcp add --transport http gauntlet http://localhost:8899/mcp
+claude mcp add --transport http gauntlet http://localhost:8080/mcp
 ```
 
 Four tools are exposed, mirroring the JSON API above (same lowerCamel field

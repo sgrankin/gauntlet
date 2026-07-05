@@ -148,7 +148,7 @@ docker run -d --name gauntlet \
   -v /srv/gauntlet/state:/data \
   -v /etc/gauntlet/gauntlet.kdl:/data/gauntlet.kdl:ro \
   --env-file /etc/gauntlet/gauntlet.env \
-  -p 127.0.0.1:8899:8899 \
+  -p 127.0.0.1:8080:8080 \
   gauntlet:latest
 ```
 
