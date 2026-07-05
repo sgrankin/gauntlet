@@ -399,6 +399,117 @@ target "main" branch="main" {
 	}
 }
 
+// TestLoadDaemon_TargetMode_Example covers the docs/plans/phase5.md §4.3
+// three-mode example (serial default, batch, speculate) parsing with
+// explicit knob values round-tripping unchanged.
+func TestLoadDaemon_TargetMode_Example(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+
+target "main" branch="main"
+
+target "release" branch="release/v2" {
+    mode "batch"
+    max-batch 8
+    on-batch-red "serial"
+}
+
+target "staging" branch="staging" {
+    mode "speculate"
+    window 4
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if len(d.Targets) != 3 {
+		t.Fatalf("Targets = %+v, want 3 targets", d.Targets)
+	}
+
+	main := d.Targets[0]
+	if main.Mode != "" {
+		t.Errorf("main.Mode = %q, want empty (serial default, never normalized)", main.Mode)
+	}
+	if main.MaxBatch != 0 || main.Window != 0 || main.OnBatchRed != "" {
+		t.Errorf("main mode-scoped knobs = %+v, want all zero", main)
+	}
+
+	release := d.Targets[1]
+	if release.Mode != "batch" {
+		t.Errorf("release.Mode = %q, want %q", release.Mode, "batch")
+	}
+	if release.MaxBatch != 8 {
+		t.Errorf("release.MaxBatch = %d, want 8", release.MaxBatch)
+	}
+	if release.OnBatchRed != "serial" {
+		t.Errorf("release.OnBatchRed = %q, want %q", release.OnBatchRed, "serial")
+	}
+	if release.Window != 0 {
+		t.Errorf("release.Window = %d, want 0 (unset, not legal for batch)", release.Window)
+	}
+
+	staging := d.Targets[2]
+	if staging.Mode != "speculate" {
+		t.Errorf("staging.Mode = %q, want %q", staging.Mode, "speculate")
+	}
+	if staging.Window != 4 {
+		t.Errorf("staging.Window = %d, want 4", staging.Window)
+	}
+	if staging.MaxBatch != 0 || staging.OnBatchRed != "" {
+		t.Errorf("staging batch-only knobs = %+v, want zero", staging)
+	}
+}
+
+// TestLoadDaemon_TargetMode_Defaults covers MaxBatch/Window/OnBatchRed
+// defaulting only within their own mode when left unset in the config
+// (docs/plans/phase5.md §4.1: MaxBatch defaults to 8, Window to 4,
+// OnBatchRed to "serial").
+func TestLoadDaemon_TargetMode_Defaults(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "batch-target" branch="b" {
+    mode "batch"
+}
+target "speculate-target" branch="s" {
+    mode "speculate"
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	batch := d.Targets[0]
+	if batch.MaxBatch != defaultMaxBatch {
+		t.Errorf("batch.MaxBatch = %d, want default %d", batch.MaxBatch, defaultMaxBatch)
+	}
+	if batch.OnBatchRed != defaultOnBatchRed {
+		t.Errorf("batch.OnBatchRed = %q, want default %q", batch.OnBatchRed, defaultOnBatchRed)
+	}
+	speculate := d.Targets[1]
+	if speculate.Window != defaultWindow {
+		t.Errorf("speculate.Window = %d, want default %d", speculate.Window, defaultWindow)
+	}
+}
+
 func TestLoadDaemon_DurationParsing(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/gauntlet.kdl"
@@ -855,6 +966,189 @@ summarize {
 }
 `,
 			wantErr: "summarize",
+		},
+		{
+			// docs/plans/phase5.md §4.1: window is only legal with
+			// mode "speculate".
+			name: "window set on a serial (default-mode) target",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    window 4
+}
+`,
+			wantErr: "window",
+		},
+		{
+			name: "max-batch set on a speculate target",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    max-batch 8
+}
+`,
+			wantErr: "max-batch",
+		},
+		{
+			name: "on-batch-red set on a speculate target",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    on-batch-red "serial"
+}
+`,
+			wantErr: "on-batch-red",
+		},
+		{
+			name: "unknown mode",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "yolo"
+}
+`,
+			wantErr: "mode",
+		},
+		{
+			// on-batch-red "bisect" is validated (a legal enum value) but
+			// rejected at construction — a documented growth path, not yet
+			// implemented (docs/plans/phase5.md §2.6, §9).
+			name: "on-batch-red bisect rejected at construction",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "batch"
+    on-batch-red "bisect"
+}
+`,
+			wantErr: "reserved for a future release",
+		},
+		{
+			name: "max-batch out of bounds (too high)",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "batch"
+    max-batch 65
+}
+`,
+			wantErr: "max-batch",
+		},
+		{
+			name: "max-batch out of bounds (zero via explicit negative)",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "batch"
+    max-batch -1
+}
+`,
+			wantErr: "max-batch",
+		},
+		{
+			name: "window out of bounds (too high)",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    window 33
+}
+`,
+			wantErr: "window",
+		},
+		{
+			name: "window out of bounds (negative)",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    window -1
+}
+`,
+			wantErr: "window",
+		},
+		{
+			name: "reserved window-start governor knob rejected",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    window-start 1
+}
+`,
+			wantErr: "reserved for a future adaptive-window governor",
+		},
+		{
+			name: "reserved window-max governor knob rejected",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    window-max 8
+}
+`,
+			wantErr: "reserved for a future adaptive-window governor",
+		},
+		{
+			name: "reserved window-halve-on-red governor knob rejected",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    mode "speculate"
+    window-halve-on-red true
+}
+`,
+			wantErr: "reserved for a future adaptive-window governor",
 		},
 	}
 	for _, tc := range cases {

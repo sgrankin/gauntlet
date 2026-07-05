@@ -75,6 +75,17 @@ const (
 	// README.md's Summaries section for the full contract.
 	defaultSummarizeTimeout = 5 * time.Second
 
+	// defaultMaxBatch, defaultWindow, and defaultOnBatchRed are the
+	// phase-5 per-target queue-mode defaults (docs/plans/phase5.md §4.1),
+	// applied only for their own mode (batch/batch/batch respectively;
+	// Window/speculate below), same "only default within the relevant
+	// section" pattern as defaultHooksPolicy above.
+	defaultMaxBatch    = 8
+	defaultOnBatchRed  = "serial"
+	defaultWindow      = 4
+	maxAllowedMaxBatch = 64 // sane safety valve, not mandated by phase5.md §4 — see MaxBatch's field doc
+	maxAllowedWindow   = 32 // sane safety valve, not mandated by phase5.md §4 — see Window's field doc
+
 	// defaultDepthRetention is how long queue_depth samples are kept before
 	// the depth sampler prunes them (docs/plans phase23 E1). Runs/checks
 	// have no retention bound — this applies to the depth series only.
@@ -275,6 +286,75 @@ type Target struct {
 	// target with no hooks at all, since there is no backlog to have a
 	// policy about.
 	HooksPolicy string `kdl:"hooks-policy"`
+
+	// Mode selects this target's queueing discipline (docs/plans/phase5.md
+	// §0, §4): "serial" (default) tests and lands one candidate at a time,
+	// byte-for-byte the phase-1 behavior; "batch" merges up to MaxBatch
+	// queued candidates into one --no-ff chain and runs a single check
+	// suite over the combined tree; "speculate" pipelines up to Window
+	// runs, each testing its own candidate chained onto the predicted
+	// (not-yet-landed) tip of the run ahead of it.
+	//
+	// "" is the zero value and means "serial" everywhere Mode is read.
+	// Unlike HooksPolicy, applyDefaults deliberately does NOT normalize ""
+	// to "serial" here: a target with no mode configured must keep
+	// reporting Mode=="" so a zero Target{} (and internal/queue's
+	// lane-per-target refactor, phase5.md P5-C) sees serial without any
+	// special-casing — "the fields' zero value already means serial".
+	Mode string `kdl:"mode"` // serial (default) | batch | speculate
+
+	// MaxBatch caps how many queued candidates one batch run combines
+	// into a single --no-ff chain and check suite (docs/plans/phase5.md
+	// §4.1). Legal only when Mode=="batch" — validate() rejects it being
+	// set for any other mode. Defaults to 8 when Mode=="batch" and left
+	// unset (zero).
+	//
+	// Bounded to [1, maxAllowedMaxBatch] (64) — a cap chosen here, not
+	// mandated by the plan: each additional batch member costs one more
+	// synchronous Config.MergeBody/summarize call on the reconcile loop
+	// before checks even start (docs/plans/phase5.md §9's documented
+	// stall cost), so an unbounded max-batch could stall the whole daemon
+	// for many multiples of summarize.timeout on a single refill.
+	MaxBatch int `kdl:"max-batch"`
+
+	// Window is the speculation pipeline depth: up to this many runs are
+	// in flight at once for the target (docs/plans/phase5.md §4.1, §4.2 —
+	// a fixed v1 window; see WindowStart/WindowMax/WindowHalveOnRed below
+	// for the reserved adaptive-governor knobs). Legal only when
+	// Mode=="speculate"; defaults to 4 when left unset (zero).
+	//
+	// Bounded to [1, maxAllowedWindow] (32) — a cap chosen here, not
+	// mandated by the plan. Each speculative run executes at most one
+	// check at a time, so Window is ALSO the maximum number of concurrent
+	// check processes/containers this target drives against the build
+	// executor (docs/plans/phase5.md §10 amendment 4): an operator sizing
+	// window is sizing builder concurrency, not just queue depth.
+	Window int `kdl:"window"`
+
+	// OnBatchRed selects the batch red-recovery strategy
+	// (docs/plans/phase5.md §2.6): "serial" (default) re-queues every
+	// batch member unparked and re-forms them one at a time on the next
+	// refill until the culprit is found and parked, then batching
+	// resumes; "bisect" is a documented growth path only. Legal only
+	// when Mode=="batch".
+	//
+	// "bisect" is accepted here so config stays forward-compatible, but
+	// phase 5 does NOT implement it: LoadDaemon rejects a target that
+	// sets on-batch-red "bisect" with a "reserved for a future release"
+	// error, rather than silently running it as "serial".
+	OnBatchRed string `kdl:"on-batch-red"` // serial (default) | bisect (reserved, rejected)
+
+	// WindowStart, WindowMax, and WindowHalveOnRed reserve the config
+	// surface for a future adaptive speculation-window governor
+	// (Zuul-style: start small, grow on green, halve on red;
+	// docs/plans/phase5.md §4.2). Phase 5 implements only the fixed
+	// Window above; setting any of these three is rejected at load with
+	// a "reserved for a future release" error (same rationale as
+	// OnBatchRed's "bisect") so a config that names them fails loudly
+	// instead of silently no-opping.
+	WindowStart      int  `kdl:"window-start"`
+	WindowMax        int  `kdl:"window-max"`
+	WindowHalveOnRed bool `kdl:"window-halve-on-red"`
 }
 
 // Hook is one named command a target runs, in order, once a candidate
@@ -383,6 +463,24 @@ func (d *Daemon) applyDefaults() {
 		if len(d.Targets[i].Hooks) > 0 && d.Targets[i].HooksPolicy == "" {
 			d.Targets[i].HooksPolicy = defaultHooksPolicy
 		}
+
+		// Mode's own knobs default only within their own mode — same
+		// "required field non-empty is the enable signal" pattern as
+		// HooksPolicy above and the phase-2/3 sections in Daemon. Mode
+		// itself is never defaulted (see its field doc): "" stays "".
+		switch d.Targets[i].Mode {
+		case "batch":
+			if d.Targets[i].MaxBatch == 0 {
+				d.Targets[i].MaxBatch = defaultMaxBatch
+			}
+			if d.Targets[i].OnBatchRed == "" {
+				d.Targets[i].OnBatchRed = defaultOnBatchRed
+			}
+		case "speculate":
+			if d.Targets[i].Window == 0 {
+				d.Targets[i].Window = defaultWindow
+			}
+		}
 	}
 
 	if d.Summarize != nil {
@@ -470,6 +568,65 @@ func (d *Daemon) validate() error {
 			}
 		} else if !validHooksPolicies[t.HooksPolicy] {
 			return fmt.Errorf("target %q: hooks-policy must be one of queue, coalesce, cancel, got %q", t.Name, t.HooksPolicy)
+		}
+
+		// Mode + its mode-scoped knobs (docs/plans/phase5.md §4.1): each
+		// knob is legal only under its own mode, matching hooks-policy's
+		// "catch config mistakes" strictness above.
+		switch t.Mode {
+		case "", "serial":
+			if t.MaxBatch != 0 {
+				return fmt.Errorf("target %q: max-batch requires mode \"batch\"", t.Name)
+			}
+			if t.Window != 0 {
+				return fmt.Errorf("target %q: window requires mode \"speculate\"", t.Name)
+			}
+			if t.OnBatchRed != "" {
+				return fmt.Errorf("target %q: on-batch-red requires mode \"batch\"", t.Name)
+			}
+		case "batch":
+			if t.Window != 0 {
+				return fmt.Errorf("target %q: window is only valid for mode \"speculate\", not \"batch\"", t.Name)
+			}
+			if t.MaxBatch < 1 || t.MaxBatch > maxAllowedMaxBatch {
+				return fmt.Errorf("target %q: max-batch must be between 1 and %d, got %d", t.Name, maxAllowedMaxBatch, t.MaxBatch)
+			}
+			switch t.OnBatchRed {
+			case "serial":
+				// v1-implemented; see field doc.
+			case "bisect":
+				// Reserved growth path (docs/plans/phase5.md §2.6, §9
+				// non-goals): validated but rejected at load rather than
+				// silently running as "serial".
+				return fmt.Errorf("target %q: on-batch-red \"bisect\" is reserved for a future release, not implemented in phase 5", t.Name)
+			default:
+				return fmt.Errorf("target %q: on-batch-red must be \"serial\" or \"bisect\", got %q", t.Name, t.OnBatchRed)
+			}
+		case "speculate":
+			if t.MaxBatch != 0 {
+				return fmt.Errorf("target %q: max-batch is only valid for mode \"batch\", not \"speculate\"", t.Name)
+			}
+			if t.OnBatchRed != "" {
+				return fmt.Errorf("target %q: on-batch-red is only valid for mode \"batch\", not \"speculate\"", t.Name)
+			}
+			if t.Window < 1 || t.Window > maxAllowedWindow {
+				return fmt.Errorf("target %q: window must be between 1 and %d, got %d", t.Name, maxAllowedWindow, t.Window)
+			}
+		default:
+			return fmt.Errorf("target %q: mode must be one of \"\", \"serial\", \"batch\", \"speculate\", got %q", t.Name, t.Mode)
+		}
+
+		// Reserved adaptive-window-governor knobs (docs/plans/phase5.md
+		// §4.2): parsed for forward compatibility, always rejected in
+		// phase 5, regardless of Mode.
+		if t.WindowStart != 0 {
+			return fmt.Errorf("target %q: window-start is reserved for a future adaptive-window governor, not implemented in phase 5", t.Name)
+		}
+		if t.WindowMax != 0 {
+			return fmt.Errorf("target %q: window-max is reserved for a future adaptive-window governor, not implemented in phase 5", t.Name)
+		}
+		if t.WindowHalveOnRed {
+			return fmt.Errorf("target %q: window-halve-on-red is reserved for a future adaptive-window governor, not implemented in phase 5", t.Name)
 		}
 	}
 

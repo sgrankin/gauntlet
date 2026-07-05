@@ -245,6 +245,9 @@ summarize {
   trailers, no body. Once the node is present (even empty, `summarize {}`),
   an empty/unset `api-key-env` is a startup error, same rationale as
   `github`/`slack` above.
+- **`target`'s `mode`, `max-batch`, `window`, `on-batch-red`** — per-target
+  queueing discipline (serial/batch/speculate); see [Queue
+  modes](#queue-modes) below.
 
 ## Summaries
 
@@ -399,6 +402,76 @@ a deploy that's already obsolete.
 
 `hooks-policy` is only meaningful on a target that has at least one
 `hook` — setting it on a target with none is a config error.
+
+## Queue modes
+
+Each `target` picks its own queueing discipline via `mode`
+(`docs/plans/phase5.md`): `"serial"` (the default — one candidate tested
+and landed at a time, byte-for-byte the phase-1 behavior), `"batch"`, or
+`"speculate"`. Config is dumb data — the knobs below are validated at load
+(node-named errors) but the daemon otherwise treats them as plain per-target
+settings.
+
+```kdl
+// Default serial — unchanged from phase 1.
+target "main" branch="main"
+
+// Batch: test up to 8 queued candidates as one --no-ff chain; on red, fall
+// back to serial until the culprit is found, then resume batching.
+target "release" branch="release/v2" {
+    mode "batch"
+    max-batch 8
+    on-batch-red "serial"
+}
+
+// Speculate: pipeline 4 candidates, each tested on the predicted landing of
+// the ones ahead of it; checks overlap, landings stay strictly FIFO.
+target "staging" branch="staging" {
+    mode "speculate"
+    window 4
+}
+```
+
+- **`mode`** — `"serial"` (default, `""` also means serial) tests and
+  lands one candidate at a time. `"batch"` merges up to `max-batch` queued
+  candidates into a single `--no-ff` chain and runs one check suite over
+  the combined tree — fewer CI runs per candidate, at the cost of coarser
+  attribution when the batch goes red. `"speculate"` pipelines up to
+  `window` runs, each testing its own candidate chained onto the
+  predicted (not-yet-landed) tip of the run ahead of it — checks overlap
+  across candidates, but landings still happen strictly FIFO, one at a
+  time.
+- **`max-batch`** — caps how many candidates one batch run combines.
+  Legal only with `mode "batch"` (a config error otherwise); defaults to
+  8 when left unset. Bounded to 1–64. Each additional batch member costs
+  one more synchronous summarize call on the reconcile loop before checks
+  even start (see "Summaries" above), so very large batches risk a
+  longer whole-daemon stall on refill.
+- **`window`** — the speculation pipeline depth: up to this many runs are
+  in flight at once for the target. Legal only with `mode "speculate"`
+  (a config error otherwise); defaults to 4 when left unset. Bounded to
+  1–32. **`window` doubles as a builder-concurrency bound**: each
+  speculative run executes at most one check at a time, so `window` is
+  also the maximum number of concurrent check processes/containers this
+  target drives against the configured executor — size it with your
+  build capacity in mind, not just desired queue depth.
+- **`on-batch-red`** — the batch red-recovery strategy. `"serial"`
+  (default) is the only strategy phase 5 implements: on a red batch, every
+  member re-queues unparked and the next refill for this target forms
+  them one at a time (serial semantics) until the culprit is found and
+  parked; batching resumes automatically once a landing occurs.
+  `"bisect"` (split the failed set and recurse to find the culprit in
+  fewer rounds) is a documented growth path only — it's accepted by
+  config parsing so the knob is forward-compatible, but **`LoadDaemon`
+  rejects it with a "reserved for a future release" error**; it is not
+  silently treated as `"serial"`. Legal only with `mode "batch"`.
+- **Reserved, rejected if set**: `window-start`, `window-max`, and
+  `window-halve-on-red` reserve config surface for a possible future
+  adaptive speculation-window governor (start small, grow on green, halve
+  on red). Phase 5 ships only the fixed `window` above; setting any of
+  these three on any target is a load-time error (same "reserved for a
+  future release" rationale as `on-batch-red "bisect"`), so a config that
+  names them fails loudly rather than silently no-opping.
 
 ## API
 

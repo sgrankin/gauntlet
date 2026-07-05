@@ -27,8 +27,37 @@ target "main" branch="main" {
     // mid-run when a newer one arrives, so a slow deploy never blocks the
     // latest candidate from deploying next.
     // hooks-policy "coalesce"
+
+    // mode (optional; default "serial") selects this target's queueing
+    // discipline (docs/plans/phase5.md §0, §4) — "serial" tests and lands
+    // one candidate at a time (this target's actual behavior, unchanged
+    // from phase 1); "batch" and "speculate" are opt-in, see the "release"
+    // and "staging" targets below.
+    // mode "serial"
 }
-target "release" branch="release/v2"
+target "release" branch="release/v2" {
+    // Batch: merge up to max-batch queued candidates into one --no-ff
+    // chain and run a single check suite over the combined tree — fewer
+    // CI runs at the cost of coarser attribution when the batch goes red
+    // (docs/plans/phase5.md §2.6: on-batch-red falls back to serial,
+    // landing member by member, until the culprit is found and parked,
+    // then batching resumes).
+    // mode "batch"
+    // max-batch 8              // optional; default 8; legal only with mode "batch"
+    // on-batch-red "serial"    // optional; default "serial"; "bisect" is
+    //                          // reserved for a future release and
+    //                          // rejected at load if set
+}
+
+// Speculate: pipeline "window" candidates, each tested on the predicted
+// landing of the ones ahead of it — checks overlap, landings stay
+// strictly FIFO (docs/plans/phase5.md §4.1). "window" also bounds how
+// many check processes/containers this target drives concurrently against
+// the build executor, so size it with builder capacity in mind.
+// target "staging" branch="staging" {
+//     mode "speculate"
+//     window 4   // optional; default 4; legal only with mode "speculate"
+// }
 
 // --- phase 2/3 additions (all optional) ---
 
