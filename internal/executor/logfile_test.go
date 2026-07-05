@@ -2,14 +2,40 @@ package executor
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/sgrankin/gauntlet/internal/core"
 )
+
+// readCheckLog opens and fully decompresses the zstd-compressed log file
+// openCheckLog writes at path, returning its plain-text content. Tests use
+// this instead of os.ReadFile since the on-disk bytes are never plain text
+// anymore.
+func readCheckLog(t *testing.T, path string) string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer f.Close()
+	dec, err := zstd.NewReader(f)
+	if err != nil {
+		t.Fatalf("new zstd reader: %v", err)
+	}
+	defer dec.Close()
+	data, err := io.ReadAll(dec)
+	if err != nil {
+		t.Fatalf("decompress log file: %v", err)
+	}
+	return string(data)
+}
 
 // TestLocalExecutor_LogFile_FullContentTailCapped is F-a's core capture
 // contract (DESIGN.md "Full per-check log files"): when job.LogPath is set,
@@ -49,16 +75,14 @@ func TestLocalExecutor_LogFile_FullContentTailCapped(t *testing.T) {
 	}
 
 	// The file has the complete record: every line, including the head
-	// that the tail buffer discarded.
-	data, err := os.ReadFile(job.LogPath)
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
-	if !strings.Contains(string(data), firstLine) {
+	// that the tail buffer discarded. It's written as a zstd stream
+	// (openCheckLog), so decompress before checking content.
+	data := readCheckLog(t, job.LogPath)
+	if !strings.Contains(data, firstLine) {
 		t.Errorf("log file missing head line %q; the file must hold the FULL output, not just the tail", firstLine)
 	}
 	lastLine := fmt.Sprintf("LINE-%05d", lines-1)
-	if !strings.Contains(string(data), lastLine) {
+	if !strings.Contains(data, lastLine) {
 		t.Errorf("log file missing tail line %q", lastLine)
 	}
 }
@@ -80,11 +104,8 @@ func TestLocalExecutor_LogFile_CreatesParentDirs(t *testing.T) {
 	if res.LogPath != job.LogPath {
 		t.Fatalf("LogPath = %q, want %q", res.LogPath, job.LogPath)
 	}
-	data, err := os.ReadFile(job.LogPath)
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
-	if !strings.Contains(string(data), "hello") {
+	data := readCheckLog(t, job.LogPath)
+	if !strings.Contains(data, "hello") {
 		t.Errorf("log file content = %q, want to contain 'hello'", data)
 	}
 }

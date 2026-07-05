@@ -57,14 +57,16 @@ containerize (topology (b), below).
    trivially re-clonable — it's just a cache of the remote); the `trials/`
    scratch dir (ephemeral by design: the daemon removes and recreates it on
    every startup, see README's "Running" section); or `logs/` — full,
-   uncapped per-check log files (`logs/<runID>/<check>.log`, DESIGN.md "Full
-   per-check log files"), unconditionally written and served by the
+   uncapped per-check log files, zstd-compressed at the fastest level
+   (`logs/<runID>/<check>.log.zst`, DESIGN.md "Full per-check log files"),
+   unconditionally written and served (decompressed on the fly) by the
    dashboard's "full log" link regardless of which optional sections are
-   configured. Unlike `trials/`, `logs/` is meant to survive restarts: it's
-   aged out by the `log-retention` config node instead (default 30 days,
-   `"720h"`; see README's "Configuration reference"), swept once at startup
-   and then hourly for the rest of the process's lifetime. None of this
-   needs backing up; see "Backups" below.
+   configured. To read one directly off disk, `zstd -d` it. Unlike
+   `trials/`, `logs/` is meant to survive restarts: it's aged out by the
+   `log-retention` config node instead (default 30 days, `"720h"`; see
+   README's "Configuration reference"), swept once at startup and then
+   hourly for the rest of the process's lifetime. None of this needs
+   backing up; see "Backups" below.
 
    **Log files are keyed by absolute path.** History's per-check rows store
    each log file's full path as written at run time — moving or renaming

@@ -110,7 +110,7 @@ func reconcileUntilRecord(t *testing.T, d *Daemon, ch *channel.RecordingChannel,
 
 // TestReconcile_LogDir_AssignsJobLogPath is F-a's core queue-side contract:
 // when Config.LogDir is set, CheckJob.LogPath must be
-// <LogDir>/<runID>/<seq>-<check>.log — seq is the check's 1-based position
+// <LogDir>/<runID>/<seq>-<check>.log.zst — seq is the check's 1-based position
 // in the spec (closing-review FIX 3, so colliding sanitized names don't
 // alias onto the same file) — and the resulting RunRecord's CheckResult
 // (threaded back from the executor) must carry the same path.
@@ -128,7 +128,7 @@ func TestReconcile_LogDir_AssignsJobLogPath(t *testing.T) {
 	if !ok {
 		t.Fatal("check \"test\" never ran")
 	}
-	want := filepath.Join(logDir, rec.RunID, "1-test.log")
+	want := filepath.Join(logDir, rec.RunID, "1-test.log.zst")
 	if job.LogPath != want {
 		t.Fatalf("CheckJob.LogPath = %q, want %q", job.LogPath, want)
 	}
@@ -222,8 +222,8 @@ func TestReconcile_LogDir_CollidingSanitizedNamesGetDistinctFiles(t *testing.T) 
 	if first.LogPath == second.LogPath {
 		t.Fatalf("both colliding checks got the same LogPath %q, want distinct files", first.LogPath)
 	}
-	wantFirst := filepath.Join(logDir, rec.RunID, "1-lint-go.log")
-	wantSecond := filepath.Join(logDir, rec.RunID, "2-lint-go.log")
+	wantFirst := filepath.Join(logDir, rec.RunID, "1-lint-go.log.zst")
+	wantSecond := filepath.Join(logDir, rec.RunID, "2-lint-go.log.zst")
 	if first.LogPath != wantFirst {
 		t.Errorf("first check LogPath = %q, want %q", first.LogPath, wantFirst)
 	}

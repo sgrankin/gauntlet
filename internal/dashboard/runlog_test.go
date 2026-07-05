@@ -5,6 +5,8 @@ package dashboard_test
 // containment-checked under dashboard.WithLogRoot.
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,10 +14,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/queue"
 )
+
+// writeZstFile zstd-compresses content (fastest level, matching
+// internal/executor/logfile.go's openCheckLog) into a single stream and
+// writes it to path.
+func writeZstFile(t *testing.T, path, content string) {
+	t.Helper()
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatalf("zstd.NewWriter: %v", err)
+	}
+	if _, err := enc.Write([]byte(content)); err != nil {
+		t.Fatalf("enc.Write: %v", err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatalf("enc.Close: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
 
 // logRecord builds a run record with one check whose CheckResult.LogPath is
 // logPath (may be empty, or point anywhere — including outside any
@@ -71,6 +96,106 @@ func TestRunLog_ServesFileUnderLogRoot(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+}
+
+// TestRunLog_ServesDecompressedZstFile exercises the ".log.zst" path
+// (internal/queue/reconcile.go's job.LogPath assignment,
+// internal/executor/logfile.go's openCheckLog): handleRunLog must
+// decompress the stored zstd stream and serve the plain-text content, not
+// the compressed bytes.
+func TestRunLog_ServesDecompressedZstFile(t *testing.T) {
+	store := openTestStore(t)
+	logRoot := t.TempDir()
+
+	runDir := filepath.Join(logRoot, "run-log-zst")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	logPath := filepath.Join(runDir, "1-test.log.zst")
+	const fullContent = "line 1\nline 2\nthe complete uncapped log\n"
+	writeZstFile(t, logPath, fullContent)
+
+	emitRun(t, store, logRecord("run-log-zst", "test", logPath))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store, dashboard.WithLogRoot(logRoot))
+	resp, body := get(t, h, "/run/run-log-zst/log/test")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body:\n%s", resp.StatusCode, body)
+	}
+	if body != fullContent {
+		t.Errorf("body = %q, want %q (decompressed content)", body, fullContent)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+}
+
+// TestRunLog_TruncatedZstFrameServesPartialContentNoPanic covers the
+// "daemon/check killed mid-write" degradation: openCheckLog's contract is
+// that losing/truncating the full log must never fail the check, so a
+// truncated final zstd frame is an expected, not exceptional, on-disk
+// state. handleRunLog must decode whatever it can and stop cleanly — no
+// panic, no hang — rather than require a complete frame to serve anything.
+func TestRunLog_TruncatedZstFrameServesPartialContentNoPanic(t *testing.T) {
+	store := openTestStore(t)
+	logRoot := t.TempDir()
+
+	runDir := filepath.Join(logRoot, "run-log-zst-truncated")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	logPath := filepath.Join(runDir, "1-test.log.zst")
+
+	// Content large enough to span multiple zstd blocks (default block
+	// size is 128KiB of *source* bytes), so truncating the compressed
+	// stream partway through cuts after at least one block has already
+	// been fully decodable, giving a genuine non-empty partial decode
+	// rather than truncating inside the only block there is.
+	var content strings.Builder
+	for i := 0; i < 40000; i++ {
+		fmt.Fprintf(&content, "LINE-%06d the complete uncapped log line\n", i)
+	}
+	fullContent := content.String()
+
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatalf("zstd.NewWriter: %v", err)
+	}
+	if _, err := enc.Write([]byte(fullContent)); err != nil {
+		t.Fatalf("enc.Write: %v", err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatalf("enc.Close: %v", err)
+	}
+
+	// Cut the compressed stream well before its end — simulates the file
+	// handle being closed (or the process killed) mid-write, before the
+	// final frame/checksum landed.
+	truncated := buf.Bytes()[:buf.Len()*2/3]
+	if err := os.WriteFile(logPath, truncated, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	emitRun(t, store, logRecord("run-log-zst-truncated", "test", logPath))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store, dashboard.WithLogRoot(logRoot))
+	resp, body := get(t, h, "/run/run-log-zst-truncated/log/test")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (headers are written before decompression starts), body:\n%s", resp.StatusCode, body)
+	}
+	if body == "" {
+		t.Fatal("body is empty, want at least one fully-decoded block's worth of partial content")
+	}
+	if body == fullContent {
+		t.Error("body equals the full content despite truncation; truncation had no effect")
+	}
+	if !strings.HasPrefix(fullContent, body) {
+		t.Errorf("body is not a prefix of the original content (got %d bytes)", len(body))
 	}
 }
 

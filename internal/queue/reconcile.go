@@ -280,16 +280,22 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	// the exact pre-F-a behavior (job.LogPath stays ""). The check name is
 	// free-form config, so it's sanitized the same way container names are
 	// (core.SanitizeName) before becoming a path component — the trailing
-	// ".log" suffix additionally guarantees the sanitized name can never
-	// resolve to "." or "..". The filename is prefixed with the check's
-	// 1-based position in the spec (r.idx+1), stable and matching history's
-	// per-check seq column: two check names that sanitize to the same
-	// string (e.g. "lint go" and "lint/go", both -> "lint-go") would
+	// ".log.zst" suffix additionally guarantees the sanitized name can
+	// never resolve to "." or "..". The filename is prefixed with the
+	// check's 1-based position in the spec (r.idx+1), stable and matching
+	// history's per-check seq column: two check names that sanitize to the
+	// same string (e.g. "lint go" and "lint/go", both -> "lint-go") would
 	// otherwise alias onto the same O_TRUNC'd file, with both checks'
 	// history rows pointing at whichever happened to write last
 	// (closing-review FIX 3).
+	//
+	// ".log.zst": the executor writes this file as a single zstd stream
+	// (internal/executor/logfile.go's openCheckLog) — the suffix is what
+	// the dashboard's handleRunLog keys on to decide whether to decompress
+	// on serve (legacy plain ".log" rows from before this change keep
+	// working unchanged).
 	if d.cfg.LogDir != "" {
-		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, fmt.Sprintf("%d-%s.log", r.idx+1, core.SanitizeName(check.Name)))
+		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, fmt.Sprintf("%d-%s.log.zst", r.idx+1, core.SanitizeName(check.Name)))
 	}
 
 	result := make(chan core.CheckResult, 1)

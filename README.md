@@ -181,12 +181,13 @@ summarize {
 ```
 
 - **`log-retention <duration>`** — how long full per-check log files
-  (`<state>/logs/<runID>/<check>.log`, written by the executor alongside
-  every check's tail-capped in-band output — see "Check environment
-  reference" below) are kept before cmd/gauntlet's periodic sweep deletes
-  the run-log directory. Unlike every node below, this one has no "absent ⇒
-  disabled" state: full logging is always wired up, so absence just means
-  the default (30 days, `"720h"`) applies. Every value must be positive.
+  (`<state>/logs/<runID>/<check>.log.zst`, zstd-compressed and written by
+  the executor alongside every check's tail-capped in-band output — see
+  "Check environment reference" below) are kept before cmd/gauntlet's
+  periodic sweep deletes the run-log directory. Unlike every node below,
+  this one has no "absent ⇒ disabled" state: full logging is always wired
+  up, so absence just means the default (30 days, `"720h"`) applies. Every
+  value must be positive.
 - **`history <path>`** — SQLite database file for run/check/queue-depth
   history (`internal/history`), read by the dashboard's history views.
   `sample-every` sets the queue-depth sampling interval; defaults to
@@ -562,12 +563,15 @@ skipped check doesn't quietly count as green); an absent or empty file is
 **Full per-check logs.** Every check's combined stdout+stderr is captured
 twice: a 64KiB tail-capped copy inline (`Output` — the fast view: run
 history, the run page, the `run` MCP tool), and, whenever `<state>/logs` is
-writable, the complete, uncapped output as a file at
-`<state>/logs/<runID>/<check>.log`. The full file is what the dashboard's
-"full log" link and the JSON API/MCP `logPath`/`logUrl` fields point at
-(see "API" and "MCP" above); it's pruned after `log-retention` (default 30
-days, see "Configuration reference") regardless of whether history or the
-dashboard are configured.
+writable, the complete, uncapped output as a zstd-compressed file at
+`<state>/logs/<runID>/<check>.log.zst` (fastest zstd level, favoring
+throughput over ratio since this is a supplementary record, not a
+space-optimized archive). The full file is what the dashboard's "full log"
+link and the JSON API/MCP `logPath`/`logUrl` fields point at (see "API" and
+"MCP" above) — the dashboard decompresses it on the fly when serving; it's
+pruned after `log-retention` (default 30 days, see "Configuration
+reference") regardless of whether history or the dashboard are configured.
+To read one offline: `zstd -d <path>` (or `zstd -dc <path> | less`).
 
 This is the whole mechanism for conditional/monorepo-style execution —
 gauntlet has no path-filter config (see DESIGN.md "Decision ledger": path

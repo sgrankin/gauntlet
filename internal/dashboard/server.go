@@ -30,6 +30,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/queue"
@@ -309,6 +311,37 @@ func (d *dash) handleRunLog(w http.ResponseWriter, r *http.Request) {
 	// check's output happens to contain.
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	// ".log.zst" (internal/queue/reconcile.go's job.LogPath assignment,
+	// internal/executor/logfile.go's openCheckLog) is a single zstd stream:
+	// decompress it to the response as we go. http.ServeContent needs a
+	// ReadSeeker to support Range requests and If-Modified-Since, which a
+	// decompressing reader can't provide, so this path is a plain io.Copy
+	// with the headers set explicitly above instead. Legacy plain ".log"
+	// rows (written before this change) still go through ServeContent
+	// below unchanged.
+	if strings.HasSuffix(resolved, ".log.zst") {
+		dec, err := zstd.NewReader(f)
+		if err != nil {
+			notFoundPrunedOrMissing(w)
+			return
+		}
+		defer dec.Close()
+		if _, err := io.Copy(w, dec); err != nil {
+			// A truncated final frame (the daemon/check killed mid-write —
+			// openCheckLog's doc: losing/truncating the log must never
+			// fail the check itself) decompresses partially and then
+			// errors here. The response has already been partially
+			// written by this point, so there's no clean way to turn this
+			// into an error status for the client; log it server-side and
+			// let the client see whatever decompressed cleanly, which is
+			// strictly more useful than hanging or serving nothing for a
+			// supplementary, best-effort log view.
+			log.Printf("dashboard: run log: %s: decompress: %v", resolved, err)
+		}
+		return
+	}
+
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }
 
