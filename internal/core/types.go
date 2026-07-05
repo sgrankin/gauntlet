@@ -65,14 +65,17 @@ type CheckJob struct {
 type CheckStatus int
 
 const (
-	// CheckPassed means the check exited 0 and did not report skipped.
-	CheckPassed CheckStatus = iota
-
 	// CheckFailed means the check reported a real verdict of "not green":
 	// a non-zero exit, or a failure to even start the command (e.g. the
 	// command is missing or not executable). Both are the author's problem
 	// to fix, so both park the (ref, SHA) rather than retrying forever.
-	CheckFailed
+	//
+	// CheckFailed is deliberately the zero value: a CheckResult whose Status
+	// was never assigned must read as a failure, never as a silent pass.
+	CheckFailed CheckStatus = iota
+
+	// CheckPassed means the check exited 0 and did not report skipped.
+	CheckPassed
 
 	// CheckSkipped means the check exited 0 and explicitly reported
 	// "skipped" via the result file. Distinct from CheckPassed so run
