@@ -1,0 +1,26 @@
+# Green multi-check land: the canonical happy path. Both checks pass, the
+# target advances to the merge commit that was actually tested, and the
+# candidate's slot is deleted. Ports TestReconcile_GreenMultiCheckLand /
+# TestIntegration_GreenMultiCheckLand.
+
+push-candidate main alice widget files/widget
+tick                          # trial merges clean; lint starts first
+
+await-started lint
+release-check lint passed     # lint recorded; test starts next
+
+await-started test
+release-check test passed     # both green: land
+
+assert-event landed
+assert-target-is-merge main   # target tip == the tested merge commit,
+                               # parent[1] == the candidate SHA verbatim
+assert-slot-gone main alice widget
+
+-- files/widget/.gauntlet.kdl --
+check "lint" {
+    command "true"
+}
+check "test" {
+    command "true"
+}

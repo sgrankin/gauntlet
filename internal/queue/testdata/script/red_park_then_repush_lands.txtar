@@ -1,0 +1,43 @@
+# Red check parks; re-push clears the park and lands. The retry story:
+# a rejected (ref, SHA) stays parked (never re-tested) until the author
+# re-pushes a new SHA, at which point it re-enters the queue and can land
+# normally. Ports TestReconcile_ParkSkipSurvivesOtherLandings /
+# TestIntegration_FailureParksPerSHA (the per-SHA park/re-push half).
+
+push-candidate main alice widget files/v1-broken
+tick                            # trial starts
+
+await-started test
+release-check test failed       # rejected: parked at this SHA
+
+assert-event rejected
+assert-slot-parked main alice widget
+
+# Parked candidates are never re-tested on their own — spin a couple of
+# ticks and confirm nothing new happens before the re-push.
+tick
+tick
+! assert-event landed
+
+repush main alice widget files/v2-fixed  # new SHA: clears the park
+tick                                     # re-enters the queue
+
+await-started test
+release-check test passed       # green this time: land
+
+assert-event landed
+assert-target-is-merge main
+assert-slot-gone main alice widget
+
+-- files/v1-broken/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/v1-broken/NOTES.md --
+first attempt: broken
+-- files/v2-fixed/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/v2-fixed/NOTES.md --
+second attempt: fixed

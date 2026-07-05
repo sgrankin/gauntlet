@@ -1,0 +1,39 @@
+# Re-push mid-check cancels and re-tests (Invariant 5): re-pushing the same
+# ref (a new SHA) while a check is gated cancels the in-flight run and
+# discards its verdict. The ref is not parked — it naturally re-queues and a
+# fresh trial starts on the new SHA, landing normally from there. A run
+# present at the start of a tick claims that whole tick, so the cancellation
+# and the re-queue are observed on two separate ticks. Ports
+# TestReconcile_CandidateMovedMidCheck / TestIntegration_RepushMidCheck.
+
+push-candidate main alice widget files/v1
+tick                             # trial starts; "test" is gated, in flight
+
+repush main alice widget files/v2  # re-push: new SHA, same ref, mid-check
+tick                                # detects the move; cancels + Skips the old run
+
+assert-event skipped
+! assert-slot-gone main alice widget  # not parked: the ref still exists, just re-queued
+! assert-event landed
+
+tick                              # next tick: not parked, so it re-queues on the new SHA
+
+await-started test
+release-check test passed         # green: land the re-pushed candidate
+
+assert-event landed
+assert-target-is-merge main
+assert-slot-gone main alice widget
+
+-- files/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/v1/NOTES.md --
+original push
+-- files/v2/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/v2/NOTES.md --
+re-push while test was running
