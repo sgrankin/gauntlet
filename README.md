@@ -48,6 +48,251 @@ new SHA to it.
 
 The daemon shuts down cleanly on `SIGINT`/`SIGTERM`.
 
+## Landing changes
+
+Queue slot = ref name, SHA = what gets tested (see [DESIGN.md](DESIGN.md)
+"The model"). Landing a change is just pushing to
+`for/<target>/<user>/<topic>`; everything below is porcelain around that one
+push.
+
+**`gauntlet land`** does it for you:
+
+```sh
+gauntlet land -target main -topic my-feature
+```
+
+- `-target` (required) — the target name from the daemon's `gauntlet.kdl`.
+- `-topic` — defaults to the current branch name.
+- `-remote` — defaults to `origin`.
+
+It derives `<user>` from `git config user.name` (falling back to `$USER`),
+slugifies it, and runs `git push <remote> HEAD:refs/heads/for/<target>/<user>/<topic>`.
+
+**Git alias**, if you'd rather not build the subcommand:
+
+```sh
+git config alias.land '!f() { git push origin "HEAD:refs/heads/for/${1:?target}/${USER}/${2:?topic}"; }; f'
+```
+
+```sh
+git land main my-feature
+```
+
+**jj equivalent** — jj is first-class client-side even though the daemon
+never touches it (DESIGN.md "Decision ledger": jj was killed as the daemon's
+VCS backend, kept for clients). A candidate ref is just a bookmark pushed
+into the `for/` namespace:
+
+```sh
+jj bookmark set for/main/$USER/my-feature -r @
+jj git push -b for/main/$USER/my-feature
+```
+
+(`-r @` if you're landing the change you just described; `-r @-` if you've
+already moved on to a new empty commit on top of it.)
+
+**Cancellation** is ref deletion — nothing more:
+
+```sh
+git push origin --delete for/main/$USER/my-feature
+# or: jj bookmark delete for/main/$USER/my-feature && jj git push -b for/main/$USER/my-feature
+```
+
+**Retry semantics.** Red (or a conflict) parks the ref at that SHA — the
+daemon won't re-test it again on its own. To retry: push a new SHA (amend
+and re-push the same ref name; the SHA change is what un-parks it), or, once
+the Slack channel is configured (see "Configuration reference" below), react
+`:recycle:` on the run's root message to re-queue the same SHA without a new
+push.
+
+## Configuration reference
+
+**Phase 2/3 — in progress.** The `history`, `dashboard`, `github`, `slack`,
+`otlp`, and container `executor` nodes below describe the target schema from
+`docs/plans/phase23.md` §3; as of this writing only `internal/config`'s
+phase-1 fields (`remote`, `poll-interval`, `check-spec`, `committer`,
+`merge-message`, `target`) are implemented. Each new node is optional —
+absence disables the feature it configures, so an existing phase-1
+`gauntlet.kdl` keeps working unchanged.
+
+```kdl
+history "/var/lib/gauntlet/history.db" {
+    sample-every "10s"
+}
+
+dashboard "localhost:8080" {
+    url "https://gauntlet.internal.example"
+}
+
+github "acme/widgets" {
+    token-env "GITHUB_TOKEN"
+    api-url "https://api.github.com"
+}
+
+slack "C0123456789" {
+    app-token-env "SLACK_APP_TOKEN"
+    bot-token-env "SLACK_BOT_TOKEN"
+}
+
+otlp "localhost:4318" {
+    insecure true
+}
+
+executor "container" {
+    runtime "container"
+    image "ghcr.io/acme/ci:latest"
+    workdir "/workspace"
+    cache "gocache"    path="/root/.cache/go-build"
+    cache "gomodcache" path="/go/pkg/mod"
+}
+```
+
+- **`history <path>`** — SQLite database file for run/check/queue-depth
+  history (`internal/history`), read by the dashboard's history views.
+  `sample-every` sets the queue-depth sampling interval; defaults to
+  `poll-interval`. **Path absent ⇒ disabled**: no SQLite store is opened, and
+  the daemon runs exactly as it does today.
+- **`dashboard <bind>`** — starts the read-only web dashboard
+  (`internal/dashboard`) on `<bind>` (e.g. `localhost:8080`). `url` is an
+  optional public base URL used only for outbound links (e.g. the GitHub
+  commit status `target_url`); defaults to `http://<bind>`, which is usually
+  wrong once anything sits in front of the daemon (a proxy, a tailnet
+  hostname), so set it explicitly whenever the dashboard is reachable at a
+  different address than it binds. **Bind absent ⇒ disabled**: no HTTP
+  server starts. The dashboard has no authentication of its own — put it
+  behind your proxy/tailnet if it needs one.
+- **`github <owner/repo>`** — enables the GitHub commit-status channel
+  (`internal/ghstatus`): one rollup status context `gauntlet/<target>`
+  posted to the candidate SHA via the plain REST statuses API.
+  `token-env` names the environment variable holding a PAT (default
+  `GITHUB_TOKEN`); `api-url` is the REST API base (default
+  `https://api.github.com`; override for GitHub Enterprise). **Repo absent
+  ⇒ disabled**: no channel is constructed, no requests made.
+- **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
+  threaded run messages in the given channel ID, root edited to a
+  pass/fail mark on landing, `:recycle:` on the root re-queues via retry.
+  `app-token-env`/`bot-token-env` name the environment variables holding the
+  app-level (socket mode) and bot tokens (defaults `SLACK_APP_TOKEN` /
+  `SLACK_BOT_TOKEN`). **Channel absent ⇒ disabled.**
+- **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter
+  (`internal/obs`) pointed at `<endpoint>`; `insecure` skips TLS (typical for
+  a local collector). The daemon already emits spans via the OTel API in
+  phase 1 with a no-op provider — this just gives them somewhere to go.
+  **Endpoint absent ⇒ no-op** (phase-1 default): spans are emitted and
+  immediately discarded, same as today.
+- **`executor <kind>`** — selects the check executor. `"local"` (the
+  default when the node is absent, or when written with no further
+  configuration) runs checks as local subprocesses, same as phase 1.
+  `"container"` runs each check via `runtime` (`"docker"`, `"podman"`, or
+  `"container"` for Apple's `container` CLI; default `"container"`) against
+  `image`, mounting the trial tree read-write at `workdir` (default
+  `/workspace`) plus one named, persistent volume per `cache` entry (`name` +
+  mount `path`) so warm caches (`GOCACHE`, module caches, …) survive across
+  runs. `image` is required when `kind` is `"container"`.
+
+## Manual verification / setup guides
+
+These channels/executors have no fake to exercise in CI-style tests; verify
+them by hand against the real service once, per docs/plans/phase23.md §5.
+
+### GitHub commit status
+
+1. Create a PAT with the `repo:status` scope (classic PAT — that scope is
+   enough to write commit statuses; no other repo access is needed).
+2. Export it as `GITHUB_TOKEN` (or whatever `token-env` names) in the
+   daemon's environment.
+3. Add a `github "<owner>/<repo>"` node to `gauntlet.kdl`.
+4. Push a candidate. You should see a `gauntlet/<target>` status appear
+   `pending` on the candidate SHA once the trial merge is clean, flip to
+   `success`/`failure`/`error` when the run finishes, and its description
+   carry the rejection detail on failure. Visible on the commit and on any
+   PR built from that branch.
+
+### Slack app
+
+1. Create a Slack app from a manifest with: **socket mode** enabled; bot
+   scopes `chat:write` and `reactions:read`; app-level token scope
+   `connections:write`; subscribed bot event `reaction_added`.
+2. Install it to your workspace. You get two tokens: an app-level token
+   (`xapp-…`, socket mode) and a bot token (`xoxb-…`). Export them as
+   `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` (or whatever `app-token-env` /
+   `bot-token-env` name).
+3. Invite the bot to the channel named in the `slack` node's channel ID.
+4. Push a candidate. Expected thread flow: a root message posts once the
+   trial merge is clean; each check posts a threaded reply as it finishes;
+   the root is edited to a ✅/❌ (with a final thread reply) on landing or
+   rejection; reacting `:recycle:` on the root re-queues that ref at its
+   current SHA (a retry command), which you'll see as a fresh run starting
+   without pushing anything.
+
+### Container executor
+
+1. Only Apple's `container` CLI is expected to be present (no docker/podman
+   assumed); start its background service: `container system start`.
+   If the service isn't running, checks fail with an infra error
+   (`CheckResult.Err`), not a red verdict — don't mistake one for the
+   other.
+2. Build or pick an image containing whatever the check spec's commands
+   need (a Go toolchain, `make`, …) — the executor doesn't provision
+   anything beyond running the image.
+3. Configure `executor "container"` with `image` and one `cache` entry per
+   directory you want to persist (e.g. `GOCACHE`, `GOMODCACHE`) — these are
+   named volumes that survive across runs, which is the point (DESIGN.md:
+   persistent warm builder beats hermetic-ephemeral on speed).
+4. Push a candidate; you should see a container start and stop per check
+   (`container list` while a run is in flight), and a second run reusing
+   the same image show faster build steps once caches are warm.
+
+### OTLP export
+
+1. Point `otlp` at any OTLP/HTTP collector endpoint (e.g. a local
+   `otel-collector` on `localhost:4318`; `insecure true` if it's plain
+   HTTP).
+2. Push a candidate. Spans should appear in whatever backend the collector
+   forwards to: one root span per run, with children for the trial merge,
+   each check, and the land. This is export only — SQLite `history` (if
+   configured) is a separate, always-local store; OTLP doesn't feed it and
+   isn't fed by it.
+
+## Check environment reference
+
+Every executor (local or container) sets five environment variables before
+running a check's command, and provides a result file for reporting
+`skipped`:
+
+- `GAUNTLET_BASE_SHA` — the target tip the trial merge was built onto.
+- `GAUNTLET_MERGE_SHA` — the tested merge commit (base + candidate).
+- `GAUNTLET_CANDIDATE_SHA` — the candidate's own commit.
+- `GAUNTLET_REF` — the candidate's queue-slot ref
+  (`refs/heads/for/<target>/<user>/<topic>`).
+- `GAUNTLET_RESULT_FILE` — path to a file the check may write to report a
+  verdict other than pass/fail.
+
+**Result-file protocol.** A non-zero exit is always a failure, full stop —
+the result file is ignored on failure. On exit 0: a result file containing
+`skipped` reports `CheckSkipped` (distinct from `passed` in history, so a
+skipped check doesn't quietly count as green); an absent or empty file is
+`CheckPassed`.
+
+This is the whole mechanism for conditional/monorepo-style execution —
+gauntlet has no path-filter config (see DESIGN.md "Decision ledger": path
+globs, never). An affected-only check decides for itself, using the SHAs
+it's handed:
+
+```sh
+if git diff --name-only "$GAUNTLET_BASE_SHA" "$GAUNTLET_MERGE_SHA" | grep -q '^services/web/'; then
+    go test ./services/web/...
+else
+    echo skipped > "$GAUNTLET_RESULT_FILE"
+fi
+```
+
+Note the check's working tree is a plain export (`git archive`, no `.git`),
+so resolving that diff needs a git object store the check can reach on its
+own — e.g. a clone the check maintains in a cache volume, or a shallow fetch
+of just those two SHAs. Gauntlet hands you the SHAs; how you turn them into
+a diff is repo-owned, same as everything else about what a check does.
+
 **Status:** phase 1 is under construction.
 
 See [DESIGN.md](DESIGN.md) for the full design and rationale.
