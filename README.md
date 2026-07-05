@@ -726,3 +726,7 @@ a diff is repo-owned, same as everything else about what a check does.
 **Status:** phase 1 is under construction.
 
 See [DESIGN.md](DESIGN.md) for the full design and rationale.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
