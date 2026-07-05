@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -415,9 +416,13 @@ func (d *Daemon) cancelRun(r *run) {
 	r.cur = nil
 }
 
-// chainLink is one candidate's link in the (length-1, in this chunk)
-// merge-commit chain (docs/plans/phase5.md §1.2): the --no-ff merge commit
-// itself, the tree it was tested against, and the candidate it links in.
+// chainLink is one candidate's link in the merge-commit chain
+// (docs/plans/phase5.md §1.2): the --no-ff merge commit itself, the tree it
+// was tested against, and the candidate it links in. len(lane.runs[*].members)
+// is still 1 everywhere in this chunk (serial), but buildChainLink itself is
+// chain-length-agnostic — chain_test.go proves it against real git for
+// multi-link chains (P5-D), ahead of P5-E/F actually growing a run's member
+// list past one.
 type chainLink struct {
 	mergeOID string
 	treeOID  string
@@ -441,6 +446,15 @@ type chainLink struct {
 // prefix tryStartTrial used as its Detail string. A conflict is signalled
 // by trial.Clean == false with a zero link and nil err — the caller
 // distinguishes that case itself (a conflict is data, not an error).
+//
+// base need not be a real ref: it may be a prior chain link's mergeOID — an
+// unpushed commit that exists only as a loose object in the local repo
+// (docs/plans/phase5.md §1.1's spike finding, and P5-D's chain_test.go: both
+// MergeTree and CommitTree resolve any commit-ish from the object store
+// regardless of refs, and MergeTree detects a conflict against a chained
+// base identically to one against a real ref). No change was needed in this
+// function itself to support that — only its callers building multi-link
+// chains (P5-E/F) are new.
 func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
 	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
 	trial, err := d.git.MergeTree(ctx, base, cand.SHA)
@@ -476,6 +490,47 @@ func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base s
 		return chainLink{}, trial, fmt.Errorf("commit-tree: %w", err)
 	}
 	return chainLink{mergeOID: mergeOID, treeOID: trial.TreeOID, cand: cand}, trial, nil
+}
+
+// specChanged reports whether cfg.CheckSpec's content differs between
+// prevTree and newTree — the §10 amendment-3 batch-boundary test
+// (docs/plans/phase5.md): while chaining, a member whose merge changes the
+// check-spec content relative to the chain's tree *before* that member's
+// link terminates the batch there (the member is included, tested under its
+// own change; later picks start the next batch, P5-E). prevTree/newTree may
+// be any tree-ish (a commit or a tree) — exactly ReadFileFromTree's own
+// contract; the intended callers pass a link's base and its resulting
+// trial.TreeOID.
+//
+// This compares file *content*, not a blob OID: ReadFileFromTree returns
+// bytes, not an object ID, and content comparison is what the plan calls
+// for (a byte-identical spec re-added at a different path, or vice versa,
+// isn't a "change" this check cares about — only the text the parser reads
+// from cfg.CheckSpec matters).
+//
+// ReadFileFromTree errors identically whether cfg.CheckSpec is genuinely
+// absent from a tree or the read failed for some other reason (gitx wraps
+// "cat-file -p <tree>:<path>" as one opaque error, git_test.go's
+// TestReadFileFromTree confirms no distinct "not found" signal exists at
+// this layer). Either kind of failure is treated here as "the spec is
+// absent in that tree", which is the conservative direction for this use:
+// a spec appearing or disappearing between two chain trees is itself
+// substantive (the batch boundary should fire), and a merely transient real
+// git failure would surface again, identically, the next time that tree's
+// spec is read for real (startRun's own ReadFileFromTree on the eventual
+// chain tip) — no signal is silently dropped by folding it into "changed"
+// here.
+func (d *Daemon) specChanged(ctx context.Context, prevTree, newTree string) bool {
+	prev, prevErr := d.git.ReadFileFromTree(ctx, prevTree, d.cfg.CheckSpec)
+	next, nextErr := d.git.ReadFileFromTree(ctx, newTree, d.cfg.CheckSpec)
+	switch {
+	case prevErr != nil && nextErr != nil:
+		return false // absent on both sides: no change
+	case prevErr != nil || nextErr != nil:
+		return true // the spec appeared or disappeared
+	default:
+		return !bytes.Equal(prev, next)
+	}
 }
 
 // refillLane tries to fill an idle lane for one tick (docs/plans/phase5.md
