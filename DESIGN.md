@@ -24,8 +24,8 @@ is agent-written and *how the branch got there* is data worth keeping.
   exact merge commit, red is discarded.
 - **Serialize first, speculate later.** One lane, FIFO. Two changes each green
   against the current tip can still break together; testing against
-  tip-as-it-will-be is the point. Zuul-style speculative pipelining is the
-  designed-in growth path, built only if measured queue depth hurts.
+  tip-as-it-will-be is the point. *(The growth path was built 2026-07-05 —
+  per-target `mode "serial"|"batch"|"speculate"`; serial remains the default.)*
 - **Preserve history: merge `--no-ff`, candidate as-is.** Never rebase, never
   squash — rewriting SHAs/messages destroys the record of how the work
   happened. `log --first-parent` reads as the ledger of landings; full branch
@@ -56,6 +56,7 @@ is agent-written and *how the branch got there* is data worth keeping.
 | **KEPT** | OTel-shaped observability from day one | A run is a trace: root span per run, children for trial-merge, each check, the land. Core emits structured run records (stable run ID; per-check name/verdict/duration) through the OTel API with a no-op provider from phase 1; OTLP exporter is config, phase 3. SQLite stays as the *queryable* local history (dashboard, red-rate) — OTel is export, not storage. |
 | **KEPT** | Go-team testing style | Test at the API layer (`ReconcileOnce`, `LoadDaemon` — not internals). **Fakes, not mocks**: test doubles are real implementations with affordances (gated executor, recording channel), and the git layer is exercised against real bare repos, never a stubbed interface. Deterministic stepping via injectable ticks, no wall-clock sleeps. Growth layer: rsc/script-style scenario tests (a tiny command DSL over txtar — `push-candidate` / `tick` / `release-check` / `assert-target`) once the daemon surface stabilizes; the "write the DSL that makes good testing easy" move belongs in tests, exactly where it's banned from config. *(Library decided 2026-07-05 by head-to-head spike: `go-internal/testscript` — actively maintained, per-scenario state via Setup/Values, hermetic env; rsc.io/script is orphaned. Port pattern: one Cmds set, two Setups — fake-git and real-git harnesses run the same scenario files.)* |
 | **KEPT** | Full per-check log files (decided 2026-07-05, supersedes the 64KiB-only stance) | The executor tees each check's combined output to `<state>/logs/<runID>/<check>.log` (CheckJob.LogPath, assigned by the queue; empty ⇒ no file). The in-band `CheckResult.Output` stays tail-capped at 64KiB — it's the fast inline view (notifications, run page, history row); the file is the complete record (dashboard "full log" link, API/MCP path). Serving is containment-checked under the log root; retention prunes by age (default 30d). `Event` additionally carries the finished `*CheckResult` on check-finished events so channels can show per-check verdicts mid-run. |
+| **KEPT** | Batching and speculation as per-target modes (phase 5) | `batch`: up to max-batch candidates chained into per-candidate `--no-ff` merges, ONE suite on the chain tip, one CAS push lands all (`--first-parent` unchanged: one merge per candidate); red ⇒ per-member skip + serial fallback until the culprit parks; spec-changing members terminate their batch ("tested by its own definition" holds). `speculate`: window of pipelined runs, each on the predicted tip; red ⇒ bubble (suffix re-queues); FIFO landings structurally CAS-enforced. Both tunable with the dashboard's queue-depth data; governor/bisect knobs reserved. docs/plans/phase5.md is the record. |
 | **KILLED** | Persistent staging branch | A second head you reconcile forever; pure contention with fast committers. (Inherited verdict from the original design exploration.) |
 
 ## Invariants

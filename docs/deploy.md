@@ -320,3 +320,11 @@ durable state gauntlet depends on — back that up the same way you already
 back up any git remote (hosted-provider durability, or your own mirror/
 replication if self-hosted). Nothing gauntlet-specific needs a separate
 backup job beyond that.
+
+### Object accumulation (batch/speculate)
+
+Trial merges and chain links are commits with no refs; abandoned ones (red
+batches, invalidated windows, crashes) sit in the daemon's bare repo as loose
+objects until `git gc` collects them. Harmless — but a busy queue's state dir
+benefits from an occasional `git -C <state>/repos/<key> gc` (safe while the
+daemon runs; git locks correctly).
