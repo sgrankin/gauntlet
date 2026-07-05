@@ -32,10 +32,10 @@ import (
 )
 
 func main() {
-	// "land", "status", and "retry" are client-side porcelain
-	// (cmd/gauntlet/land.go, cmd/gauntlet/status.go): thin HTTP/git clients
-	// that talk to an already-running daemon rather than running it.
-	// Everything else is the daemon itself.
+	// "land", "status", "retry", and "version" are client-side porcelain
+	// (cmd/gauntlet/land.go, cmd/gauntlet/status.go, cmd/gauntlet/version.go):
+	// thin HTTP/git clients (or, for "version", pure local info) that don't
+	// run the daemon. Everything else is the daemon itself.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "land":
@@ -56,6 +56,9 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "version":
+			fmt.Println(versionString())
+			return
 		}
 	}
 	if err := run(); err != nil {
@@ -72,7 +75,13 @@ func run() error {
 
 	configPath := flag.String("config", "", "path to the daemon config (gauntlet.kdl) [required]")
 	statePath := flag.String("state", defaultState, "directory for the daemon's bare repo clone(s)")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return nil
+	}
 
 	if *configPath == "" {
 		return errors.New("-config is required (path to gauntlet.kdl)")

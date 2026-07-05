@@ -52,6 +52,10 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 		opts = append(opts, dashboard.WithChannel(dashCh))
 		retry = dashCh.TrySend
 	}
+	// version is main.go's package var (version.go), stamped at build time
+	// via -ldflags; "devel" for a plain `go build`. Surfaced in the
+	// dashboard footer purely as an operator convenience (docs/deploy.md).
+	opts = append(opts, dashboard.WithVersion(version))
 
 	// The MCP server (chunk E5) is mounted at /mcp on the same listener as
 	// the dashboard, since it's meant for agents that already know the

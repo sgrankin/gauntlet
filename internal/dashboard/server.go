@@ -63,13 +63,17 @@ type dash struct {
 	// ch is nil unless New was called with WithChannel: POST /api/v1/retry
 	// only has somewhere to send a retry Command when it is set (api.go).
 	ch *Channel
+
+	// version is empty unless New was called with WithVersion; the footer
+	// omits its version line in that case (api.go's WithVersion doc).
+	version string
 }
 
 // --- / --------------------------------------------------------------------
 
 func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 	snap := d.snapshot()
-	data := indexData{baseData: newBase("gauntlet", snap, true)}
+	data := indexData{baseData: d.newBase("gauntlet", snap, true)}
 	if snap == nil {
 		data.Starting = true
 		render(w, indexTmpl, data)
@@ -101,7 +105,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	if snap == nil {
 		// No pass has completed, so we can't tell a real target name from a
 		// typo yet — show the friendly starting-up state rather than 404.
-		b := newBase(name, snap, true)
+		b := d.newBase(name, snap, true)
 		b.Starting = true
 		render(w, targetTmpl, targetData{baseData: b, Name: name})
 		return
@@ -114,7 +118,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := targetData{
-		baseData:  newBase(ts.Name, snap, true),
+		baseData:  d.newBase(ts.Name, snap, true),
 		Name:      ts.Name,
 		Branch:    ts.Branch,
 		TargetTip: orDash(ts.TargetTip),
@@ -156,7 +160,7 @@ func findTarget(snap *queue.Snapshot, name string) (queue.TargetSnapshot, bool) 
 func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 	if d.store == nil {
-		render(w, runTmpl, runData{baseData: newBase(runID, nil, false)})
+		render(w, runTmpl, runData{baseData: d.newBase(runID, nil, false)})
 		return
 	}
 
@@ -172,7 +176,7 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := runData{
-		baseData:     newBase(row.RunID, nil, false),
+		baseData:     d.newBase(row.RunID, nil, false),
 		StoreEnabled: true,
 		Run: runSummaryFull{
 			RunID: row.RunID, Target: row.Target,
@@ -210,7 +214,7 @@ func (d *dash) handleChecks(w http.ResponseWriter, r *http.Request) {
 	since := parseSince(r.URL.Query().Get("since"), now)
 
 	data := checksData{
-		baseData: newBase("checks", nil, false),
+		baseData: d.newBase("checks", nil, false),
 		Target:   target,
 		Since:    formatTime(since),
 	}
@@ -597,14 +601,18 @@ type baseData struct {
 	Refresh     bool
 	GeneratedAt string
 	Starting    bool
+	Version     string
 }
 
-func newBase(title string, snap *queue.Snapshot, refresh bool) baseData {
+// newBase is a method (rather than a free function) only so it can reach
+// d.version — the gauntlet version string set via WithVersion (api.go),
+// shown in every page's footer. Empty unless the option was used.
+func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool) baseData {
 	at := time.Now()
 	if snap != nil {
 		at = snap.At
 	}
-	return baseData{Title: title, Refresh: refresh, GeneratedAt: formatTime(at)}
+	return baseData{Title: title, Refresh: refresh, GeneratedAt: formatTime(at), Version: d.version}
 }
 
 type indexData struct {

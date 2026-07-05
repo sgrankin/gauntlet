@@ -111,7 +111,7 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 <h1>{{.Title}}</h1>
 </header>
 <main>{{block "content" .}}{{end}}</main>
-<footer class="muted"><small>generated {{.GeneratedAt}}</small></footer>
+<footer class="muted"><small>generated {{.GeneratedAt}}{{if .Version}} · gauntlet {{.Version}}{{end}}</small></footer>
 </body>
 </html>
 {{end}}

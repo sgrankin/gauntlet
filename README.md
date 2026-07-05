@@ -58,6 +58,21 @@ new SHA to it.
 
 The daemon shuts down cleanly on `SIGINT`/`SIGTERM`.
 
+`gauntlet -version` (or the `version` subcommand) prints the daemon's
+version, the Go toolchain and GOOS/GOARCH it was built with, and — when
+built with `go build` from a VCS checkout — the exact commit, straight from
+`runtime/debug.BuildInfo`.
+
+## Deploying
+
+See [docs/deploy.md](docs/deploy.md) for the production guide: the
+recommended warm-builder-VM topology (systemd unit included) and a
+container-based alternative, plus git-version/remote-auth requirements,
+GitHub PAT permissions, dashboard/API/MCP exposure guidance, and backup
+notes. `make build` (version stamped from `git describe`), `make test`, and
+`make image` (docker/podman/`container`) are the build entry points; see
+the [`Makefile`](Makefile) and [`Dockerfile`](Dockerfile).
+
 ## Landing changes
 
 Queue slot = ref name, SHA = what gets tested (see [DESIGN.md](DESIGN.md)
@@ -313,8 +328,13 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
 
 ### GitHub commit status
 
-1. Create a PAT with the `repo:status` scope (classic PAT — that scope is
-   enough to write commit statuses; no other repo access is needed).
+1. Create a **fine-grained PAT** scoped to the one repository, with
+   **Commit statuses: Read and write** and nothing else (GitHub adds
+   **Metadata: Read-only** automatically — that's expected and sufficient;
+   no other permission is needed unless the git remote itself also
+   authenticates via this token, in which case add **Contents: Read and
+   write** too — see [docs/deploy.md](docs/deploy.md#github-fine-grained-pat-minimal-permissions)
+   for the full writeup).
 2. Export it as `GITHUB_TOKEN` (or whatever `token-env` names) in the
    daemon's environment.
 3. Add a `github "<owner>/<repo>"` node to `gauntlet.kdl`.

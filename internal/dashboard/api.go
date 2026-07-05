@@ -110,6 +110,14 @@ func WithChannel(ch *Channel) Option {
 	return func(d *dash) { d.ch = ch }
 }
 
+// WithVersion sets the gauntlet version string shown in every page's
+// footer (cmd/gauntlet wires this from its own main.version, docs/deploy.md
+// P1 packaging). Without this option the footer omits the version line
+// entirely, same as today.
+func WithVersion(v string) Option {
+	return func(d *dash) { d.version = v }
+}
+
 // mountAPIRoutes registers the JSON API beside the HTML routes New already
 // registers. /api/v1/retry is registered without a method verb (unlike the
 // GET-only routes) because its handler needs full control over the 405
