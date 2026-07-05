@@ -36,7 +36,17 @@ gauntlet -config gauntlet.kdl -state ~/.cache/gauntlet
 
 - `-config` (required) — path to the daemon config (`gauntlet.kdl`).
 - `-state` — directory for the daemon's local bare-repo clone(s), keyed per
-  remote. Defaults to `gauntlet` under `os.UserCacheDir()`.
+  remote, plus a `trials/` scratch directory (see below). Defaults to
+  `gauntlet` under `os.UserCacheDir()`.
+
+At startup the daemon probes `git --version` and refuses to run below git
+2.38 (the `git merge-tree --write-tree` requirement above) — a clear error
+naming the requirement, rather than a confusing failure the first time a
+trial merge runs. It also removes and recreates `<state>/trials`, the
+scratch directory each candidate's trial tree is exported into: it only ever
+holds ephemeral exports for whatever run is currently in flight, never
+anything that needs to survive a restart, so sweeping it on every startup is
+always safe and cleans up anything an earlier crash left behind.
 
 **The land flow:** push your branch to `refs/heads/for/<target>/<user>/<topic>`.
 Each poll tick the daemon trial-merges the candidate onto the live tip of
@@ -107,13 +117,12 @@ push.
 
 ## Configuration reference
 
-**Phase 2/3 — in progress.** The `history`, `dashboard`, `github`, `slack`,
-`otlp`, and container `executor` nodes below describe the target schema from
-`docs/plans/phase23.md` §3; as of this writing only `internal/config`'s
-phase-1 fields (`remote`, `poll-interval`, `check-spec`, `committer`,
-`merge-message`, `target`) are implemented. Each new node is optional —
-absence disables the feature it configures, so an existing phase-1
-`gauntlet.kdl` keeps working unchanged.
+The `history`, `dashboard`, `github`, `slack`, `otlp`, and container
+`executor` nodes below (`docs/plans/phase23.md` §3) are all wired into the
+daemon (`cmd/gauntlet`) alongside the phase-1 fields (`remote`,
+`poll-interval`, `check-spec`, `committer`, `merge-message`, `target`). Each
+new node is optional — absence disables the feature it configures, so an
+existing phase-1 `gauntlet.kdl` keeps working unchanged.
 
 ```kdl
 history "/var/lib/gauntlet/history.db" {
@@ -167,13 +176,18 @@ executor "container" {
   `token-env` names the environment variable holding a PAT (default
   `GITHUB_TOKEN`); `api-url` is the REST API base (default
   `https://api.github.com`; override for GitHub Enterprise). **Repo absent
-  ⇒ disabled**: no channel is constructed, no requests made.
+  ⇒ disabled**: no channel is constructed, no requests made. Once `repo` is
+  set, an empty/unset `token-env` is a startup error, not a silent no-op —
+  the daemon refuses to start rather than run a channel it can't
+  authenticate.
 - **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
   threaded run messages in the given channel ID, root edited to a
   pass/fail mark on landing, `:recycle:` on the root re-queues via retry.
   `app-token-env`/`bot-token-env` name the environment variables holding the
   app-level (socket mode) and bot tokens (defaults `SLACK_APP_TOKEN` /
-  `SLACK_BOT_TOKEN`). **Channel absent ⇒ disabled.**
+  `SLACK_BOT_TOKEN`). **Channel absent ⇒ disabled.** Once `channel` is set,
+  either token being empty/unset is a startup error, same rationale as
+  `github` above.
 - **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter
   (`internal/obs`) pointed at `<endpoint>`; `insecure` skips TLS (typical for
   a local collector). The daemon already emits spans via the OTel API in
