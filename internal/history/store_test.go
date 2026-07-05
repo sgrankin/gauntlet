@@ -669,6 +669,196 @@ func TestMigrate_V4ToV5(t *testing.T) {
 	}
 }
 
+// schemaV5SQL is schema.sql as it existed before chunk 1 (phase 6) added the
+// retry_intents/ignored_refs/hook_runs tables: runs/checks/hooks/queue_depth
+// exist with every column through the batch columns, but none of the v6
+// durability tables exist yet. Kept here, verbatim, so TestMigrate_V5ToV6
+// can build a genuine v5 database by hand and prove the running code
+// migrates it forward correctly.
+const schemaV5SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL,
+  batch_id     TEXT NOT NULL DEFAULT '',
+  position     INTEGER NOT NULL DEFAULT 0,
+  batch_size   INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE hooks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_hooks_name ON hooks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+`
+
+// TestMigrate_V5ToV6 builds a v5 database by hand (schemaV5SQL, none of
+// retry_intents/ignored_refs/hook_runs exist yet, user_version stamped to 5
+// — exactly what an already-deployed v5 Store would have on disk) and
+// confirms that opening it with the current code migrates it in place:
+// user_version lands on schemaVersion, the pre-existing run row survives
+// untouched, and all three new v6 tables are usable — a fresh
+// EventRetryRequested/EventIgnoredRef/EventHookStarted/EventHookSkipped Emit
+// each round-trips through the newly-created tables.
+func TestMigrate_V5ToV6(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v5.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV5SQL); err != nil {
+		t.Fatalf("apply v5 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 5`); err != nil {
+		t.Fatalf("stamp user_version=5: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1)`,
+	); err != nil {
+		t.Fatalf("seed v5 run: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v5 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	run, _, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if run.RunID != "run-old" {
+		t.Errorf("Run(run-old) after migrate = %+v, want the pre-existing row untouched", run)
+	}
+
+	ctx := context.Background()
+
+	// EventRetryRequested -> retry_intents.
+	retryAt := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventRetryRequested, At: retryAt, Target: "main",
+		Candidate: core.Candidate{Ref: "refs/heads/for/main/alice/feat", SHA: "newsha"},
+	}); err != nil {
+		t.Fatalf("Emit EventRetryRequested after migrate: %v", err)
+	}
+
+	// EventIgnoredRef -> ignored_refs.
+	ignoredAt := time.Date(2026, 7, 5, 10, 1, 0, 0, time.UTC)
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventIgnoredRef, At: ignoredAt, Target: "typoed",
+		Candidate: core.Candidate{Ref: "refs/heads/for/typoed/alice/x", SHA: "sha1"},
+		Detail:    `target "typoed" is not configured`,
+	}); err != nil {
+		t.Fatalf("Emit EventIgnoredRef after migrate: %v", err)
+	}
+	refs, err := s.IgnoredRefs("typoed", 10)
+	if err != nil {
+		t.Fatalf("IgnoredRefs after migrate: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Ref != "refs/heads/for/typoed/alice/x" {
+		t.Errorf("IgnoredRefs after migrate = %+v, want one row", refs)
+	}
+
+	// EventHookStarted -> hook_runs (owed row).
+	startedAt := time.Date(2026, 7, 5, 10, 2, 0, 0, time.UTC)
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventHookStarted, At: startedAt, Target: "main",
+		RunID: "run-old", CheckName: "deploy", HookIndex: 0, HookCount: 2,
+	}); err != nil {
+		t.Fatalf("Emit EventHookStarted after migrate: %v", err)
+	}
+	summaries, err := s.HookRunSummaries("main", 10)
+	if err != nil {
+		t.Fatalf("HookRunSummaries after migrate: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].OwedCount != 2 || summaries[0].Skipped {
+		t.Errorf("HookRunSummaries after migrate = %+v, want one unskipped owed=2 row", summaries)
+	}
+
+	// EventHookSkipped -> hook_runs (skipped row), a different run_id.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size)
+		 VALUES ('run-skipped', 'main', 'refs/heads/for/main/bob/x', 'bob', 'x', 'deadbeef',
+			'', '', 0, 'landed', '', 0, 1000, 1000, '', 0, 1)`,
+	); err != nil {
+		t.Fatalf("seed run-skipped: %v", err)
+	}
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventHookSkipped, At: startedAt, Target: "main",
+		RunID: "run-skipped", Detail: "recovered landing; hooks not run", HookCount: 3,
+	}); err != nil {
+		t.Fatalf("Emit EventHookSkipped after migrate: %v", err)
+	}
+	summaries, err = s.HookRunSummaries("main", 10)
+	if err != nil {
+		t.Fatalf("HookRunSummaries after skip: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("HookRunSummaries after skip = %d rows, want 2", len(summaries))
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }
@@ -966,6 +1156,240 @@ func TestStore_Hooks_EmptyForRunWithNoHooks(t *testing.T) {
 	}
 	if len(hooks) != 0 {
 		t.Errorf("Hooks = %+v, want none", hooks)
+	}
+}
+
+// --- v6 durability rows: retry_intents, ignored_refs, hook_runs (S3, S7c, S1-C) ---
+
+// TestStore_Emit_RetryIntent_UpsertsLatest confirms writeRetryIntent's
+// upsert: a second EventRetryRequested for the same (target, ref) replaces
+// the first's sha/at rather than erroring or creating a second row — only
+// the LATEST retry matters to LatestTerminalPerRef's seed-park suppression.
+func TestStore_Emit_RetryIntent_UpsertsLatest(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	ref := "refs/heads/for/main/alice/feat"
+
+	first := time.Date(2026, 7, 5, 9, 0, 0, 0, time.UTC)
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventRetryRequested, At: first, Target: "main",
+		Candidate: core.Candidate{Ref: ref, SHA: "sha1"},
+	}); err != nil {
+		t.Fatalf("Emit (1st retry): %v", err)
+	}
+
+	second := first.Add(time.Minute)
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventRetryRequested, At: second, Target: "main",
+		Candidate: core.Candidate{Ref: ref, SHA: "sha2"},
+	}); err != nil {
+		t.Fatalf("Emit (2nd retry): %v", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM retry_intents WHERE target = ? AND ref = ?`, "main", ref).Scan(&count); err != nil {
+		t.Fatalf("count retry_intents: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("retry_intents rows for (main, %s) = %d, want 1 (upsert, not append)", ref, count)
+	}
+
+	var sha string
+	var atMS int64
+	if err := s.db.QueryRow(`SELECT sha, at FROM retry_intents WHERE target = ? AND ref = ?`, "main", ref).Scan(&sha, &atMS); err != nil {
+		t.Fatalf("read retry_intents: %v", err)
+	}
+	if sha != "sha2" || !time.UnixMilli(atMS).Equal(second) {
+		t.Errorf("retry_intents row = sha=%q at=%v, want sha2 at %v (latest wins)", sha, time.UnixMilli(atMS), second)
+	}
+}
+
+// TestStore_LatestTerminalPerRef_RetrySuppressesStalePark is the store-level
+// proof of S3's exact fix: a ref's most recent terminal outcome is a
+// rejection, but an operator's retry (EventRetryRequested) landed AFTER that
+// rejection's ended_at — simulating a daemon crash between the retry and the
+// retried run's own terminal event. LatestTerminalPerRef must omit this ref
+// entirely (not just report it differently): the stale rejection must never
+// again be treated as a park candidate.
+func TestStore_LatestTerminalPerRef_RetrySuppressesStalePark(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	ref := "refs/heads/for/main/alice/feat"
+
+	emitRun(t, s, "run-1", "main", ref, "sha1", core.OutcomeRejected, "first try failed", base)
+
+	// The retry lands AFTER the rejection's ended_at (base + 1s).
+	retryAt := base.Add(time.Hour)
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventRetryRequested, At: retryAt, Target: "main",
+		Candidate: core.Candidate{Ref: ref, SHA: "sha1"},
+	}); err != nil {
+		t.Fatalf("Emit EventRetryRequested: %v", err)
+	}
+
+	verdicts, err := s.LatestTerminalPerRef("main")
+	if err != nil {
+		t.Fatalf("LatestTerminalPerRef: %v", err)
+	}
+	for _, v := range verdicts {
+		if v.Ref == ref {
+			t.Fatalf("LatestTerminalPerRef returned %+v for %s, want it omitted (retry newer than the terminal must suppress the stale park)", v, ref)
+		}
+	}
+
+	// A later terminal (the retried run rejected again) re-parks with the
+	// new reason: ended_at now postdates the retry again.
+	emitRun(t, s, "run-2", "main", ref, "sha1", core.OutcomeRejected, "regressed again", retryAt.Add(time.Minute))
+
+	verdicts, err = s.LatestTerminalPerRef("main")
+	if err != nil {
+		t.Fatalf("LatestTerminalPerRef (after re-reject): %v", err)
+	}
+	var found bool
+	for _, v := range verdicts {
+		if v.Ref == ref {
+			found = true
+			if v.Detail != "regressed again" {
+				t.Errorf("re-parked verdict = %+v, want Detail=%q", v, "regressed again")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("a terminal newer than the retry must re-include the ref as a park candidate")
+	}
+}
+
+// TestStore_HookRunSummaries_OwedGreaterThanDoneIsCrashIncomplete is S1-C's
+// crash-timing acceptance criterion at the store layer: a landing whose
+// hook_runs row records owed_count=3 (EventHookStarted fired for hook 0)
+// but only 1 hooks row exists (the chain never got further — a simulated
+// daemon crash mid-chain) must report OwedCount > DoneCount with
+// Skipped=false, the exact signal HookRunSummaries exists to surface
+// (crash-incomplete, discoverable without ever auto-resuming a hook).
+// Contrasted with a landing that finished normally (owed == done) and one
+// that was deliberately skipped (recovery landing, never crash-incomplete
+// regardless of owed vs. done).
+func TestStore_HookRunSummaries_OwedGreaterThanDoneIsCrashIncomplete(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	// run-crashed: EventHookStarted says 3 hooks owed; only 1 ever finished
+	// (writeHookResult below records exactly one hooks row) — simulating a
+	// daemon crash between hook 0 finishing and hook 1 starting.
+	crashedRec := sampleRecord("run-crashed", "main", base)
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-crashed", Record: crashedRec}); err != nil {
+		t.Fatalf("Emit (run-crashed landed): %v", err)
+	}
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventHookStarted, At: base, Target: "main",
+		RunID: "run-crashed", CheckName: "deploy", HookIndex: 0, HookCount: 3,
+	}); err != nil {
+		t.Fatalf("Emit (run-crashed hook 0 started): %v", err)
+	}
+	if err := s.Emit(ctx, hookFinishedEvent("run-crashed", "main", "deploy", core.CheckResult{Status: core.CheckPassed})); err != nil {
+		t.Fatalf("Emit (run-crashed hook 0 finished): %v", err)
+	}
+	// Hook 1 never starts: the daemon "crashed" here.
+
+	// run-complete: owed_count == done_count, a perfectly normal landing.
+	completeRec := sampleRecord("run-complete", "main", base.Add(time.Minute))
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-complete", Record: completeRec}); err != nil {
+		t.Fatalf("Emit (run-complete landed): %v", err)
+	}
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventHookStarted, At: base.Add(time.Minute), Target: "main",
+		RunID: "run-complete", CheckName: "deploy", HookIndex: 0, HookCount: 1,
+	}); err != nil {
+		t.Fatalf("Emit (run-complete hook started): %v", err)
+	}
+	if err := s.Emit(ctx, hookFinishedEvent("run-complete", "main", "deploy", core.CheckResult{Status: core.CheckPassed})); err != nil {
+		t.Fatalf("Emit (run-complete hook finished): %v", err)
+	}
+
+	// run-skipped-recovery: owed_count=2, done_count=0, but Skipped=true —
+	// must never read as crash-incomplete despite owed > done.
+	skippedRec := sampleRecord("run-skipped-recovery", "main", base.Add(2*time.Minute))
+	skippedRec.MergeSHA = ""
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-skipped-recovery", Record: skippedRec}); err != nil {
+		t.Fatalf("Emit (run-skipped-recovery landed): %v", err)
+	}
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventHookSkipped, At: base.Add(2 * time.Minute), Target: "main",
+		RunID: "run-skipped-recovery", Detail: "recovered landing; hooks not run", HookCount: 2,
+	}); err != nil {
+		t.Fatalf("Emit (run-skipped-recovery skipped): %v", err)
+	}
+
+	summaries, err := s.HookRunSummaries("main", 10)
+	if err != nil {
+		t.Fatalf("HookRunSummaries: %v", err)
+	}
+	byRunID := make(map[string]HookRunSummary, len(summaries))
+	for _, h := range summaries {
+		byRunID[h.RunID] = h
+	}
+	if len(byRunID) != 3 {
+		t.Fatalf("HookRunSummaries = %d distinct runs, want 3 (got %+v)", len(byRunID), summaries)
+	}
+
+	crashed := byRunID["run-crashed"]
+	if crashed.OwedCount != 3 || crashed.DoneCount != 1 || crashed.Skipped {
+		t.Errorf("run-crashed summary = %+v, want OwedCount=3 DoneCount=1 Skipped=false (crash-incomplete)", crashed)
+	}
+	if crashed.OwedCount <= crashed.DoneCount {
+		t.Errorf("run-crashed OwedCount=%d DoneCount=%d, want OwedCount > DoneCount", crashed.OwedCount, crashed.DoneCount)
+	}
+
+	complete := byRunID["run-complete"]
+	if complete.OwedCount != 1 || complete.DoneCount != 1 || complete.Skipped {
+		t.Errorf("run-complete summary = %+v, want OwedCount=1 DoneCount=1 Skipped=false (finished normally)", complete)
+	}
+
+	skipped := byRunID["run-skipped-recovery"]
+	if skipped.OwedCount != 2 || skipped.DoneCount != 0 || !skipped.Skipped || skipped.SkipReason == "" {
+		t.Errorf("run-skipped-recovery summary = %+v, want OwedCount=2 DoneCount=0 Skipped=true with a reason", skipped)
+	}
+}
+
+// TestStore_IgnoredRefs_NewestFirstAndLimit confirms IgnoredRefs' read
+// contract: rows for target only, newest first, capped at limit.
+func TestStore_IgnoredRefs_NewestFirstAndLimit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	for i, ref := range []string{"refs/heads/for/typoed/a/1", "refs/heads/for/typoed/b/2", "refs/heads/for/typoed/c/3"} {
+		if err := s.Emit(ctx, core.Event{
+			Kind: core.EventIgnoredRef, At: base.Add(time.Duration(i) * time.Minute), Target: "typoed",
+			Candidate: core.Candidate{Ref: ref, SHA: fmt.Sprintf("sha%d", i)},
+			Detail:    `target "typoed" is not configured`,
+		}); err != nil {
+			t.Fatalf("Emit(%s): %v", ref, err)
+		}
+	}
+	// A different target must never leak into "typoed"'s result.
+	if err := s.Emit(ctx, core.Event{
+		Kind: core.EventIgnoredRef, At: base, Target: "other-typo",
+		Candidate: core.Candidate{Ref: "refs/heads/for/other-typo/x/y", SHA: "shaX"},
+		Detail:    `target "other-typo" is not configured`,
+	}); err != nil {
+		t.Fatalf("Emit(other-typo): %v", err)
+	}
+
+	refs, err := s.IgnoredRefs("typoed", 2)
+	if err != nil {
+		t.Fatalf("IgnoredRefs: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("IgnoredRefs limit = %d rows, want 2", len(refs))
+	}
+	if refs[0].Ref != "refs/heads/for/typoed/c/3" || refs[1].Ref != "refs/heads/for/typoed/b/2" {
+		t.Errorf("IgnoredRefs order = [%s %s], want newest-first [c/3 b/2]", refs[0].Ref, refs[1].Ref)
+	}
+	if refs[0].Detail == "" {
+		t.Error("IgnoredRefs[0].Detail is empty")
 	}
 }
 

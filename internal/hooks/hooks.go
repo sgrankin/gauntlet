@@ -179,6 +179,45 @@ type Runner struct {
 	// already-finished landing (see execLanding).
 	mu       sync.Mutex
 	monitors map[string]chan core.Event
+
+	// live is the in-memory state Snapshot/SnapshotAll read (S5's live
+	// observability rider): zero-valued (live.Running == false) whenever no
+	// landing's hooks are currently executing. runLanding sets it once, on
+	// entry, for the whole duration of one landing's hooks (mkdir/export
+	// included, not just the RunCheck calls themselves) and clears it via
+	// defer on every return path; setCurrentHook updates CurrentHook/
+	// HookIndex before each hook's RunCheck. Guarded by mu alongside
+	// monitors — hook execution is globally serial (S25), so at most one
+	// goroutine is ever writing this at a time, but Snapshot/SnapshotAll
+	// read it from arbitrary caller goroutines (dashboard/MCP handlers).
+	live LiveState
+}
+
+// LiveState is a snapshot of what hooks.Runner is doing for one target right
+// now (S5's live observability rider, in-memory only — deliberately not
+// persisted; history.Store.HookRunSummaries is the durable counterpart,
+// S1-C). Running is true iff a landing's hooks are actively executing for
+// Target this instant; CurrentHook/HookIndex/HookCount/StartedAt describe
+// that landing's hook chain (CurrentHook/HookIndex zero-valued before the
+// first hook starts; StartedAt is when this landing's hook execution began,
+// held fixed across every hook in its chain, not reset per hook). Since hook
+// execution is globally serial (S25: one Runner goroutine, at most one
+// landing's hooks running at any instant, across every target at once), at
+// most one target can ever have Running == true at a time.
+//
+// BacklogDepth is the whole Runner's cross-target queue length (len(Runner.
+// queue)) at the moment of the snapshot — approximate by design (a live
+// gauge, not a durable count): it can move between the read and the caller
+// using it, and it counts every target's pending landings, not just
+// Target's.
+type LiveState struct {
+	Target       string
+	Running      bool
+	CurrentHook  string
+	HookIndex    int
+	HookCount    int
+	StartedAt    time.Time
+	BacklogDepth int
 }
 
 // New returns a Runner configured by p. It performs no I/O; Run drains the
@@ -469,6 +508,75 @@ func (r *Runner) CancelCurrent(target string) bool {
 	}
 }
 
+// Snapshot reports target's current LiveState (S5's live observability
+// rider): ok is true iff a landing's hooks are executing for target this
+// instant, in which case the returned LiveState describes it fully. When ok
+// is false, the returned LiveState still carries Target and BacklogDepth
+// (the queue length is target-agnostic — meaningful regardless of whether
+// target itself has anything running) but every hook-specific field is
+// zero.
+func (r *Runner) Snapshot(target string) (LiveState, bool) {
+	r.mu.Lock()
+	live := r.live
+	r.mu.Unlock()
+
+	depth := len(r.queue)
+	if live.Target != target || !live.Running {
+		return LiveState{Target: target, BacklogDepth: depth}, false
+	}
+	live.BacklogDepth = depth
+	return live, true
+}
+
+// SnapshotAll returns every target with a landing currently executing hooks
+// — at most one entry, by the same global-serial guarantee Snapshot's doc
+// describes, but returned as a slice so callers (dashboard, MCP) don't need
+// a special case for "is anything running right now" versus "what,
+// specifically" — an empty slice, not a special sentinel, means nothing is
+// running anywhere.
+func (r *Runner) SnapshotAll() []LiveState {
+	r.mu.Lock()
+	live := r.live
+	r.mu.Unlock()
+
+	if !live.Running {
+		return nil
+	}
+	live.BacklogDepth = len(r.queue)
+	return []LiveState{live}
+}
+
+// setLive marks a landing's hook execution as started for the duration of
+// runLanding's remaining body (mkdir/export included, not just the RunCheck
+// calls) — cleared by the deferred clearLive in runLanding on every return
+// path, so Running never reads stale-true after a landing concludes for any
+// reason (success, export failure, ctx cancellation).
+func (r *Runner) setLive(target string, hookCount int) {
+	r.mu.Lock()
+	r.live = LiveState{Target: target, Running: true, HookCount: hookCount, StartedAt: time.Now()}
+	r.mu.Unlock()
+}
+
+// setCurrentHook updates the in-flight landing's CurrentHook/HookIndex
+// immediately before that hook's RunCheck call — called only while
+// live.Running is already true (setLive having run first), so this never
+// resets StartedAt or HookCount.
+func (r *Runner) setCurrentHook(index int, name string) {
+	r.mu.Lock()
+	r.live.CurrentHook = name
+	r.live.HookIndex = index
+	r.mu.Unlock()
+}
+
+// clearLive resets live to its zero value (Running == false), the
+// counterpart to setLive — always called via defer in runLanding so it
+// fires on every return path.
+func (r *Runner) clearLive() {
+	r.mu.Lock()
+	r.live = LiveState{}
+	r.mu.Unlock()
+}
+
 // landingRef formats ev as "<topic>@<shortSHA>" for log lines and
 // EventHookFinished.Detail — a compact, human-scannable identifier for
 // which landing superseded which.
@@ -520,6 +628,14 @@ func (r *Runner) hookLogPath(runID string, seq int, name string) string {
 // back into the landing or the queue — only the notification fan-out
 // (Params.Emit) and the log.
 //
+// S1-C/S5: a real landing (MergeSHA != "") sets the in-memory live-state
+// gauge (setLive/clearLive) for the whole call and emits EventHookStarted
+// immediately before each hook's RunCheck — history.Store durably upserts
+// the "owed" row from the first one; a recovery-synthesized landing
+// (MergeSHA == "") instead emits one EventHookSkipped and returns before any
+// of that, never touching live state at all (there is nothing running to
+// report).
+//
 // supersede is PolicyCancel's channel from execLanding: non-nil only when
 // ev.Target is configured for PolicyCancel, in which case a hook whose
 // RunCheck comes back with a non-nil Err checks it (non-blockingly) for
@@ -540,9 +656,28 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 		// BaseOID/MergeSHA/Trial stay zero-valued): the merge commit
 		// already landed in an earlier pass and its SHA was never
 		// captured here, so there is no tree to export hooks against.
+		const detail = "recovered landing; hooks not run"
 		fmt.Fprintf(r.log, "hooks: %s: landing has no merge SHA (recovered landing), skipping hooks run=%s\n", ev.Target, rec.RunID)
+		// S1-C: a durable marker (history.Store upserts hook_runs with
+		// skipped=1) so this landing's hooks read as "skipped (recovery)"
+		// on every surface, rather than only reaching the log line above —
+		// kept verbatim alongside this event, not replaced by it.
+		if r.notify != nil {
+			r.notify(context.WithoutCancel(ctx), core.Event{
+				Kind:      core.EventHookSkipped,
+				At:        time.Now(),
+				Target:    ev.Target,
+				Candidate: rec.Candidate,
+				RunID:     rec.RunID,
+				Detail:    detail,
+				HookCount: len(hs),
+			})
+		}
 		return
 	}
+
+	r.setLive(ev.Target, len(hs))
+	defer r.clearLive()
 
 	dir, err := os.MkdirTemp(r.workDir, "landing-")
 	if err != nil {
@@ -560,6 +695,7 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 		if ctx.Err() != nil {
 			return
 		}
+		r.setCurrentHook(i, h.Name)
 
 		job := core.CheckJob{
 			RunID:     rec.RunID,
@@ -572,6 +708,27 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 			Candidate: rec.Candidate,
 			LogPath:   r.hookLogPath(rec.RunID, i+1, h.Name),
 		}
+
+		// S1-C + S5: EventHookStarted fires before this hook's RunCheck,
+		// on this single execution goroutine (S25: globally serial) —
+		// history.Store upserts the durable "owed" row on the first hook
+		// of this landing (ON CONFLICT(run_id) DO NOTHING), synchronously,
+		// before any hook subprocess starts; live consumers (dashboard,
+		// MCP) render every hook's start via Snapshot instead, since
+		// dashboard is pull-only (api.go).
+		if r.notify != nil {
+			r.notify(context.WithoutCancel(ctx), core.Event{
+				Kind:      core.EventHookStarted,
+				At:        time.Now(),
+				Target:    ev.Target,
+				Candidate: rec.Candidate,
+				RunID:     rec.RunID,
+				CheckName: h.Name,
+				HookIndex: i,
+				HookCount: len(hs),
+			})
+		}
+
 		// S5 (OTel rider): give this hook its own "check" span, mirroring
 		// queue's startCheck (internal/queue/reconcile.go) exactly — same
 		// obs.StartCheck/EndCheck pair, same CheckJob/CheckResult shape.

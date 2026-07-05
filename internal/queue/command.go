@@ -63,10 +63,20 @@ func (d *Daemon) applyCommand(ctx context.Context, cmd core.Command, refs map[st
 
 // applyRetry clears the park for (cmd.Target, cmd.Ref) at its current SHA,
 // if one exists, and emits EventQueued with detail "retry: park cleared" so
-// the next pick re-tests it. Idempotent: retrying a ref that isn't parked
-// (already cleared by an earlier retry, a re-push, or because it was never
-// parked at all) is a silent no-op — touches no ref, no CAS, nothing but
-// this in-memory bookkeeping.
+// the next pick re-tests it, plus EventRetryRequested (S3: persisted retry
+// intent) so history.Store can durably record that this retry happened —
+// see that event's own doc and history.Store.LatestTerminalPerRef's
+// seed-park query for why: without it, a daemon crash between this retry
+// and the retried run's own terminal event would have restart's park-seed
+// query re-read the stale pre-retry verdict and silently re-park the ref at
+// its old rejection, undoing the operator's action. In-memory bookkeeping
+// (delete(done, cmd.Ref)) is otherwise unchanged from before S3 — the two
+// emits are additional, not a replacement. Idempotent in-memory: retrying a
+// ref that isn't parked (already cleared by an earlier retry, a re-push, or
+// because it was never parked at all) is a silent no-op — touches no ref,
+// no CAS, nothing but this in-memory bookkeeping (a redundant
+// EventRetryRequested for an already-cleared park is never emitted, since
+// this whole method returns early in that case).
 func (d *Daemon) applyRetry(ctx context.Context, cmd core.Command) {
 	done := d.done[cmd.Target]
 	if done == nil {
@@ -78,13 +88,20 @@ func (d *Daemon) applyRetry(ctx context.Context, cmd core.Command) {
 	}
 	delete(done, cmd.Ref)
 
+	now := d.now()
 	const detail = "retry: park cleared"
 	d.emit(ctx, core.Event{
 		Kind:      core.EventQueued,
-		At:        d.now(),
+		At:        now,
 		Target:    cmd.Target,
 		Candidate: core.Candidate{Ref: cmd.Ref, Target: cmd.Target, SHA: entry.SHA},
 		Detail:    detail,
+	})
+	d.emit(ctx, core.Event{
+		Kind:      core.EventRetryRequested,
+		At:        now,
+		Target:    cmd.Target,
+		Candidate: core.Candidate{Ref: cmd.Ref, Target: cmd.Target, SHA: entry.SHA},
 	})
 }
 

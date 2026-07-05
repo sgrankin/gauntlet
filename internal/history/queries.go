@@ -27,6 +27,27 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	insertDepthSQL = `
 INSERT OR REPLACE INTO queue_depth (at, target, waiting, in_flight, parked)
 VALUES (?, ?, ?, ?, ?)`
+
+	// upsertRetryIntentSQL, insertIgnoredRefSQL, upsertHookRunStartedSQL, and
+	// upsertHookRunSkippedSQL back the v6 durability rows (S3, S7c, S1-C) —
+	// see Store.writeRetryIntent/writeIgnoredRef/writeHookStarted/
+	// writeHookSkipped for the upsert-vs-append reasoning behind each.
+	upsertRetryIntentSQL = `
+INSERT INTO retry_intents (target, ref, sha, at) VALUES (?, ?, ?, ?)
+ON CONFLICT(target, ref) DO UPDATE SET sha = excluded.sha, at = excluded.at`
+
+	insertIgnoredRefSQL = `
+INSERT OR REPLACE INTO ignored_refs (at, target, ref, detail) VALUES (?, ?, ?, ?)`
+
+	upsertHookRunStartedSQL = `
+INSERT INTO hook_runs (run_id, target, owed_count, started_at, skipped, skip_reason)
+VALUES (?, ?, ?, ?, 0, '')
+ON CONFLICT(run_id) DO NOTHING`
+
+	upsertHookRunSkippedSQL = `
+INSERT INTO hook_runs (run_id, target, owed_count, started_at, skipped, skip_reason)
+VALUES (?, ?, ?, ?, 1, ?)
+ON CONFLICT(run_id) DO UPDATE SET skipped = 1, skip_reason = excluded.skip_reason`
 )
 
 // RunRow is one row of the runs table, as read back for the dashboard.
@@ -367,9 +388,23 @@ type RefVerdict struct {
 // is responsible for filtering to red-family outcomes before treating a
 // result as a park seed — this method itself returns every ref's latest
 // verdict regardless of outcome, landed included.
+//
+// S3 read-side (the retry-intent seed-park fix): a ref's latest terminal row
+// is additionally suppressed — omitted from the result entirely — when a
+// retry_intents row for the same (target, ref) is newer than that row's
+// ended_at (LEFT JOIN retry_intents ... WHERE ri.at IS NULL OR ri.at <=
+// ended_at). Net effect: an operator's retry (core.EventRetryRequested,
+// internal/queue/command.go's applyRetry) that hasn't yet been superseded by
+// a fresh terminal outcome means "don't re-seed a park from the stale
+// pre-retry verdict" — the exact bug S3 closes (a daemon crash between the
+// retry and the retried run's own terminal event no longer silently
+// re-parks the ref at its old rejection on restart). If the retried run
+// later produces its OWN newer terminal row (e.g. it rejects again), that
+// row's ended_at is newer than the retry, the join condition is satisfied
+// again, and the ref re-parks correctly with the new reason.
 func (s *Store) LatestTerminalPerRef(target string) ([]RefVerdict, error) {
 	rows, err := s.db.Query(`
-SELECT candidate_ref, candidate_sha, outcome, detail, ended_at
+SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at
 FROM (
 	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at,
 	       ROW_NUMBER() OVER (
@@ -378,8 +413,9 @@ FROM (
 	       ) AS rn
 	FROM runs
 	WHERE target = ?
-)
-WHERE rn = 1`, target)
+) t
+LEFT JOIN retry_intents ri ON ri.target = ? AND ri.ref = t.candidate_ref
+WHERE t.rn = 1 AND (ri.at IS NULL OR ri.at <= t.ended_at)`, target, target)
 	if err != nil {
 		return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
 	}
@@ -397,6 +433,111 @@ WHERE rn = 1`, target)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
+	}
+	return out, nil
+}
+
+// IgnoredRef is one recorded occurrence of core.EventIgnoredRef (S7c): a
+// well-formed candidate ref whose target segment named no configured
+// target, as read back for the dashboard/MCP "recently ignored refs"
+// section (internal/queue/reconcile.go's checkIgnoredRefs is the sole
+// writer, via Store.Emit).
+type IgnoredRef struct {
+	At     time.Time
+	Target string
+	Ref    string
+	Detail string
+}
+
+// IgnoredRefs returns target's most recently ignored refs, newest first,
+// capped at limit — the read side of S7c's durable misconfig capture: an
+// operator not watching the log/Slack at the instant a misnamed/
+// misconfigured ref was pushed can still discover it here after the fact.
+func (s *Store) IgnoredRefs(target string, limit int) ([]IgnoredRef, error) {
+	rows, err := s.db.Query(
+		`SELECT at, target, ref, detail FROM ignored_refs WHERE target = ? ORDER BY at DESC LIMIT ?`,
+		target, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("history: ignored refs %s: %w", target, err)
+	}
+	defer rows.Close()
+
+	var out []IgnoredRef
+	for rows.Next() {
+		var r IgnoredRef
+		var atMS int64
+		if err := rows.Scan(&atMS, &r.Target, &r.Ref, &r.Detail); err != nil {
+			return nil, fmt.Errorf("history: ignored refs %s: %w", target, err)
+		}
+		r.At = time.UnixMilli(atMS)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history: ignored refs %s: %w", target, err)
+	}
+	return out, nil
+}
+
+// HookRunSummary is one landing's durable post-land hook "owed" state
+// (core.EventHookStarted/EventHookSkipped -> hook_runs; S1-C), as read back
+// for the dashboard/MCP: OwedCount is the target's configured hook count at
+// the moment the first hook of this landing started (or, for a skipped
+// landing, at skip time); DoneCount is derived from COUNT(*) of this run's
+// rows in the `hooks` table (never stored redundantly in hook_runs itself).
+//
+// A caller (e.g. the dashboard) reads OwedCount > DoneCount && !Skipped,
+// combined with enough wall-clock time having passed since StartedAt (a
+// "stale" threshold the caller chooses — this method carries no opinion on
+// it, since it has no notion of "now"), as "this landing's hook chain
+// crashed mid-way and will never finish on its own" — the crash-incomplete
+// signal S1-C exists to surface, discoverable without gauntlet ever
+// auto-resuming a hook.
+type HookRunSummary struct {
+	RunID      string
+	Target     string
+	OwedCount  int
+	DoneCount  int
+	StartedAt  time.Time
+	Skipped    bool
+	SkipReason string
+}
+
+// HookRunSummaries returns target's most recent hook_runs entries, newest
+// (by StartedAt) first, capped at limit, each joined against the `hooks`
+// table to derive DoneCount. A landing with no hook_runs row at all (i.e.
+// hooks.Runner never emitted EventHookStarted/EventHookSkipped for it —
+// either the target has no hooks configured, or it predates the v6 schema)
+// simply has no entry here; this is not an error.
+func (s *Store) HookRunSummaries(target string, limit int) ([]HookRunSummary, error) {
+	rows, err := s.db.Query(`
+SELECT hr.run_id, hr.target, hr.owed_count, hr.started_at, hr.skipped, hr.skip_reason,
+       COUNT(h.run_id) AS done_count
+FROM hook_runs hr
+LEFT JOIN hooks h ON h.run_id = hr.run_id
+WHERE hr.target = ?
+GROUP BY hr.run_id
+ORDER BY hr.started_at DESC
+LIMIT ?`, target, limit)
+	if err != nil {
+		return nil, fmt.Errorf("history: hook run summaries %s: %w", target, err)
+	}
+	defer rows.Close()
+
+	var out []HookRunSummary
+	for rows.Next() {
+		var h HookRunSummary
+		var startedMS int64
+		var skipped int
+		if err := rows.Scan(&h.RunID, &h.Target, &h.OwedCount, &startedMS, &skipped, &h.SkipReason, &h.DoneCount); err != nil {
+			return nil, fmt.Errorf("history: hook run summaries %s: %w", target, err)
+		}
+		h.StartedAt = time.UnixMilli(startedMS)
+		h.Skipped = skipped != 0
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history: hook run summaries %s: %w", target, err)
 	}
 	return out, nil
 }

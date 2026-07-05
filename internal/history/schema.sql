@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 5).
+-- schema.sql: gauntlet history store schema (user_version = 6).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -76,4 +76,60 @@ CREATE TABLE queue_depth (
   in_flight INTEGER NOT NULL,
   parked    INTEGER NOT NULL,
   PRIMARY KEY (at, target)
+);
+
+-- retry_intents durably records an operator's most recent retry of a parked
+-- (target, ref) (core.EventRetryRequested, S3): upserted on every retry, one
+-- row per (target, ref) — the latest retry always wins. Read by
+-- LatestTerminalPerRef's seed-park query to suppress re-parking a ref whose
+-- last recorded terminal outcome predates a later retry: without this, a
+-- daemon crash between an operator's retry and the retried run's own
+-- terminal event would silently re-park the ref at its old, now-superseded
+-- rejection on restart (v6+).
+CREATE TABLE retry_intents (
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  sha    TEXT NOT NULL,
+  at     INTEGER NOT NULL,
+  PRIMARY KEY (target, ref)
+);
+
+-- ignored_refs durably records core.EventIgnoredRef (a well-formed candidate
+-- ref whose target segment names no configured target — a misconfiguration,
+-- S7c): one row per occurrence, so an operator not watching the log/Slack at
+-- the instant it happened can still discover it after the fact. Keyed by
+-- (at, target, ref) rather than just (target, ref) since the daemon reports
+-- the same (ref, SHA) at most once per SHA (see checkIgnoredRefs,
+-- internal/queue/reconcile.go) but a ref pushed multiple times over its
+-- lifetime legitimately produces multiple distinct rows (v6+).
+CREATE TABLE ignored_refs (
+  at     INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (at, target, ref)
+);
+
+-- hook_runs durably records one landing's post-land hook "owed" state
+-- (core.EventHookStarted/EventHookSkipped; S1-C's durable owed/skipped
+-- marker, no auto-resume): one row per run_id, written the instant the
+-- FIRST EventHookStarted for that landing reaches history — synchronously,
+-- before any hook subprocess even starts — or, for a recovery-synthesized
+-- landing whose hooks were never run at all, by EventHookSkipped instead.
+-- owed_count is the target's configured hook count at that moment
+-- (EventHookStarted/Skipped's HookCount); the number of hooks actually
+-- finished is derived separately by counting this run_id's rows in the
+-- existing `hooks` table (never stored redundantly here) — see
+-- Store.HookRunSummaries. owed_count > (that count), when skipped = 0, means
+-- the daemon crashed mid-chain: later hooks in this landing's order were
+-- never reached. skipped = 1 (skip_reason set) means hooks were
+-- deliberately never attempted (a recovery landing with no merge SHA to
+-- export), which must never be confused with a crash (v6+).
+CREATE TABLE hook_runs (
+  run_id      TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  target      TEXT NOT NULL,
+  owed_count  INTEGER NOT NULL,
+  started_at  INTEGER NOT NULL,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT NOT NULL DEFAULT ''
 );

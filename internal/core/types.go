@@ -275,6 +275,59 @@ const (
 	// name; Check carries its CheckResult. It is additive like EventIgnoredRef
 	// — channels that don't render it simply ignore it.
 	EventHookFinished
+
+	// EventHookStarted reports that one post-land hook is about to run
+	// (internal/hooks; S1-C's durable owed/skipped marker + S5's live
+	// observability rider): Target, Candidate, and RunID identify the
+	// landing; CheckName is the hook's name; HookIndex is its 0-based
+	// position within this landing's configured hook order and HookCount is
+	// the landing's total configured hook count (see Event's HookIndex/
+	// HookCount doc — meaningful only on hook events, zero on every other
+	// kind). Emitted once per hook, immediately before that hook's
+	// core.Executor.RunCheck call, on hooks.Runner's single execution
+	// goroutine (S25: hook execution stays globally serial — this never
+	// fires from more than one goroutine at a time). history.Store upserts a
+	// durable "owed" row (hook_runs) the first time this fires for a given
+	// RunID — before any hook subprocess actually starts — so a crash
+	// mid-chain leaves owed_count > (COUNT of finished hooks), discoverable
+	// via history.Store.HookRunSummaries without gauntlet ever auto-resuming
+	// anything. Additive like EventIgnoredRef: channel implementations must
+	// ignore EventKind values they don't recognize (this one included)
+	// rather than erroring — new kinds are always additive.
+	EventHookStarted
+
+	// EventHookSkipped reports that a recovery-synthesized landing
+	// (queue/reconcile.go's recoverLanded, whose RunRecord.MergeSHA is
+	// always "" — there is no merge SHA to export a tree from) skipped its
+	// hooks entirely: hooks.Runner.runLanding never calls RunCheck for it at
+	// all. Target, Candidate, and RunID identify the landing; Detail is a
+	// human-readable reason ("recovered landing; hooks not run"); HookCount
+	// is the target's configured hook count, carried for parity with
+	// EventHookStarted's owed accounting (see Event's HookIndex/HookCount
+	// doc). history.Store persists this as a durable hook_runs row with
+	// skipped=1/skip_reason=Detail, so the landing's hooks read as
+	// "skipped (recovery)" on every surface rather than being silently
+	// mistaken for a stalled or crashed chain (S1-C's discoverability, no
+	// auto-resume). Additive like EventIgnoredRef — channel implementations
+	// must ignore EventKind values they don't recognize rather than
+	// erroring.
+	EventHookSkipped
+
+	// EventRetryRequested reports an operator's explicit retry of a parked
+	// (ref, SHA) (queue/command.go's applyRetry, S3's persisted retry
+	// intent): Target and Candidate (Ref, SHA set; User/Topic as parsed)
+	// identify what was retried, At is when. history.Store upserts a
+	// retry_intents row (target, ref) -> (sha, at), latest retry wins, so a
+	// daemon crash between this retry and the retried run's own terminal
+	// event can't silently re-park the ref at its old, now-superseded
+	// rejection (see history's LatestTerminalPerRef seed-park query, which
+	// suppresses a park whose terminal predates a later retry_intents row).
+	// Purely a durability signal — EventQueued, emitted alongside this in
+	// the same applyRetry call, still drives every channel's live
+	// rendering. Additive like EventIgnoredRef — channel implementations
+	// must ignore EventKind values they don't recognize rather than
+	// erroring.
+	EventRetryRequested
 )
 
 // Event is one notification emitted to a Channel. Terminal events —
@@ -289,6 +342,17 @@ type Event struct {
 
 	RunID     string
 	CheckName string
+
+	// HookIndex and HookCount are meaningful only on EventHookStarted
+	// (both) and EventHookSkipped (HookCount only) — hooks.Runner's
+	// per-landing hook accounting — and zero on every other event kind,
+	// the same additive pattern as CheckName. HookIndex is a hook's
+	// 0-based position within its landing's configured hook order
+	// ("hook 0 of HookCount"); EventHookSkipped never sets it, since a
+	// skipped landing never starts any specific hook. HookCount is the
+	// landing's target's total configured hook count.
+	HookIndex int
+	HookCount int
 
 	// Check carries one finished result — the just-finished check on
 	// EventCheckFinished, or the just-finished hook on EventHookFinished —

@@ -23,7 +23,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 5
+const schemaVersion = 6
 
 var _ core.Channel = (*Store)(nil)
 
@@ -89,6 +89,10 @@ func Open(path string) (*Store, error) {
 //   - 4 (schema v4: runs has no batch columns): ALTER TABLE runs ADD COLUMN
 //     batch_id/position/batch_size (docs/plans/phase5.md §10 amendment 1,
 //     batch-aware CheckStats), stamp user_version=5, loop.
+//   - 5 (schema v5: no retry_intents/ignored_refs/hook_runs tables): CREATE
+//     TABLE all three (S3's persisted retry intent, S7c's durable ignored-ref
+//     capture, S1-C's durable hook owed/skipped marker), stamp
+//     user_version=6, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -161,6 +165,41 @@ CREATE TABLE hooks (
 			if _, err := db.Exec(`PRAGMA user_version = 5`); err != nil {
 				return fmt.Errorf("history: set user_version=5: %w", err)
 			}
+		case 5:
+			if _, err := db.Exec(`
+CREATE TABLE retry_intents (
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  sha    TEXT NOT NULL,
+  at     INTEGER NOT NULL,
+  PRIMARY KEY (target, ref)
+)`); err != nil {
+				return fmt.Errorf("history: migrate v5->v6 (retry_intents table): %w", err)
+			}
+			if _, err := db.Exec(`
+CREATE TABLE ignored_refs (
+  at     INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (at, target, ref)
+)`); err != nil {
+				return fmt.Errorf("history: migrate v5->v6 (ignored_refs table): %w", err)
+			}
+			if _, err := db.Exec(`
+CREATE TABLE hook_runs (
+  run_id      TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  target      TEXT NOT NULL,
+  owed_count  INTEGER NOT NULL,
+  started_at  INTEGER NOT NULL,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT NOT NULL DEFAULT ''
+)`); err != nil {
+				return fmt.Errorf("history: migrate v5->v6 (hook_runs table): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 6`); err != nil {
+				return fmt.Errorf("history: set user_version=6: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -175,21 +214,35 @@ func (s *Store) Close() error {
 }
 
 // Emit writes ev's carried RunRecord, or — for EventHookFinished — one
-// post-land hook result (internal/hooks; log/history parity with checks).
-// Every other non-terminal event (Record == nil and not a hook result,
-// including a crash-recovered EventLanded whose record didn't survive) is
-// silently ignored — Emit never blocks or fails the reconcile loop for
-// history-side reasons. Terminal events are written in one transaction: the
-// run row and its check rows via INSERT OR REPLACE, keyed on run_id (and
-// run_id+seq for checks), so re-emitting the same RunRecord is a no-op
-// beyond redundant writes.
+// post-land hook result (internal/hooks; log/history parity with checks), or
+// — for EventRetryRequested/EventIgnoredRef/EventHookStarted/
+// EventHookSkipped — one of the v6 durability rows (S3, S7c, S1-C). Every
+// other non-terminal event (Record == nil and none of the above, including a
+// crash-recovered EventLanded whose record didn't survive) is silently
+// ignored — Emit never blocks or fails the reconcile loop for history-side
+// reasons. Terminal events are written in one transaction: the run row and
+// its check rows via INSERT OR REPLACE, keyed on run_id (and run_id+seq for
+// checks), so re-emitting the same RunRecord is a no-op beyond redundant
+// writes.
 func (s *Store) Emit(ctx context.Context, ev core.Event) error {
-	// EventHookFinished carries no RunRecord at all (Record is nil on it,
-	// same as every other non-terminal event) — its whole payload is the one
-	// finished hook in ev.Check, so it's keyed off Kind+Check rather than
-	// Record like every other branch here.
-	if ev.Kind == core.EventHookFinished && ev.Check != nil {
-		return s.writeHookResult(ctx, ev)
+	switch ev.Kind {
+	case core.EventHookFinished:
+		// EventHookFinished carries no RunRecord at all (Record is nil on
+		// it, same as every other non-terminal event) — its whole payload
+		// is the one finished hook in ev.Check, so it's keyed off Kind+Check
+		// rather than Record like every other branch here.
+		if ev.Check != nil {
+			return s.writeHookResult(ctx, ev)
+		}
+		return nil
+	case core.EventRetryRequested:
+		return s.writeRetryIntent(ctx, ev)
+	case core.EventIgnoredRef:
+		return s.writeIgnoredRef(ctx, ev)
+	case core.EventHookStarted:
+		return s.writeHookStarted(ctx, ev)
+	case core.EventHookSkipped:
+		return s.writeHookSkipped(ctx, ev)
 	}
 	if ev.Record == nil {
 		return nil
@@ -342,6 +395,71 @@ func (s *Store) writeHookResult(ctx context.Context, ev core.Event) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("history: commit: %w", err)
+	}
+	return nil
+}
+
+// writeRetryIntent upserts one retry_intents row (core.EventRetryRequested,
+// S3): the latest retry for (target, ref) always wins — INSERT ... ON
+// CONFLICT(target, ref) DO UPDATE — since only the most recent retry's
+// timestamp matters to LatestTerminalPerRef's seed-park suppression (a
+// retry superseded by a later one is no longer the operative "don't re-park
+// until at least this terminal" boundary).
+func (s *Store) writeRetryIntent(ctx context.Context, ev core.Event) error {
+	if _, err := s.db.ExecContext(ctx, upsertRetryIntentSQL,
+		ev.Target, ev.Candidate.Ref, ev.Candidate.SHA, ev.At.UnixMilli(),
+	); err != nil {
+		return fmt.Errorf("history: write retry intent: %w", err)
+	}
+	return nil
+}
+
+// writeIgnoredRef inserts one ignored_refs row (core.EventIgnoredRef, S7c):
+// a well-formed candidate ref whose target segment names no configured
+// target. Unlike retry_intents, this is a pure append (INSERT OR REPLACE
+// keyed on (at, target, ref), never an update) — every occurrence is its own
+// durable fact, so an operator can discover a misconfiguration after the
+// fact even if it happened between two dashboard visits.
+func (s *Store) writeIgnoredRef(ctx context.Context, ev core.Event) error {
+	if _, err := s.db.ExecContext(ctx, insertIgnoredRefSQL,
+		ev.At.UnixMilli(), ev.Target, ev.Candidate.Ref, ev.Detail,
+	); err != nil {
+		return fmt.Errorf("history: write ignored ref: %w", err)
+	}
+	return nil
+}
+
+// writeHookStarted upserts hook_runs' "owed" row for ev.RunID on the FIRST
+// core.EventHookStarted hooks.Runner emits for a landing (S1-C): ON
+// CONFLICT(run_id) DO NOTHING means every subsequent hook in the same
+// landing's chain is a no-op here — only the first hook's owed_count/
+// started_at are ever recorded, which is exactly right since owed_count is
+// the landing's total configured hook count (ev.HookCount), constant across
+// every hook of the same landing.
+func (s *Store) writeHookStarted(ctx context.Context, ev core.Event) error {
+	if _, err := s.db.ExecContext(ctx, upsertHookRunStartedSQL,
+		ev.RunID, ev.Target, ev.HookCount, ev.At.UnixMilli(),
+	); err != nil {
+		return fmt.Errorf("history: write hook run started: %w", err)
+	}
+	return nil
+}
+
+// writeHookSkipped upserts hook_runs' row for ev.RunID on
+// core.EventHookSkipped (a recovery-synthesized landing whose hooks were
+// never run at all, S1-C): skipped=1 and skip_reason=ev.Detail mark it so
+// HookRunSummaries never mistakes "deliberately never attempted" for
+// "crashed mid-chain" (owed_count > done_count). ON CONFLICT(run_id) DO
+// UPDATE rather than DO NOTHING: unlike writeHookStarted, a landing's own
+// RunID is unique per recoverLanded call (queue/reconcile.go mints a fresh
+// one), so no prior hook_runs row is expected here in practice — the update
+// path exists only for re-emission idempotency, matching every other Emit
+// branch's re-emit-is-a-no-op-beyond-redundant-writes contract.
+func (s *Store) writeHookSkipped(ctx context.Context, ev core.Event) error {
+	if _, err := s.db.ExecContext(ctx, upsertHookRunSkippedSQL,
+		ev.RunID, ev.Target, ev.HookCount, ev.At.UnixMilli(), ev.Detail,
+	); err != nil {
+		return fmt.Errorf("history: write hook run skipped: %w", err)
 	}
 	return nil
 }

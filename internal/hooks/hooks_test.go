@@ -208,9 +208,18 @@ func TestRunner_RunsHooksInOrderWithLandedCoordinates(t *testing.T) {
 		t.Fatalf("ExportTree called with %v, want [merge-sha] once", got)
 	}
 
-	events := emit.snapshot()
+	// Every hook now also fires an EventHookStarted immediately before its
+	// EventHookFinished (S1-C/S5); filter down to just the Finished events
+	// for this assertion's original per-hook-outcome shape.
+	var finished []core.Event
+	for _, ev := range emit.snapshot() {
+		if ev.Kind == core.EventHookFinished {
+			finished = append(finished, ev)
+		}
+	}
+	events := finished
 	if len(events) != 2 {
-		t.Fatalf("emitted %d events, want 2", len(events))
+		t.Fatalf("emitted %d EventHookFinished events, want 2", len(events))
 	}
 	for i, want := range []string{"deploy", "notify"} {
 		ev := events[i]
@@ -226,6 +235,112 @@ func TestRunner_RunsHooksInOrderWithLandedCoordinates(t *testing.T) {
 		if ev.RunID != "run-1" {
 			t.Errorf("events[%d].RunID = %q, want run-1", i, ev.RunID)
 		}
+	}
+}
+
+// TestRunner_EmitsHookStartedBeforeEachHook is S1-C/S5's producer-side
+// contract: EventHookStarted must fire, in order, immediately before each
+// hook's RunCheck — interleaved with the existing EventHookFinished per
+// hook, not batched at the start or end. HookIndex/HookCount must be
+// correct for a 2-hook landing.
+func TestRunner_EmitsHookStartedBeforeEachHook(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	emit := &recordingEmit{}
+
+	r := New(Params{
+		Hooks: map[string][]Hook{
+			"main": {
+				{Name: "deploy", Command: []string{"true"}},
+				{Name: "notify", Command: []string{"true"}},
+			},
+		},
+		Git:     git,
+		Exec:    exec,
+		Emit:    emit.fn,
+		WorkDir: t.TempDir(),
+		Log:     io.Discard,
+	})
+
+	rec := &core.RunRecord{RunID: "run-started", Target: "main", MergeSHA: "merge-sha"}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	events := emit.snapshot()
+	wantKinds := []core.EventKind{
+		core.EventHookStarted, core.EventHookFinished,
+		core.EventHookStarted, core.EventHookFinished,
+	}
+	if len(events) != len(wantKinds) {
+		t.Fatalf("emitted %d events, want %d: %+v", len(events), len(wantKinds), events)
+	}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Errorf("events[%d].Kind = %v, want %v", i, events[i].Kind, want)
+		}
+	}
+
+	started0, started1 := events[0], events[2]
+	if started0.CheckName != "deploy" || started0.HookIndex != 0 || started0.HookCount != 2 {
+		t.Errorf("events[0] (hook 0 started) = %+v, want CheckName=deploy HookIndex=0 HookCount=2", started0)
+	}
+	if started1.CheckName != "notify" || started1.HookIndex != 1 || started1.HookCount != 2 {
+		t.Errorf("events[2] (hook 1 started) = %+v, want CheckName=notify HookIndex=1 HookCount=2", started1)
+	}
+	for i, ev := range []core.Event{started0, started1} {
+		if ev.RunID != "run-started" {
+			t.Errorf("started event %d RunID = %q, want run-started", i, ev.RunID)
+		}
+	}
+}
+
+// TestRunner_RecoveredLandingEmitsHookSkipped confirms the
+// MergeSHA=="" recovery branch emits EventHookSkipped (S1-C's durable
+// marker) carrying Detail and HookCount, in addition to (not instead of)
+// the existing stderr log line, and never calls RunCheck.
+func TestRunner_RecoveredLandingEmitsHookSkipped(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	emit := &recordingEmit{}
+	var logBuf boundedLogBuf
+
+	r := New(Params{
+		Hooks: map[string][]Hook{"main": {
+			{Name: "deploy", Command: []string{"true"}},
+			{Name: "notify", Command: []string{"true"}},
+		}},
+		Git:     git,
+		Exec:    exec,
+		Emit:    emit.fn,
+		WorkDir: t.TempDir(),
+		Log:     &logBuf,
+	})
+
+	rec := &core.RunRecord{RunID: "run-skip", Target: "main"} // MergeSHA == ""
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	if exec.callCount() != 0 {
+		t.Fatalf("exec called %d times, want 0 (recovered landing must never run hooks)", exec.callCount())
+	}
+	if !logBuf.contains("recovered landing") {
+		t.Errorf("log = %q, want the existing stderr line preserved", logBuf.String())
+	}
+
+	events := emit.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("emitted %d events, want 1 (EventHookSkipped)", len(events))
+	}
+	ev := events[0]
+	if ev.Kind != core.EventHookSkipped {
+		t.Fatalf("events[0].Kind = %v, want EventHookSkipped", ev.Kind)
+	}
+	if ev.RunID != "run-skip" || ev.Target != "main" {
+		t.Errorf("EventHookSkipped RunID/Target = %q/%q, want run-skip/main", ev.RunID, ev.Target)
+	}
+	if ev.Detail == "" {
+		t.Error("EventHookSkipped.Detail is empty, want a human-readable reason")
+	}
+	if ev.HookCount != 2 {
+		t.Errorf("EventHookSkipped.HookCount = %d, want 2 (target's configured hook count)", ev.HookCount)
 	}
 }
 
@@ -259,12 +374,18 @@ func TestRunner_FailureStopsRemainingHooks(t *testing.T) {
 		t.Fatalf("exec called %d times, want 1 (should stop after deploy fails)", n)
 	}
 
+	// deploy fires both EventHookStarted (before RunCheck) and
+	// EventHookFinished (S1-C/S5); notify never runs at all since deploy
+	// failed, so it fires neither.
 	events := emit.snapshot()
-	if len(events) != 1 {
-		t.Fatalf("emitted %d events, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("emitted %d events, want 2 (deploy's Started+Finished)", len(events))
 	}
-	if events[0].CheckName != "deploy" || events[0].Check.Status != core.CheckFailed {
-		t.Fatalf("events[0] = %+v, want a failed deploy result", events[0])
+	if events[0].Kind != core.EventHookStarted || events[0].CheckName != "deploy" {
+		t.Fatalf("events[0] = %+v, want EventHookStarted for deploy", events[0])
+	}
+	if events[1].Kind != core.EventHookFinished || events[1].CheckName != "deploy" || events[1].Check.Status != core.CheckFailed {
+		t.Fatalf("events[1] = %+v, want a failed deploy EventHookFinished", events[1])
 	}
 }
 
@@ -951,10 +1072,12 @@ func TestRunner_CancelPolicy_CancelsRunningLandingMidHook(t *testing.T) {
 		}
 	}
 
+	// EventHookStarted (S1-C) also carries RunID=run-1/CheckName=deploy, so
+	// filter specifically for the Finished event rather than any match.
 	events := emit.snapshot()
 	var run1Deploy *core.Event
 	for i, ev := range events {
-		if ev.RunID == "run-1" && ev.CheckName == "deploy" {
+		if ev.Kind == core.EventHookFinished && ev.RunID == "run-1" && ev.CheckName == "deploy" {
 			run1Deploy = &events[i]
 		}
 	}
@@ -1039,15 +1162,19 @@ func TestRunner_CancelCurrent_CancelsRunningLandingMidHook(t *testing.T) {
 	// Wait for run-1's own EventHookFinished specifically — NOT a plain
 	// callCount check (jobs already recorded 1 entry the moment "deploy"
 	// blocked, before CancelCurrent ever ran, so that would return
-	// immediately and prove nothing) and NOT the outer ctx cancel (cancelling
+	// immediately and prove nothing), NOT the outer ctx cancel (cancelling
 	// the Run loop's own parent context would race the causality chain this
 	// test is verifying: inbox send -> supersede send -> execLanding's own
-	// per-landing cancel -> RunCheck unblocks -> runLanding reads supersede).
-	// Waiting for the actual emitted event is the one signal that's
-	// synchronized with runLanding having already computed Detail.
+	// per-landing cancel -> RunCheck unblocks -> runLanding reads supersede),
+	// and NOT a bare RunID+CheckName match (S1-C's EventHookStarted now also
+	// carries RunID=run-1/CheckName=deploy, and fires BEFORE RunCheck even
+	// blocks — it would already be present the instant exec.started closes,
+	// proving nothing about the cancellation). Waiting for the Finished
+	// event specifically is the one signal that's synchronized with
+	// runLanding having already computed Detail.
 	waitFor(t, func() bool {
 		for _, ev := range emit.snapshot() {
-			if ev.RunID == "run-1" && ev.CheckName == "deploy" {
+			if ev.Kind == core.EventHookFinished && ev.RunID == "run-1" && ev.CheckName == "deploy" {
 				return true
 			}
 		}
@@ -1063,7 +1190,7 @@ func TestRunner_CancelCurrent_CancelsRunningLandingMidHook(t *testing.T) {
 	events := emit.snapshot()
 	var run1Deploy *core.Event
 	for i, ev := range events {
-		if ev.RunID == "run-1" && ev.CheckName == "deploy" {
+		if ev.Kind == core.EventHookFinished && ev.RunID == "run-1" && ev.CheckName == "deploy" {
 			run1Deploy = &events[i]
 		}
 	}
@@ -1153,6 +1280,132 @@ func TestRunner_CancelCurrent_NonCancelPolicyIsFalse(t *testing.T) {
 
 	close(exec.release) // let it finish normally so Run can drain cleanly
 	waitFor(t, func() bool { return exec.callCount() >= 1 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+}
+
+// --- live state (S5) ------------------------------------------------------
+
+// TestRunner_Snapshot_NoLandingRunningIsFalse covers the common idle case:
+// no landing has ever run for target, so Snapshot reports false with a
+// zero-valued LiveState (BacklogDepth still populated, since the queue
+// length is target-agnostic — meaningful regardless of whether target
+// itself has anything running).
+func TestRunner_Snapshot_NoLandingRunningIsFalse(t *testing.T) {
+	r := New(Params{
+		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Git:     &fakeGitRepo{},
+		Exec:    &fakeExecutor{},
+		WorkDir: t.TempDir(),
+		Log:     io.Discard,
+	})
+
+	live, ok := r.Snapshot("main")
+	if ok {
+		t.Fatalf("Snapshot(main) ok = true, want false (nothing has ever run)")
+	}
+	if live.Running {
+		t.Errorf("Snapshot(main) = %+v, want Running=false", live)
+	}
+	if all := r.SnapshotAll(); all != nil {
+		t.Errorf("SnapshotAll() = %+v, want nil (nothing running anywhere)", all)
+	}
+}
+
+// TestRunner_Snapshot_ReflectsInFlightHookAndBacklog drives the whole
+// Runner (Run goroutine + real queue) to prove Snapshot/SnapshotAll report
+// live state accurately while a landing's hook is blocked mid-flight:
+// Running, CurrentHook, HookIndex/HookCount, and a non-zero BacklogDepth
+// once further landings queue up behind the blocked one — then confirms
+// Snapshot clears back to false once everything concludes.
+func TestRunner_Snapshot_ReflectsInFlightHookAndBacklog(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &blockingExecutor{
+		blockName: "hook:deploy",
+		blockRun:  "run-1",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	r := New(Params{
+		Hooks: map[string][]Hook{"main": {
+			{Name: "deploy", Command: []string{"true"}},
+			{Name: "notify", Command: []string{"true"}},
+		}},
+		Git:     git,
+		Exec:    exec,
+		WorkDir: t.TempDir(),
+		Log:     io.Discard,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	rec1 := &core.RunRecord{RunID: "run-1", Target: "main", MergeSHA: "merge-1",
+		Candidate: core.Candidate{Target: "main", Topic: "t1", SHA: "sha1"}}
+	if err := r.Emit(ctx, landedEvent("main", rec1)); err != nil {
+		t.Fatalf("Emit run-1: %v", err)
+	}
+	<-exec.started // run-1's deploy hook is now blocked in flight
+
+	live, ok := r.Snapshot("main")
+	if !ok {
+		t.Fatal("Snapshot(main) ok = false, want true (run-1's deploy hook is in flight)")
+	}
+	if !live.Running || live.CurrentHook != "deploy" || live.HookIndex != 0 || live.HookCount != 2 {
+		t.Errorf("Snapshot(main) = %+v, want Running=true CurrentHook=deploy HookIndex=0 HookCount=2", live)
+	}
+	if live.StartedAt.IsZero() {
+		t.Error("Snapshot(main).StartedAt is zero, want set")
+	}
+
+	if _, ok := r.Snapshot("other"); ok {
+		t.Error("Snapshot(other) ok = true, want false (only main has anything running)")
+	}
+
+	all := r.SnapshotAll()
+	if len(all) != 1 || all[0].Target != "main" || !all[0].Running {
+		t.Errorf("SnapshotAll() = %+v, want exactly one running entry for main", all)
+	}
+
+	// Queue two more landings for the same target while run-1 is still
+	// blocked: they land directly in r.queue (Run is busy inside
+	// execLanding for run-1, not back at the top select reading/draining
+	// it), so BacklogDepth must reflect them.
+	rec2 := &core.RunRecord{RunID: "run-2", Target: "main", MergeSHA: "merge-2",
+		Candidate: core.Candidate{Target: "main", Topic: "t2", SHA: "sha2"}}
+	rec3 := &core.RunRecord{RunID: "run-3", Target: "main", MergeSHA: "merge-3",
+		Candidate: core.Candidate{Target: "main", Topic: "t3", SHA: "sha3"}}
+	if err := r.Emit(ctx, landedEvent("main", rec2)); err != nil {
+		t.Fatalf("Emit run-2: %v", err)
+	}
+	if err := r.Emit(ctx, landedEvent("main", rec3)); err != nil {
+		t.Fatalf("Emit run-3: %v", err)
+	}
+
+	live, ok = r.Snapshot("main")
+	if !ok || live.BacklogDepth != 2 {
+		t.Errorf("Snapshot(main).BacklogDepth = %d (ok=%v), want 2 (run-2 and run-3 queued behind run-1)", live.BacklogDepth, ok)
+	}
+
+	close(exec.release) // let run-1 finish; run-2/run-3 drain after
+	// run-1, run-2, run-3 each run both hooks: 6 total RunCheck calls.
+	waitFor(t, func() bool { return exec.callCount() >= 6 })
+
+	live, ok = r.Snapshot("main")
+	if ok || live.Running {
+		t.Errorf("Snapshot(main) after everything drained = %+v (ok=%v), want Running=false", live, ok)
+	}
+	if all := r.SnapshotAll(); all != nil {
+		t.Errorf("SnapshotAll() after everything drained = %+v, want nil", all)
+	}
+
 	cancel()
 	select {
 	case <-done:
