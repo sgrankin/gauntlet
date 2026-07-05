@@ -36,6 +36,9 @@ func TestLoadDaemon_Example(t *testing.T) {
 	if d.MergeMsg != "Merge {{.Topic}} ({{.User}})" {
 		t.Errorf("MergeMsg = %q", d.MergeMsg)
 	}
+	if d.LogRetention != 720*time.Hour {
+		t.Errorf("LogRetention = %v, want 720h", d.LogRetention)
+	}
 	wantTargets := []Target{
 		{Name: "main", Branch: "main"},
 		{Name: "release", Branch: "release/v2"},
@@ -165,6 +168,12 @@ target "main" branch="main"
 	}
 	if d.CheckSpec != defaultCheckSpec {
 		t.Errorf("CheckSpec = %q, want default %q", d.CheckSpec, defaultCheckSpec)
+	}
+	// LogRetention defaults unconditionally (no "section absent" state to
+	// preserve, unlike the phase-2/3 sections below) — 30 days even though
+	// the "log-retention" node is absent from this config.
+	if d.LogRetention != defaultLogRetention {
+		t.Errorf("LogRetention = %v, want default %v", d.LogRetention, defaultLogRetention)
 	}
 
 	// All phase-2/3 sections are absent from this config; each should come
@@ -343,6 +352,7 @@ func TestLoadDaemon_DurationParsing(t *testing.T) {
 	data := []byte(`
 remote "https://example.com/repo.git"
 poll-interval "1h30m"
+log-retention "48h"
 committer {
     name "Gauntlet"
     email "gauntlet@example.com"
@@ -359,6 +369,9 @@ target "main" branch="main"
 	want := 90 * time.Minute
 	if d.Poll != want {
 		t.Errorf("Poll = %v, want %v", d.Poll, want)
+	}
+	if d.LogRetention != 48*time.Hour {
+		t.Errorf("LogRetention = %v, want 48h", d.LogRetention)
 	}
 }
 
@@ -391,6 +404,19 @@ committer {
 target "main" branch="main"
 `,
 			wantErr: "poll-interval",
+		},
+		{
+			name: "log-retention<=0 given explicitly",
+			kdl: `
+remote "https://example.com/repo.git"
+log-retention "-720h"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+`,
+			wantErr: "log-retention",
 		},
 		{
 			name: "no targets",

@@ -41,7 +41,16 @@ const dashboardShutdownTimeout = 5 * time.Second
 // before closing the history store, so a query still in flight against store
 // (via the dashboard's or MCP server's history-backed views) can never race
 // a Close (cmd wiring review, docs/plans/phase23.md).
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, wg *sync.WaitGroup) {
+//
+// logDir is the same directory passed as queue.Config.LogDir (main.go's
+// logsDir) — wired here as both dashboard.WithLogRoot and
+// gauntletmcp.Params.LogRoot so GET /run/{id}/log/{check} and the MCP run
+// tool's logUrl serve full per-check logs (DESIGN.md "Full per-check log
+// files") under the exact containment boundary the executor ever writes
+// into. This is unconditional: full logging is wired up regardless of
+// whether the dashboard/history are configured (main.go), so log serving
+// is available whenever the dashboard itself is.
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -56,6 +65,7 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	// via -ldflags; "devel" for a plain `go build`. Surfaced in the
 	// dashboard footer purely as an operator convenience (docs/deploy.md).
 	opts = append(opts, dashboard.WithVersion(version))
+	opts = append(opts, dashboard.WithLogRoot(logDir))
 
 	// The MCP server (chunk E5) is mounted at /mcp on the same listener as
 	// the dashboard, since it's meant for agents that already know the
@@ -64,7 +74,7 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	// "GET /{$}" for its index rather than a catch-all, so it doesn't
 	// shadow /mcp.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", gauntletmcp.New(gauntletmcp.Params{Snapshot: snapshot, Store: store, Retry: retry}))
+	mux.Handle("/mcp", gauntletmcp.New(gauntletmcp.Params{Snapshot: snapshot, Store: store, Retry: retry, LogRoot: logDir}))
 	mux.Handle("/", dashboard.New(snapshot, store, opts...))
 
 	srv := &http.Server{

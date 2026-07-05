@@ -6,6 +6,7 @@ committer {
     email "gauntlet@ci.acme.example"
 }
 merge-message "Merge {{.Topic}} ({{.User}})"   // optional
+log-retention "720h"   // optional; default 30 days ("720h"); full per-check log files under <state>/logs
 
 target "main" branch="main" {
     // Post-land hooks (optional, ordered, multiple allowed): run against

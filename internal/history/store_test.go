@@ -208,6 +208,185 @@ func TestMigrate_V1ToV2(t *testing.T) {
 	}
 }
 
+// schemaV2SQL is schema.sql as it existed before chunk F-b added
+// checks.log_path: checks has output but not log_path. Kept here, verbatim,
+// so TestMigrate_V2ToV3 can build a genuine v2 database by hand and prove
+// the running code migrates it forward correctly.
+const schemaV2SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+`
+
+// TestMigrate_V2ToV3 builds a v2 database by hand (schemaV2SQL, no
+// checks.log_path column, user_version stamped to 2 — exactly what an
+// already-deployed v2 Store would have on disk) and confirms that opening it
+// with the current code migrates it in place: user_version lands on
+// schemaVersion, the pre-existing row survives with the new log_path column
+// readable (empty, since it predates the column), and a fresh write against
+// the migrated database round-trips LogPath correctly.
+func TestMigrate_V2ToV3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV2SQL); err != nil {
+		t.Fatalf("apply v2 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("stamp user_version=2: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000)`,
+	); err != nil {
+		t.Fatalf("seed v2 run: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output) VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean')`,
+	); err != nil {
+		t.Fatalf("seed v2 check: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v2 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	_, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Output != "clean" || checks[0].LogPath != "" {
+		t.Errorf("checks after migrate = %+v, want 1 check with Output=clean LogPath=\"\"", checks)
+	}
+
+	// A fresh write against the migrated database must exercise the new
+	// log_path column correctly.
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC))
+	rec.Checks[0].LogPath = "/var/lib/gauntlet/logs/run-new/lint.log"
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if len(newChecks) != 2 || newChecks[0].LogPath != "/var/lib/gauntlet/logs/run-new/lint.log" {
+		t.Errorf("Run(run-new) checks = %+v, want checks[0].LogPath = %q", newChecks, "/var/lib/gauntlet/logs/run-new/lint.log")
+	}
+}
+
+// TestMigrate_V1ToV3_MultiHop builds a v1 database (predating both
+// checks.output and checks.log_path) and confirms Open walks both
+// intermediate steps in one call, landing on schemaVersion — the case
+// migrate()'s loop restructuring (chunk F-b) exists to get right: a single
+// switch pass over the original version would apply only the v1->v2 step
+// and stamp the database straight to schemaVersion without ever adding
+// log_path.
+func TestMigrate_V1ToV3_MultiHop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV1SQL); err != nil {
+		t.Fatalf("apply v1 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatalf("stamp user_version=1: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v1 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (multi-hop migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after multi-hop migrate = %d, want %d", version, schemaVersion)
+	}
+
+	// Both output and log_path columns must be usable now, not just
+	// whichever the (buggy) single-pass switch would have added. Uses Emit
+	// (rather than raw SQL) so the parent runs row satisfies the checks
+	// table's foreign key.
+	ctx := context.Background()
+	rec := sampleRecord("run-multihop", "main", time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC))
+	rec.Checks[0].LogPath = "/var/lib/gauntlet/logs/run-multihop/lint.log"
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-multihop", Record: rec}); err != nil {
+		t.Fatalf("Emit exercising both output and log_path columns: %v", err)
+	}
+	_, checks, err := s.Run("run-multihop")
+	if err != nil {
+		t.Fatalf("Run(run-multihop): %v", err)
+	}
+	if len(checks) != 2 || checks[0].Output != "all clean" || checks[0].LogPath != "/var/lib/gauntlet/logs/run-multihop/lint.log" {
+		t.Errorf("checks after multi-hop migrate = %+v, want checks[0].Output=%q LogPath=%q",
+			checks, "all clean", "/var/lib/gauntlet/logs/run-multihop/lint.log")
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }

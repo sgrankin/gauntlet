@@ -139,6 +139,19 @@ func run() error {
 		return fmt.Errorf("create trials dir %s: %w", trialsDir, err)
 	}
 
+	// F-b (DESIGN.md "Full per-check log files"): unlike trials/, logsDir
+	// holds durable state (log files meant to survive restarts, up to
+	// cfg.LogRetention) — never swept unconditionally. Wired into
+	// queue.Config.LogDir below regardless of which optional sections
+	// (history, dashboard, ...) are configured, so full logs are always
+	// captured; a startup prune sweep here catches anything past retention
+	// from before this process started, and startLogPruner repeats it
+	// periodically for the rest of this process's lifetime.
+	logsDir := filepath.Join(*statePath, "logs")
+	if err := pruneLogFiles(logsDir, time.Now().Add(-cfg.LogRetention)); err != nil {
+		return fmt.Errorf("sweep logs dir %s: %w", logsDir, err)
+	}
+
 	ex, err := buildExecutor(cfg)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
@@ -247,22 +260,25 @@ func run() error {
 		MergeMessage: cfg.MergeMsg,
 		MergeBody:    mergeBody,
 		WorkDir:      trialsDir,
+		LogDir:       logsDir,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
 	}
 
-	// wg tracks the dashboard's goroutines (Shutdown watcher + ListenAndServe)
-	// and the depth sampler, all of which may still be querying or writing
-	// store after d.Run returns on ctx cancellation. Waiting on wg before
-	// store.Close() runs (deferred above) keeps that Close from racing them
-	// (cmd wiring review, docs/plans/phase23.md): sampler exits, dashboard's
-	// graceful Shutdown completes, then — only then — the store closes.
+	// wg tracks the dashboard's goroutines (Shutdown watcher + ListenAndServe),
+	// the depth sampler, and the log pruner, all of which may still be
+	// querying or writing store (or, for the pruner, logsDir) after d.Run
+	// returns on ctx cancellation. Waiting on wg before store.Close() runs
+	// (deferred above) keeps that Close from racing them (cmd wiring review,
+	// docs/plans/phase23.md): sampler exits, dashboard's graceful Shutdown
+	// completes, then — only then — the store closes.
 	var wg sync.WaitGroup
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, &wg)
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}
+	startLogPruner(ctx, logsDir, cfg.LogRetention, &wg)
 
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()

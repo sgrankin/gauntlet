@@ -49,14 +49,21 @@ containerize (topology (b), below).
    ```
    /etc/gauntlet/gauntlet.kdl        daemon config (see gauntlet.kdl for a full example)
    /etc/gauntlet/gauntlet.env        secrets: GITHUB_TOKEN, SLACK_APP_TOKEN, SLACK_BOT_TOKEN, ...
-   /var/lib/gauntlet/state/          -state: bare repo clone(s) + trials/ scratch
+   /var/lib/gauntlet/state/          -state: bare repo clone(s) + trials/ scratch + logs/
    /var/lib/gauntlet/history.db      SQLite history, if the `history` node is configured
    ```
 
-   Everything under `-state` is either a bare git clone (durable, but
-   trivially re-clonable — it's just a cache of the remote) or the
-   `trials/` scratch dir (ephemeral by design: the daemon removes and
-   recreates it on every startup, see README's "Running" section). Neither
+   Everything under `-state` is one of: a bare git clone (durable, but
+   trivially re-clonable — it's just a cache of the remote); the `trials/`
+   scratch dir (ephemeral by design: the daemon removes and recreates it on
+   every startup, see README's "Running" section); or `logs/` — full,
+   uncapped per-check log files (`logs/<runID>/<check>.log`, DESIGN.md "Full
+   per-check log files"), unconditionally written and served by the
+   dashboard's "full log" link regardless of which optional sections are
+   configured. Unlike `trials/`, `logs/` is meant to survive restarts: it's
+   aged out by the `log-retention` config node instead (default 30 days,
+   `"720h"`; see README's "Configuration reference"), swept once at startup
+   and then hourly for the rest of the process's lifetime. None of this
    needs backing up; see "Backups" below.
 4. **Install the systemd unit** (adjust paths/`ExecStart` to match step 3):
 
@@ -158,9 +165,10 @@ docker run -d --name gauntlet \
 ```
 
 - The `/data` volume holds everything `-state` would hold directly on a
-  host install (bare clones under `repos/`, ephemeral `trials/`), plus the
-  config file and, if you configure `history`, `history.db` — same
-  disposability rules as topology (a) apply per-subpath.
+  host install (bare clones under `repos/`, ephemeral `trials/`, retention-
+  pruned `logs/`), plus the config file and, if you configure `history`,
+  `history.db` — same disposability rules as topology (a) apply
+  per-subpath.
 - Secrets (`GITHUB_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, ...) come in
   via `--env-file`/`-e`, same env-var names the `token-env`/`app-token-env`/
   `bot-token-env` config fields point at.

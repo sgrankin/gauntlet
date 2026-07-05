@@ -118,6 +118,18 @@ func WithVersion(v string) Option {
 	return func(d *dash) { d.version = v }
 }
 
+// WithLogRoot enables full per-check log serving (DESIGN.md "Full per-check
+// log files"): root is the containment boundary every stored
+// history.CheckRow.LogPath must resolve under (cmd/gauntlet wires this to
+// the same directory passed as queue.Config.LogDir, so it's exactly the
+// tree the executor ever writes log files into). Without this option
+// GET /run/{id}/log/{check} always 404s and every logUrl field (run.html,
+// GET /api/v1/run/{id}) stays empty/absent — see server.go's
+// resolveLogPath for the containment check itself.
+func WithLogRoot(root string) Option {
+	return func(d *dash) { d.logRoot = root }
+}
+
 // mountAPIRoutes registers the JSON API beside the HTML routes New already
 // registers. /api/v1/retry is registered without a method verb (unlike the
 // GET-only routes) because its handler needs full control over the 405
@@ -325,6 +337,14 @@ type checkJSON struct {
 	Status     string `json:"status"`
 	DurationMs int64  `json:"durationMs"`
 	Err        string `json:"err"`
+	// LogPath is the check's full per-check log file path on disk (empty if
+	// none was written), verbatim from history.CheckRow.LogPath.
+	LogPath string `json:"logPath"`
+	// LogURL is the relative link the dashboard serves that file at
+	// (GET /run/{id}/log/{name}), present only when the dashboard is
+	// actually configured to serve it (WithLogRoot) and LogPath is
+	// non-empty — omitted from the JSON entirely otherwise.
+	LogURL string `json:"logUrl,omitempty"`
 }
 
 func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
@@ -359,6 +379,8 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 		resp.Checks = append(resp.Checks, checkJSON{
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err,
+			LogPath: c.LogPath,
+			LogURL:  d.runLogURL(row.RunID, c.Name, c.LogPath),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

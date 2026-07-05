@@ -23,7 +23,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 2
+const schemaVersion = 3
 
 var _ core.Channel = (*Store)(nil)
 
@@ -72,44 +72,59 @@ func Open(path string) (*Store, error) {
 }
 
 // migrate brings db from whatever PRAGMA user_version it's at up to
-// schemaVersion, one step at a time:
+// schemaVersion, one step at a time, re-reading user_version after every
+// step so a database several versions behind actually walks every
+// intermediate step (rather than applying only the first matching case) on
+// its way to schemaVersion:
 //
 //   - 0 (fresh database, no tables yet): apply the embedded schema.sql
 //     (already at the current shape) and stamp schemaVersion directly —
 //     there's no history to step through.
 //   - 1 (schema v1: checks has no output column): ALTER TABLE checks ADD
-//     COLUMN output, then fall through to stamp schemaVersion.
+//     COLUMN output, stamp user_version=2, loop.
+//   - 2 (schema v2: checks has no log_path column): ALTER TABLE checks ADD
+//     COLUMN log_path, stamp user_version=3, loop.
 //   - schemaVersion: already current, no-op.
 //
-// Each case falls through to the next so a database several versions behind
-// walks every intermediate step before landing on schemaVersion. Add new
-// cases above the schemaVersion case, oldest first, when schema.sql next
-// changes.
+// Add new cases above the schemaVersion case, oldest first, when schema.sql
+// next changes — each new case stamps the version it upgrades *to* and lets
+// the loop re-examine, rather than assuming it's the last step needed.
 func migrate(db *sql.DB) error {
-	var version int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("history: read user_version: %w", err)
-	}
-
-	switch version {
-	case 0:
-		if _, err := db.Exec(schemaSQL); err != nil {
-			return fmt.Errorf("history: apply schema: %w", err)
+	for {
+		var version int
+		if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+			return fmt.Errorf("history: read user_version: %w", err)
 		}
-	case 1:
-		if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN output TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("history: migrate v1->v2 (checks.output): %w", err)
-		}
-	case schemaVersion:
-		return nil
-	default:
-		return fmt.Errorf("history: unknown user_version %d (want 0..%d)", version, schemaVersion)
-	}
 
-	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
-		return fmt.Errorf("history: set user_version: %w", err)
+		switch version {
+		case 0:
+			if _, err := db.Exec(schemaSQL); err != nil {
+				return fmt.Errorf("history: apply schema: %w", err)
+			}
+			if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+				return fmt.Errorf("history: set user_version: %w", err)
+			}
+			return nil
+		case 1:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN output TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v1->v2 (checks.output): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+				return fmt.Errorf("history: set user_version=2: %w", err)
+			}
+		case 2:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN log_path TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v2->v3 (checks.log_path): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+				return fmt.Errorf("history: set user_version=3: %w", err)
+			}
+		case schemaVersion:
+			return nil
+		default:
+			return fmt.Errorf("history: unknown user_version %d (want 0..%d)", version, schemaVersion)
+		}
 	}
-	return nil
 }
 
 // Close closes the underlying database.
@@ -182,6 +197,10 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			// The executor's 64KiB tail cap (executor.outputCap) is the only
 			// bound — no history-side re-cap.
 			cr.Output,
+			// LogPath is "" whenever no full log file was written (no
+			// Config.LogDir configured, or the file couldn't be created) —
+			// see core.CheckResult.LogPath's doc for the log-less fallback.
+			cr.LogPath,
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

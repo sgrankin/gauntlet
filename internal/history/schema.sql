@@ -1,11 +1,11 @@
--- schema.sql: gauntlet history store schema (user_version = 2).
+-- schema.sql: gauntlet history store schema (user_version = 3).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
--- existing v1 database is migrated in place instead (ALTER TABLE checks ADD
--- COLUMN output ...) rather than re-run against this file, so this file
--- always reflects the *current* schema, not the upgrade path — see
--- migrate()'s doc comment for the version-by-version steps.
+-- existing older database is migrated in place instead (ALTER TABLE checks
+-- ADD COLUMN ...) rather than re-run against this file, so this file always
+-- reflects the *current* schema, not the upgrade path — see migrate()'s doc
+-- comment for the version-by-version steps.
 
 CREATE TABLE runs (
   run_id       TEXT PRIMARY KEY,
@@ -33,6 +33,7 @@ CREATE TABLE checks (
   duration_ms INTEGER NOT NULL,
   err         TEXT NOT NULL DEFAULT '',
   output      TEXT NOT NULL DEFAULT '',   -- captured output, verbatim (executor tail-caps at 64KiB) (v2+)
+  log_path    TEXT NOT NULL DEFAULT '',   -- full per-check log file path, if one was written (v3+)
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

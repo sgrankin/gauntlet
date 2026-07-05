@@ -54,6 +54,14 @@ const (
 	// the depth sampler prunes them (docs/plans phase23 E1). Runs/checks
 	// have no retention bound — this applies to the depth series only.
 	defaultDepthRetention = 14 * 24 * time.Hour
+
+	// defaultLogRetention is how long full per-check log directories
+	// (Config.LogDir/<runID>/, DESIGN.md "Full per-check log files") are
+	// kept before cmd/gauntlet's prune sweep deletes them — 30 days.
+	// Unlike depth-retention, this applies unconditionally: cmd/gauntlet
+	// always wires Config.LogDir (chunk F-b), so this default always
+	// matters, not only when some optional section is enabled.
+	defaultLogRetention = 30 * 24 * time.Hour
 )
 
 // Daemon is the admin-written daemon config (docs/plans/phase1.md §4): one
@@ -72,6 +80,14 @@ type Daemon struct {
 	Committer core.Identity `kdl:"committer"`
 	MergeMsg  string        `kdl:"merge-message"`
 	Targets   []Target      `kdl:"target,multiple"`
+
+	// LogRetention bounds how long full per-check log directories survive
+	// under cmd/gauntlet's <state>/logs (DESIGN.md "Full per-check log
+	// files"); cmd/gauntlet's prune sweep deletes any run-log directory
+	// older than this. Unconditional (unlike History/Dashboard/...): full
+	// logging is always wired up in cmd/gauntlet, so this always defaults
+	// (30 days) rather than only defaulting when some section is "enabled".
+	LogRetention time.Duration `kdl:"log-retention,format:units"`
 
 	History   History   `kdl:"history"`   // Path=="" ⇒ disabled
 	Dashboard Dashboard `kdl:"dashboard"` // Bind=="" ⇒ disabled
@@ -211,6 +227,12 @@ func (d *Daemon) applyDefaults() {
 	if d.CheckSpec == "" {
 		d.CheckSpec = defaultCheckSpec
 	}
+	// LogRetention defaults unconditionally (see its doc): there is no
+	// "log-retention section absent -> disabled" state to preserve, unlike
+	// every phase-2/3 section below.
+	if d.LogRetention == 0 {
+		d.LogRetention = defaultLogRetention
+	}
 
 	// History: SampleEvery defaults to the reconcile cadence. Only meaningful
 	// (and only defaulted) when history is enabled.
@@ -283,6 +305,9 @@ func (d *Daemon) validate() error {
 	}
 	if d.Poll <= 0 {
 		return fmt.Errorf("poll-interval: must be positive, got %s", d.Poll)
+	}
+	if d.LogRetention <= 0 {
+		return fmt.Errorf("log-retention: must be positive, got %s", d.LogRetention)
 	}
 	if d.Committer.Name == "" {
 		return fmt.Errorf("committer: name must not be empty")

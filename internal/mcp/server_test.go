@@ -232,6 +232,78 @@ func TestRun_OutputIncluded(t *testing.T) {
 	}
 }
 
+// logRecord builds a run record with one check carrying a non-empty
+// LogPath, for exercising the run tool's logPath/logUrl fields (chunk F-b).
+func logRecord(runID string) *core.RunRecord {
+	started := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
+	return &core.RunRecord{
+		RunID:  runID,
+		Target: "main",
+		Candidate: core.Candidate{
+			Ref: "refs/heads/for/main/dave/histfix", Target: "main",
+			User: "dave", Topic: "histfix", SHA: "5555555555555555555555555555555555555555",
+		},
+		Checks: []core.CheckResult{
+			{Name: "test", Status: core.CheckFailed, Duration: time.Second, Output: "boom", LogPath: "/var/lib/gauntlet/logs/" + runID + "/test.log"},
+		},
+		Outcome:   core.OutcomeRejected,
+		StartedAt: started,
+		EndedAt:   started.Add(time.Second),
+	}
+}
+
+// TestRun_LogFieldsIncludedWhenLogRootConfigured confirms the run tool's
+// checks carry logPath (verbatim from history) and logUrl (only when
+// Params.LogRoot is set) — mirroring dashboard/api.go's GET /api/v1/run/{id}
+// field additions (chunk F-b).
+func TestRun_LogFieldsIncludedWhenLogRootConfigured(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: logRecord("run-log-mcp")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{
+		Snapshot: func() *queue.Snapshot { return nil },
+		Store:    store,
+		LogRoot:  "/var/lib/gauntlet/logs",
+	})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-log-mcp"})
+	if res.IsError {
+		t.Fatalf("run errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{
+		`"logPath":"/var/lib/gauntlet/logs/run-log-mcp/test.log"`,
+		`"logUrl":"/run/run-log-mcp/log/test"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("run content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRun_LogURLOmittedWithoutLogRoot confirms logUrl is absent when
+// Params.LogRoot isn't set, even though logPath is still present — an agent
+// should never be handed a link that always 404s.
+func TestRun_LogURLOmittedWithoutLogRoot(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: logRecord("run-log-mcp-2")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-log-mcp-2"})
+	text := textOf(t, res)
+	if !strings.Contains(text, `"logPath":"/var/lib/gauntlet/logs/run-log-mcp-2/test.log"`) {
+		t.Errorf("run content missing logPath:\n%s", text)
+	}
+	if strings.Contains(text, `"logUrl"`) {
+		t.Errorf("run content included logUrl without LogRoot configured:\n%s", text)
+	}
+}
+
 func TestRun_UnknownID_ErrorResult(t *testing.T) {
 	store := openTestStore(t)
 	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})

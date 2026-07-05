@@ -140,6 +140,8 @@ new node is optional — absence disables the feature it configures, so an
 existing phase-1 `gauntlet.kdl` keeps working unchanged.
 
 ```kdl
+log-retention "720h"   // optional; default 30 days ("720h")
+
 history "/var/lib/gauntlet/history.db" {
     sample-every "10s"
 }
@@ -177,6 +179,13 @@ summarize {
 }
 ```
 
+- **`log-retention <duration>`** — how long full per-check log files
+  (`<state>/logs/<runID>/<check>.log`, written by the executor alongside
+  every check's tail-capped in-band output — see "Check environment
+  reference" below) are kept before cmd/gauntlet's periodic sweep deletes
+  the run-log directory. Unlike every node below, this one has no "absent ⇒
+  disabled" state: full logging is always wired up, so absence just means
+  the default (30 days, `"720h"`) applies. Every value must be positive.
 - **`history <path>`** — SQLite database file for run/check/queue-depth
   history (`internal/history`), read by the dashboard's history views.
   `sample-every` sets the queue-depth sampling interval; defaults to
@@ -190,7 +199,11 @@ summarize {
   hostname), so set it explicitly whenever the dashboard is reachable at a
   different address than it binds. **Bind absent ⇒ disabled**: no HTTP
   server starts. The dashboard has no authentication of its own — put it
-  behind your proxy/tailnet if it needs one.
+  behind your proxy/tailnet if it needs one. Whenever the dashboard is
+  enabled it also serves each check's full, uncapped log at `GET
+  /run/{runID}/log/{checkName}` (linked as "full log" on the run page),
+  containment-checked under `<state>/logs`; a pruned or otherwise missing
+  log file 404s with a friendly message rather than an error.
 - **`github <owner/repo>`** — enables the GitHub commit-status channel
   (`internal/ghstatus`): one rollup status context `gauntlet/<target>`
   posted to the candidate SHA via the plain REST statuses API.
@@ -338,8 +351,12 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   ```
 
 - **`GET /api/v1/run/{id}`** — one run's full detail, including its
-  per-check results. `404 {"error":"not found"}` for an unknown run ID;
-  `503 {"error":"history disabled"}` if no `history` store is configured.
+  per-check results. Each check carries `logPath` (the full log file's path
+  on disk, or `""` if none was written) and, only when the dashboard is
+  configured to actually serve it, `logUrl` (a relative link to `GET
+  /run/{id}/log/{name}` — omitted from the JSON entirely otherwise).
+  `404 {"error":"not found"}` for an unknown run ID; `503
+  {"error":"history disabled"}` if no `history` store is configured.
 
   ```sh
   curl -s http://localhost:8080/api/v1/run/<run-id> | jq .
@@ -399,7 +416,9 @@ names, so an agent reading both sees one vocabulary):
 - **`run`** (`run_id` required) — one run's full detail, including every
   check's captured output — the JSON API's `GET /api/v1/run/{id}` omits
   output (it's meant for a human on the dashboard's run page); this tool is
-  where an agent debugging a red run gets it.
+  where an agent debugging a red run gets it. Each check also carries
+  `logPath` and, when the dashboard is configured to serve it, `logUrl`,
+  same as the JSON API's `GET /api/v1/run/{id}`.
 - **`retry`** (`target` and `ref` required) — re-queues a parked ref at its
   current SHA, the same effect as `POST /api/v1/retry` or a Slack
   `:recycle:` reaction. Returns `{"status": "queued"}` on success, or an
@@ -499,6 +518,16 @@ the result file is ignored on failure. On exit 0: a result file containing
 `skipped` reports `CheckSkipped` (distinct from `passed` in history, so a
 skipped check doesn't quietly count as green); an absent or empty file is
 `CheckPassed`.
+
+**Full per-check logs.** Every check's combined stdout+stderr is captured
+twice: a 64KiB tail-capped copy inline (`Output` — the fast view: run
+history, the run page, the `run` MCP tool), and, whenever `<state>/logs` is
+writable, the complete, uncapped output as a file at
+`<state>/logs/<runID>/<check>.log`. The full file is what the dashboard's
+"full log" link and the JSON API/MCP `logPath`/`logUrl` fields point at
+(see "API" and "MCP" above); it's pruned after `log-retention` (default 30
+days, see "Configuration reference") regardless of whether history or the
+dashboard are configured.
 
 This is the whole mechanism for conditional/monorepo-style execution —
 gauntlet has no path-filter config (see DESIGN.md "Decision ledger": path

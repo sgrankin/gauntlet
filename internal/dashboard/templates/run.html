@@ -27,12 +27,12 @@
 {{range .Checks}}
 {{if .Output}}
 <details class="check-row"{{if .Open}} open{{end}}>
-<summary><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}</summary>
+<summary><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}</summary>
 <pre class="output">{{.Output}}</pre>
 </details>
 {{else}}
 <div class="check-row">
-<span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}
+<span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}
 </div>
 {{end}}
 {{end}}

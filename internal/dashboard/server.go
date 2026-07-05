@@ -20,8 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -51,6 +55,7 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /{$}", d.handleIndex)
 	mux.HandleFunc("GET /t/{target}", d.handleTarget)
 	mux.HandleFunc("GET /run/{runID}", d.handleRun)
+	mux.HandleFunc("GET /run/{runID}/log/{checkName}", d.handleRunLog)
 	mux.HandleFunc("GET /checks", d.handleChecks)
 	d.mountAPIRoutes(mux)
 	return mux
@@ -67,6 +72,12 @@ type dash struct {
 	// version is empty unless New was called with WithVersion; the footer
 	// omits its version line in that case (api.go's WithVersion doc).
 	version string
+
+	// logRoot is empty unless New was called with WithLogRoot; both
+	// GET /run/{id}/log/{check} and every logUrl field this package emits
+	// (run.html, GET /api/v1/run/{id}) stay disabled/absent in that case —
+	// see WithLogRoot's doc (api.go) and handleRunLog below.
+	logRoot string
 }
 
 // --- / --------------------------------------------------------------------
@@ -195,9 +206,203 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			// output should be impossible to miss. Passed/skipped checks
 			// start collapsed.
 			Open: c.Status == "failed" || c.Err != "",
+			// LogURL is only populated when there's both a stored log file
+			// (c.LogPath != "") and a configured containment root to serve it
+			// from (d.logRoot != "", WithLogRoot) — see runLogURL.
+			LogURL: d.runLogURL(row.RunID, c.Name, c.LogPath),
 		})
 	}
 	render(w, runTmpl, data)
+}
+
+// --- /run/{runID}/log/{checkName} --------------------------------------------
+
+// runLogURL builds the relative link to a check's full log
+// (GET /run/{runID}/log/{checkName}), or "" when full-log serving isn't
+// meaningful: no log file was ever written for this check (logPath == "")
+// or the dashboard has no LogRoot configured (WithLogRoot never called),
+// in which case handleRunLog would always 404 anyway. checkName is
+// path-escaped since check names are free-form (a repo-owned check spec),
+// not guaranteed to be URL-safe as a single path segment.
+func (d *dash) runLogURL(runID, checkName, logPath string) string {
+	if logPath == "" || d.logRoot == "" {
+		return ""
+	}
+	return "/run/" + url.PathEscape(runID) + "/log/" + url.PathEscape(checkName)
+}
+
+// handleRunLog serves one check's full per-check log file (DESIGN.md "Full
+// per-check log files"): GET /run/{runID}/log/{checkName}. The run/check
+// must exist in history and have a non-empty stored LogPath, and — the
+// containment check — that path, once resolved, must live under d.logRoot
+// (WithLogRoot). Every failure mode (nil store, unknown run, unknown check,
+// no LogPath, containment violation, or the file missing/pruned) renders
+// the same friendly 404 rather than distinguishing attacker-relevant detail
+// in the response.
+func (d *dash) handleRunLog(w http.ResponseWriter, r *http.Request) {
+	if d.store == nil {
+		notFoundPrunedOrMissing(w)
+		return
+	}
+
+	runID := r.PathValue("runID")
+	checkName := r.PathValue("checkName")
+
+	_, checks, err := d.store.Run(runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			notFoundPrunedOrMissing(w)
+			return
+		}
+		log.Printf("dashboard: run log: run %s: %v", runID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	var storedPath string
+	for _, c := range checks {
+		if c.Name == checkName {
+			storedPath = c.LogPath
+			break
+		}
+	}
+	if storedPath == "" {
+		notFoundPrunedOrMissing(w)
+		return
+	}
+
+	resolved, ok := resolveLogPath(d.logRoot, storedPath)
+	if !ok {
+		// Either LogRoot isn't configured, or the stored path (cleaned and
+		// symlink-resolved) doesn't live under it. Same 404 either way —
+		// see handleRunLog's doc.
+		notFoundPrunedOrMissing(w)
+		return
+	}
+
+	f, err := os.Open(resolved)
+	if err != nil {
+		// Most commonly the file was pruned (retention swept its run-log
+		// directory) since the row was written; any other Open failure
+		// degrades to the same friendly message rather than a 500, since
+		// there's nothing an operator-facing 500 would let a viewer act on.
+		notFoundPrunedOrMissing(w)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		notFoundPrunedOrMissing(w)
+		return
+	}
+	if info.IsDir() {
+		// A stored path that resolves to a directory (e.g. LogRoot itself,
+		// or a wrong-depth path from a buggy writer) is never a servable
+		// log; ServeContent on a directory handle would produce a confusing
+		// read error rather than a clean 404.
+		notFoundPrunedOrMissing(w)
+		return
+	}
+
+	// text/plain + nosniff: this is a raw command-output log, never
+	// executed or rendered as HTML by the browser regardless of what a
+	// check's output happens to contain.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
+}
+
+// notFoundPrunedOrMissing is handleRunLog's uniform failure response: a
+// plain-text 404 body distinguishing "the log is gone" from an ordinary
+// route-not-found 404, for every failure mode handleRunLog has (nil store,
+// unknown run/check, no LogPath, containment violation, or a stat/open
+// failure) — see handleRunLog's doc for why these don't get distinguished
+// further.
+func notFoundPrunedOrMissing(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusNotFound)
+	io.WriteString(w, "log pruned or missing\n")
+}
+
+// resolveLogPath validates storedPath against logRoot (WithLogRoot) and
+// returns the path handleRunLog should actually open. Containment is
+// checked twice, each time comparing two paths run through the *same*
+// resolution so the comparison is apples-to-apples:
+//
+//  1. cleaned-but-unresolved root vs. cleaned-but-unresolved storedPath —
+//     catches a stored path that simply isn't textually under logRoot.
+//  2. symlink-resolved root vs. symlink-resolved storedPath — catches a
+//     path that only escapes logRoot via a symlink component.
+//
+// per DESIGN.md/the work order, "reject any stored path that, after
+// filepath.Clean/EvalSymlinks, does not live under LogRoot". Resolving only
+// one side (e.g. comparing a symlink-resolved root against an unresolved
+// storedPath) would misfire on any host where the root itself sits behind a
+// symlink — notably macOS, where t.TempDir()/os.TempDir() live under
+// /tmp, itself a symlink to /private/tmp: resolving root but not storedPath
+// would make every legitimately-contained path fail containment.
+//
+// A storedPath whose file has already been pruned is expected and common
+// (retention deletes the run-log directory, not the history row): in that
+// case EvalSymlinks fails with a not-exist error, and this returns the
+// cleaned (unresolved) path with ok=true, deferring the actual
+// missing-file 404 to the caller's os.Open/Stat — "pruned" and "escaped
+// containment" are different failure modes even though handleRunLog
+// currently renders them identically.
+func resolveLogPath(logRoot, storedPath string) (path string, ok bool) {
+	if logRoot == "" || storedPath == "" {
+		return "", false
+	}
+
+	root, err := filepath.Abs(logRoot)
+	if err != nil {
+		return "", false
+	}
+	root = filepath.Clean(root)
+
+	clean := filepath.Clean(storedPath)
+	if !filepath.IsAbs(clean) {
+		return "", false
+	}
+	// Step 1: unresolved-vs-unresolved, both in the same (possibly
+	// symlinked) coordinate system.
+	if !pathUnder(root, clean) {
+		return "", false
+	}
+
+	resolvedRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot = r
+	}
+	// A logRoot that doesn't exist yet (fresh state dir, nothing pruned or
+	// served yet) leaves resolvedRoot at the cleaned-but-unresolved absolute
+	// path — EvalSymlinks failing here is not itself a containment
+	// violation, only a reason not to trust symlink resolution of anything
+	// under it either.
+
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		// Most commonly: pruned. Return the cleaned, contained path — the
+		// caller's os.Open reports the real "missing" failure.
+		return clean, true
+	}
+	// Step 2: resolved-vs-resolved, both run through EvalSymlinks.
+	if !pathUnder(resolvedRoot, resolved) {
+		return "", false
+	}
+	return resolved, true
+}
+
+// pathUnder reports whether path is root itself or lives strictly beneath
+// it, using filepath.Rel rather than a string-prefix check so "/a/bb" is
+// never mistaken for being under "/a/b".
+func pathUnder(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // --- /checks?target=&since= --------------------------------------------------
@@ -651,6 +856,14 @@ type checkView struct {
 	// failed/errored checks, so the answer to "how did it fail" is visible
 	// without a click.
 	Open bool
+
+	// LogURL is the relative link to this check's full per-check log
+	// (GET /run/{id}/log/{name}), or "" when there's nothing to link:
+	// either no log file was ever written (history.CheckRow.LogPath == "")
+	// or the dashboard has no LogRoot configured (WithLogRoot). Only
+	// handleRun populates this — buildInFlight's in-flight "Done" checks
+	// never have a history row yet, so their LogURL is always "".
+	LogURL string
 }
 
 // runSummary is one row of a target's recent-run history: the compact

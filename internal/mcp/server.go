@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"time"
 
@@ -67,6 +68,15 @@ type Params struct {
 	// reports whether it was accepted (false = backpressure, e.g. a full
 	// buffer — never blocks). Nil disables the retry tool.
 	Retry func(core.Command) bool
+
+	// LogRoot mirrors dashboard.WithLogRoot: when non-empty, the run tool's
+	// checks gain a logUrl pointing at the dashboard's
+	// GET /run/{id}/log/{check} route (mounted on the same HTTP server this
+	// MCP handler is, per cmd/gauntlet/dashboard.go) — a relative path works
+	// identically here since an MCP client reaching this server can reach
+	// that route too. Empty (the default) omits logUrl entirely, same as
+	// the dashboard's own JSON API when WithLogRoot isn't used.
+	LogRoot string
 }
 
 // New builds the MCP-over-Streamable-HTTP handler: one *sdkmcp.Server,
@@ -319,6 +329,13 @@ type checkDetail struct {
 	DurationMs int64  `json:"durationMs"`
 	Err        string `json:"err"`
 	Output     string `json:"output"`
+	// LogPath is the check's full per-check log file path on disk (empty if
+	// none was written), verbatim from history.CheckRow.LogPath.
+	LogPath string `json:"logPath"`
+	// LogURL is the dashboard's relative link to that file
+	// (GET /run/{id}/log/{name}), present only when Params.LogRoot is set
+	// and LogPath is non-empty — see Params.LogRoot's doc.
+	LogURL string `json:"logUrl,omitempty"`
 }
 
 func handleRun(p Params, in runIn) (runOut, error) {
@@ -351,9 +368,22 @@ func handleRun(p Params, in runIn) (runOut, error) {
 		out.Checks = append(out.Checks, checkDetail{
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err, Output: c.Output,
+			LogPath: c.LogPath,
+			LogURL:  runLogURL(p.LogRoot, in.RunID, c.Name, c.LogPath),
 		})
 	}
 	return out, nil
+}
+
+// runLogURL mirrors dashboard's runLogURL: it returns the dashboard's
+// relative log-serving link for one check, or "" when there's nothing
+// meaningful to link (no log file was written, or LogRoot isn't
+// configured, in which case the dashboard's handler would 404 anyway).
+func runLogURL(logRoot, runID, checkName, logPath string) string {
+	if logRoot == "" || logPath == "" {
+		return ""
+	}
+	return "/run/" + url.PathEscape(runID) + "/log/" + url.PathEscape(checkName)
 }
 
 // --- retry --------------------------------------------------------------------

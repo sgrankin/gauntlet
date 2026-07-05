@@ -16,8 +16,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output)
-VALUES (?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertDepthSQL = `
 INSERT OR REPLACE INTO queue_depth (at, target, waiting, in_flight, parked)
@@ -53,6 +53,13 @@ type CheckRow struct {
 	// status: green output is diagnostics too. The executor's 64KiB tail
 	// cap is the only bound; history does not re-cap.
 	Output string
+	// LogPath is the full per-check log file's path (core.CheckResult.
+	// LogPath), or "" when no file was written (no Config.LogDir
+	// configured, or the file couldn't be created). The dashboard's
+	// GET /run/{id}/log/{check} route serves this file, containment-checked
+	// under its configured LogRoot; a stored path pointing at a since-pruned
+	// or otherwise missing file serves a friendly 404, not an error.
+	LogPath string
 }
 
 // CheckStat summarizes one check's outcomes across a window of runs: how
@@ -113,7 +120,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -125,7 +132,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	for rows.Next() {
 		var c CheckRow
 		var durationMS int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond

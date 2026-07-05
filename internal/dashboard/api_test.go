@@ -251,13 +251,66 @@ func TestAPIRun_Shape(t *testing.T) {
 		t.Fatalf("checks = %v", m["checks"])
 	}
 	c0 := checks[0].(map[string]any)
-	for _, key := range []string{"seq", "name", "status", "durationMs", "err"} {
+	for _, key := range []string{"seq", "name", "status", "durationMs", "err", "logPath"} {
 		if _, ok := c0[key]; !ok {
 			t.Errorf("check missing key %q", key)
 		}
 	}
 	if c0["name"] != "lint" || c0["status"] != "passed" {
 		t.Errorf("checks[0] = %v", c0)
+	}
+}
+
+// TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured confirms
+// GET /api/v1/run/{id} exposes logPath (always, when non-empty) and logUrl
+// (only when the dashboard is configured to actually serve it, WithLogRoot)
+// on each check — chunk F-b's API field additions.
+func TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured(t *testing.T) {
+	store := openTestStore(t)
+	const logPath = "/var/lib/gauntlet/logs/run-log-api/test.log"
+	emitRun(t, store, logRecord("run-log-api", "test", logPath))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store, dashboard.WithLogRoot("/var/lib/gauntlet/logs"))
+	resp, body := get(t, h, "/api/v1/run/run-log-api")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	checks := m["checks"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("checks = %v", checks)
+	}
+	c := checks[0].(map[string]any)
+	if c["logPath"] != logPath {
+		t.Errorf("logPath = %v, want %q", c["logPath"], logPath)
+	}
+	wantURL := "/run/run-log-api/log/test"
+	if c["logUrl"] != wantURL {
+		t.Errorf("logUrl = %v, want %q", c["logUrl"], wantURL)
+	}
+}
+
+// TestAPIRun_ChecksOmitLogURLWithoutLogRoot confirms logUrl is absent
+// (omitempty) when the dashboard has no LogRoot configured, even though
+// logPath is still reported — logUrl should never point at a route that
+// always 404s.
+func TestAPIRun_ChecksOmitLogURLWithoutLogRoot(t *testing.T) {
+	store := openTestStore(t)
+	const logPath = "/var/lib/gauntlet/logs/run-log-api-2/test.log"
+	emitRun(t, store, logRecord("run-log-api-2", "test", logPath))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/api/v1/run/run-log-api-2")
+
+	m := decodeJSON(t, body)
+	checks := m["checks"].([]any)
+	c := checks[0].(map[string]any)
+	if c["logPath"] != logPath {
+		t.Errorf("logPath = %v, want %q", c["logPath"], logPath)
+	}
+	if _, ok := c["logUrl"]; ok {
+		t.Errorf("logUrl = %v, want absent (omitempty) without WithLogRoot", c["logUrl"])
 	}
 }
 
