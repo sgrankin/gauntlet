@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,8 +61,20 @@ func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Check
 	)
 
 	out := &tailBuffer{cap: outputCap}
-	cmd.Stdout = out
-	cmd.Stderr = out
+
+	// logFile, when non-nil, is teed alongside the tail buffer: the full,
+	// uncapped combined output (DESIGN.md "Full per-check log files"). Its
+	// open error is deliberately swallowed here — see openCheckLog's doc —
+	// so a bad/unwritable job.LogPath degrades to the tail-only capture
+	// this executor already had, never to a failed check.
+	logFile, _ := openCheckLog(job.LogPath)
+	var combined io.Writer = out
+	if logFile != nil {
+		defer logFile.Close()
+		combined = io.MultiWriter(out, logFile)
+	}
+	cmd.Stdout = combined
+	cmd.Stderr = combined
 
 	// Own process group so a cancel can kill the whole tree (§9.5): a
 	// cancelled check must not leave grandchildren holding the export dir
@@ -77,6 +90,15 @@ func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Check
 	runErr := cmd.Run()
 	duration := time.Since(start)
 
+	// The command has now been attempted regardless of outcome, so every
+	// return from here on reports whether the full log file actually got
+	// written: LogPath is set iff logFile was successfully opened above,
+	// empty otherwise (no file requested, or the open/mkdir fallback).
+	logPath := ""
+	if logFile != nil {
+		logPath = job.LogPath
+	}
+
 	// ctx cancellation takes precedence over any run error: the process
 	// may exit with a signalled/non-zero status as a side effect of the
 	// group kill, but that is not a verdict.
@@ -85,6 +107,7 @@ func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Check
 			Name:     job.Name,
 			Err:      ctx.Err(),
 			Output:   out.String(),
+			LogPath:  logPath,
 			Duration: duration,
 		}
 	}
@@ -99,6 +122,7 @@ func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Check
 				Name:     job.Name,
 				Status:   core.CheckFailed,
 				Output:   out.String(),
+				LogPath:  logPath,
 				Duration: duration,
 			}
 		}
@@ -113,6 +137,7 @@ func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Check
 			Name:     job.Name,
 			Status:   core.CheckFailed,
 			Output:   output,
+			LogPath:  logPath,
 			Duration: duration,
 		}
 	}
@@ -125,6 +150,7 @@ func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Check
 		Name:     job.Name,
 		Status:   status,
 		Output:   out.String(),
+		LogPath:  logPath,
 		Duration: duration,
 	}
 }

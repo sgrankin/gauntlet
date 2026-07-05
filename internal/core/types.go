@@ -48,6 +48,16 @@ type CheckJob struct {
 	// Dir is the exported trial tree the check runs against.
 	Dir string
 
+	// LogPath, if non-empty, is the file the executor tees this check's
+	// combined stdout+stderr to, in full — alongside (never instead of)
+	// the tail-capped in-band Output (DESIGN.md "Full per-check log
+	// files"). The queue assigns it (Config.LogDir); empty means no file
+	// is written at all, which is also the correct fallback when a
+	// non-empty LogPath's file can't be created — see CheckResult.LogPath
+	// and the executor's handling. Assigning this is purely additive: an
+	// executor that doesn't know about it is free to ignore it.
+	LogPath string
+
 	// BaseSHA is the target tip the trial merge was built onto.
 	BaseSHA string
 
@@ -98,6 +108,15 @@ type CheckResult struct {
 	// Output is the check's captured output, tail-capped (64 KiB in phase
 	// 1; see docs/plans/phase1.md §9.6).
 	Output string
+
+	// LogPath is set iff the executor actually wrote the full,
+	// uncapped log file at CheckJob.LogPath: empty both when no file was
+	// requested (CheckJob.LogPath == "") and when one was requested but
+	// couldn't be created (a log-less fallback — losing the log file must
+	// never fail the check itself, so that failure is silent here, not an
+	// Err). Callers that want the complete record use this path; Output
+	// stays the fast tail-capped inline view either way.
+	LogPath string
 
 	Duration time.Duration
 
@@ -236,6 +255,14 @@ type Event struct {
 
 	RunID     string
 	CheckName string
+
+	// Check is populated with the just-finished result on EventCheckFinished
+	// only, so channels can show a per-check verdict (and duration) mid-run
+	// without waiting for the run's terminal RunRecord. nil on every other
+	// event kind. Channel implementations must nil-check before
+	// dereferencing: older events, and any future EventKind, may carry nil
+	// here even on what looks like a finished-check line.
+	Check *CheckResult
 
 	// Record is set on terminal events; nil otherwise.
 	Record *RunRecord

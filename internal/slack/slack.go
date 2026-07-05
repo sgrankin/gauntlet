@@ -256,11 +256,13 @@ func (s *Slack) postRoot(ctx context.Context, ev core.Event) {
 }
 
 // postCheckReply posts a terse threaded reply for a check starting or
-// finishing. core.Event carries only the check's name at this point (the
-// verdict and duration are only known once the check finishes and land in
-// the terminal RunRecord — see postTerminal), so these interim replies are
-// necessarily just a progress marker; the final threaded summary is where
-// each check's verdict and duration actually appear.
+// finishing. A check-started event carries only the check's name (nothing
+// else is known yet). A check-finished event now carries ev.Check (F-a,
+// DESIGN.md "Full per-check log files") — the just-finished CheckResult —
+// so its reply can show the verdict and duration immediately instead of
+// waiting for the run's terminal threaded summary (postTerminal); ev.Check
+// is nil-checked and falls back to the old name-only line for any event
+// that (still) doesn't carry one.
 func (s *Slack) postCheckReply(ctx context.Context, ev core.Event) {
 	rootTS, ok := s.lookupRoot(ev.RunID)
 	if !ok {
@@ -272,7 +274,11 @@ func (s *Slack) postCheckReply(ctx context.Context, ev core.Event) {
 	case core.EventCheckStarted:
 		text = fmt.Sprintf("▶️ %s", ev.CheckName)
 	case core.EventCheckFinished:
-		text = fmt.Sprintf("◾ %s finished", ev.CheckName)
+		if ev.Check != nil {
+			text = fmt.Sprintf("%s %s (%s)", checkEmoji(ev.Check.Status), ev.CheckName, ev.Check.Duration.Round(time.Millisecond))
+		} else {
+			text = fmt.Sprintf("◾ %s finished", ev.CheckName)
+		}
 	}
 
 	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false), goslack.MsgOptionTS(rootTS)); err != nil {

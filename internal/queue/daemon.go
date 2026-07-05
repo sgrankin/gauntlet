@@ -58,6 +58,19 @@ type Config struct {
 	// sweepable location; the queue itself never sweeps WorkDir (that's
 	// cmd's job, D7).
 	WorkDir string
+
+	// LogDir is the directory full per-check log files are written under
+	// (DESIGN.md "Full per-check log files"): each check's job gets
+	// LogPath = filepath.Join(LogDir, runID, sanitized-check-name+".log"),
+	// and the executor tees the check's combined output there in addition
+	// to the tail-capped in-band CheckResult.Output. Empty disables log
+	// files entirely (CheckJob.LogPath stays "" for every check),
+	// preserving the exact pre-F-a behavior. Unlike WorkDir's trial export
+	// dirs, log files under LogDir are never removed by the queue: they
+	// outlive their run by design (the dashboard's "full log" link, an
+	// API/MCP path) — retention/pruning is a separate mechanism, not the
+	// reconcile loop's job.
+	LogDir string
 }
 
 // checkInFlight is the currently-running check within an in-flight run: its

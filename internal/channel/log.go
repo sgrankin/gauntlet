@@ -123,6 +123,12 @@ func formatEvent(ev core.Event) string {
 	if ev.CheckName != "" {
 		fmt.Fprintf(&b, " check=%s", ev.CheckName)
 	}
+	// Check is populated on EventCheckFinished (F-a, DESIGN.md "Full
+	// per-check log files") — nil-checked since older events, and any
+	// event kind that doesn't carry one, must still render correctly.
+	if ev.Check != nil {
+		fmt.Fprintf(&b, " status=%s duration=%s", checkStatusString(ev.Check.Status), ev.Check.Duration)
+	}
 	if ev.Detail != "" {
 		fmt.Fprintf(&b, " detail=%q", ev.Detail)
 	}

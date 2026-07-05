@@ -67,6 +67,17 @@ func TestLogChannel_EmitEventKinds(t *testing.T) {
 			want: []string{"kind=check_finished", "run=run-1", "check=lint"},
 		},
 		{
+			name: "check finished with Check",
+			ev: core.Event{
+				Kind:      core.EventCheckFinished,
+				Target:    "main",
+				RunID:     "run-1",
+				CheckName: "lint",
+				Check:     &core.CheckResult{Name: "lint", Status: core.CheckFailed, Duration: 1500 * time.Millisecond},
+			},
+			want: []string{"kind=check_finished", "run=run-1", "check=lint", "status=failed", "duration=1.5s"},
+		},
+		{
 			name: "rejected",
 			ev:   core.Event{Kind: core.EventRejected, Target: "main", Detail: "missing .gauntlet.kdl"},
 			want: []string{"kind=rejected", `detail="missing .gauntlet.kdl"`},
@@ -110,6 +121,23 @@ func TestLogChannel_EmitEventKinds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLogChannel_CheckFinishedWithoutCheckOmitsStatusDuration asserts the
+// nil-Check fallback: an EventCheckFinished with Check == nil must not
+// render a status/duration field at all (only kind/run/check, as before
+// F-a — DESIGN.md "Full per-check log files").
+func TestLogChannel_CheckFinishedWithoutCheckOmitsStatusDuration(t *testing.T) {
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	ev := core.Event{Kind: core.EventCheckFinished, Target: "main", RunID: "run-1", CheckName: "lint"}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "status=") || strings.Contains(out, "duration=") {
+		t.Errorf("output %q should have no status/duration field when Event.Check is nil", out)
 	}
 }
 

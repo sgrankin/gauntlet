@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,8 +156,22 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 	cmd := exec.CommandContext(ctx, c.spec.Bin, args...)
 
 	out := &tailBuffer{cap: outputCap}
-	cmd.Stdout = out
-	cmd.Stderr = out
+
+	// logFile, when non-nil, is teed alongside the tail buffer: the full,
+	// uncapped combined output (DESIGN.md "Full per-check log files"),
+	// captured identically to LocalExecutor since both just wire up
+	// cmd.Stdout/Stderr on the CLI subprocess. Its open error is
+	// deliberately swallowed here — see openCheckLog's doc — so a
+	// bad/unwritable job.LogPath degrades to the tail-only capture this
+	// executor already had, never to a failed check.
+	logFile, _ := openCheckLog(job.LogPath)
+	var combined io.Writer = out
+	if logFile != nil {
+		defer logFile.Close()
+		combined = io.MultiWriter(out, logFile)
+	}
+	cmd.Stdout = combined
+	cmd.Stderr = combined
 
 	// Own process group so a cancel can kill the whole CLI-and-children
 	// tree (same discipline as LocalExecutor), plus a best-effort named
@@ -176,6 +191,15 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 	runErr := cmd.Run()
 	duration := time.Since(start)
 
+	// The command has now been attempted regardless of outcome, so every
+	// return from here on reports whether the full log file actually got
+	// written: LogPath is set iff logFile was successfully opened above,
+	// empty otherwise (no file requested, or the open/mkdir fallback).
+	logPath := ""
+	if logFile != nil {
+		logPath = job.LogPath
+	}
+
 	// ctx cancellation takes precedence over any run error, same as
 	// LocalExecutor: the CLI may exit signalled/non-zero as a side effect
 	// of the cancel, but that is not a verdict.
@@ -184,6 +208,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 			Name:     job.Name,
 			Err:      ctx.Err(),
 			Output:   out.String(),
+			LogPath:  logPath,
 			Duration: duration,
 		}
 	}
@@ -198,6 +223,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 				Name:     job.Name,
 				Status:   core.CheckFailed,
 				Output:   out.String(),
+				LogPath:  logPath,
 				Duration: duration,
 			}
 		}
@@ -214,6 +240,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 			Name:     job.Name,
 			Status:   core.CheckFailed,
 			Output:   output,
+			LogPath:  logPath,
 			Duration: duration,
 		}
 	}
@@ -226,6 +253,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		Name:     job.Name,
 		Status:   status,
 		Output:   out.String(),
+		LogPath:  logPath,
 		Duration: duration,
 	}
 }
@@ -278,19 +306,12 @@ func containerName(runID, check string) string {
 
 // sanitizeName replaces every rune outside [A-Za-z0-9_.-] with '-', the
 // portable-name-safe subset shared by docker/podman/Apple container
-// container-ID syntax.
+// container-ID syntax. A thin wrapper over core.SanitizeName so
+// internal/queue's per-check log path sanitization (DESIGN.md "Full
+// per-check log files") shares exactly this logic instead of a second,
+// possibly-drifting copy.
 func sanitizeName(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	return b.String()
+	return core.SanitizeName(s)
 }
 
 // probeRuntime reports whether spec's CLI is installed and its backing

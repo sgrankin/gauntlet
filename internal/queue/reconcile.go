@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -228,7 +229,11 @@ func (d *Daemon) reconcileInFlight(ctx context.Context, t config.Target, targetT
 	case res := <-r.cur.result:
 		obs.EndCheck(r.cur.span, res)
 		r.rec.Checks = append(r.rec.Checks, res)
-		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.cand, RunID: r.runID, CheckName: res.Name})
+		// Check is the just-finished result itself (docs/plans/phase23.md
+		// F-a: "Event additionally carries the finished *CheckResult on
+		// check-finished events"), so channels can render a per-check
+		// verdict mid-run instead of waiting for the run's terminal event.
+		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.cand, RunID: r.runID, CheckName: res.Name, Check: &res})
 		r.cur = nil
 
 		switch {
@@ -270,6 +275,15 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 		MergeSHA:  r.mergeOID,
 		Candidate: r.cand,
 		Clean:     false, // reserved for the phase-4 clean-build escape hatch
+	}
+	// F-a (DESIGN.md "Full per-check log files"): LogDir == "" preserves
+	// the exact pre-F-a behavior (job.LogPath stays ""). The check name is
+	// free-form config, so it's sanitized the same way container names are
+	// (core.SanitizeName) before becoming a path component — the trailing
+	// ".log" suffix additionally guarantees the sanitized name can never
+	// resolve to "." or "..".
+	if d.cfg.LogDir != "" {
+		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, core.SanitizeName(check.Name)+".log")
 	}
 
 	result := make(chan core.CheckResult, 1)
@@ -489,6 +503,11 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 
 	obs.EndRun(r.rootSpan, r.rec)
 
+	// Only the trial export dir (WorkDir) is removed here. Per-check log
+	// files (LogDir, if configured) are deliberately never touched by run
+	// cleanup: they outlive the run by design (DESIGN.md "Full per-check
+	// log files") — retention is a separate, later prune mechanism, not
+	// this state machine's job.
 	if r.dir != "" {
 		_ = os.RemoveAll(r.dir)
 	}
