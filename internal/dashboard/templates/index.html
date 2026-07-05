@@ -1,0 +1,30 @@
+{{define "content"}}
+{{if .Starting}}
+<p class="muted">Starting up — no reconcile pass has completed yet.</p>
+{{else if not .Targets}}
+<p class="muted">No targets configured.</p>
+{{else}}
+<div class="grid">
+{{range .Targets}}
+<div class="card">
+<h2><a href="/t/{{.Name}}">{{.Name}}</a></h2>
+<p class="muted">branch <code>{{.Branch}}</code> @ <code>{{.TargetTip}}</code></p>
+{{if .InFlight}}
+<p><span class="tag neutral">in flight</span> {{.InFlight.Candidate.User}}/{{.InFlight.Candidate.Topic}}</p>
+<p>{{if .InFlight.CurrentName}}running <strong>{{.InFlight.CurrentName}}</strong> ({{.InFlight.CurrentElapsed}}){{else}}<span class="muted">between checks</span>{{end}}</p>
+{{else}}
+<p class="muted">idle</p>
+{{end}}
+<p>{{.WaitingCount}} waiting &middot; {{.ParkedCount}} parked</p>
+{{if .StoreEnabled}}
+<p class="muted">recent:
+{{range .RecentRuns}} <a href="/run/{{.RunID}}" class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</a>{{else}}<span class="muted">none</span>{{end}}
+</p>
+{{else}}
+<p class="muted">history disabled</p>
+{{end}}
+</div>
+{{end}}
+</div>
+{{end}}
+{{end}}

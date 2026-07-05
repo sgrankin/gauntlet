@@ -1,0 +1,33 @@
+{{define "content"}}
+{{if not .StoreEnabled}}
+<p class="muted">history disabled</p>
+{{else}}
+<p>
+<strong>{{.Run.User}}/{{.Run.Topic}}</strong> on target <a href="/t/{{.Run.Target}}">{{.Run.Target}}</a>
+&middot; <span class="tag {{.Run.Outcome.Class}}">{{.Run.Outcome.Word}}</span>
+</p>
+<table>
+<tr><th>ref</th><td class="mono">{{.Run.Ref}}</td></tr>
+<tr><th>candidate sha</th><td><code>{{.Run.SHA}}</code></td></tr>
+<tr><th>base</th><td><code>{{.Run.BaseOID}}</code></td></tr>
+<tr><th>merge sha</th><td><code>{{.Run.MergeSHA}}</code></td></tr>
+<tr><th>trial merge</th><td>{{if .Run.TrialClean}}clean{{else}}conflict{{end}}</td></tr>
+<tr><th>detail</th><td>{{.Run.Detail}}</td></tr>
+<tr><th>started</th><td>{{.Run.StartedAt}}</td></tr>
+<tr><th>ended</th><td>{{.Run.EndedAt}}</td></tr>
+<tr><th>duration</th><td>{{.Run.Duration}}</td></tr>
+</table>
+
+<h2>Checks</h2>
+{{if .Checks}}
+<table>
+<tr><th>#</th><th>check</th><th>status</th><th>duration</th><th>err</th></tr>
+{{range .Checks}}
+<tr><td>{{.Seq}}</td><td>{{.Name}}</td><td><span class="tag {{.Status.Class}}">{{.Status.Word}}</span></td><td>{{.Duration}}</td><td class="muted">{{.Err}}</td></tr>
+{{end}}
+</table>
+{{else}}
+<p class="muted">no checks recorded</p>
+{{end}}
+{{end}}
+{{end}}

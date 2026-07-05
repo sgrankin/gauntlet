@@ -1,0 +1,35 @@
+{{define "content"}}
+<p class="muted">since {{.Since}}</p>
+{{if .AvailableTargets}}
+<p>
+{{range .AvailableTargets}}<a href="/checks?target={{.}}">{{.}}</a> {{end}}
+</p>
+{{end}}
+{{if not .StoreEnabled}}
+<p class="muted">history disabled</p>
+{{else}}
+<h2>Check stats{{if .Target}} — {{.Target}}{{end}}</h2>
+{{if .Stats}}
+<table>
+<tr><th>check</th><th>total</th><th>failed</th><th>red rate</th><th>avg</th><th>max</th></tr>
+{{range .Stats}}
+<tr><td>{{.Name}}</td><td>{{.Total}}</td><td>{{.Failed}}</td><td>{{.RedRate}}</td><td>{{.Avg}}</td><td>{{.Max}}</td></tr>
+{{end}}
+</table>
+{{else}}
+<p class="muted">no data for this window</p>
+{{end}}
+
+<h2>Queue depth{{if .Target}} — {{.Target}}{{end}}</h2>
+{{if .Depth}}
+<table>
+<tr><th>at</th><th>waiting</th><th>in flight</th><th>parked</th></tr>
+{{range .Depth}}
+<tr><td class="muted">{{.At}}</td><td>{{.Waiting}}</td><td>{{.InFlight}}</td><td>{{.Parked}}</td></tr>
+{{end}}
+</table>
+{{else}}
+<p class="muted">no samples for this window</p>
+{{end}}
+{{end}}
+{{end}}
