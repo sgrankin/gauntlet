@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 const defaultDashboardURL = "http://localhost:8899"
@@ -34,12 +35,13 @@ type statusAPIResponse struct {
 }
 
 type statusAPITarget struct {
-	Name     string             `json:"name"`
-	Branch   string             `json:"branch"`
-	Tip      string             `json:"tip"`
-	InFlight *statusAPIInFlight `json:"inFlight"`
-	Waiting  []statusAPIWaiting `json:"waiting"`
-	Parked   []statusAPIParked  `json:"parked"`
+	Name     string              `json:"name"`
+	Branch   string              `json:"branch"`
+	Tip      string              `json:"tip"`
+	InFlight *statusAPIInFlight  `json:"inFlight"`
+	Pipeline []statusAPIPipeline `json:"pipeline"`
+	Waiting  []statusAPIWaiting  `json:"waiting"`
+	Parked   []statusAPIParked   `json:"parked"`
 }
 
 type statusAPIInFlight struct {
@@ -49,6 +51,28 @@ type statusAPIInFlight struct {
 	CurrentCheck string   `json:"currentCheck"`
 	StartedAt    string   `json:"startedAt"`
 	ChecksDone   []string `json:"checksDone"`
+}
+
+// statusAPIPipeline mirrors dashboard.pipelineStatus's JSON shape
+// (internal/dashboard/api.go) — see the file doc on why this is a separate
+// type rather than a shared import. One entry per run currently in a
+// target's pipeline (docs/plans/phase5.md §3.4): head first, additive
+// alongside inFlight (which stays the head run, for back-compat) — a
+// target running more than one speculative lane, or a batch of more than
+// one member, only shows up here.
+type statusAPIPipeline struct {
+	Members      []statusAPIPipelineMember `json:"members"`
+	ChainTip     string                    `json:"chainTip"`
+	Predicted    bool                      `json:"predicted"`
+	BatchID      string                    `json:"batchId"`
+	ChecksDone   []string                  `json:"checksDone"`
+	CurrentCheck string                    `json:"currentCheck"`
+	StartedAt    string                    `json:"startedAt"`
+}
+
+type statusAPIPipelineMember struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
 }
 
 type statusAPIWaiting struct {
@@ -118,10 +142,11 @@ func runStatus(args []string) error {
 }
 
 // renderStatus writes a compact, per-target summary of resp to w: branch
-// and short tip SHA, the in-flight ref and check (if any), the waiting
-// count, and one line per parked ref with its outcome and reason. Pure
-// (no I/O beyond w), so it's testable against canned API JSON without a
-// network.
+// and short tip SHA, the in-flight ref and check (if any), the pipeline
+// (one line per run, position + ref/topic + a "(speculated)" marker on a
+// predicted-base run — S10, docs/plans/phase5.md §3.4), the waiting count,
+// and one line per parked ref with its outcome and reason. Pure (no I/O
+// beyond w), so it's testable against canned API JSON without a network.
 func renderStatus(w io.Writer, resp statusAPIResponse, target string) error {
 	shown := 0
 	for _, t := range resp.Targets {
@@ -136,6 +161,30 @@ func renderStatus(w io.Writer, resp statusAPIResponse, target string) error {
 			fmt.Fprintf(w, "  in-flight: %s check=%s\n", t.InFlight.Ref, orDash(t.InFlight.CurrentCheck))
 		} else {
 			fmt.Fprintf(w, "  in-flight: -\n")
+		}
+
+		if len(t.Pipeline) > 1 || (len(t.Pipeline) == 1 && len(t.Pipeline[0].Members) > 1) {
+			// Only worth a separate section once there's something inFlight
+			// alone can't already show: more than one run in flight
+			// (speculation), or a single run with more than one member
+			// (batch) — matching the dashboard target page's own
+			// (len(Pipeline) > 1 || len(Pipeline[0].Members) > 1) gate
+			// (internal/dashboard/server.go).
+			fmt.Fprintf(w, "  pipeline:\n")
+			for i, p := range t.Pipeline {
+				refs := make([]string, len(p.Members))
+				for j, m := range p.Members {
+					refs[j] = m.Ref
+				}
+				line := strings.Join(refs, ", ")
+				if line == "" {
+					line = "-"
+				}
+				if p.Predicted {
+					line += " (speculated)"
+				}
+				fmt.Fprintf(w, "    #%d %s\n", i, line)
+			}
 		}
 
 		fmt.Fprintf(w, "  waiting: %d\n", len(t.Waiting))

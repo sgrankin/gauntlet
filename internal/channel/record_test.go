@@ -35,6 +35,25 @@ func TestRecordingChannel_CapturesEventsAndRecords(t *testing.T) {
 	}
 }
 
+// TestRecordingChannel_EmitUnknownEventKindNoPanic is S14's universal
+// contract test for RecordingChannel: unlike a real channel,
+// RecordingChannel's whole job is to capture every event a test hands it
+// verbatim, so its contract for an unrecognized core.EventKind isn't
+// "ignore it" but "record it without panicking" — a future EventKind must
+// be just as capturable by tests as any existing one.
+func TestRecordingChannel_EmitUnknownEventKindNoPanic(t *testing.T) {
+	c := NewRecordingChannel()
+	ev := core.Event{Kind: core.EventKind(999), Target: "main"}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	events := c.Events()
+	if len(events) != 1 || events[0].Kind != core.EventKind(999) {
+		t.Fatalf("Events() = %+v, want the unrecognized-kind event recorded", events)
+	}
+}
+
 func TestRecordingChannel_EventsSnapshotIsIndependent(t *testing.T) {
 	c := NewRecordingChannel()
 	if err := c.Emit(context.Background(), core.Event{Kind: core.EventQueued}); err != nil {

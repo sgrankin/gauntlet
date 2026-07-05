@@ -18,7 +18,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/obs"
 )
 
 // Hook is one named command run, in order, against a target's landed tree.
@@ -150,6 +153,17 @@ type Runner struct {
 	logDir   string
 	log      io.Writer
 
+	// tr is gauntlet's shared tracer (obs.Tracer()), grabbed once at
+	// construction exactly like queue.Daemon does (cmd/gauntlet/main.go's
+	// obs.InstallProvider-before-New ordering applies here too: hooks.New is
+	// only ever called after InstallProvider in main's run()). Used to give
+	// each hook's RunCheck call its own "check" span (S5's OTel rider),
+	// mirroring internal/queue/reconcile.go's startCheck — the same
+	// obs.StartCheck/EndCheck pair, since a hook's CheckJob/CheckResult
+	// shape is identical to a check's. With no provider installed, every
+	// span is a no-op, so this costs nothing when OTel isn't configured.
+	tr trace.Tracer
+
 	queue chan core.Event
 	cmds  chan core.Command
 
@@ -183,6 +197,7 @@ func New(p Params) *Runner {
 		workDir:  p.WorkDir,
 		logDir:   p.LogDir,
 		log:      logw,
+		tr:       obs.Tracer(),
 		queue:    make(chan core.Event, queueBuffer),
 		cmds:     make(chan core.Command),
 		monitors: make(map[string]chan core.Event),
@@ -259,6 +274,14 @@ func (r *Runner) Commands() <-chan core.Command {
 // the next batch once this one drains — Policy is applied fresh each
 // cycle, so a target's backlog never accumulates unboundedly under
 // PolicyCoalesce/PolicyCancel even if landings keep arriving throughout.
+//
+// GUARD (S25): this loop's single goroutine draining r.queue is what makes
+// hook execution globally serial — across every target at once, not merely
+// one landing per target at a time — which history.Store.writeHookResult
+// (internal/history/store.go) depends on for its count-in-transaction
+// sequence numbering to be race-free. If this ever changes (e.g. one Run
+// goroutine per target, or execLanding calls fanned out concurrently),
+// that seq-by-COUNT approach must be revisited first.
 func (r *Runner) Run(ctx context.Context) error {
 	for {
 		select {
@@ -549,7 +572,16 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 			Candidate: rec.Candidate,
 			LogPath:   r.hookLogPath(rec.RunID, i+1, h.Name),
 		}
-		result := r.exec.RunCheck(ctx, job)
+		// S5 (OTel rider): give this hook its own "check" span, mirroring
+		// queue's startCheck (internal/queue/reconcile.go) exactly — same
+		// obs.StartCheck/EndCheck pair, same CheckJob/CheckResult shape.
+		// There is no run-level parent span here (hooks have no
+		// obs.StartRun-shaped root the way a queue run does), so this is a
+		// standalone span per hook rather than a child of one; with no OTel
+		// provider installed it's a no-op regardless (obs.Tracer's doc).
+		spanCtx, span := obs.StartCheck(ctx, r.tr, job.Name)
+		result := r.exec.RunCheck(spanCtx, job)
+		obs.EndCheck(span, result)
 
 		// A non-nil Err (as opposed to a verdict CheckFailed) is the only
 		// case PolicyCancel's cancellation produces (LocalExecutor's

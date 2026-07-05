@@ -291,3 +291,95 @@ func TestRenderStatus_NoParkedOmitsSection(t *testing.T) {
 		t.Errorf("expected no parked section for release:\n%s", buf.String())
 	}
 }
+
+// pipelineCanned is a canned API response with a target running a
+// multi-lane speculative pipeline (one predicted-base run, one on the live
+// tip) — the exact shape statusAPITarget previously dropped entirely
+// (S10), since it had no Pipeline field to unmarshal into.
+const pipelineCanned = `{
+	"snapshotAt": "2026-07-05T12:00:00Z",
+	"targets": [
+		{
+			"name": "main",
+			"branch": "main",
+			"tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"inFlight": {
+				"ref": "refs/heads/for/main/alice/feat-a",
+				"sha": "1111111111111111111111111111111111111111",
+				"runID": "run-inflight-1",
+				"currentCheck": "test",
+				"startedAt": "2026-07-05T11:59:30Z",
+				"checksDone": []
+			},
+			"pipeline": [
+				{
+					"members": [{"ref": "refs/heads/for/main/alice/feat-a", "sha": "1111111111111111111111111111111111111111"}],
+					"chainTip": "1111111111111111111111111111111111111111",
+					"predicted": false,
+					"batchId": "",
+					"checksDone": [],
+					"currentCheck": "test",
+					"startedAt": "2026-07-05T11:59:30Z"
+				},
+				{
+					"members": [{"ref": "refs/heads/for/main/bob/feat-b", "sha": "2222222222222222222222222222222222222222"}],
+					"chainTip": "2222222222222222222222222222222222222222",
+					"predicted": true,
+					"batchId": "",
+					"checksDone": [],
+					"currentCheck": "",
+					"startedAt": "2026-07-05T11:59:45Z"
+				}
+			],
+			"waiting": [],
+			"parked": []
+		}
+	]
+}`
+
+// TestRenderStatus_PipelineRendersPositionRefAndSpeculatedMarker is S10's
+// regression test: gauntlet status's human renderer must not silently drop
+// the API's pipeline array — a target running more than one speculative
+// lane must render every lane (position, ref, and a "(speculated)" marker
+// on the predicted-base one), not just the single head-run inFlight line.
+func TestRenderStatus_PipelineRendersPositionRefAndSpeculatedMarker(t *testing.T) {
+	var resp statusAPIResponse
+	if err := json.Unmarshal([]byte(pipelineCanned), &resp); err != nil {
+		t.Fatalf("decode pipelineCanned JSON: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, ""); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"pipeline:",
+		"#0 refs/heads/for/main/alice/feat-a",
+		"#1 refs/heads/for/main/bob/feat-b (speculated)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\noutput:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "#0 refs/heads/for/main/alice/feat-a (speculated)") {
+		t.Errorf("head run must not carry the speculated marker:\n%s", out)
+	}
+}
+
+// TestRenderStatus_SingleMemberPipelineOmitsSection confirms the ordinary
+// (non-speculative, non-batch) case — one pipeline entry with exactly one
+// member, mirroring InFlight — doesn't grow a redundant pipeline section:
+// renderStatus's gate matches the dashboard target page's own
+// (len(Pipeline) > 1 || len(Pipeline[0].Members) > 1) condition.
+func TestRenderStatus_SingleMemberPipelineOmitsSection(t *testing.T) {
+	resp := decodeCanned(t) // canned's "main" target has no "pipeline" key at all
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "main"); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	if strings.Contains(buf.String(), "pipeline:") {
+		t.Errorf("expected no pipeline section without a multi-run/multi-member pipeline:\n%s", buf.String())
+	}
+}

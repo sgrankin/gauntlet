@@ -203,13 +203,27 @@ func run() error {
 		chans = append(chans, ghStatus)
 	}
 
+	// wg tracks every background goroutine started here (Slack, hooks, the
+	// dashboard, the depth sampler, the log pruner) that may still be
+	// querying or writing store (or, for the pruner, logsDir) after d.Run
+	// returns on ctx cancellation. Declared here — ahead of the Slack/hooks
+	// goroutines below, not just startDashboard/startDepthSampler/
+	// startLogPruner further down — so sc.Run and hr.Run are joined by the
+	// same wg.Wait() before store.Close() runs (deferred above): both can
+	// still be mid-write (a hook history row, a Slack API call) when ctx is
+	// cancelled, and neither was previously counted, so shutdown could race
+	// ahead of them and store.Close() out from under an in-flight write.
+	var wg sync.WaitGroup
+
 	sc, err := buildSlackChannel(cfg)
 	if err != nil {
 		return fmt.Errorf("build slack channel: %w", err)
 	}
 	if sc != nil {
 		chans = append(chans, sc)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := sc.Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "gauntlet: slack: %v\n", err)
 			}
@@ -248,7 +262,9 @@ func run() error {
 			return fmt.Errorf("create hooks dir %s: %w", hooksDir, err)
 		}
 		chans = append(chans, hr)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := hr.Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "gauntlet: hooks: %v\n", err)
 			}
@@ -296,14 +312,14 @@ func run() error {
 		return fmt.Errorf("init queue: %w", err)
 	}
 
-	// wg tracks the dashboard's goroutines (Shutdown watcher + ListenAndServe),
-	// the depth sampler, and the log pruner, all of which may still be
-	// querying or writing store (or, for the pruner, logsDir) after d.Run
-	// returns on ctx cancellation. Waiting on wg before store.Close() runs
-	// (deferred above) keeps that Close from racing them (cmd wiring review,
-	// docs/plans/phase23.md): sampler exits, dashboard's graceful Shutdown
-	// completes, then — only then — the store closes.
-	var wg sync.WaitGroup
+	// wg additionally covers the dashboard's goroutines (Shutdown watcher +
+	// ListenAndServe), the depth sampler, and the log pruner, all of which
+	// may still be querying or writing store (or, for the pruner, logsDir)
+	// after d.Run returns on ctx cancellation. Waiting on wg before
+	// store.Close() runs (deferred above) keeps that Close from racing any
+	// of them (cmd wiring review, docs/plans/phase23.md): Slack/hooks/
+	// sampler/pruner exit, the dashboard's graceful Shutdown completes,
+	// then — only then — the store closes.
 	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)

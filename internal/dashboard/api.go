@@ -427,6 +427,12 @@ type checkJSON struct {
 	Status     string `json:"status"`
 	DurationMs int64  `json:"durationMs"`
 	Err        string `json:"err"`
+	// Output is the check's (or hook's) captured output, stored verbatim,
+	// straight from the same history.CheckRow/HookRow column the HTML page
+	// and the MCP server already render — added so a JSON/CLI consumer
+	// doesn't need a second round-trip through the log file (LogPath/LogURL,
+	// below) just to see what a check printed.
+	Output string `json:"output"`
 	// LogPath is the check's full per-check log file path on disk (empty if
 	// none was written), verbatim from history.CheckRow.LogPath.
 	LogPath string `json:"logPath"`
@@ -472,6 +478,7 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 		resp.Checks = append(resp.Checks, checkJSON{
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err,
+			Output:  c.Output,
 			LogPath: c.LogPath,
 			LogURL:  d.runLogURL(row.RunID, c.Name, c.LogPath),
 		})
@@ -486,6 +493,7 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 		resp.Hooks = append(resp.Hooks, checkJSON{
 			Seq: h.Seq, Name: h.Name, Status: h.Status,
 			DurationMs: h.Duration.Milliseconds(), Err: h.Err,
+			Output:  h.Output,
 			LogPath: h.LogPath,
 			LogURL:  d.runLogURL(row.RunID, h.Name, h.LogPath),
 		})

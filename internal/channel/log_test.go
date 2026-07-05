@@ -314,6 +314,25 @@ func TestLogChannel_EmitHookFinishedNilCheckOmitsBlock(t *testing.T) {
 	}
 }
 
+// TestLogChannel_EmitUnknownEventKindNoPanic is S14's universal contract
+// test for LogChannel: core.EventKind(999) (a future kind eventKindString's
+// switch has never heard of) must not panic Emit, matching the package doc's
+// own claim ("every core.Channel implementation is expected to hold the
+// same contract — ignore event kinds it doesn't understand, never fail
+// Emit over one"). Unlike a silent consumer, LogChannel's own contract is
+// to still render the line, tagged "unknown(N)" rather than dropped, so
+// that (not "no output") is what this asserts.
+func TestLogChannel_EmitUnknownEventKindNoPanic(t *testing.T) {
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), core.Event{Kind: core.EventKind(999), Target: "main"}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if !strings.Contains(buf.String(), "unknown(999)") {
+		t.Errorf("output %q missing kind=unknown(999) rendering for an unrecognized EventKind", buf.String())
+	}
+}
+
 func TestLogChannel_EmitSwallowsWriteFailure(t *testing.T) {
 	c := NewLogChannel(failingWriter{})
 	err := c.Emit(context.Background(), core.Event{Kind: core.EventQueued, Target: "main"})

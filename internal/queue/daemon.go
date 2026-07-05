@@ -337,7 +337,20 @@ func (d *Daemon) headRun(target string) *run {
 // ReconcileOnce once per tick. A ReconcileOnce error is reported as a
 // channel EventError (it is not target-specific, so it carries no
 // Candidate) and does not stop the loop — the next tick tries again.
+//
+// Run performs one extra ReconcileOnce immediately, before ever waiting on
+// tick: without it, park-seeding, discovery, and command draining would sit
+// idle for up to a full poll interval after every restart for no reason —
+// tick's first value is otherwise cfg.Poll away. Errors from this initial
+// pass are reported exactly like a tick's (an EventError, loop keeps going);
+// ctx.Done() firing before it completes still returns ctx.Err() as normal.
 func (d *Daemon) Run(ctx context.Context, tick <-chan time.Time) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := d.ReconcileOnce(ctx); err != nil {
+		d.emit(ctx, core.Event{Kind: core.EventError, At: d.now(), Detail: err.Error()})
+	}
 	for {
 		select {
 		case <-ctx.Done():

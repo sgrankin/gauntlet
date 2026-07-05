@@ -238,6 +238,16 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		return fmt.Errorf("history: insert run: %w", err)
 	}
 
+	// Per-check data is captured exclusively from the terminal RunRecord's
+	// own Checks slice, right here, never as a per-event row of its own:
+	// Store.Emit's Record == nil branch (above) already drops
+	// EventCheckStarted/EventCheckFinished before writeRecord is ever
+	// called, and by the time a run's terminal event arrives, rec.Checks
+	// already holds every check that ran, in order — so there is nothing a
+	// per-event check row would capture that this one transaction doesn't
+	// already write. Deliberate and correct by construction (S28), not a
+	// gap: mirrors ghstatus's and hooks.Runner's own documented "ignores
+	// this event kind on purpose" stance.
 	for i, cr := range rec.Checks {
 		if _, err := tx.ExecContext(ctx, insertCheckSQL,
 			rec.RunID,
@@ -283,6 +293,16 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 // re-emitting the same event twice (which normal operation never does) is
 // the one case this would double-count rather than replace; INSERT OR
 // REPLACE here guards against exact-same-seq collisions, not against that.
+//
+// GUARD (S25): the safety margin here is actually stronger than the
+// paragraph above states — hooks.Runner.Run drains a single global landing
+// queue in one goroutine (internal/hooks/hooks.go), so hook execution is
+// serial across every target at once, not merely "one landing per target at
+// a time". Either invariant alone is enough to make this count-in-tx seq
+// safe today, but if hook execution is ever sharded or parallelized (e.g.
+// one Runner goroutine per target, or a concurrent backlog drain within
+// PolicyQueue), this COUNT(*) can race across two writers for the same
+// run_id and must be replaced with an explicit sequence column instead.
 //
 // ev.RunID is expected to already have a matching runs row by the time this
 // runs: hooks only ever fire off an EventLanded whose Record history's own

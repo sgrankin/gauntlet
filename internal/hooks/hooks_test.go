@@ -268,6 +268,11 @@ func TestRunner_FailureStopsRemainingHooks(t *testing.T) {
 	}
 }
 
+// TestRunner_NonLandedEventsIgnored also covers S14's universal contract —
+// core.EventKind(999) (a future kind this version of Runner has never heard
+// of) must be ignored exactly like any other non-landing event, not panic
+// or otherwise misbehave (internal/channel/log.go's "channels ignore
+// unknown kinds" contract, which Runner.Emit's own doc cites).
 func TestRunner_NonLandedEventsIgnored(t *testing.T) {
 	r := New(Params{
 		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
@@ -281,6 +286,7 @@ func TestRunner_NonLandedEventsIgnored(t *testing.T) {
 		{Kind: core.EventQueued, Target: "main"},
 		{Kind: core.EventCheckFinished, Target: "main", Record: nil},
 		{Kind: core.EventRejected, Target: "main", Record: &core.RunRecord{}}, // terminal, but not a landing
+		{Kind: core.EventKind(999), Target: "main"},                          // unrecognized kind (S14)
 	}
 	for _, ev := range cases {
 		if err := r.Emit(context.Background(), ev); err != nil {

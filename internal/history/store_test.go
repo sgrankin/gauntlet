@@ -682,6 +682,11 @@ func TestStore_Commands_NeverYields(t *testing.T) {
 	}
 }
 
+// TestStore_Emit_IgnoresNonTerminalEvents also covers S14's universal
+// contract: core.EventKind(999) (a future kind Store.Emit's Kind/Record
+// switch has never heard of) has Record == nil like every other
+// non-terminal event here, so it must fall into the same "silently
+// ignored, no rows written" branch — not panic or otherwise misbehave.
 func TestStore_Emit_IgnoresNonTerminalEvents(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -691,6 +696,7 @@ func TestStore_Emit_IgnoresNonTerminalEvents(t *testing.T) {
 		{Kind: core.EventTrialClean, Target: "main"},
 		{Kind: core.EventCheckStarted, Target: "main", RunID: "run-1", CheckName: "lint"},
 		{Kind: core.EventCheckFinished, Target: "main", RunID: "run-1", CheckName: "lint"},
+		{Kind: core.EventKind(999), Target: "main"}, // unrecognized kind (S14)
 	}
 	for _, ev := range nonTerminal {
 		if err := s.Emit(ctx, ev); err != nil {

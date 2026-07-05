@@ -368,6 +368,62 @@ func TestSlack_HookPassedPostsNothing(t *testing.T) {
 	}
 }
 
+// TestSlack_HookFinishedNilCheckPostsNothing is S13's regression test,
+// mirroring TestLogChannel_EmitHookFinishedNilCheckOmitsBlock
+// (internal/channel/log_test.go): postHookFinished (slack.go) branches on
+// ev.Check first, before looking at its Status/Err — a nil Check (an
+// EventHookFinished with no result, however that might arise) must not
+// panic on that nil dereference, and must post nothing, exactly like a
+// passed hook does. Every other Slack hook test (e.g.
+// TestSlack_HookPassedPostsNothing, TestSlack_HookFailedPostsStandaloneMessageWithTail)
+// passes a non-nil Check, so this branch was previously unexercised.
+func TestSlack_HookFinishedNilCheckPostsNothing(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/ivy/deploy", Target: "main", User: "ivy", Topic: "deploy", SHA: "0bad0bad"}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-nil-check", CheckName: "deploy", Check: nil})
+
+	// Synchronize on notify (fires once the drainer has fully handled the
+	// event), matching TestSlack_HookPassedPostsNothing's rationale for not
+	// asserting absence against a wall-clock sleep.
+	s.mu.Lock()
+	wake := s.notify
+	s.mu.Unlock()
+	select {
+	case <-wake:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the event to be processed")
+	}
+
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no Slack post for a nil-Check hook-finished event, got %+v", got)
+	}
+}
+
+// TestSlack_UnknownEventKindPostsNothing is S14's universal contract test
+// for Slack: handleOutbound's switch falls through to no-op for any Kind it
+// doesn't recognize (mirroring core.Channel's "ignore unknown kinds"
+// contract, internal/channel/log.go), so core.EventKind(999) — a future
+// kind this build has never heard of — must produce no post and no panic,
+// exactly like EventQueued/EventCheckStarted-without-thread today.
+func TestSlack_UnknownEventKindPostsNothing(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventKind(999), Target: "main"})
+
+	s.mu.Lock()
+	wake := s.notify
+	s.mu.Unlock()
+	select {
+	case <-wake:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the event to be processed")
+	}
+
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no Slack post for an unrecognized EventKind, got %+v", got)
+	}
+}
+
 func TestSlack_TerminalWithoutKnownRootIsANoOp(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 

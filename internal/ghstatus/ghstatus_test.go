@@ -245,6 +245,10 @@ func TestChannel_SkippedDoesNotPost(t *testing.T) {
 	}
 }
 
+// TestChannel_NonMappedEventKindsDoNotPost also covers S14's universal
+// contract: core.EventKind(999) (a future kind statusFor's switch has never
+// heard of) must fall into the same default "no post" case as any other
+// non-mapped kind, not panic or otherwise misbehave.
 func TestChannel_NonMappedEventKindsDoNotPost(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -253,7 +257,7 @@ func TestChannel_NonMappedEventKindsDoNotPost(t *testing.T) {
 
 	c := New(Params{Owner: "acme", Repo: "widgets", Token: "tok", APIURL: srv.URL, Log: io.Discard})
 
-	for _, kind := range []core.EventKind{core.EventQueued, core.EventCheckStarted, core.EventCheckFinished} {
+	for _, kind := range []core.EventKind{core.EventQueued, core.EventCheckStarted, core.EventCheckFinished, core.EventKind(999)} {
 		ev := core.Event{Kind: kind, Target: "main", Candidate: core.Candidate{SHA: "deadbeef"}}
 		if err := c.Emit(context.Background(), ev); err != nil {
 			t.Fatalf("Emit(%v): %v", kind, err)

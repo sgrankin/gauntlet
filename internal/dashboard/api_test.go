@@ -365,13 +365,22 @@ func TestAPIRun_Shape(t *testing.T) {
 		t.Fatalf("checks = %v", m["checks"])
 	}
 	c0 := checks[0].(map[string]any)
-	for _, key := range []string{"seq", "name", "status", "durationMs", "err", "logPath"} {
+	for _, key := range []string{"seq", "name", "status", "durationMs", "err", "output", "logPath"} {
 		if _, ok := c0[key]; !ok {
 			t.Errorf("check missing key %q", key)
 		}
 	}
 	if c0["name"] != "lint" || c0["status"] != "passed" {
 		t.Errorf("checks[0] = %v", c0)
+	}
+
+	// checks[1] ("test") is sampleRecord's failing check, seeded with
+	// Output: "boom" — confirms the API surfaces the same output column the
+	// HTML page and MCP already render (S9), instead of requiring a second
+	// round-trip through the log file.
+	c1 := checks[1].(map[string]any)
+	if c1["output"] != "boom" {
+		t.Errorf("checks[1] output = %v, want %q", c1["output"], "boom")
 	}
 }
 
@@ -479,7 +488,7 @@ func TestAPIRun_ChecksOmitLogURLWithoutLogRoot(t *testing.T) {
 func TestAPIRun_HooksFieldPresentAndPopulated(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, sampleRecord("run-hooks-api-1", "main"))
-	emitHook(t, store, "run-hooks-api-1", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 250 * time.Millisecond})
+	emitHook(t, store, "run-hooks-api-1", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 250 * time.Millisecond, Output: "deployed ok"})
 
 	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
 	resp, body := get(t, h, "/api/v1/run/run-hooks-api-1")
@@ -497,13 +506,16 @@ func TestAPIRun_HooksFieldPresentAndPopulated(t *testing.T) {
 		t.Fatalf("hooks = %v, want a 1-element array", hooksField)
 	}
 	hk := hooks[0].(map[string]any)
-	for _, key := range []string{"seq", "name", "status", "durationMs", "err", "logPath"} {
+	for _, key := range []string{"seq", "name", "status", "durationMs", "err", "output", "logPath"} {
 		if _, ok := hk[key]; !ok {
 			t.Errorf("hook missing key %q", key)
 		}
 	}
 	if hk["name"] != "deploy" || hk["status"] != "passed" {
 		t.Errorf("hooks[0] = %v", hk)
+	}
+	if hk["output"] != "deployed ok" {
+		t.Errorf("hooks[0] output = %v, want %q (S9: same column the HTML/MCP views already render)", hk["output"], "deployed ok")
 	}
 }
 

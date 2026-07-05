@@ -217,9 +217,19 @@ type RunRecord struct {
 	BatchID string
 
 	// Position is this member's 0-based index within its batch (0 for
-	// serial/speculate). BatchSize is the batch's member count (1
-	// otherwise).
-	Position  int
+	// serial/speculate).
+	Position int
+
+	// BatchSize is the batch's member count. Construction sites that never
+	// touch batching (serial/speculate's tryStartTrial/rejectRun/
+	// rejectPreMerge/recoverLanded, internal/queue) leave it at Go's zero
+	// value, 0 — NOT 1 — so a consumer reading BatchSize straight off an
+	// in-memory RunRecord must gate on BatchID != "" (empty for serial/
+	// speculate) rather than assume "0 or 1 means a lone run". Only
+	// history.Store normalizes it to 1 at write time (batchSizeOrDefault,
+	// internal/history/store.go) for the persisted/queried value — a row
+	// read back from history.RunRow.BatchSize (or the dashboard/CLI JSON
+	// derived from it) is always >= 1.
 	BatchSize int
 
 	// Speculated is true iff this run was tested on a *predicted* base

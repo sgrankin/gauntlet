@@ -161,8 +161,15 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 
 // syncBookkeeping updates order and done against this tick's candidates
 // (§9.1): drops entries for refs that vanished, clears park entries whose
-// SHA changed (a re-push), and assigns a fresh sequence number — emitting
-// EventQueued — to every ref seen for the first time.
+// SHA changed (a re-push), and assigns a fresh sequence number to every ref
+// seen for the first time — emitting EventQueued for it, unless it is
+// already parked at its current SHA (same test pickHead uses below): a ref
+// seeded straight into done at boot (Feature 2, SeedParks) is "seen for the
+// first time" from order's perspective on the very next tick, but it was
+// never actually queued just now, so announcing it as freshly queued would
+// be cosmetic noise, not a real transition. The sequence number is still
+// assigned unconditionally — order must track every candidate regardless of
+// park state, only the event is gated.
 func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map[string]core.Candidate) {
 	order := d.order[t.Name]
 	if order == nil {
@@ -196,6 +203,9 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 	for _, ref := range newRefs {
 		order[ref] = d.seq
 		d.seq++
+		if parked, ok := done[ref]; ok && parked.SHA == cands[ref].SHA {
+			continue // parked at this SHA already (e.g. seeded at boot): not a real "queued" transition
+		}
 		d.emit(ctx, core.Event{Kind: core.EventQueued, At: d.now(), Target: t.Name, Candidate: cands[ref]})
 	}
 }

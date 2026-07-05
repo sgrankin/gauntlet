@@ -104,6 +104,71 @@ func TestSeedParks_ParkedRefNotRePicked(t *testing.T) {
 	}
 }
 
+// TestSeedParks_ParkedRefAtBootEmitsNoEventQueued is S11's regression case:
+// a ref seeded straight into a park at boot (same test as
+// TestSeedParks_ParkedRefNotRePicked) must not also emit a cosmetic
+// EventQueued on the very first reconcile pass that sees it — it was never
+// actually queued, only recognized as already-parked. syncBookkeeping gates
+// the emission on exactly the "parked at this SHA" test pickHead itself
+// uses; the sequence number is still assigned (proven by the retry-then-
+// mergeTreeCalls assertion in TestSeedParks_ParkedRefNotRePicked already).
+func TestSeedParks_ParkedRefAtBootEmitsNoEventQueued(t *testing.T) {
+	git := newFakeGitRepo()
+	git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	sha := git.pushCandidate(ref, "", checkSpecFile("test"))
+
+	seedParks := func(target string) []ParkSeed {
+		if target != "main" {
+			return nil
+		}
+		return []ParkSeed{{Ref: ref, SHA: sha, Outcome: core.OutcomeRejected, Reason: "prior red (pre-restart)", At: time.Now()}}
+	}
+	d, ch := newSeededDaemon(t, git, seedParks)
+
+	if err := d.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+
+	for _, ev := range ch.Events() {
+		if ev.Kind == core.EventQueued {
+			t.Fatalf("got EventQueued for a ref seeded parked at boot: %+v", ev)
+		}
+	}
+}
+
+// TestSeedParks_RePushedRefStillEmitsEventQueued is
+// TestSeedParks_ParkedRefAtBootEmitsNoEventQueued's counterpart: once the
+// ref is re-pushed to a new SHA (the seeded park no longer applies —
+// TestSeedParks_MovedSHASeedIsDropped's scenario), it is a genuine new
+// arrival and must still emit EventQueued exactly as an unseeded ref would.
+func TestSeedParks_RePushedRefStillEmitsEventQueued(t *testing.T) {
+	git := newFakeGitRepo()
+	git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	git.pushCandidate(ref, "", checkSpecFile("test")) // the CURRENT (re-pushed) SHA
+
+	const staleSHA = "0000000000000000000000000000000000000f" // no longer the ref's SHA
+	seedParks := func(target string) []ParkSeed {
+		return []ParkSeed{{Ref: ref, SHA: staleSHA, Outcome: core.OutcomeRejected, Reason: "stale", At: time.Now()}}
+	}
+	d, ch := newSeededDaemon(t, git, seedParks)
+
+	if err := d.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+
+	var found bool
+	for _, ev := range ch.Events() {
+		if ev.Kind == core.EventQueued && ev.Candidate.Ref == ref {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no EventQueued for a re-pushed ref whose seeded park is stale (moved SHA)")
+	}
+}
+
 // TestSeedParks_MovedSHASeedIsDropped covers the resurrection-adjacent edge
 // explicitly: a seed naming a SHA that no longer matches the candidate
 // ref's CURRENT SHA (a re-push since the seed's own verdict) must never
