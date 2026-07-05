@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -105,6 +106,20 @@ type Params struct {
 	// landing's hooks finish).
 	WorkDir string
 
+	// LogDir, mirroring queue.Config.LogDir (DESIGN.md "Full per-check log
+	// files"), is the root each hook's full combined-output log is written
+	// under: runLanding assigns each hook's CheckJob.LogPath to
+	// <LogDir>/<runID>/hook-<seq>-<sanitized name>.log.zst, where runID is
+	// the landing's RunID and seq is the hook's 1-based position within its
+	// target's configured order. Landing hook logs into the SAME per-run
+	// directory a check's own logs already live under means retention
+	// (cmd/gauntlet's pruneLogFiles, keyed on that directory's mtime) covers
+	// them for free — no separate sweep needed. Empty (the default)
+	// preserves the exact pre-parity behavior: every job.LogPath stays "",
+	// so the executor writes no log file at all, exactly as if LogDir were
+	// never wired up.
+	LogDir string
+
 	// Log receives one line per dropped landing (queue full), export
 	// failure, or hook failure. Defaults to os.Stderr when nil.
 	Log io.Writer
@@ -132,6 +147,7 @@ type Runner struct {
 	exec     core.Executor
 	notify   func(context.Context, core.Event)
 	workDir  string
+	logDir   string
 	log      io.Writer
 
 	queue chan core.Event
@@ -165,6 +181,7 @@ func New(p Params) *Runner {
 		exec:     p.Exec,
 		notify:   p.Emit,
 		workDir:  p.WorkDir,
+		logDir:   p.LogDir,
 		log:      logw,
 		queue:    make(chan core.Event, queueBuffer),
 		cmds:     make(chan core.Command),
@@ -395,6 +412,33 @@ func shortSHA(sha string) string {
 	return sha
 }
 
+// hookLogPath builds one hook's full per-check log file path (DESIGN.md
+// "Full per-check log files", extended here to hooks for log/history
+// parity with checks): <LogDir>/<runID>/hook-<seq>-<sanitized name>.log.zst.
+// seq is the hook's 1-based position within its target's configured order,
+// matching the seq history.Store's hooks table records for it. The hook's
+// (free-form, config-owned) name is sanitized the same way a check's name
+// is (core.SanitizeName) before becoming a path component; the fixed
+// "hook-" prefix plus the ".log.zst" suffix additionally guarantees the
+// sanitized name can never make the final component resolve to "." or "..".
+//
+// Landing this in <LogDir>/<runID>/ — the exact same per-run directory
+// queue/reconcile.go's job.LogPath assignment already writes that run's
+// check logs into — is deliberate: cmd/gauntlet's retention sweep
+// (pruneLogFiles) prunes whole per-run directories by mtime, so a hook log
+// dropped into a run's existing directory is covered by that same sweep for
+// free, without pruneLogFiles needing to know hooks exist at all.
+//
+// Returns "" when r.logDir is empty (Params.LogDir unset): the pre-parity
+// default of "no log files written at all", identical in shape to
+// queue.Config.LogDir's own empty-string fallback.
+func (r *Runner) hookLogPath(runID string, seq int, name string) string {
+	if r.logDir == "" {
+		return ""
+	}
+	return filepath.Join(r.logDir, runID, fmt.Sprintf("hook-%d-%s.log.zst", seq, core.SanitizeName(name)))
+}
+
 // runLanding runs every hook configured for ev.Target, in order, against a
 // fresh export of the landed merge commit's tree, stopping at the first
 // failure (a later deploy step shouldn't run if an earlier one failed) and
@@ -438,7 +482,7 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 		return
 	}
 
-	for _, h := range hs {
+	for i, h := range hs {
 		if ctx.Err() != nil {
 			return
 		}
@@ -452,6 +496,7 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 			BaseSHA:   rec.BaseOID,
 			MergeSHA:  rec.MergeSHA,
 			Candidate: rec.Candidate,
+			LogPath:   r.hookLogPath(rec.RunID, i+1, h.Name),
 		}
 		result := r.exec.RunCheck(ctx, job)
 

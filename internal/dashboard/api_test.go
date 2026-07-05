@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
@@ -311,6 +312,63 @@ func TestAPIRun_ChecksOmitLogURLWithoutLogRoot(t *testing.T) {
 	}
 	if _, ok := c["logUrl"]; ok {
 		t.Errorf("logUrl = %v, want absent (omitempty) without WithLogRoot", c["logUrl"])
+	}
+}
+
+// TestAPIRun_HooksFieldPresentAndPopulated confirms GET /api/v1/run/{id}
+// gains a "hooks" array alongside "checks" (chunk P5-B, log/history
+// parity): present (as an array, never omitted) even when empty, and
+// populated with the same field shape as a check when the run actually has
+// hook rows.
+func TestAPIRun_HooksFieldPresentAndPopulated(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hooks-api-1", "main"))
+	emitHook(t, store, "run-hooks-api-1", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 250 * time.Millisecond})
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/run/run-hooks-api-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	hooksField, ok := m["hooks"]
+	if !ok {
+		t.Fatalf("run missing key %q\nbody:\n%s", "hooks", body)
+	}
+	hooks, ok := hooksField.([]any)
+	if !ok || len(hooks) != 1 {
+		t.Fatalf("hooks = %v, want a 1-element array", hooksField)
+	}
+	hk := hooks[0].(map[string]any)
+	for _, key := range []string{"seq", "name", "status", "durationMs", "err", "logPath"} {
+		if _, ok := hk[key]; !ok {
+			t.Errorf("hook missing key %q", key)
+		}
+	}
+	if hk["name"] != "deploy" || hk["status"] != "passed" {
+		t.Errorf("hooks[0] = %v", hk)
+	}
+}
+
+// TestAPIRun_HooksFieldEmptyArrayWhenNone confirms "hooks" is present as an
+// empty array (never omitted, never null) for a run with no hook rows —
+// mirroring "checks" always being an array too.
+func TestAPIRun_HooksFieldEmptyArrayWhenNone(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hooks-api-2", "main"))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/api/v1/run/run-hooks-api-2")
+
+	m := decodeJSON(t, body)
+	hooksField, ok := m["hooks"]
+	if !ok {
+		t.Fatalf("run missing key %q\nbody:\n%s", "hooks", body)
+	}
+	hooks, ok := hooksField.([]any)
+	if !ok || len(hooks) != 0 {
+		t.Fatalf("hooks = %v, want an empty array", hooksField)
 	}
 }
 

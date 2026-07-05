@@ -214,6 +214,30 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			LogURL: d.runLogURL(row.RunID, c.Name, c.LogPath),
 		})
 	}
+
+	// Hooks (internal/hooks; log/history parity, DESIGN.md's decision
+	// ledger "Deployments as post-land hooks"): a query error degrades to
+	// "no hooks" rather than failing the whole page — the run row and its
+	// checks already rendered successfully above, and a hooks-table hiccup
+	// shouldn't take that down with it. run.html only renders the Hooks
+	// section at all when data.Hooks is non-empty (chunk P5-B requirement:
+	// "rendered only when rows exist").
+	hooks, err := d.store.Hooks(runID)
+	if err != nil {
+		log.Printf("dashboard: run %s: hooks: %v", runID, err)
+	}
+	for _, h := range hooks {
+		data.Hooks = append(data.Hooks, checkView{
+			Seq: h.Seq, Name: h.Name, Status: wordTag(h.Status), Duration: formatDuration(h.Duration), Err: h.Err,
+			Output: h.Output,
+			Open:   h.Status == "failed" || h.Err != "",
+			// runLogURL is name-agnostic (checks vs. hooks): handleRunLog
+			// below looks a checkName up in checks first, then hooks, so the
+			// same relative link shape works for either.
+			LogURL: d.runLogURL(row.RunID, h.Name, h.LogPath),
+		})
+	}
+
 	render(w, runTmpl, data)
 }
 
@@ -266,6 +290,24 @@ func (d *dash) handleRunLog(w http.ResponseWriter, r *http.Request) {
 		if c.Name == checkName {
 			storedPath = c.LogPath
 			break
+		}
+	}
+	// Not a check by that name (or it has no LogPath) — try the run's hooks
+	// next (internal/hooks; log/history parity): the route is shared between
+	// checks and hooks, so a hook's full log is served through the exact
+	// same GET /run/{id}/log/{name} URL a check's is.
+	if storedPath == "" {
+		hooks, err := d.store.Hooks(runID)
+		if err != nil {
+			log.Printf("dashboard: run log: hooks %s: %v", runID, err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		for _, h := range hooks {
+			if h.Name == checkName {
+				storedPath = h.LogPath
+				break
+			}
 		}
 	}
 	if storedPath == "" {
@@ -936,6 +978,12 @@ type runData struct {
 	StoreEnabled bool
 	Run          runSummaryFull
 	Checks       []checkView
+	// Hooks holds this run's post-land hook results (internal/hooks), same
+	// view shape as Checks. Empty (nil) whenever the run landed no hooks —
+	// no target hooks configured, or the run never reached hooks at all —
+	// in which case run.html omits the Hooks section entirely rather than
+	// rendering an empty one.
+	Hooks []checkView
 }
 
 type runSummaryFull struct {

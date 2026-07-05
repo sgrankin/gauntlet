@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/executor"
 )
 
 // fakeGitRepo is a minimal core.GitRepo test double: every method but
@@ -537,6 +541,119 @@ func (b *boundedLogBuf) contains(substr string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return strings.Contains(string(b.buf), substr)
+}
+
+// --- full per-check log files (hooks/history parity) --------------------
+
+// TestRunner_HookLogPathAssignedAndSanitized exercises hookLogPath's
+// contract directly through runLanding: each hook's CheckJob.LogPath must
+// land under <LogDir>/<runID>/hook-<1-based seq>-<sanitized name>.log.zst,
+// with a free-form hook name (spaces, slashes) sanitized the same way
+// check names are (core.SanitizeName).
+func TestRunner_HookLogPathAssignedAndSanitized(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	logDir := filepath.Join(t.TempDir(), "logs") // need not exist; fakeExecutor never touches disk
+
+	r := New(Params{
+		Hooks: map[string][]Hook{
+			"main": {
+				{Name: "deploy/prod", Command: []string{"true"}},
+				{Name: "notify team", Command: []string{"true"}},
+			},
+		},
+		Git:     git,
+		Exec:    exec,
+		WorkDir: t.TempDir(),
+		LogDir:  logDir,
+		Log:     io.Discard,
+	})
+
+	rec := &core.RunRecord{RunID: "run-log-path", Target: "main", MergeSHA: "merge-sha"}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	want := []string{
+		filepath.Join(logDir, "run-log-path", "hook-1-deploy-prod.log.zst"),
+		filepath.Join(logDir, "run-log-path", "hook-2-notify-team.log.zst"),
+	}
+	if len(exec.jobs) != len(want) {
+		t.Fatalf("exec.jobs = %d, want %d", len(exec.jobs), len(want))
+	}
+	for i, job := range exec.jobs {
+		if job.LogPath != want[i] {
+			t.Errorf("jobs[%d].LogPath = %q, want %q", i, job.LogPath, want[i])
+		}
+	}
+}
+
+// TestRunner_HookLogPathEmptyWhenLogDirUnset confirms the pre-parity
+// default survives: a Runner built with no Params.LogDir (the zero value)
+// assigns no LogPath at all, exactly as if full hook logging never
+// existed.
+func TestRunner_HookLogPathEmptyWhenLogDirUnset(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	r := New(Params{
+		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Git:     git,
+		Exec:    exec,
+		WorkDir: t.TempDir(),
+		Log:     io.Discard,
+	})
+
+	rec := &core.RunRecord{RunID: "run-no-logdir", Target: "main", MergeSHA: "merge-sha"}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	if len(exec.jobs) != 1 {
+		t.Fatalf("exec.jobs = %d, want 1", len(exec.jobs))
+	}
+	if exec.jobs[0].LogPath != "" {
+		t.Errorf("LogPath = %q, want empty when LogDir is unset", exec.jobs[0].LogPath)
+	}
+}
+
+// TestRunner_HookLogFileActuallyWritten is the one integration-style test
+// through a real core.Executor (executor.LocalExecutor, no fake): proves
+// the tee machinery that already exists for checks (internal/executor/
+// logfile.go's openCheckLog, driven purely off CheckJob.LogPath) needs no
+// executor-side change at all to also cover hooks — assigning LogPath in
+// hooks.go is sufficient. Reads back the hook's real zstd-compressed log
+// file from disk and confirms it holds the command's actual output.
+func TestRunner_HookLogFileActuallyWritten(t *testing.T) {
+	git := &fakeGitRepo{}
+	logDir := t.TempDir()
+
+	r := New(Params{
+		Hooks: map[string][]Hook{
+			"main": {{Name: "deploy echo", Command: []string{"echo", "hello from hook"}}},
+		},
+		Git:     git,
+		Exec:    executor.LocalExecutor{},
+		WorkDir: t.TempDir(),
+		LogDir:  logDir,
+		Log:     io.Discard,
+	})
+
+	rec := &core.RunRecord{RunID: "run-real-log", Target: "main", MergeSHA: "merge-sha"}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	wantPath := filepath.Join(logDir, "run-real-log", "hook-1-deploy-echo.log.zst")
+	raw, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read hook log %s: %v", wantPath, err)
+	}
+	dec, err := zstd.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("zstd.NewReader: %v", err)
+	}
+	defer dec.Close()
+	content, err := io.ReadAll(dec)
+	if err != nil {
+		t.Fatalf("decompress hook log: %v", err)
+	}
+	if !strings.Contains(string(content), "hello from hook") {
+		t.Errorf("hook log content = %q, want to contain %q", content, "hello from hook")
+	}
 }
 
 // --- backlog policies (hooks v2) ---------------------------------------

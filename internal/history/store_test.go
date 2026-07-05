@@ -329,6 +329,143 @@ func TestMigrate_V2ToV3(t *testing.T) {
 	}
 }
 
+// schemaV3SQL is schema.sql as it existed before chunk P5-B added the hooks
+// table: checks has both output and log_path, but there is no hooks table
+// at all. Kept here, verbatim, so TestMigrate_V3ToV4 can build a genuine v3
+// database by hand and prove the running code migrates it forward
+// correctly.
+const schemaV3SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+`
+
+// TestMigrate_V3ToV4 builds a v3 database by hand (schemaV3SQL, no hooks
+// table at all, user_version stamped to 3 — exactly what an
+// already-deployed v3 Store would have on disk) and confirms that opening it
+// with the current code migrates it in place: user_version lands on
+// schemaVersion, the pre-existing run/check rows survive untouched, and both
+// a fresh hook write (Emit with an EventHookFinished) and Hooks() round-trip
+// correctly against the newly-created table.
+func TestMigrate_V3ToV4(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV3SQL); err != nil {
+		t.Fatalf("apply v3 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("stamp user_version=3: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000)`,
+	); err != nil {
+		t.Fatalf("seed v3 run: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '')`,
+	); err != nil {
+		t.Fatalf("seed v3 check: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v3 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	run, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if run.RunID != "run-old" || len(checks) != 1 || checks[0].Output != "clean" {
+		t.Errorf("Run(run-old) after migrate = %+v / %+v, want the pre-existing row untouched", run, checks)
+	}
+
+	// The hooks table must exist and be usable now: no rows yet for
+	// run-old (it predates hooks entirely).
+	hooks, err := s.Hooks("run-old")
+	if err != nil {
+		t.Fatalf("Hooks(run-old) after migrate: %v", err)
+	}
+	if len(hooks) != 0 {
+		t.Errorf("Hooks(run-old) after migrate = %+v, want none", hooks)
+	}
+
+	// A fresh hook write against the migrated database must round-trip
+	// correctly.
+	ctx := context.Background()
+	ev := core.Event{
+		Kind: core.EventHookFinished, Target: "main", RunID: "run-old", CheckName: "deploy",
+		Check: &core.CheckResult{Status: core.CheckPassed, Duration: 250 * time.Millisecond, Output: "deployed", LogPath: "/var/lib/gauntlet/logs/run-old/hook-1-deploy.log.zst"},
+	}
+	if err := s.Emit(ctx, ev); err != nil {
+		t.Fatalf("Emit hook after migrate: %v", err)
+	}
+	hooks, err = s.Hooks("run-old")
+	if err != nil {
+		t.Fatalf("Hooks(run-old) after hook write: %v", err)
+	}
+	if len(hooks) != 1 || hooks[0].Name != "deploy" || hooks[0].Status != "passed" ||
+		hooks[0].Output != "deployed" || hooks[0].LogPath != "/var/lib/gauntlet/logs/run-old/hook-1-deploy.log.zst" {
+		t.Errorf("Hooks(run-old) = %+v, want one passed deploy hook", hooks)
+	}
+}
+
 // TestMigrate_V1ToV3_MultiHop builds a v1 database (predating both
 // checks.output and checks.log_path) and confirms Open walks both
 // intermediate steps in one call, landing on schemaVersion — the case
@@ -569,6 +706,115 @@ func TestStore_Emit_ReEmitIsIdempotent(t *testing.T) {
 	}
 	if len(checks) != 2 {
 		t.Fatalf("Run() checks after re-emit = %d, want 2 (re-emit must not duplicate check rows)", len(checks))
+	}
+}
+
+// hookFinishedEvent builds an EventHookFinished the way internal/hooks'
+// runLanding actually emits one: Record is always nil on this kind (see
+// core.Event's doc), the whole payload rides on Check + CheckName.
+func hookFinishedEvent(runID, target, name string, cr core.CheckResult) core.Event {
+	cr.Name = name
+	return core.Event{
+		Kind:      core.EventHookFinished,
+		Target:    target,
+		RunID:     runID,
+		CheckName: name,
+		Check:     &cr,
+	}
+}
+
+// TestStore_Emit_InsertsHookRowsKeyedOffCheck confirms Store.Emit's
+// EventHookFinished branch (writeHookResult): it fires off ev.Check (never
+// ev.Record, which is nil on this event kind) and assigns seq by counting
+// hooks already recorded for run_id — so successive hooks for the same run,
+// emitted one event at a time as internal/hooks.Runner actually does it, get
+// 0, 1, 2, ... in arrival order.
+func TestStore_Emit_InsertsHookRowsKeyedOffCheck(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// The run row must exist first (foreign key) — this is what
+	// queue.Daemon's channel fan-out order actually guarantees in
+	// production (history's own Emit runs before hooks.Runner's), and what
+	// writeHookResult's doc documents as the assumption.
+	started := time.Date(2026, 7, 5, 9, 0, 0, 0, time.UTC)
+	rec := sampleRecord("run-hooks-1", "main", started)
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-hooks-1", Record: rec}); err != nil {
+		t.Fatalf("Emit (landed): %v", err)
+	}
+
+	deploy := hookFinishedEvent("run-hooks-1", "main", "deploy", core.CheckResult{
+		Status: core.CheckPassed, Duration: 250 * time.Millisecond, Output: "deployed ok",
+		LogPath: "/var/lib/gauntlet/logs/run-hooks-1/hook-1-deploy.log.zst",
+	})
+	if err := s.Emit(ctx, deploy); err != nil {
+		t.Fatalf("Emit (deploy hook): %v", err)
+	}
+	notify := hookFinishedEvent("run-hooks-1", "main", "notify", core.CheckResult{
+		Status: core.CheckFailed, Duration: 50 * time.Millisecond, Output: "webhook 500", Err: fmt.Errorf("boom"),
+	})
+	if err := s.Emit(ctx, notify); err != nil {
+		t.Fatalf("Emit (notify hook): %v", err)
+	}
+
+	hooks, err := s.Hooks("run-hooks-1")
+	if err != nil {
+		t.Fatalf("Hooks: %v", err)
+	}
+	if len(hooks) != 2 {
+		t.Fatalf("Hooks = %d rows, want 2", len(hooks))
+	}
+	if hooks[0].Seq != 0 || hooks[0].Name != "deploy" || hooks[0].Status != "passed" ||
+		hooks[0].Duration != 250*time.Millisecond || hooks[0].Output != "deployed ok" ||
+		hooks[0].LogPath != "/var/lib/gauntlet/logs/run-hooks-1/hook-1-deploy.log.zst" {
+		t.Errorf("hooks[0] = %+v, unexpected", hooks[0])
+	}
+	if hooks[1].Seq != 1 || hooks[1].Name != "notify" || hooks[1].Status != "failed" ||
+		hooks[1].Duration != 50*time.Millisecond || hooks[1].Output != "webhook 500" || hooks[1].Err != "boom" {
+		t.Errorf("hooks[1] = %+v, unexpected", hooks[1])
+	}
+}
+
+// TestStore_Emit_HookFinishedIgnoredWhenCheckNil guards the Kind-plus-Check
+// gate in Emit: an EventHookFinished with a nil Check (which internal/hooks
+// never actually emits, but core.Channel implementations must tolerate any
+// nil-Check event per core.Event's doc) must not panic or write a row.
+func TestStore_Emit_HookFinishedIgnoredWhenCheckNil(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Emit(ctx, core.Event{Kind: core.EventHookFinished, Target: "main", RunID: "run-x", CheckName: "deploy"}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	hooks, err := s.Hooks("run-x")
+	if err != nil {
+		t.Fatalf("Hooks: %v", err)
+	}
+	if len(hooks) != 0 {
+		t.Errorf("Hooks = %+v, want none", hooks)
+	}
+}
+
+// TestStore_Hooks_EmptyForRunWithNoHooks confirms the "omit the section"
+// contract the dashboard/MCP tool both rely on: a perfectly ordinary run
+// that never had any hooks configured for its target returns an empty,
+// non-error result from Hooks.
+func TestStore_Hooks_EmptyForRunWithNoHooks(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	started := time.Date(2026, 7, 5, 9, 0, 0, 0, time.UTC)
+	rec := sampleRecord("run-no-hooks", "main", started)
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-no-hooks", Record: rec}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	hooks, err := s.Hooks("run-no-hooks")
+	if err != nil {
+		t.Fatalf("Hooks: %v", err)
+	}
+	if len(hooks) != 0 {
+		t.Errorf("Hooks = %+v, want none", hooks)
 	}
 }
 

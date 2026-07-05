@@ -212,7 +212,7 @@ func run() error {
 	// the snapshot is taken.
 	notifyChans := append([]core.Channel(nil), chans...)
 	hooksDir := filepath.Join(*statePath, "hooks")
-	if hr := buildHooksRunner(cfg, repo, ex, hooksDir, func(ctx context.Context, ev core.Event) {
+	if hr := buildHooksRunner(cfg, repo, ex, hooksDir, logsDir, func(ctx context.Context, ev core.Event) {
 		for _, ch := range notifyChans {
 			_ = ch.Emit(ctx, ev)
 		}

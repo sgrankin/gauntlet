@@ -1,11 +1,11 @@
--- schema.sql: gauntlet history store schema (user_version = 3).
+-- schema.sql: gauntlet history store schema (user_version = 4).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
 -- existing older database is migrated in place instead (ALTER TABLE checks
--- ADD COLUMN ...) rather than re-run against this file, so this file always
--- reflects the *current* schema, not the upgrade path — see migrate()'s doc
--- comment for the version-by-version steps.
+-- ADD COLUMN ..., CREATE TABLE hooks ...) rather than re-run against this
+-- file, so this file always reflects the *current* schema, not the upgrade
+-- path — see migrate()'s doc comment for the version-by-version steps.
 
 CREATE TABLE runs (
   run_id       TEXT PRIMARY KEY,
@@ -37,6 +37,25 @@ CREATE TABLE checks (
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);
+
+-- hooks mirrors checks column-for-column (log/history parity for post-land
+-- hooks, internal/hooks): one row per finished hook (core.EventHookFinished),
+-- keyed by (run_id, seq) exactly like checks. Unlike checks, rows arrive one
+-- at a time (there is no RunRecord.Hooks slice to write in bulk from) — see
+-- Store.Emit's EventHookFinished branch for how seq is derived without one
+-- being carried on the event (v4+).
+CREATE TABLE hooks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,              -- passed|failed|skipped
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',   -- captured output, verbatim (executor tail-caps at 64KiB)
+  log_path    TEXT NOT NULL DEFAULT '',   -- full per-hook log file path, if one was written
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_hooks_name ON hooks(name);
 
 CREATE TABLE queue_depth (
   at        INTEGER NOT NULL,

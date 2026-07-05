@@ -365,6 +365,18 @@ target "main" branch="main" {
 - A slow hook only delays *later* hooks for the same landing (and, since
   landings for one target are already serial, later landings on that
   target) — it never blocks the reconcile loop itself.
+- Hooks get the same log/history treatment as checks (full parity):
+  each hook's full combined-output log is written to
+  `<state>/logs/<runID>/hook-<n>-<sanitized name>.log.zst` — the *same*
+  per-run directory that landing's own check logs already live in, so
+  `log-retention`'s sweep (above) covers hook logs for free, no separate
+  configuration needed. Every hook result is also written to the run's
+  history row (`internal/history`'s `hooks` table) alongside its checks,
+  and the dashboard's run page renders a "Hooks" section — same status
+  chip/duration/expandable-output/"full log" link treatment a check
+  gets — whenever a run actually has hook rows (omitted entirely
+  otherwise). `GET /api/v1/run/{id}` and the MCP `run` tool both gain a
+  `hooks` array in the same shape as `checks`.
 
 ### Backlog policies
 
@@ -502,7 +514,9 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   ```
 
 - **`GET /api/v1/run/{id}`** — one run's full detail, including its
-  per-check results. Each check carries `logPath` (the full log file's path
+  per-check results, plus a `hooks` array (its post-land hook results, same
+  shape as `checks` — always present, empty when the run had no hooks).
+  Each check/hook carries `logPath` (the full log file's path
   on disk, or `""` if none was written) and, only when the dashboard is
   configured to actually serve it, `logUrl` (a relative link to `GET
   /run/{id}/log/{name}` — omitted from the JSON entirely otherwise).
@@ -681,6 +695,13 @@ link and the JSON API/MCP `logPath`/`logUrl` fields point at (see "API" and
 "MCP" above) — the dashboard decompresses it on the fly when serving; it's
 pruned after `log-retention` (default 30 days, see "Configuration
 reference") regardless of whether history or the dashboard are configured.
+
+Post-land hooks (see "Hooks" above) get the identical treatment: each
+hook's full log lands at `<state>/logs/<runID>/hook-<n>-<sanitized
+name>.log.zst` — inside the *same* run directory its checks' logs already
+live in, so it's covered by the exact same retention sweep and served
+through the exact same `GET /run/{id}/log/{name}` route, with no separate
+configuration.
 To read one offline: `zstd -d <path>` (or `zstd -dc <path> | less`).
 
 This is the whole mechanism for conditional/monorepo-style execution —

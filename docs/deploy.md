@@ -76,6 +76,15 @@ containerize (topology (b), below).
    hourly for the rest of the process's lifetime. None of this needs
    backing up; see "Backups" below.
 
+   Post-land hooks (`internal/hooks`, if any `target` configures `hook`
+   nodes) write their own full logs into this same `logs/` tree, one per
+   hook, at `logs/<runID>/hook-<n>-<sanitized name>.log.zst` — inside the
+   *same* per-run directory (`logs/<runID>/`) that landing's own check logs
+   already live in, not a separate hooks directory. That placement is
+   deliberate: the age-based sweep above prunes whole `logs/<runID>/`
+   directories, so hook logs are covered by the exact same retention pass
+   as check logs, with nothing extra to configure or back up.
+
    **Log files are keyed by absolute path.** History's per-check rows store
    each log file's full path as written at run time — moving or renaming
    the `-state` directory (or the volume it lives on) orphans every

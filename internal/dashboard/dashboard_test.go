@@ -218,6 +218,67 @@ func TestRun_RendersChecksFromStore(t *testing.T) {
 	}
 }
 
+// emitHook writes one post-land hook result (internal/hooks;
+// core.EventHookFinished) into s, the way internal/hooks.Runner actually
+// emits one: Record is always nil on this event kind, the whole payload
+// rides on Check + CheckName.
+func emitHook(t *testing.T, s *history.Store, runID, name string, cr core.CheckResult) {
+	t.Helper()
+	cr.Name = name
+	ev := core.Event{Kind: core.EventHookFinished, Target: "main", RunID: runID, CheckName: name, Check: &cr}
+	if err := s.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit (hook %s): %v", name, err)
+	}
+}
+
+// TestRun_RendersHooksSection confirms /run/{id} gains a "Hooks" section
+// (chunk P5-B, log/history parity with checks) whenever the run has hook
+// rows: a passed hook and a failed one, same status/duration/output
+// treatment as Checks — the failed hook's output must render already
+// expanded.
+func TestRun_RendersHooksSection(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hooks-1", "main"))
+	emitHook(t, store, "run-hooks-1", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 250 * time.Millisecond, Output: "deployed ok"})
+	emitHook(t, store, "run-hooks-1", "notify", core.CheckResult{Status: core.CheckFailed, Duration: 50 * time.Millisecond, Output: "webhook 500"})
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/run/run-hooks-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	for _, want := range []string{"Hooks", "deploy", "notify", "deployed ok", "webhook 500"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("run body missing %q\nbody:\n%s", want, body)
+		}
+	}
+	// The failed hook's <details> must start open (Open: true) so its
+	// output is visible without a click, same convention as failed checks.
+	if idx := strings.Index(body, "webhook 500"); idx >= 0 {
+		// Walk backward to the nearest "<details" and confirm it carries
+		// "open" — a light structural check, not a full HTML parse.
+		detailsIdx := strings.LastIndex(body[:idx], "<details")
+		if detailsIdx < 0 || !strings.Contains(body[detailsIdx:idx], "open") {
+			t.Errorf("failed hook's <details> is not open by default:\n%s", body)
+		}
+	}
+}
+
+// TestRun_OmitsHooksSectionWhenNone confirms an ordinary run with no hook
+// rows at all (no target hooks configured, or the run never reached hooks)
+// renders no "Hooks" heading — the section requirement is "only when rows
+// exist" (chunk P5-B), not "always, empty".
+func TestRun_OmitsHooksSectionWhenNone(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-no-hooks", "main"))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/run/run-no-hooks")
+	if strings.Contains(body, "<h2>Hooks</h2>") {
+		t.Errorf("run body has a Hooks section for a run with no hook rows:\n%s", body)
+	}
+}
+
 func TestNilStore_Degrades(t *testing.T) {
 	snap := testSnapshot()
 	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)

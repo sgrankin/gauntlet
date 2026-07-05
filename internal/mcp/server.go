@@ -315,6 +315,11 @@ type runOut struct {
 	EndedAt    string        `json:"endedAt"`
 	DurationMs int64         `json:"durationMs"`
 	Checks     []checkDetail `json:"checks"`
+	// Hooks holds this run's post-land hook results (internal/hooks), same
+	// shape as Checks (including captured Output — an agent debugging a
+	// failed deploy hook needs it exactly as much as a failed check's).
+	// Always present as an array (possibly empty, never omitted).
+	Hooks []checkDetail `json:"hooks"`
 }
 
 // checkDetail is api.go's checkJSON plus Output: an agent debugging a red
@@ -370,6 +375,20 @@ func handleRun(p Params, in runIn) (runOut, error) {
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err, Output: c.Output,
 			LogPath: c.LogPath,
 			LogURL:  runLogURL(p.LogRoot, in.RunID, c.Name, c.LogPath),
+		})
+	}
+
+	out.Hooks = make([]checkDetail, 0)
+	hooks, err := p.Store.Hooks(in.RunID)
+	if err != nil {
+		return runOut{}, fmt.Errorf("run %s hooks: %w", in.RunID, err)
+	}
+	for _, h := range hooks {
+		out.Hooks = append(out.Hooks, checkDetail{
+			Seq: h.Seq, Name: h.Name, Status: h.Status,
+			DurationMs: h.Duration.Milliseconds(), Err: h.Err, Output: h.Output,
+			LogPath: h.LogPath,
+			LogURL:  runLogURL(p.LogRoot, in.RunID, h.Name, h.LogPath),
 		})
 	}
 	return out, nil

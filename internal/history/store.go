@@ -23,7 +23,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 3
+const schemaVersion = 4
 
 var _ core.Channel = (*Store)(nil)
 
@@ -84,6 +84,8 @@ func Open(path string) (*Store, error) {
 //     COLUMN output, stamp user_version=2, loop.
 //   - 2 (schema v2: checks has no log_path column): ALTER TABLE checks ADD
 //     COLUMN log_path, stamp user_version=3, loop.
+//   - 3 (schema v3: no hooks table): CREATE TABLE hooks (log/history parity
+//     for post-land hooks, internal/hooks), stamp user_version=4, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -119,6 +121,27 @@ func migrate(db *sql.DB) error {
 			if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
 				return fmt.Errorf("history: set user_version=3: %w", err)
 			}
+		case 3:
+			if _, err := db.Exec(`
+CREATE TABLE hooks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+)`); err != nil {
+				return fmt.Errorf("history: migrate v3->v4 (hooks table): %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX idx_hooks_name ON hooks(name)`); err != nil {
+				return fmt.Errorf("history: migrate v3->v4 (hooks index): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
+				return fmt.Errorf("history: set user_version=4: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -132,14 +155,23 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Emit writes ev's carried RunRecord. Non-terminal events (Record == nil,
-// including a crash-recovered EventLanded whose record didn't survive) are
+// Emit writes ev's carried RunRecord, or — for EventHookFinished — one
+// post-land hook result (internal/hooks; log/history parity with checks).
+// Every other non-terminal event (Record == nil and not a hook result,
+// including a crash-recovered EventLanded whose record didn't survive) is
 // silently ignored — Emit never blocks or fails the reconcile loop for
 // history-side reasons. Terminal events are written in one transaction: the
 // run row and its check rows via INSERT OR REPLACE, keyed on run_id (and
 // run_id+seq for checks), so re-emitting the same RunRecord is a no-op
 // beyond redundant writes.
 func (s *Store) Emit(ctx context.Context, ev core.Event) error {
+	// EventHookFinished carries no RunRecord at all (Record is nil on it,
+	// same as every other non-terminal event) — its whole payload is the one
+	// finished hook in ev.Check, so it's keyed off Kind+Check rather than
+	// Record like every other branch here.
+	if ev.Kind == core.EventHookFinished && ev.Check != nil {
+		return s.writeHookResult(ctx, ev)
+	}
 	if ev.Record == nil {
 		return nil
 	}
@@ -204,6 +236,66 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("history: commit: %w", err)
+	}
+	return nil
+}
+
+// writeHookResult inserts one row into hooks for a finished post-land hook
+// (core.EventHookFinished, internal/hooks). Unlike checks — written all at
+// once from RunRecord.Checks when the run's terminal event arrives — each
+// hook result arrives as its own event with no RunRecord at all (Record is
+// nil on EventHookFinished) and no seq of its own: core.Event carries only
+// CheckName, not a position. seq is instead derived by counting hooks
+// already recorded for ev.RunID inside this same transaction.
+//
+// That count-in-tx approach is only correct because hooks.Runner guarantees
+// at most one landing's hooks run at a time for any given target (its own
+// doc: "hooks always run serially"), and every hook's EventHookFinished for
+// one landing is emitted synchronously, in order, before the next hook
+// starts (internal/hooks/hooks.go's runLanding) — so by construction there
+// is never a second writer racing this count for the same run_id, and
+// re-emitting the same event twice (which normal operation never does) is
+// the one case this would double-count rather than replace; INSERT OR
+// REPLACE here guards against exact-same-seq collisions, not against that.
+//
+// ev.RunID is expected to already have a matching runs row by the time this
+// runs: hooks only ever fire off an EventLanded whose Record history's own
+// Emit branch (writeRecord, above) already wrote synchronously — before
+// hooks.Runner's async queue even processes that same event — because
+// queue.Daemon's emit (internal/queue/daemon.go) calls every configured
+// channel's Emit in registration order, and cmd/gauntlet/main.go registers
+// the history store ahead of the hooks Runner. The hooks.run_id foreign key
+// should therefore never fail in practice; a run_id with no matching runs
+// row (e.g. a hand-built event in a test) surfaces as an ordinary FK
+// constraint error here, not a panic.
+func (s *Store) writeHookResult(ctx context.Context, ev core.Event) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("history: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var seq int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM hooks WHERE run_id = ?`, ev.RunID).Scan(&seq); err != nil {
+		return fmt.Errorf("history: count hooks for %s: %w", ev.RunID, err)
+	}
+
+	cr := ev.Check
+	if _, err := tx.ExecContext(ctx, insertHookSQL,
+		ev.RunID,
+		seq,
+		ev.CheckName,
+		checkStatusString(cr.Status),
+		cr.Duration.Milliseconds(),
+		errString(cr.Err),
+		cr.Output,
+		cr.LogPath,
+	); err != nil {
+		return fmt.Errorf("history: insert hook: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

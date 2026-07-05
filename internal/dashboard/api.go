@@ -329,6 +329,11 @@ type runDetailResponse struct {
 	EndedAt    string      `json:"endedAt"`
 	DurationMs int64       `json:"durationMs"`
 	Checks     []checkJSON `json:"checks"`
+	// Hooks holds this run's post-land hook results (internal/hooks), same
+	// shape as Checks. Always present as an array (possibly empty, never
+	// omitted) — a client that doesn't care about hooks can simply ignore an
+	// empty one.
+	Hooks []checkJSON `json:"hooks"`
 }
 
 type checkJSON struct {
@@ -381,6 +386,20 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err,
 			LogPath: c.LogPath,
 			LogURL:  d.runLogURL(row.RunID, c.Name, c.LogPath),
+		})
+	}
+
+	resp.Hooks = make([]checkJSON, 0)
+	hooks, err := d.store.Hooks(id)
+	if err != nil {
+		log.Printf("dashboard: api: run %s: hooks: %v", id, err)
+	}
+	for _, h := range hooks {
+		resp.Hooks = append(resp.Hooks, checkJSON{
+			Seq: h.Seq, Name: h.Name, Status: h.Status,
+			DurationMs: h.Duration.Milliseconds(), Err: h.Err,
+			LogPath: h.LogPath,
+			LogURL:  d.runLogURL(row.RunID, h.Name, h.LogPath),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

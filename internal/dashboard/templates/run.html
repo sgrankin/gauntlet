@@ -40,5 +40,27 @@
 {{else}}
 <p class="muted">no checks recorded</p>
 {{end}}
+
+{{if .Hooks}}
+<!-- Post-land hooks (internal/hooks): rendered only when this run actually
+     has hook rows — a run for a target with no configured hooks, or one
+     that never reached hooks at all, gets no section here (chunk P5-B),
+     same row treatment as Checks above. -->
+<h2>Hooks</h2>
+<div class="checklist">
+{{range .Hooks}}
+{{if .Output}}
+<details class="check-row"{{if .Open}} open{{end}}>
+<summary><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}</summary>
+<pre class="output">{{.Output}}</pre>
+</details>
+{{else}}
+<div class="check-row">
+<span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}
+</div>
+{{end}}
+{{end}}
+</div>
+{{end}}
 {{end}}
 {{end}}

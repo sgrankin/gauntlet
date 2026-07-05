@@ -19,6 +19,10 @@ INSERT OR REPLACE INTO runs (
 INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
+	insertHookSQL = `
+INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+
 	insertDepthSQL = `
 INSERT OR REPLACE INTO queue_depth (at, target, waiting, in_flight, parked)
 VALUES (?, ?, ?, ?, ?)`
@@ -59,6 +63,27 @@ type CheckRow struct {
 	// GET /run/{id}/log/{check} route serves this file, containment-checked
 	// under its configured LogRoot; a stored path pointing at a since-pruned
 	// or otherwise missing file serves a friendly 404, not an error.
+	LogPath string
+}
+
+// HookRow is one row of the hooks table, as read back for the dashboard:
+// one post-land hook's outcome within a landing (internal/hooks), mirroring
+// CheckRow column-for-column.
+type HookRow struct {
+	Seq      int
+	Name     string
+	Status   string // passed|failed|skipped
+	Duration time.Duration
+	Err      string
+	// Output is the hook's captured output, stored verbatim regardless of
+	// status, same as CheckRow.Output.
+	Output string
+	// LogPath is the hook's full per-check log file path (core.CheckResult.
+	// LogPath, as assigned by internal/hooks' hookLogPath), or "" when no
+	// file was written (no Params.LogDir configured, or the file couldn't be
+	// created). Served through the same GET /run/{id}/log/{name} route
+	// checks use, containment-checked under the same LogRoot — see
+	// CheckRow.LogPath's doc.
 	LogPath string
 }
 
@@ -142,6 +167,37 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 		return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 	}
 	return run, checks, nil
+}
+
+// Hooks returns runID's post-land hook rows (internal/hooks;
+// core.EventHookFinished), in seq order — empty (nil, no error) when the run
+// landed no hooks at all (no target hooks configured, or the landing never
+// reached hooks, e.g. it wasn't a landing), which the dashboard and MCP run
+// tool both treat as "omit the hooks section/field" rather than an error.
+func (s *Store) Hooks(runID string) ([]HookRow, error) {
+	rows, err := s.db.Query(
+		`SELECT seq, name, status, duration_ms, err, output, log_path FROM hooks WHERE run_id = ? ORDER BY seq`,
+		runID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("history: hooks %s: %w", runID, err)
+	}
+	defer rows.Close()
+
+	var out []HookRow
+	for rows.Next() {
+		var h HookRow
+		var durationMS int64
+		if err := rows.Scan(&h.Seq, &h.Name, &h.Status, &durationMS, &h.Err, &h.Output, &h.LogPath); err != nil {
+			return nil, fmt.Errorf("history: hooks %s: %w", runID, err)
+		}
+		h.Duration = time.Duration(durationMS) * time.Millisecond
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history: hooks %s: %w", runID, err)
+	}
+	return out, nil
 }
 
 // CheckStats summarizes per-check red-rate and duration across target's

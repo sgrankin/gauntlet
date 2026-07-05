@@ -304,6 +304,64 @@ func TestRun_LogURLOmittedWithoutLogRoot(t *testing.T) {
 	}
 }
 
+// emitHook writes one post-land hook result (internal/hooks;
+// core.EventHookFinished) into s, the way internal/hooks.Runner actually
+// emits one: Record is always nil on this event kind, the whole payload
+// rides on Check + CheckName.
+func emitHook(t *testing.T, s *history.Store, runID, name string, cr core.CheckResult) {
+	t.Helper()
+	cr.Name = name
+	ev := core.Event{Kind: core.EventHookFinished, Target: "main", RunID: runID, CheckName: name, Check: &cr}
+	if err := s.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit (hook %s): %v", name, err)
+	}
+}
+
+// TestRun_HooksFieldIncluded confirms the run tool gains a "hooks" array
+// alongside "checks" (chunk P5-B, log/history parity): present (even if
+// empty) and populated with the same field shape a check gets, including
+// captured Output for an agent debugging a failed hook.
+func TestRun_HooksFieldIncluded(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hooks-mcp-1", "main")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	emitHook(t, store, "run-hooks-mcp-1", "deploy", core.CheckResult{Status: core.CheckFailed, Duration: 250 * time.Millisecond, Output: "deploy exploded"})
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-hooks-mcp-1"})
+	if res.IsError {
+		t.Fatalf("run errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{`"hooks"`, `"name":"deploy"`, `"status":"failed"`, "deploy exploded"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("run content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRun_HooksFieldEmptyArrayWhenNone confirms "hooks" is present as an
+// empty array (never omitted) for a run with no hook rows.
+func TestRun_HooksFieldEmptyArrayWhenNone(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hooks-mcp-2", "main")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-hooks-mcp-2"})
+	if res.IsError {
+		t.Fatalf("run errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	if !strings.Contains(text, `"hooks":[]`) {
+		t.Errorf("run content missing empty hooks array:\n%s", text)
+	}
+}
+
 func TestRun_UnknownID_ErrorResult(t *testing.T) {
 	store := openTestStore(t)
 	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})

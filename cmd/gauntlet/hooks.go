@@ -17,7 +17,14 @@ import (
 // target's configured Hooks. It returns nil (no error) if no target
 // configures any hooks — the common case — so callers know not to start a
 // Run goroutine or register it as a channel at all.
-func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, workDir string, emit func(context.Context, core.Event)) *hooks.Runner {
+//
+// logDir is wired straight into hooks.Params.LogDir — the same <state>/logs
+// directory queue.Config.LogDir also gets (main.go), so a hook's full log
+// file lands in the exact per-run directory its landing's own check logs
+// already live under (log/history parity with checks, chunk P5-B): the
+// existing retention sweep (logs.go's pruneLogFiles, keyed on that
+// directory's mtime) covers hook logs for free, with no separate sweep.
+func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, workDir, logDir string, emit func(context.Context, core.Event)) *hooks.Runner {
 	hookMap := make(map[string][]hooks.Hook)
 	policyMap := make(map[string]hooks.Policy)
 	for _, t := range cfg.Targets {
@@ -45,5 +52,6 @@ func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, wo
 		Exec:     ex,
 		Emit:     emit,
 		WorkDir:  workDir,
+		LogDir:   logDir,
 	})
 }

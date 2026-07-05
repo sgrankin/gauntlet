@@ -398,3 +398,54 @@ func TestRunPage_OmitsFullLogLinkWhenNoLogPathStored(t *testing.T) {
 		t.Errorf("run page rendered a full-log link despite no stored LogPath:\n%s", body)
 	}
 }
+
+// --- hook log serving (log/history parity, chunk P5-B) ----------------------
+
+// TestRunLog_ServesHookLog confirms GET /run/{id}/log/{name} also matches
+// hook rows, not just checks: handleRunLog looks the name up in checks
+// first (miss, since this run has no check by that name) and falls through
+// to hooks — the same containment-checked serving path a check's log gets.
+func TestRunLog_ServesHookLog(t *testing.T) {
+	store := openTestStore(t)
+	logRoot := t.TempDir()
+
+	runDir := filepath.Join(logRoot, "run-hook-log-1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	logPath := filepath.Join(runDir, "hook-1-deploy.log")
+	const fullContent = "deploying...\ndeployed.\n"
+	if err := os.WriteFile(logPath, []byte(fullContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	emitRun(t, store, sampleRecord("run-hook-log-1", "main")) // checks: lint, test — no "deploy"
+	emitHook(t, store, "run-hook-log-1", "deploy", core.CheckResult{
+		Status: core.CheckPassed, Duration: time.Second, Output: "tail only", LogPath: logPath,
+	})
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store, dashboard.WithLogRoot(logRoot))
+	resp, body := get(t, h, "/run/run-hook-log-1/log/deploy")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body:\n%s", resp.StatusCode, body)
+	}
+	if body != fullContent {
+		t.Errorf("body = %q, want %q", body, fullContent)
+	}
+}
+
+// TestRunLog_HookUnknownNameStill404s confirms a name that matches neither
+// a check nor a hook for the run still 404s, even once the lookup covers
+// both tables.
+func TestRunLog_HookUnknownNameStill404s(t *testing.T) {
+	store := openTestStore(t)
+	logRoot := t.TempDir()
+	emitRun(t, store, sampleRecord("run-hook-log-2", "main"))
+	emitHook(t, store, "run-hook-log-2", "deploy", core.CheckResult{Status: core.CheckPassed})
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store, dashboard.WithLogRoot(logRoot))
+	resp, _ := get(t, h, "/run/run-hook-log-2/log/does-not-exist")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
