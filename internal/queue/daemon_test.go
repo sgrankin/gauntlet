@@ -1,0 +1,346 @@
+package queue
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sgrankin/gauntlet/internal/channel"
+	"github.com/sgrankin/gauntlet/internal/config"
+	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/executor"
+)
+
+const testCheckSpecPath = ".gauntlet.kdl"
+
+var testCommitter = core.Identity{Name: "Gauntlet", Email: "gauntlet@example.com"}
+
+// runIDPattern matches the §9.4-shaped run-ID scheme: a UTC timestamp, a
+// hyphen, and 12 hex characters taken from an OID (the trial tree's for a
+// run that got one; the candidate's own SHA for pre-trial outcomes — see
+// tryStartTrial's and rejectPreMerge's run-ID comments in reconcile.go).
+var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}Z-[0-9a-f]{12}$`)
+
+// testHarness wires a Daemon to a fakeGitRepo, a GatedExecutor, and a
+// RecordingChannel, with an injectable clock — everything queue's tests
+// need to drive ReconcileOnce deterministically and inspect the result.
+type testHarness struct {
+	t     *testing.T
+	git   *fakeGitRepo
+	exec  *executor.GatedExecutor
+	ch    *channel.RecordingChannel
+	d     *Daemon
+	clock time.Time
+}
+
+// newHarness builds a testHarness for a single target named "main" tracking
+// branch "main", unless targets is given explicitly.
+func newHarness(t *testing.T, targets ...config.Target) *testHarness {
+	t.Helper()
+	if len(targets) == 0 {
+		targets = []config.Target{{Name: "main", Branch: "main"}}
+	}
+	git := newFakeGitRepo()
+	exec := executor.NewGatedExecutor()
+	ch := channel.NewRecordingChannel()
+	h := &testHarness{
+		t: t, git: git, exec: exec, ch: ch,
+		clock: time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC),
+	}
+
+	d, err := New(git, exec, []core.Channel{ch}, Config{
+		Targets:   targets,
+		CheckSpec: testCheckSpecPath,
+		Committer: testCommitter,
+	}, h.now)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.d = d
+	return h
+}
+
+// now is the Daemon's injected clock: deterministic (no wall time) but
+// advancing one second per call. Advancing matters because run IDs embed a
+// second-resolution timestamp alongside the trial tree's OID — under a
+// frozen clock, two runs of identical content (e.g. a re-push of the same
+// files after a Skip) would mint the same run ID and collide in the
+// GatedExecutor, which keys its gates by (RunID, Name).
+func (h *testHarness) now() time.Time {
+	h.clock = h.clock.Add(time.Second)
+	return h.clock
+}
+
+func (h *testHarness) reconcile() {
+	h.t.Helper()
+	if err := h.d.ReconcileOnce(context.Background()); err != nil {
+		h.t.Fatalf("ReconcileOnce: %v", err)
+	}
+}
+
+// release delivers result to the executor gated on (runID, name) and then
+// spins ReconcileOnce (yielding the scheduler between attempts, never
+// sleeping) until at least one new event appears.
+//
+// This exists because GatedExecutor.Release only enqueues result into a
+// buffered channel — it does not wait for the executor goroutine it
+// unblocks to actually resume, return, and deliver that result into the
+// run's one-shot result channel (nothing synchronizes that ordering).
+// Since ReconcileOnce's read of that channel is deliberately non-blocking
+// (production must never stall the reconcile loop on a slow check), calling
+// it exactly once immediately after Release can race ahead of the goroutine
+// and simply observe "still running" — not a logic bug, just two
+// independently-scheduled goroutines with no rendezvous between them.
+func (h *testHarness) release(runID, name string, result core.CheckResult) {
+	h.t.Helper()
+	before := len(h.ch.Events())
+	h.exec.Release(runID, name, result)
+	for i := 0; i < 100000; i++ {
+		h.reconcile()
+		if len(h.ch.Events()) > before {
+			return
+		}
+		runtime.Gosched()
+	}
+	h.t.Fatalf("no new event after releasing (%s,%s); the check's executor goroutine never seemed to run", runID, name)
+}
+
+// awaitStarted blocks until the executor gated on (runID, name) has
+// registered (GatedExecutor.Started), or fails the test after a generous
+// timeout. This is a synchronization wait, not a pacing sleep — it returns
+// as soon as the check's executor goroutine actually runs, almost always
+// within microseconds; the timeout is only a safety net against a genuine
+// hang, the same idiom internal/executor's own gate_test.go uses.
+//
+// Only for *positive* "this check has started" assertions. A *negative*
+// assertion ("this check must never start") doesn't need this: when the
+// state machine never calls startCheck for it, no goroutine is ever
+// spawned and Started's channel never closes — that's a standing logical
+// guarantee, not a timing race, so a plain non-blocking check is correct.
+func (h *testHarness) awaitStarted(runID, name string) {
+	h.t.Helper()
+	select {
+	case <-h.exec.Started(runID, name):
+	case <-time.After(5 * time.Second):
+		h.t.Fatalf("check (%s,%s) never started", runID, name)
+	}
+}
+
+// currentRunID returns the RunID of the most recently emitted event that
+// carries one. Tests use it to address GatedExecutor.Release calls at the
+// run currently in flight, since run IDs are content-derived and not
+// predictable ahead of time.
+func (h *testHarness) currentRunID() string {
+	h.t.Helper()
+	evs := h.ch.Events()
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].RunID != "" {
+			return evs[i].RunID
+		}
+	}
+	h.t.Fatal("no event with a RunID found")
+	return ""
+}
+
+// candidateRef builds a well-formed candidate ref (§9.3). An empty user
+// produces the solo (no-user) form.
+func candidateRef(target, user, topic string) string {
+	if user == "" {
+		return candidatePrefix + target + "/" + topic
+	}
+	return candidatePrefix + target + "/" + user + "/" + topic
+}
+
+// checkSpecFile renders a minimal .gauntlet.kdl declaring one check per
+// name in names. The command's argv never actually runs — every test here
+// uses the GatedExecutor test double — it only needs to satisfy
+// config.ParseChecks's validation (non-empty name and command).
+func checkSpecFile(names ...string) map[string]string {
+	var b strings.Builder
+	for _, n := range names {
+		fmt.Fprintf(&b, "check %q {\n    command \"true\"\n}\n", n)
+	}
+	return map[string]string{testCheckSpecPath: b.String()}
+}
+
+func TestReconcile_GreenMultiCheckLand(t *testing.T) {
+	h := newHarness(t)
+	base := h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	candSHA := h.git.pushCandidate(ref, "", checkSpecFile("lint", "test"))
+
+	h.reconcile() // trial clean; lint started
+	runID := h.currentRunID()
+	if !runIDPattern.MatchString(runID) {
+		t.Fatalf("run ID %q does not match the §9.4 format", runID)
+	}
+
+	h.release(runID, "lint", core.CheckResult{Name: "lint", Status: core.CheckPassed, Duration: time.Second})     // lint recorded; test started
+	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed, Duration: 2 * time.Second}) // both green: land
+
+	// Land ordering (Invariants 2, 3): target CAS logged strictly before
+	// the slot-delete CAS.
+	if len(h.git.casLog) != 2 {
+		t.Fatalf("CAS calls = %d, want exactly 2 (target push, slot delete)", len(h.git.casLog))
+	}
+	if h.git.casLog[0].ref != "refs/heads/main" {
+		t.Errorf("first CAS call ref = %q, want target ref", h.git.casLog[0].ref)
+	}
+	if h.git.casLog[1].ref != ref {
+		t.Errorf("second CAS call ref = %q, want candidate ref", h.git.casLog[1].ref)
+	}
+
+	mergeOID := h.git.ref("refs/heads/main")
+	if mergeOID == "" || mergeOID == base {
+		t.Fatalf("target ref = %q, want a new merge commit", mergeOID)
+	}
+	if h.git.hasRef(ref) {
+		t.Fatal("candidate slot still exists after land")
+	}
+	if c := h.git.commits[mergeOID]; len(c.parents) != 2 || c.parents[0] != base || c.parents[1] != candSHA {
+		t.Fatalf("merge commit parents = %v, want [%s %s] (Invariant 1: candidate SHA verbatim as parent[1])", c.parents, base, candSHA)
+	}
+
+	recs := h.ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v, want Landed", last.Outcome)
+	}
+	if last.RunID != runID {
+		t.Fatalf("RunRecord.RunID = %q, want %q", last.RunID, runID)
+	}
+	if last.BaseOID != base {
+		t.Errorf("BaseOID = %q, want %q", last.BaseOID, base)
+	}
+	if last.MergeSHA != mergeOID {
+		t.Errorf("MergeSHA = %q, want %q", last.MergeSHA, mergeOID)
+	}
+	if last.Candidate.SHA != candSHA {
+		t.Errorf("Candidate.SHA = %q, want %q", last.Candidate.SHA, candSHA)
+	}
+	if len(last.Checks) != 2 {
+		t.Fatalf("Checks = %+v, want 2 entries in run order", last.Checks)
+	}
+	if last.Checks[0].Name != "lint" || last.Checks[0].Status != core.CheckPassed || last.Checks[0].Duration != time.Second {
+		t.Errorf("Checks[0] = %+v", last.Checks[0])
+	}
+	if last.Checks[1].Name != "test" || last.Checks[1].Status != core.CheckPassed || last.Checks[1].Duration != 2*time.Second {
+		t.Errorf("Checks[1] = %+v", last.Checks[1])
+	}
+}
+
+func TestNew_Validation(t *testing.T) {
+	git := newFakeGitRepo()
+	exec := executor.NewGatedExecutor()
+	valid := Config{
+		Targets:   []config.Target{{Name: "main", Branch: "main"}},
+		CheckSpec: testCheckSpecPath,
+		Committer: testCommitter,
+	}
+
+	cases := []struct {
+		name string
+		git  core.GitRepo
+		exec core.Executor
+		cfg  func(Config) Config
+	}{
+		{name: "nil git", git: nil, exec: exec, cfg: func(c Config) Config { return c }},
+		{name: "nil executor", git: git, exec: nil, cfg: func(c Config) Config { return c }},
+		{name: "no targets", git: git, exec: exec, cfg: func(c Config) Config { c.Targets = nil; return c }},
+		{name: "empty check spec", git: git, exec: exec, cfg: func(c Config) Config { c.CheckSpec = ""; return c }},
+		{name: "empty committer", git: git, exec: exec, cfg: func(c Config) Config { c.Committer = core.Identity{}; return c }},
+		{name: "committer missing email", git: git, exec: exec, cfg: func(c Config) Config { c.Committer.Email = ""; return c }},
+		{name: "unparseable merge message", git: git, exec: exec, cfg: func(c Config) Config { c.MergeMessage = "{{.Nope"; return c }},
+		{name: "target missing branch", git: git, exec: exec, cfg: func(c Config) Config {
+			c.Targets = []config.Target{{Name: "main"}}
+			return c
+		}},
+		{name: "duplicate target", git: git, exec: exec, cfg: func(c Config) Config {
+			c.Targets = []config.Target{{Name: "main", Branch: "main"}, {Name: "main", Branch: "other"}}
+			return c
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := New(tc.git, tc.exec, nil, tc.cfg(valid), nil); err == nil {
+				t.Fatal("New: want an error")
+			}
+		})
+	}
+
+	if _, err := New(git, exec, nil, valid, nil); err != nil {
+		t.Fatalf("New with a valid config: %v", err)
+	}
+}
+
+func TestRun_TicksAndStops(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+	h.git.pushCandidate(candidateRef("main", "alice", "widget"), "", checkSpecFile("test"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	tick := make(chan time.Time)
+	done := make(chan error, 1)
+	go func() { done <- h.d.Run(ctx, tick) }()
+
+	tick <- time.Time{} // one tick = one ReconcileOnce
+	waitCtx, waitCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer waitCancel()
+	if _, ok := h.ch.WaitForKind(waitCtx, core.EventQueued); !ok {
+		t.Fatal("no EventQueued after a tick; Run is not reconciling")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run returned nil after ctx cancel, want ctx.Err()")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestRun_TickChannelClosed(t *testing.T) {
+	h := newHarness(t)
+	tick := make(chan time.Time)
+	close(tick)
+	if err := h.d.Run(t.Context(), tick); err != nil {
+		t.Fatalf("Run after tick close = %v, want nil", err)
+	}
+}
+
+func TestReconcile_EventsPerTransition(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", checkSpecFile("test"))
+
+	h.reconcile()
+	runID := h.currentRunID()
+	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
+
+	var kinds []core.EventKind
+	for _, e := range h.ch.Events() {
+		kinds = append(kinds, e.Kind)
+	}
+	want := []core.EventKind{
+		core.EventQueued,
+		core.EventTrialClean,
+		core.EventCheckStarted,
+		core.EventCheckFinished,
+		core.EventLanded,
+	}
+	if len(kinds) != len(want) {
+		t.Fatalf("events = %v, want %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Errorf("events[%d] = %v, want %v", i, kinds[i], want[i])
+		}
+	}
+}
