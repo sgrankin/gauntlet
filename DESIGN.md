@@ -137,6 +137,21 @@ The review checklist. Every plan and every implementation gets graded against th
   store. Options if this bites: export via clone instead, or mount the bare
   repo read-only alongside.
 
+First live run (crashtest demo, 2026-07-05) surfaced three more:
+
+- **Red pings need the failing output.** A rejection's detail says `check "test"
+  failed`; the actually-useful line (`airbag: deploy at 148ms, want <= 25ms`)
+  lives only in the RunRecord's tail-capped Output, which history deliberately
+  doesn't store. Channels should include the failing check's output tail in
+  terminal notifications.
+- **kdl-go rejects single-line child blocks** (`check "vet" { command ... }` on
+  one line) and reports the error at "line 0". Adopters will write the
+  single-line form; docs must show multi-line only, and the parse-error paths
+  should be made friendlier (or the parser quirk fixed/reported upstream).
+- **Apple `container` has no named volumes** — cache "volumes" work as
+  host-path bind mounts (an absolute path in the cache name slot). Config
+  semantics should acknowledge both forms explicitly per runtime.
+
 ## Open spikes
 
 - Config language head-to-head: `sblinch/kdl-go` (fitness, KDL 2.0 status) vs
