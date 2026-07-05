@@ -1,0 +1,9 @@
+check "lint" {
+    command "golangci-lint" "run"
+}
+check "test" {
+    command "go" "test" "./..."
+}
+check "build" {
+    command "go" "build" "./..."
+}

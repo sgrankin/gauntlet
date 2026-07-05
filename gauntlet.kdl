@@ -1,0 +1,10 @@
+remote "https://github.com/acme/widgets.git"
+poll-interval "10s"
+check-spec ".gauntlet.kdl"        // path within each repo tree; optional, default ".gauntlet.kdl"
+committer {
+    name "Gauntlet"
+    email "gauntlet@ci.acme.example"
+}
+merge-message "Merge {{.Topic}} ({{.User}})"   // optional
+target "main"    branch="main"
+target "release" branch="release/v2"
