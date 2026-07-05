@@ -49,6 +49,9 @@ is agent-written and *how the branch got there* is data worth keeping.
 | **KEPT** | Deployments as post-land hooks | A hook stage triggered by the land event, same executor machinery. Keeps the queue core pure; avoids growing a CD system in v1. |
 | **KEPT** | KDL for config | Queues / channels / executors nest naturally as KDL nodes; reads better than TOML for trees of typed things. Risk: thin Go ecosystem. Mitigation: all parsing isolated in one `config` package unmarshaling to plain structs; syntax is swappable. *(Spike: `sblinch/kdl-go` fitness, KDL 2.0 status.)* |
 | **KEPT** | One daemon, N queues | Multiple target branches and multiple repos per instance, config-driven. Cheap now, painful to retrofit. |
+| **KILLED** | A job/pipeline DSL | GHA-yaml is a programming language in a data-format costume. A **job is a named command**; structure (matrix, setup, ordering) belongs in the repo's own scripts (shell/make/just). A queue runs multiple named checks (`lint`, `test`, …), each a command; verdict = all green. Buys per-check history and per-check red pings with zero DSL. |
+| **KEPT** | Job spec lives in the repo, read from the trial tree | CI definition versions with the code; a candidate that changes its checks is tested by its own definition. Daemon config keeps only operations: remotes, credentials, channels, builders. |
+| **KEPT** | OTel-shaped observability from day one | A run is a trace: root span per run, children for trial-merge, each check, the land. Core emits structured run records (stable run ID; per-check name/verdict/duration) through the OTel API with a no-op provider from phase 1; OTLP exporter is config, phase 3. SQLite stays as the *queryable* local history (dashboard, red-rate) — OTel is export, not storage. |
 | **KILLED** | Persistent staging branch | A second head you reconcile forever; pure contention with fast committers. (Inherited verdict from the original design exploration.) |
 
 ## Invariants
@@ -92,16 +95,20 @@ The review checklist. Every plan and every implementation gets graded against th
 
 ## Build phases
 
-1. **Core loop, local-only.** Watch `for/*` refs, trial-merge, run a configured
-   command, CAS land, stdout channel. KDL config. End-to-end usable against any
+1. **Core loop, local-only.** Watch `for/*` refs, trial-merge, run the named
+   checks defined by a KDL file in the trial tree, CAS land, stdout channel.
+   Structured run records (run ID; per-check name/verdict/duration) in the
+   event model via the OTel API (no-op provider). End-to-end usable against any
    git remote; tested entirely with local bare repos. No SQLite, no container,
    no network services.
 2. **Executors & channels.** Container wrapper (docker/podman/Apple
    `container`) with persistent cache volumes; GitHub Actions
    dispatch-and-await; Slack (socket mode, threads, reaction commands); GitHub
    commit status.
-3. **Dashboard + SQLite history.** Read-only web UI; queue state, run history,
-   red-rate. Bind localhost/tailnet; auth is your proxy's job.
+3. **Dashboard + SQLite history + OTLP export.** Read-only web UI; queue
+   state, run history, red-rate (per check). Bind localhost/tailnet; auth is
+   your proxy's job. OTLP span exporter as a config option — same run records,
+   exported instead of stored.
 4. **Porcelain & polish.** `land` one-worder for git and jj; post-land hooks
    (deployments); Claude merge summaries; speculation if queue-depth data
    demands it.
