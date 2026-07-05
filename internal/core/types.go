@@ -210,6 +210,23 @@ type RunRecord struct {
 
 	StartedAt time.Time
 	EndedAt   time.Time
+
+	// BatchID groups the per-member records of one batch run (empty for
+	// serial and speculate). All members of a batch share it; the dashboard
+	// and history use it to render "landed together as batch <id>".
+	BatchID string
+
+	// Position is this member's 0-based index within its batch (0 for
+	// serial/speculate). BatchSize is the batch's member count (1
+	// otherwise).
+	Position  int
+	BatchSize int
+
+	// Speculated is true iff this run was tested on a *predicted* base
+	// (speculation, a non-head window member) rather than the live target
+	// tip. Purely informational for the dashboard; the landed commit is the
+	// tested commit either way (Invariant 1).
+	Speculated bool
 }
 
 // Identity is a git commit identity: a name and an email address.

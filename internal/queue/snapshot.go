@@ -29,18 +29,47 @@ type Snapshot struct {
 type TargetSnapshot struct {
 	Name      string
 	Branch    string
-	TargetTip string         // "" if the target branch doesn't exist yet
-	InFlight  *RunSnapshot   // nil when the lane is idle
-	Waiting   []WaitingEntry // FIFO order; excludes in-flight and parked refs
-	Parked    []ParkedEntry  // refs parked at their current SHA, with reason
+	TargetTip string       // "" if the target branch doesn't exist yet
+	InFlight  *RunSnapshot // the HEAD run (lane.runs[0]); nil when the lane is idle
+
+	// Pipeline is every in-flight run for this target, head first: nil/empty
+	// when the lane is idle, exactly one element in today's serial-only code
+	// (mirroring InFlight), and up to Target.Window elements once batching
+	// and speculation land (docs/plans/phase5.md §3.4).
+	Pipeline []RunSnapshot
+
+	Waiting []WaitingEntry // FIFO order; excludes in-flight and parked refs
+	Parked  []ParkedEntry  // refs parked at their current SHA, with reason
 }
 
-// RunSnapshot is the in-flight run for one target, if any.
+// RunSnapshot is one in-flight run within a target's pipeline.
 type RunSnapshot struct {
+	// Candidate is this run's head member (members[0]) — kept for
+	// back-compat with pre-batch consumers. See Members.
 	Candidate core.Candidate
-	RunID     string
-	BaseOID   string
-	MergeSHA  string
+
+	// Members is every candidate chained into this run: len 1 for
+	// serial/speculate, up to max-batch for batch (docs/plans/phase5.md
+	// §3.4). Candidate == Members[0] always.
+	Members []core.Candidate
+
+	RunID   string
+	BaseOID string
+
+	// ChainTip is the tested merge commit — the last member's chain link.
+	// Equal to MergeSHA (kept for back-compat: MergeSHA == ChainTip always).
+	ChainTip string
+	MergeSHA string
+
+	// Predicted is true iff this run was built on a predicted (unpushed,
+	// not-yet-landed) base rather than the live target tip — a non-head
+	// speculation-window member.
+	Predicted bool
+
+	// BatchID groups this run with its sibling per-member RunRecords when
+	// it's part of a batch; "" for serial and speculate.
+	BatchID string
+
 	Done      []core.CheckResult // checks finished so far, in run order
 	Current   *CurrentCheck      // the check running now; nil between checks
 	StartedAt time.Time
@@ -93,7 +122,13 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 
 	r := d.runs[t.Name]
 	if r != nil {
-		ts.InFlight = buildRunSnapshot(r)
+		rs := buildRunSnapshot(r)
+		ts.InFlight = rs
+		// Serial-only today: the lane holds at most this one run, so
+		// Pipeline is a single-element mirror of InFlight. The lane
+		// refactor (docs/plans/phase5.md §3.4) swaps this for
+		// lane.runs, head first.
+		ts.Pipeline = []RunSnapshot{*rs}
 	}
 
 	order := d.order[t.Name]
@@ -154,9 +189,15 @@ func buildRunSnapshot(r *run) *RunSnapshot {
 
 	return &RunSnapshot{
 		Candidate: r.cand,
+		// Degenerate today's single-candidate run as a one-element member
+		// list; the lane refactor sources this from runMember instead.
+		Members:   []core.Candidate{r.cand},
 		RunID:     r.runID,
 		BaseOID:   r.baseOID,
+		ChainTip:  r.mergeOID, // ChainTip == MergeSHA (back-compat, §3.4)
 		MergeSHA:  r.mergeOID,
+		Predicted: false,         // no speculation until the lane refactor lands
+		BatchID:   r.rec.BatchID, // always "" until batching sets it
 		Done:      done,
 		Current:   cur,
 		StartedAt: r.rec.StartedAt,

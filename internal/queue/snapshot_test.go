@@ -63,6 +63,27 @@ func TestSnapshot_MidRun(t *testing.T) {
 	if ts.InFlight.Current.StartedAt.IsZero() {
 		t.Error("InFlight.Current.StartedAt is zero")
 	}
+	// docs/plans/phase5.md §3.4: today's serial-only code degenerately
+	// populates Pipeline as a single-element mirror of InFlight, and
+	// Members as the one candidate.
+	if len(ts.Pipeline) != 1 {
+		t.Fatalf("Pipeline = %+v, want exactly 1 (serial-only degenerate population)", ts.Pipeline)
+	}
+	if ts.Pipeline[0].RunID != ts.InFlight.RunID || ts.Pipeline[0].Candidate != ts.InFlight.Candidate {
+		t.Fatalf("Pipeline[0] = %+v, want it to mirror InFlight %+v", ts.Pipeline[0], *ts.InFlight)
+	}
+	if len(ts.InFlight.Members) != 1 || ts.InFlight.Members[0] != ts.InFlight.Candidate {
+		t.Fatalf("InFlight.Members = %+v, want exactly [Candidate]", ts.InFlight.Members)
+	}
+	if ts.InFlight.ChainTip != ts.InFlight.MergeSHA {
+		t.Fatalf("InFlight.ChainTip = %q, want == MergeSHA %q", ts.InFlight.ChainTip, ts.InFlight.MergeSHA)
+	}
+	if ts.InFlight.Predicted {
+		t.Error("InFlight.Predicted = true, want false (no speculation yet)")
+	}
+	if ts.InFlight.BatchID != "" {
+		t.Errorf("InFlight.BatchID = %q, want empty (no batching yet)", ts.InFlight.BatchID)
+	}
 	if len(ts.Waiting) != 0 {
 		t.Fatalf("Waiting = %+v, want none (the only candidate is in flight)", ts.Waiting)
 	}
