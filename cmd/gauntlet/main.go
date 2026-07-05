@@ -30,6 +30,15 @@ import (
 )
 
 func main() {
+	// "land" is client-side porcelain (cmd/gauntlet/land.go); everything
+	// else is the daemon itself.
+	if len(os.Args) > 1 && os.Args[1] == "land" {
+		if err := runLand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "gauntlet land:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "gauntlet:", err)
 		os.Exit(1)
