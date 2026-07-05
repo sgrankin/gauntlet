@@ -17,6 +17,8 @@
   --ok: #1a7f37;
   --bad: #cf222e;
   --warn: #9a6700;
+  --conflict: #bc4c00;
+  --error: #8250df;
   --neutral: #656d76;
   --accent: #0969da;
 }
@@ -30,6 +32,8 @@
     --ok: #3fb950;
     --bad: #f85149;
     --warn: #d29922;
+    --conflict: #e0812c;
+    --error: #a371f7;
     --neutral: #9198a1;
     --accent: #58a6ff;
   }
@@ -52,17 +56,53 @@ h2 { font-size: 1.05rem; margin: 0 0 .3rem; }
 table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
 th, td { padding: .35rem .6rem; border-bottom: 1px solid var(--border); text-align: left; font-size: .88rem; vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
-.card { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+.card { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; min-width: 0; overflow-wrap: anywhere; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.grid > * { min-width: 0; }
 .tag { display: inline-block; padding: .05rem .5rem; border-radius: 1rem; font-size: .78rem; font-weight: 600; border: 1px solid currentColor; }
 .tag.ok { color: var(--ok); }
 .tag.bad { color: var(--bad); }
 .tag.warn { color: var(--warn); }
 .tag.neutral { color: var(--neutral); }
 .muted { color: var(--muted); }
-code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
 footer { margin-top: 2rem; }
 .section { margin-bottom: 1.5rem; }
+
+/* --- status chips: shared between /, /t/{target} and /run/{id} ---------
+   A chip is always a small solid-fill square, never text (bullet 5's
+   "filled squares without text" option) — the human-readable word, when
+   one is needed (e.g. a check's status in its <details> summary), sits in
+   ordinary text next to it rather than inside it, so chip contrast never
+   has to be separately tuned per color per color-scheme. */
+.chip { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; vertical-align: text-bottom; }
+.chip-ok { background: var(--ok); }
+.chip-bad { background: var(--bad); }
+.chip-warn { background: var(--warn); }
+.chip-conflict { background: var(--conflict); }
+.chip-error { background: var(--error); }
+.chip-neutral { background: var(--neutral); }
+.chips { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; min-width: 0; }
+
+/* --- per-check output (/run/{id}) --------------------------------------- */
+.checklist { margin: .5rem 0 1rem; border-top: 1px solid var(--border); }
+.check-row, details.check-row summary { display: block; padding: .4rem .2rem; border-bottom: 1px solid var(--border); font-size: .88rem; }
+details.check-row summary { cursor: pointer; }
+details.check-row summary::marker { color: var(--muted); }
+pre.output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .6rem; margin: .3rem 0 .6rem; overflow-x: auto; overflow-y: auto; max-height: 30em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; white-space: pre; }
+
+/* --- queue-depth chart (/checks) ----------------------------------------- */
+.depth-chart { background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 100%; height: auto; }
+.depth-axis { stroke: var(--border); stroke-width: 1; }
+.depth-label { fill: var(--muted); font-size: 9px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.depth-waiting { fill: none; stroke: var(--accent); stroke-width: 2; }
+.depth-inflight { fill: none; stroke: var(--ok); stroke-width: 2; }
+.depth-parked { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 2px; margin: 0 .3rem 0 .9rem; vertical-align: middle; }
+.legend-dot:first-child { margin-left: 0; }
+.legend-dot.waiting { background: var(--accent); }
+.legend-dot.inflight { background: var(--ok); }
+.legend-dot.parked { background: var(--muted); }
 </style>
 </head>
 <body>

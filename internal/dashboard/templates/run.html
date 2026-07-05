@@ -7,10 +7,10 @@
 &middot; <span class="tag {{.Run.Outcome.Class}}">{{.Run.Outcome.Word}}</span>
 </p>
 <table>
-<tr><th>ref</th><td class="mono">{{.Run.Ref}}</td></tr>
-<tr><th>candidate sha</th><td><code>{{.Run.SHA}}</code></td></tr>
-<tr><th>base</th><td><code>{{.Run.BaseOID}}</code></td></tr>
-<tr><th>merge sha</th><td><code>{{.Run.MergeSHA}}</code></td></tr>
+<tr><th>ref</th><td class="mono" title="{{.Run.Ref}}">{{compactRef .Run.Ref}}</td></tr>
+<tr><th>candidate sha</th><td><code title="{{.Run.SHA}}">{{shortSHA .Run.SHA}}</code></td></tr>
+<tr><th>base</th><td><code title="{{.Run.BaseOID}}">{{shortSHA .Run.BaseOID}}</code></td></tr>
+<tr><th>merge sha</th><td><code title="{{.Run.MergeSHA}}">{{shortSHA .Run.MergeSHA}}</code></td></tr>
 <tr><th>trial merge</th><td>{{if .Run.TrialClean}}clean{{else}}conflict{{end}}</td></tr>
 <tr><th>detail</th><td>{{.Run.Detail}}</td></tr>
 <tr><th>started</th><td>{{.Run.StartedAt}}</td></tr>
@@ -20,12 +20,23 @@
 
 <h2>Checks</h2>
 {{if .Checks}}
-<table>
-<tr><th>#</th><th>check</th><th>status</th><th>duration</th><th>err</th></tr>
+<!-- This is the "how did it fail / is it actually doing the thing" page:
+     every check's captured output is one click away, and a failed/errored
+     check starts already expanded so its output is impossible to miss. -->
+<div class="checklist">
 {{range .Checks}}
-<tr><td>{{.Seq}}</td><td>{{.Name}}</td><td><span class="tag {{.Status.Class}}">{{.Status.Word}}</span></td><td>{{.Duration}}</td><td class="muted">{{.Err}}</td></tr>
+{{if .Output}}
+<details class="check-row"{{if .Open}} open{{end}}>
+<summary><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}</summary>
+<pre class="output">{{.Output}}</pre>
+</details>
+{{else}}
+<div class="check-row">
+<span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}
+</div>
 {{end}}
-</table>
+{{end}}
+</div>
 {{else}}
 <p class="muted">no checks recorded</p>
 {{end}}

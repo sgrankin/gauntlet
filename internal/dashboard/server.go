@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -86,7 +87,7 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 		if ts.InFlight != nil {
 			card.InFlight = buildInFlight(ts.InFlight, snap.At)
 		}
-		card.RecentRuns, card.StoreEnabled = d.recentRuns(ts.Name, 6)
+		card.RecentRuns, card.StoreEnabled = d.recentRuns(ts.Name, 6, snap.At)
 		data.Targets = append(data.Targets, card)
 	}
 	render(w, indexTmpl, data)
@@ -137,7 +138,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	data.RecentRuns, data.StoreEnabled = d.recentRuns(ts.Name, 25)
+	data.RecentRuns, data.StoreEnabled = d.recentRuns(ts.Name, 25, snap.At)
 	render(w, targetTmpl, data)
 }
 
@@ -184,6 +185,12 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	for _, c := range checks {
 		data.Checks = append(data.Checks, checkView{
 			Seq: c.Seq, Name: c.Name, Status: wordTag(c.Status), Duration: formatDuration(c.Duration), Err: c.Err,
+			Output: c.Output,
+			// Open the failed/errored check's output by default — this page
+			// exists to answer "how did it fail", so the failed check's
+			// output should be impossible to miss. Passed/skipped checks
+			// start collapsed.
+			Open: c.Status == "failed" || c.Err != "",
 		})
 	}
 	render(w, runTmpl, data)
@@ -191,9 +198,16 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 
 // --- /checks?target=&since= --------------------------------------------------
 
+// maxStatsRows caps the per-check stats table: it's grouped by check name,
+// which is normally a small set, but nothing stops a misbehaving client from
+// naming a fresh check on every run, so cap it at a sane row count rather
+// than trusting that.
+const maxStatsRows = 200
+
 func (d *dash) handleChecks(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
 	target := r.URL.Query().Get("target")
-	since := parseSince(r.URL.Query().Get("since"))
+	since := parseSince(r.URL.Query().Get("since"), now)
 
 	data := checksData{
 		baseData: newBase("checks", nil, false),
@@ -215,6 +229,9 @@ func (d *dash) handleChecks(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("dashboard: check stats: %v", err)
 	}
+	if len(stats) > maxStatsRows {
+		stats = stats[:maxStatsRows]
+	}
 	for _, st := range stats {
 		data.Stats = append(data.Stats, statView{
 			Name: st.Name, Total: st.Total, Failed: st.Failed,
@@ -227,24 +244,25 @@ func (d *dash) handleChecks(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("dashboard: depth series: %v", err)
 	}
-	for _, p := range depth {
-		data.Depth = append(data.Depth, depthView{
-			At: formatTime(p.At), Waiting: p.Waiting, InFlight: p.InFlight, Parked: p.Parked,
-		})
+	data.HasDepth = len(depth) > 0
+	if data.HasDepth {
+		data.DepthChart = buildDepthSVG(depth, since, now)
 	}
 	render(w, checksTmpl, data)
 }
 
-// parseSince interprets the "since" query param: a Go duration ("24h") is
-// relative to now; an RFC3339 timestamp is absolute; anything else
-// (including empty) falls back to a 7-day window.
-func parseSince(s string) time.Time {
-	def := time.Now().Add(-7 * 24 * time.Hour)
+// parseSince interprets the "since" query param relative to now: a Go
+// duration ("24h") is relative to now; an RFC3339 timestamp is absolute;
+// anything else (including empty) falls back to a 24h window — the depth
+// chart's default per requirement, tighter than the 7-day default this used
+// to have back when the only consumer was the stats table.
+func parseSince(s string, now time.Time) time.Time {
+	def := now.Add(-24 * time.Hour)
 	if s == "" {
 		return def
 	}
 	if dur, err := time.ParseDuration(s); err == nil {
-		return time.Now().Add(-dur)
+		return now.Add(-dur)
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t
@@ -252,12 +270,116 @@ func parseSince(s string) time.Time {
 	return def
 }
 
+// --- depth chart (hand-built SVG) --------------------------------------------
+//
+// buildDepthSVG renders history.DepthPoint (queue.depth's change-only,
+// 10m-heartbeat sampled series — see history/queries.go's DepthPoint doc) as
+// a step chart: one line each for waiting/in-flight/parked. No JS charting
+// lib — this is plain server-rendered SVG, computed once per request.
+//
+// Step interpolation with carry-forward: between two stored samples the
+// true value never changed (a row is only written on change, or every 10m
+// as a heartbeat proving liveness) — so the polyline holds each sample's
+// value flat until the next sample's timestamp, then jumps. That is exactly
+// what "carry-forward across gaps" means here: a gap between samples is
+// never interpolated toward some other value, and never renders as missing
+// data — it renders as the last known value, held.
+
+const (
+	depthChartW = 700
+	depthChartH = 120
+	depthPadL   = 32
+	depthPadR   = 8
+	depthPadT   = 8
+	depthPadB   = 20
+)
+
+// buildDepthSVG renders points (ascending time order, per DepthSeries) into
+// an inline SVG covering [start, end] on the x-axis, where start is the
+// earlier of since/points[0].At and end is the later of now/the last
+// point's At (so the current value visibly holds through to "now" even if
+// no fresher sample has landed yet). Returns "" for an empty series — the
+// checks.html template renders "no data yet" in that case instead of calling
+// this.
+func buildDepthSVG(points []history.DepthPoint, since, now time.Time) template.HTML {
+	if len(points) == 0 {
+		return ""
+	}
+
+	start := since
+	if points[0].At.Before(start) {
+		start = points[0].At
+	}
+	end := now
+	if last := points[len(points)-1].At; last.After(end) {
+		end = last
+	}
+	span := end.Sub(start).Seconds()
+	if span <= 0 {
+		span = 1
+	}
+
+	maxV := 1
+	for _, p := range points {
+		for _, v := range [3]int{p.Waiting, p.InFlight, p.Parked} {
+			if v > maxV {
+				maxV = v
+			}
+		}
+	}
+
+	plotW := float64(depthChartW - depthPadL - depthPadR)
+	plotH := float64(depthChartH - depthPadT - depthPadB)
+	xAt := func(t time.Time) float64 {
+		return float64(depthPadL) + t.Sub(start).Seconds()/span*plotW
+	}
+	yAt := func(v int) float64 {
+		return float64(depthPadT) + plotH - float64(v)/float64(maxV)*plotH
+	}
+
+	// stepPoints builds a step-after polyline (see doc above) for one
+	// series, extracted from points via sel, extended flat to end.
+	stepPoints := func(sel func(history.DepthPoint) int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%.1f,%.1f", xAt(points[0].At), yAt(sel(points[0])))
+		for i := 1; i < len(points); i++ {
+			fmt.Fprintf(&b, " %.1f,%.1f", xAt(points[i].At), yAt(sel(points[i-1])))
+			fmt.Fprintf(&b, " %.1f,%.1f", xAt(points[i].At), yAt(sel(points[i])))
+		}
+		fmt.Fprintf(&b, " %.1f,%.1f", xAt(end), yAt(sel(points[len(points)-1])))
+		return b.String()
+	}
+	waiting := stepPoints(func(p history.DepthPoint) int { return p.Waiting })
+	inFlight := stepPoints(func(p history.DepthPoint) int { return p.InFlight })
+	parked := stepPoints(func(p history.DepthPoint) int { return p.Parked })
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %d %d" width="%d" height="%d" class="depth-chart" role="img" aria-label="queue depth over time">`,
+		depthChartW, depthChartH, depthChartW, depthChartH)
+	fmt.Fprintf(&b, `<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" class="depth-axis"/>`,
+		depthPadL, yAt(0), depthChartW-depthPadR, yAt(0))
+	fmt.Fprintf(&b, `<text x="2" y="%.1f" class="depth-label">%d</text>`, yAt(maxV)+8, maxV)
+	fmt.Fprintf(&b, `<text x="2" y="%.1f" class="depth-label">0</text>`, yAt(0)+4)
+	fmt.Fprintf(&b, `<text x="%d" y="%d" class="depth-label">%s</text>`,
+		depthPadL, depthChartH-4, template.HTMLEscapeString(start.UTC().Format("01-02 15:04")))
+	fmt.Fprintf(&b, `<text x="%d" y="%d" class="depth-label" text-anchor="end">%s</text>`,
+		depthChartW-depthPadR, depthChartH-4, template.HTMLEscapeString(end.UTC().Format("01-02 15:04")))
+	fmt.Fprintf(&b, `<polyline points="%s" class="depth-parked"/>`, parked)
+	fmt.Fprintf(&b, `<polyline points="%s" class="depth-inflight"/>`, inFlight)
+	fmt.Fprintf(&b, `<polyline points="%s" class="depth-waiting"/>`, waiting)
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
 // --- shared view-building helpers -------------------------------------------
 
-// recentRuns fetches target's recent runs for display. store == nil (or a
-// query error, logged and treated as empty) both render as an ordinary
-// empty/disabled section — never an error page.
-func (d *dash) recentRuns(target string, limit int) ([]runSummary, bool) {
+// recentRuns fetches target's recent runs for display, rendered as the
+// compact outcome-chip strip on / and /t/{target} (chipClass/chipTitle
+// below) rather than the old bordered text pill. store == nil (or a query
+// error, logged and treated as empty) both render as an ordinary
+// empty/disabled section — never an error page. at is the snapshot's "now"
+// (snap.At), used to compute each chip's relative-time tooltip.
+func (d *dash) recentRuns(target string, limit int, at time.Time) ([]runSummary, bool) {
 	if d.store == nil {
 		return nil, false
 	}
@@ -270,7 +392,9 @@ func (d *dash) recentRuns(target string, limit int) ([]runSummary, bool) {
 	for _, row := range rows {
 		out = append(out, runSummary{
 			RunID: row.RunID, User: row.CandidateUser, Topic: row.CandidateTopic,
-			Outcome: wordTag(row.Outcome), Detail: row.Detail,
+			ChipClass: outcomeChipClass(row.Outcome),
+			Title:     chipTitle(row.Outcome, row.CandidateTopic, row.StartedAt, at),
+			Detail:    row.Detail,
 			StartedAt: formatTime(row.StartedAt), Duration: formatDuration(row.Duration),
 		})
 	}
@@ -396,6 +520,75 @@ func checkWord(s core.CheckStatus) string {
 
 func checkTag(s core.CheckStatus) tag { return wordTag(checkWord(s)) }
 
+// outcomeChipClass maps a run outcome word to one of five distinct chip
+// colors — unlike wordTag, which collapses rejected/conflict/error into a
+// single "bad" for the bordered text pill, the compact outcome-chip strip
+// (recentRuns) keeps all five apart: landed=green, rejected=red,
+// skipped=yellow, conflict=orange, error=purple.
+func outcomeChipClass(word string) string {
+	switch word {
+	case "landed":
+		return "ok"
+	case "rejected":
+		return "bad"
+	case "skipped":
+		return "warn"
+	case "conflict":
+		return "conflict"
+	case "error":
+		return "error"
+	default:
+		return "neutral"
+	}
+}
+
+// chipTitle builds a recent-run chip's title tooltip, e.g.
+// "landed · safety-rating · 2m ago".
+func chipTitle(outcomeWord, topic string, startedAt, now time.Time) string {
+	if topic == "" {
+		return fmt.Sprintf("%s · %s", outcomeWord, relAgo(startedAt, now))
+	}
+	return fmt.Sprintf("%s · %s · %s", outcomeWord, topic, relAgo(startedAt, now))
+}
+
+// relAgo renders t relative to now as a short "Nx ago" string.
+func relAgo(t, now time.Time) string {
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	}
+}
+
+// shortSHA returns s's first 12 characters (or all of it, if shorter) —
+// enough to disambiguate in practice while fitting a card without
+// overflowing it (a full 40-char SHA does not). Templates pair this with the
+// full value in a title tooltip, e.g. `title="{{.SHA}}"` next to
+// `{{shortSHA .SHA}}`.
+func shortSHA(s string) string {
+	const n = 12
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// compactRef strips a queue-slot ref's "refs/heads/for/" prefix for display
+// in space-constrained contexts (tables, cards); the full ref belongs in a
+// title tooltip, same pairing as shortSHA.
+func compactRef(ref string) string {
+	return strings.TrimPrefix(ref, "refs/heads/for/")
+}
+
 // --- template view models ----------------------------------------------------
 
 // baseData holds the fields every page template's "base" wrapper needs.
@@ -440,11 +633,25 @@ type checkView struct {
 	Name          string
 	Status        tag
 	Duration, Err string
+
+	// Output is the check's captured output (history.CheckRow.Output);
+	// empty for in-flight "Done" checks (buildInFlight doesn't populate it —
+	// only /run/{id} renders per-check output). Run.html renders it in a
+	// <details> body when non-empty, nothing when empty.
+	Output string
+	// Open is whether that <details> should start expanded: true for
+	// failed/errored checks, so the answer to "how did it fail" is visible
+	// without a click.
+	Open bool
 }
 
+// runSummary is one row of a target's recent-run history: the compact
+// outcome-chip strip on / and /t/{target} (ChipClass/Title), not the old
+// bordered text pill.
 type runSummary struct {
 	RunID, User, Topic  string
-	Outcome             tag
+	ChipClass           string // ok|bad|warn|conflict|error|neutral -> chip-<class>
+	Title               string // tooltip: "landed · topic · 2m ago"
 	Detail              string
 	StartedAt, Duration string
 }
@@ -494,7 +701,11 @@ type checksData struct {
 	Since            string
 	AvailableTargets []string
 	Stats            []statView
-	Depth            []depthView
+	// HasDepth is len(depth series) > 0; DepthChart is only meaningful (a
+	// non-empty rendered <svg>) when this is true — otherwise the template
+	// renders "no data yet" instead.
+	HasDepth   bool
+	DepthChart template.HTML
 }
 
 type statView struct {
@@ -502,9 +713,4 @@ type statView struct {
 	Total, Failed int
 	RedRate       string
 	Avg, Max      string
-}
-
-type depthView struct {
-	At                        string
-	Waiting, InFlight, Parked int
 }

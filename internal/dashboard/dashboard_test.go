@@ -17,6 +17,11 @@ import (
 
 const hostileTopic = "<script>alert(1)</script>"
 
+// hostileOutput stands in for a check that echoes something dangerous into
+// its captured output (e.g. a linter quoting attacker-controlled source) —
+// run.html must render it escaped inside <pre>, never as live markup.
+const hostileOutput = "<script>alert(2)</script>"
+
 // openTestStore opens a real SQLite-backed history.Store in a temp dir (no
 // mocks: the dashboard's history queries are exercised against the same
 // store type production uses).
@@ -277,5 +282,151 @@ func TestChecks_RendersStatsWhenStoreEnabled(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("checks body missing %q\nbody:\n%s", want, body)
 		}
+	}
+}
+
+func TestChecks_DepthEmptyMessage(t *testing.T) {
+	store := openTestStore(t)
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+
+	_, body := get(t, h, "/checks?target=main")
+	if !strings.Contains(body, "no data yet") {
+		t.Errorf("expected \"no data yet\" for an empty depth series:\n%s", body)
+	}
+	if strings.Contains(body, `class="depth-chart"`) {
+		t.Errorf("expected no chart to be rendered for an empty series:\n%s", body)
+	}
+}
+
+func TestChecks_DepthChartRendersWhenSamplesExist(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now().UTC()
+	if err := store.RecordDepth(now.Add(-2*time.Hour), "main", 3, 1, 0); err != nil {
+		t.Fatalf("RecordDepth: %v", err)
+	}
+	if err := store.RecordDepth(now.Add(-1*time.Hour), "main", 1, 0, 2); err != nil {
+		t.Fatalf("RecordDepth: %v", err)
+	}
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/checks?target=main&since=24h")
+	if !strings.Contains(body, `class="depth-chart"`) {
+		t.Errorf("expected an inline SVG depth chart:\n%s", body)
+	}
+	if strings.Contains(body, "no data yet") {
+		t.Errorf("chart present but body still says \"no data yet\":\n%s", body)
+	}
+}
+
+// --- recent-outcome chips (bullet 1: bordered text pills -> compact squares) --
+
+func TestIndex_RecentRunsRenderAsChips(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hist-1", "main")) // OutcomeRejected, topic "histfix"
+
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+
+	_, body := get(t, h, "/")
+
+	if !strings.Contains(body, `class="chip chip-bad"`) {
+		t.Errorf("expected a rejected run to render as a chip-bad square:\n%s", body)
+	}
+	if !strings.Contains(body, `href="/run/run-hist-1"`) {
+		t.Errorf("expected the chip to link to /run/run-hist-1:\n%s", body)
+	}
+	if !strings.Contains(body, `title="rejected · histfix ·`) {
+		t.Errorf("expected a title tooltip with outcome and topic:\n%s", body)
+	}
+	if strings.Contains(body, `class="tag bad">rejected</a>`) {
+		t.Errorf("old bordered text pill still present:\n%s", body)
+	}
+}
+
+func TestTarget_RecentRunsRenderAsChips(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hist-1", "main"))
+
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+
+	_, body := get(t, h, "/t/main")
+
+	if !strings.Contains(body, `class="chip chip-bad"`) {
+		t.Errorf("expected a rejected run to render as a chip-bad square on the target page:\n%s", body)
+	}
+	if !strings.Contains(body, `href="/run/run-hist-1" class="chip chip-bad"`) {
+		t.Errorf("expected the chip anchor itself to carry the run link:\n%s", body)
+	}
+}
+
+// --- short SHA rendering (bullet 2: fix SHA overflow) -------------------------
+
+func TestIndex_ShortSHAWithFullTitle(t *testing.T) {
+	snap := testSnapshot() // main's TargetTip is 40 'a's
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/")
+
+	full := strings.Repeat("a", 40)
+	short := full[:12]
+	if !strings.Contains(body, `title="`+full+`"`) {
+		t.Errorf("expected the full 40-char sha in a title attribute:\n%s", body)
+	}
+	if strings.Contains(body, ">"+full+"<") {
+		t.Errorf("full 40-char sha rendered as visible text (should be short form):\n%s", body)
+	}
+	if !strings.Contains(body, ">"+short+"<") {
+		t.Errorf("expected short sha %q as visible text:\n%s", short, body)
+	}
+}
+
+// --- per-check output (/run/{id}) ---------------------------------------------
+
+func TestRun_ChecksExpandWithOutput(t *testing.T) {
+	store := openTestStore(t)
+	rec := sampleRecord("run-hist-2", "main")
+	rec.Checks[1].Output = hostileOutput // "test" (failed) gets hostile output
+	emitRun(t, store, rec)
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/run/run-hist-2")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	// lint passed with no captured output -> no <details> at all, just the
+	// flat row; test failed with output -> the only <details> on the page.
+	if n := strings.Count(body, "<details"); n != 1 {
+		t.Errorf("expected exactly one <details> (lint has no output, test does), got %d:\n%s", n, body)
+	}
+	if !strings.Contains(body, `<details class="check-row" open>`) {
+		t.Errorf("expected the failed check's <details> to start open:\n%s", body)
+	}
+	const escaped = "&lt;script&gt;alert(2)&lt;/script&gt;"
+	if !strings.Contains(body, escaped) {
+		t.Errorf("expected check output to be HTML-escaped inside <pre>:\n%s", body)
+	}
+	if strings.Contains(body, hostileOutput) {
+		t.Errorf("check output rendered unescaped (XSS risk):\n%s", body)
+	}
+}
+
+func TestRun_PassedCheckWithNoOutputStaysFlat(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hist-3", "main")) // lint: passed, Output == ""
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/run/run-hist-3")
+
+	// "lint" has no output in sampleRecord, so it must not be wrapped in a
+	// <details> at all — just the plain row.
+	lintIdx := strings.Index(body, "lint")
+	detailsIdx := strings.Index(body, "<details")
+	if lintIdx == -1 {
+		t.Fatalf("lint check missing from body:\n%s", body)
+	}
+	if detailsIdx != -1 && detailsIdx < lintIdx && strings.Index(body[detailsIdx:lintIdx], "</details>") == -1 {
+		t.Errorf("lint (no output) appears to be wrapped in a <details>, want a flat row:\n%s", body)
 	}
 }

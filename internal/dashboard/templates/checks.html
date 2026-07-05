@@ -21,15 +21,15 @@
 {{end}}
 
 <h2>Queue depth{{if .Target}} — {{.Target}}{{end}}</h2>
-{{if .Depth}}
-<table>
-<tr><th>at</th><th>waiting</th><th>in flight</th><th>parked</th></tr>
-{{range .Depth}}
-<tr><td class="muted">{{.At}}</td><td>{{.Waiting}}</td><td>{{.InFlight}}</td><td>{{.Parked}}</td></tr>
-{{end}}
-</table>
+{{if .HasDepth}}
+<p class="muted">
+<span class="legend-dot waiting"></span>waiting
+<span class="legend-dot inflight"></span>in-flight
+<span class="legend-dot parked"></span>parked
+</p>
+{{.DepthChart}}
 {{else}}
-<p class="muted">no samples for this window</p>
+<p class="muted">no data yet</p>
 {{end}}
 {{end}}
 {{end}}
