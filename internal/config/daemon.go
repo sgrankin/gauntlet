@@ -200,6 +200,16 @@ type Slack struct {
 	Channel     string `kdl:",arg"`          // channel ID
 	AppTokenEnv string `kdl:"app-token-env"` // default "SLACK_APP_TOKEN"
 	BotTokenEnv string `kdl:"bot-token-env"` // default "SLACK_BOT_TOKEN"
+
+	// AllowedUsers optionally restricts who may issue reaction commands
+	// (:recycle: retry, :x: cancel) to these Slack member IDs ("U…"/"W…"):
+	//
+	//	allowed-users "U025FTHN3" "U0987ZYXWV"
+	//
+	// Empty (the default) keeps the open behavior: anyone who can react in
+	// the channel commands the queue. Only inbound command minting is
+	// gated; outbound posting is unaffected.
+	AllowedUsers []string `kdl:"allowed-users"`
 }
 
 // OTLP configures the optional OTLP trace exporter (docs/plans/phase23.md

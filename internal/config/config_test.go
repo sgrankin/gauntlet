@@ -88,6 +88,9 @@ func TestLoadDaemon_Example(t *testing.T) {
 	if d.Slack.BotTokenEnv != "SLACK_BOT_TOKEN" {
 		t.Errorf("Slack.BotTokenEnv = %q", d.Slack.BotTokenEnv)
 	}
+	if want := []string{"U025FTHN3", "U0987ZYXWV"}; !reflect.DeepEqual(d.Slack.AllowedUsers, want) {
+		t.Errorf("Slack.AllowedUsers = %v, want %v", d.Slack.AllowedUsers, want)
+	}
 	if d.OTLP.Endpoint != "localhost:4318" {
 		t.Errorf("OTLP.Endpoint = %q", d.OTLP.Endpoint)
 	}

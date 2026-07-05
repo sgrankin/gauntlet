@@ -79,9 +79,10 @@ func buildSlackChannel(cfg *config.Daemon) (*slack.Slack, error) {
 		return nil, fmt.Errorf("slack: %s is empty or unset, but slack is configured for channel %s", cfg.Slack.BotTokenEnv, cfg.Slack.Channel)
 	}
 	return slack.New(slack.Params{
-		Channel:  cfg.Slack.Channel,
-		AppToken: appToken,
-		BotToken: botToken,
+		Channel:      cfg.Slack.Channel,
+		AppToken:     appToken,
+		BotToken:     botToken,
+		AllowedUsers: cfg.Slack.AllowedUsers,
 	}), nil
 }
 

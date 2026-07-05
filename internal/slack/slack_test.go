@@ -23,18 +23,29 @@ const testTimeout = 5 * time.Second
 // registers cleanup that cancels ctx and waits for Run to return.
 func newTestSlack(t *testing.T, log io.Writer) (*Slack, *fakeSlack, context.Context) {
 	t.Helper()
+	return newTestSlackWith(t, log, nil)
+}
+
+// newTestSlackWith is newTestSlack with a Params hook for the handful of
+// tests that need a non-default option (e.g. AllowedUsers).
+func newTestSlackWith(t *testing.T, log io.Writer, mut func(*Params)) (*Slack, *fakeSlack, context.Context) {
+	t.Helper()
 	fake := newFakeSlack(t)
 	if log == nil {
 		log = io.Discard
 	}
 
-	s := New(Params{
+	p := Params{
 		Channel:  "C_TARGET",
 		AppToken: "xapp-test",
 		BotToken: "xoxb-test",
 		APIURL:   fake.apiURL(),
 		Log:      log,
-	})
+	}
+	if mut != nil {
+		mut(&p)
+	}
+	s := New(p)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -398,6 +409,64 @@ func TestSlack_RecycleReactionOnOwnedRootProducesRetryCommand(t *testing.T) {
 		}
 	case <-time.After(testTimeout):
 		t.Fatal("timed out waiting for a retry Command")
+	}
+}
+
+// TestSlack_ReactionFromUnauthorizedUserIgnored: with allowed-users
+// configured, a command reaction from anyone off the list is dropped before
+// ANY ownership resolution — no Command, no ack reaction, no metadata fetch
+// side effects. The channel-visible silence is deliberate (don't invite
+// probing); only the daemon log records it.
+func TestSlack_ReactionFromUnauthorizedUserIgnored(t *testing.T) {
+	s, fake, ctx := newTestSlackWith(t, nil, func(p *Params) {
+		p.AllowedUsers = []string{"U_BOSS"}
+	})
+	cand := core.Candidate{Ref: "refs/heads/for/main/carol/thing", Target: "main", User: "carol", Topic: "thing", SHA: "beadface"}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: "run-authz-deny"})
+	posts := fake.waitForPosts(1, testTimeout)
+	root := posts[0]
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U_MALLORY", "recycle", root.ts)
+
+	select {
+	case cmd, ok := <-s.Commands():
+		t.Fatalf("expected no Command from an unauthorized user, got %v (ok=%v)", cmd, ok)
+	case <-time.After(300 * time.Millisecond):
+		// expected: nothing arrived
+	}
+	if got := fake.snapshotReactions(); len(got) != 0 {
+		t.Fatalf("expected no ack reaction for an unauthorized user, got %+v", got)
+	}
+}
+
+// TestSlack_ReactionFromAllowedUserMintsCommand is the positive half: the
+// same configuration, but the reactor IS on the list — full normal flow,
+// command + 👀 ack.
+func TestSlack_ReactionFromAllowedUserMintsCommand(t *testing.T) {
+	s, fake, ctx := newTestSlackWith(t, nil, func(p *Params) {
+		p.AllowedUsers = []string{"U_BOSS", "U_OTHER"}
+	})
+	cand := core.Candidate{Ref: "refs/heads/for/main/carol/thing", Target: "main", User: "carol", Topic: "thing", SHA: "beadface"}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: "run-authz-allow"})
+	posts := fake.waitForPosts(1, testTimeout)
+	root := posts[0]
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U_BOSS", "recycle", root.ts)
+
+	select {
+	case cmd := <-s.Commands():
+		if cmd.Kind != core.CommandRetry || cmd.Target != "main" || cmd.Ref != cand.Ref {
+			t.Fatalf("Command = %+v, want retry for target=main ref=%s", cmd, cand.Ref)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for a retry Command from an allowed user")
+	}
+	if got := fake.waitForReactions(1, testTimeout); got[0].name != ackEyes {
+		t.Fatalf("ack reaction = %+v, want %s", got[0], ackEyes)
 	}
 }
 

@@ -76,6 +76,12 @@ type Params struct {
 	// Defaults to os.Stderr when nil, matching LogChannel's spirit
 	// (internal/channel/log.go).
 	Log io.Writer
+
+	// AllowedUsers, when non-empty, restricts reaction commands to these
+	// Slack member IDs; reactions from anyone else are logged and ignored
+	// before any ownership resolution happens. Empty means anyone who can
+	// react in the channel may command the queue (the default).
+	AllowedUsers []string
 }
 
 // Bounds on Slack's internal channels (§9.2: never leak, never block).
@@ -217,6 +223,11 @@ type Slack struct {
 	// staleness sweep, F1(c)) so the ~10-minute window can be exercised
 	// without a real wall-clock wait. Defaults to time.Now.
 	now func() time.Time
+
+	// allowedUsers is Params.AllowedUsers as a set. Nil/empty = no
+	// restriction. Write-once in New, lock-free reads (same publication
+	// pattern as now).
+	allowedUsers map[string]struct{}
 }
 
 // batchEntry is one in-flight batch's buffered per-member terminal records
@@ -271,6 +282,14 @@ func New(p Params) *Slack {
 	api := goslack.New(p.BotToken, opts...)
 	smc := socketmode.New(api)
 
+	var allowed map[string]struct{}
+	if len(p.AllowedUsers) > 0 {
+		allowed = make(map[string]struct{}, len(p.AllowedUsers))
+		for _, u := range p.AllowedUsers {
+			allowed[u] = struct{}{}
+		}
+	}
+
 	return &Slack{
 		channel:   p.Channel,
 		api:       api,
@@ -284,6 +303,8 @@ func New(p Params) *Slack {
 		batchRecs: make(map[string]*batchEntry),
 		refRetry:  make(map[refRetryKey]refRetryEntry),
 		now:       time.Now,
+
+		allowedUsers: allowed,
 	}
 }
 
@@ -1021,6 +1042,15 @@ func (s *Slack) handleSocketEvent(ctx context.Context, evt socketmode.Event) {
 		// A reaction on a file or file comment has no message timestamp to
 		// resolve; skip it rather than issue a pointless history fetch.
 		return
+	}
+	if len(s.allowedUsers) > 0 {
+		if _, ok := s.allowedUsers[reaction.User]; !ok {
+			// Deliberately silent toward the channel (no ❓ ack — don't
+			// invite probing); loud in the daemon log so a misconfigured
+			// allowlist is diagnosable.
+			s.logf("slack: ignoring :%s: from user %s not in allowed-users", reaction.Reaction, reaction.User)
+			return
+		}
 	}
 
 	ts := reaction.Item.Timestamp

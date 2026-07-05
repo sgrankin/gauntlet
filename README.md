@@ -188,6 +188,8 @@ github "acme/widgets" {
 slack "C0123456789" {
     app-token-env "SLACK_APP_TOKEN"
     bot-token-env "SLACK_BOT_TOKEN"
+    // optional: restrict reaction commands to these member IDs
+    allowed-users "U025FTHN3" "U0987ZYXWV"
 }
 
 otlp "localhost:4318" {
@@ -257,7 +259,13 @@ summarize {
   environment variables holding the app-level (socket mode) and bot tokens
   (defaults `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN`). **Channel absent ⇒
   disabled.** Once `channel` is set, either token being empty/unset is a
-  startup error, same rationale as `github` above.
+  startup error, same rationale as `github` above. `allowed-users`, when
+  present, restricts reaction commands to the listed Slack member IDs
+  ("U…"/"W…" — profile → "Copy member ID"): reactions from anyone else are
+  ignored silently (logged daemon-side only, so the channel doesn't reveal
+  who is authorized). Absent ⇒ anyone who can react in the channel can
+  command the queue — fine for a private team channel, set the list for
+  anything broader. Only inbound commands are gated; posting is unaffected.
 - **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter
   (`internal/obs`) pointed at `<endpoint>`; `insecure` skips TLS (typical for
   a local collector). The daemon already emits spans via the OTel API in
@@ -719,10 +727,11 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
      anything but a still-in-flight run silently does nothing. (For a
      **private** posting channel, that fetch needs `groups:history` instead —
      `channels:history` covers public channels only.)
-   - `users:read` is optional/future — not required today (reactions are
-     resolved by message ownership, not by who reacted), but would let a
-     future version render the reacting human's display name instead of a
-     bare user id in acknowledgment/guidance replies.
+   - `users:read` is optional — not required even for `allowed-users`
+     (authorization matches the reaction event's raw member ID, no lookup
+     needed), but would let a future version render the reacting human's
+     display name instead of a bare user id in acknowledgment/guidance
+     replies.
 2. Install it to your workspace. You get two tokens: an app-level token
    (`xapp-…`, socket mode) and a bot token (`xoxb-…`). Export them as
    `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` (or whatever `app-token-env` /

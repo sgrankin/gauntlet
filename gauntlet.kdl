@@ -78,6 +78,10 @@ github "acme/widgets" {
 slack "C0123456789" {
     app-token-env "SLACK_APP_TOKEN"
     bot-token-env "SLACK_BOT_TOKEN"
+    // optional: only these Slack member IDs may command the queue via
+    // reactions (:recycle: retry, :x: cancel). Omit to allow anyone who
+    // can react in the channel.
+    allowed-users "U025FTHN3" "U0987ZYXWV"
 }
 
 otlp "localhost:4318" {
