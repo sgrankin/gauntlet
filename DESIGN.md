@@ -116,6 +116,27 @@ The review checklist. Every plan and every implementation gets graded against th
    (deployments); Claude merge summaries; speculation if queue-depth data
    demands it.
 
+## Watch items
+
+- **Event shapes are the soft underbelly.** Two review cycles found the same
+  family: `EventTrialClean` shipped without the `RunID` its consumers join on
+  (phase-2/3 review, ship-blocker), and `EventCheckFinished` carries no
+  `CheckResult`, so channels can't show per-check verdicts mid-run. The
+  emit-site contract ("terminal events carry a Record"; "run-scoped events
+  carry the run ID") is now partially test-enforced; when events next grow,
+  extend those contract tests first.
+- **`core.Command` carries no SHA** — a delayed retry clears whatever park
+  currently exists at the ref. Benign today (parks are keyed to the current
+  SHA and a re-push already clears them); matters if commands ever queue for
+  long or gain more destructive kinds.
+- **`extractTar` writes symlink entries verbatim** — a candidate tree can
+  plant a symlink escaping the export dir that a later check follows. Within
+  the own-code threat model; revisit if the threat model widens.
+- **Trial-tree exports carry no `.git`** (git-archive), so affected-only check
+  scripts can't `git diff` the exported coordinates without their own object
+  store. Options if this bites: export via clone instead, or mount the bare
+  repo read-only alongside.
+
 ## Open spikes
 
 - Config language head-to-head: `sblinch/kdl-go` (fitness, KDL 2.0 status) vs
