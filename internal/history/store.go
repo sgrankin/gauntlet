@@ -21,6 +21,10 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
+// schemaVersion is the current PRAGMA user_version. Bump it and add a case
+// to migrate's switch whenever schema.sql changes.
+const schemaVersion = 2
+
 var _ core.Channel = (*Store)(nil)
 
 // Store is a core.Channel backed by a SQLite database: Emit writes terminal
@@ -67,19 +71,42 @@ func Open(path string) (*Store, error) {
 	}, nil
 }
 
-// migrate applies schema.sql exactly once, gated by PRAGMA user_version.
+// migrate brings db from whatever PRAGMA user_version it's at up to
+// schemaVersion, one step at a time:
+//
+//   - 0 (fresh database, no tables yet): apply the embedded schema.sql
+//     (already at the current shape) and stamp schemaVersion directly —
+//     there's no history to step through.
+//   - 1 (schema v1: checks has no output column): ALTER TABLE checks ADD
+//     COLUMN output, then fall through to stamp schemaVersion.
+//   - schemaVersion: already current, no-op.
+//
+// Each case falls through to the next so a database several versions behind
+// walks every intermediate step before landing on schemaVersion. Add new
+// cases above the schemaVersion case, oldest first, when schema.sql next
+// changes.
 func migrate(db *sql.DB) error {
 	var version int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("history: read user_version: %w", err)
 	}
-	if version != 0 {
+
+	switch version {
+	case 0:
+		if _, err := db.Exec(schemaSQL); err != nil {
+			return fmt.Errorf("history: apply schema: %w", err)
+		}
+	case 1:
+		if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN output TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("history: migrate v1->v2 (checks.output): %w", err)
+		}
+	case schemaVersion:
 		return nil
+	default:
+		return fmt.Errorf("history: unknown user_version %d (want 0..%d)", version, schemaVersion)
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
-		return fmt.Errorf("history: apply schema: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return fmt.Errorf("history: set user_version: %w", err)
 	}
 	return nil
@@ -150,6 +177,11 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			checkStatusString(cr.Status),
 			cr.Duration.Milliseconds(),
 			errString(cr.Err),
+			// Stored verbatim for every check regardless of status: green
+			// output is diagnostics too ("is it actually doing the thing").
+			// The executor's 64KiB tail cap (executor.outputCap) is the only
+			// bound — no history-side re-cap.
+			cr.Output,
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}
@@ -167,6 +199,21 @@ func (s *Store) RecordDepth(at time.Time, target string, waiting, inFlight, park
 	_, err := s.db.Exec(insertDepthSQL, at.UnixMilli(), target, waiting, inFlight, parked)
 	if err != nil {
 		return fmt.Errorf("history: record depth: %w", err)
+	}
+	return nil
+}
+
+// PruneDepth deletes queue_depth samples recorded before cutoff. This is
+// retention for the depth series only: runs and checks are never pruned by
+// this or any other Store method, deliberately — they're gauntlet's
+// audit-quality historical record of what actually happened, while
+// queue_depth exists purely to feed recent-trend charts and is the one table
+// that grows in proportion to wall-clock time rather than to actual queue
+// activity, so it's the one that needs a retention bound.
+func (s *Store) PruneDepth(cutoff time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM queue_depth WHERE at < ?`, cutoff.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("history: prune depth: %w", err)
 	}
 	return nil
 }

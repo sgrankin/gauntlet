@@ -40,6 +40,11 @@ const (
 	defaultExecutorKind   = "local"
 	defaultRuntime        = "container"
 	defaultWorkdir        = "/workspace"
+
+	// defaultDepthRetention is how long queue_depth samples are kept before
+	// the depth sampler prunes them (docs/plans phase23 E1). Runs/checks
+	// have no retention bound — this applies to the depth series only.
+	defaultDepthRetention = 14 * 24 * time.Hour
 )
 
 // Daemon is the admin-written daemon config (docs/plans/phase1.md §4): one
@@ -70,8 +75,9 @@ type Daemon struct {
 // History configures the optional SQLite run-history store
 // (docs/plans/phase23.md §4.1). Path=="" disables it.
 type History struct {
-	Path        string        `kdl:",arg"`
-	SampleEvery time.Duration `kdl:"sample-every,format:units"` // default = Poll
+	Path           string        `kdl:",arg"`
+	SampleEvery    time.Duration `kdl:"sample-every,format:units"`    // default = Poll
+	DepthRetention time.Duration `kdl:"depth-retention,format:units"` // default 14 days; queue_depth only
 }
 
 // Dashboard configures the optional read-only web dashboard
@@ -165,6 +171,9 @@ func (d *Daemon) applyDefaults() {
 	if d.History.Path != "" && d.History.SampleEvery == 0 {
 		d.History.SampleEvery = d.Poll
 	}
+	if d.History.Path != "" && d.History.DepthRetention == 0 {
+		d.History.DepthRetention = defaultDepthRetention
+	}
 
 	// Dashboard: URL defaults to an http:// URL built from Bind (§9.3) —
 	// outbound links (e.g. GitHub target_url) must not point at a bind
@@ -255,6 +264,9 @@ func (d *Daemon) validate() error {
 
 	if d.History.Path != "" && d.History.SampleEvery <= 0 {
 		return fmt.Errorf("history: sample-every must be positive, got %s", d.History.SampleEvery)
+	}
+	if d.History.Path != "" && d.History.DepthRetention <= 0 {
+		return fmt.Errorf("history: depth-retention must be positive, got %s", d.History.DepthRetention)
 	}
 
 	if d.GitHub.Repo != "" {

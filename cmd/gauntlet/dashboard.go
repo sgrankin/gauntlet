@@ -61,29 +61,77 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	}()
 }
 
+// depthHeartbeat bounds how long a target's queue_depth series can go
+// without a sample even when nothing changes: shouldRecord skips unchanged
+// samples to keep the series small, but a chart with no points for hours
+// during a genuinely idle/steady period would misread as "sampling stopped"
+// rather than "nothing to report". A point at least this often keeps the
+// series alive through steady stretches.
+const depthHeartbeat = 10 * time.Minute
+
+// depthTuple is the part of a queue_depth sample that matters for
+// change-only sampling: (waiting, in-flight, parked) for one target. Two
+// samples with an equal tuple carry no new information regardless of At.
+type depthTuple struct {
+	Waiting, InFlight, Parked int
+}
+
+// depthSample is the last tuple recorded for a target, and when.
+type depthSample struct {
+	tuple depthTuple
+	at    time.Time // zero => never recorded
+}
+
+// shouldRecord is the pure decision behind the depth sampler's change-only
+// recording: record when the tuple differs from the last one recorded for
+// this target (including the very first sample, where lastAt is the zero
+// time), or when the last recording is old enough that depthHeartbeat has
+// elapsed since — so a steady-state series still gets periodic points
+// rather than going silent indefinitely. now is the current sample's
+// timestamp (snap.At), not wall-clock time, so the decision is driven by the
+// same clock the samples themselves are keyed on.
+func shouldRecord(last, current depthTuple, lastAt, now time.Time) bool {
+	if current != last {
+		return true
+	}
+	if lastAt.IsZero() {
+		return true
+	}
+	return now.Sub(lastAt) >= depthHeartbeat
+}
+
 // startDepthSampler starts the goroutine that periodically samples queue
 // depth into store, per docs/plans/phase23.md §4.8: every cfg.History.
-// SampleEvery tick, read d.Snapshot() and record one queue_depth row per
-// target. Nil snapshots (no reconcile pass has completed yet) are skipped
-// rather than recorded as zero, so an idle-startup gap doesn't read as "an
-// empty queue" in the depth series. A snapshot whose At is unchanged from
-// the last one actually sampled is skipped too: RecordDepth's INSERT OR
-// REPLACE is keyed on (at, target), so re-sampling the same unchanged
-// snapshot on a poll interval shorter than SampleEvery's tick would silently
-// replace a real point with itself — harmless, but any timing where a
-// slow/short poll cadence lets the ticker fire twice against one unchanged
-// snapshot would otherwise drop a would-be-distinct sample in favor of a
-// duplicate. Only called when store != nil.
+// SampleEvery tick, read snapshot() and consider recording one queue_depth
+// row per target. Nil snapshots (no reconcile pass has completed yet) are
+// skipped rather than recorded as zero, so an idle-startup gap doesn't read
+// as "an empty queue" in the depth series.
 //
-// wg gains one count, released once this goroutine exits on ctx.Done() — see
-// startDashboard's doc for why main waits on it before closing store.
+// Per target, a sample is only actually written when shouldRecord says so:
+// the (waiting, in-flight, parked) tuple changed since the last sample this
+// goroutine wrote for that target, or the heartbeat interval has elapsed —
+// bounding the depth series to actual state transitions plus a keepalive,
+// rather than one row per SampleEvery tick forever (chunk E1).
+//
+// Once per heartbeat interval this also prunes queue_depth rows older than
+// now-cfg.History.DepthRetention (Store.PruneDepth) — opportunistically,
+// piggybacking on the sampler's own tick rather than a separate timer. Runs
+// and checks are never pruned; see PruneDepth's doc for why only the depth
+// series gets a retention bound.
+//
+// Only called when store != nil. wg gains one count, released once this
+// goroutine exits on ctx.Done() — see startDashboard's doc for why main
+// waits on it before closing store.
 func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(cfg.History.SampleEvery)
 		defer ticker.Stop()
-		var lastAt time.Time
+
+		last := make(map[string]depthSample)
+		var lastPrune time.Time
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -93,18 +141,27 @@ func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() 
 				if snap == nil {
 					continue
 				}
-				if snap.At.Equal(lastAt) {
-					continue
-				}
-				lastAt = snap.At
 				for _, ts := range snap.Targets {
 					inFlight := 0
 					if ts.InFlight != nil {
 						inFlight = 1
 					}
-					if err := store.RecordDepth(snap.At, ts.Name, len(ts.Waiting), inFlight, len(ts.Parked)); err != nil {
+					current := depthTuple{Waiting: len(ts.Waiting), InFlight: inFlight, Parked: len(ts.Parked)}
+					prev := last[ts.Name]
+					if !shouldRecord(prev.tuple, current, prev.at, snap.At) {
+						continue
+					}
+					if err := store.RecordDepth(snap.At, ts.Name, current.Waiting, current.InFlight, current.Parked); err != nil {
 						fmt.Fprintf(os.Stderr, "gauntlet: history: record depth: %v\n", err)
 					}
+					last[ts.Name] = depthSample{tuple: current, at: snap.At}
+				}
+
+				if lastPrune.IsZero() || snap.At.Sub(lastPrune) >= depthHeartbeat {
+					if err := store.PruneDepth(snap.At.Add(-cfg.History.DepthRetention)); err != nil {
+						fmt.Fprintf(os.Stderr, "gauntlet: history: prune depth: %v\n", err)
+					}
+					lastPrune = snap.At
 				}
 			}
 		}

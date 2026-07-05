@@ -1,9 +1,11 @@
--- schema.sql: gauntlet history store schema (user_version = 1).
+-- schema.sql: gauntlet history store schema (user_version = 2).
 --
--- Applied once via PRAGMA user_version bookkeeping in store.go: a fresh
--- database (user_version == 0) gets this DDL and is stamped to version 1.
--- There is no migration framework; a future schema change bumps the version
--- and appends a migration step in store.go.
+-- Applied fresh (user_version == 0) via the migrate() stepwise switch in
+-- store.go, which stamps a new database straight to the current version. An
+-- existing v1 database is migrated in place instead (ALTER TABLE checks ADD
+-- COLUMN output ...) rather than re-run against this file, so this file
+-- always reflects the *current* schema, not the upgrade path — see
+-- migrate()'s doc comment for the version-by-version steps.
 
 CREATE TABLE runs (
   run_id       TEXT PRIMARY KEY,
@@ -30,6 +32,7 @@ CREATE TABLE checks (
   status      TEXT NOT NULL,              -- passed|failed|skipped
   duration_ms INTEGER NOT NULL,
   err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',   -- captured output, verbatim (executor tail-caps at 64KiB) (v2+)
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

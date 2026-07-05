@@ -14,6 +14,7 @@ target "release" branch="release/v2"
 
 history "/var/lib/gauntlet/history.db" {
     sample-every "10s"
+    depth-retention "336h"   // optional; default 14 days ("336h"); queue_depth series only
 }
 
 dashboard "localhost:8080" {

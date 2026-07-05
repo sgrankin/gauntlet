@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func sampleRecord(runID, target string, started time.Time) *core.RunRecord {
 		MergeSHA: "merge0000000000000000000000000000000000",
 		Trial:    core.TrialMerge{Clean: true, TreeOID: "tree000000000000000000000000000000000000"},
 		Checks: []core.CheckResult{
-			{Name: "lint", Status: core.CheckPassed, Duration: 500 * time.Millisecond},
+			{Name: "lint", Status: core.CheckPassed, Duration: 500 * time.Millisecond, Output: "all clean"},
 			{Name: "test", Status: core.CheckFailed, Duration: 2500 * time.Millisecond, Output: "boom"},
 		},
 		Outcome:   core.OutcomeRejected,
@@ -82,6 +83,128 @@ func TestOpen_AppliesSchemaOnceAndSurvivesReopen(t *testing.T) {
 	}
 	if len(points) != 1 {
 		t.Fatalf("DepthSeries after reopen = %d points, want 1", len(points))
+	}
+}
+
+// schemaV1SQL is schema.sql as it existed before chunk E1 added checks.output
+// (schema.sql's own header now describes the *current* shape, not this one).
+// Kept here, verbatim, so TestMigrate_V1ToV2 can build a genuine v1 database
+// by hand and prove the running code migrates it forward correctly.
+const schemaV1SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+`
+
+// TestMigrate_V1ToV2 builds a v1 database by hand (schemaV1SQL, no
+// checks.output column, user_version stamped to 1 — exactly what an
+// already-deployed v1 Store would have on disk) and confirms that opening it
+// with the current code migrates it in place: user_version lands on
+// schemaVersion, the pre-existing row survives with the new output column
+// readable (empty, since it predates the column), and a fresh write against
+// the migrated database round-trips output correctly.
+func TestMigrate_V1ToV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV1SQL); err != nil {
+		t.Fatalf("apply v1 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatalf("stamp user_version=1: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000)`,
+	); err != nil {
+		t.Fatalf("seed v1 run: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err) VALUES ('run-old', 0, 'lint', 'passed', 500, '')`,
+	); err != nil {
+		t.Fatalf("seed v1 check: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v1 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	run, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if run.RunID != "run-old" {
+		t.Errorf("Run() after migrate = %+v", run)
+	}
+	if len(checks) != 1 || checks[0].Output != "" {
+		t.Errorf("checks after migrate = %+v, want 1 check with empty Output", checks)
+	}
+
+	// A fresh write against the migrated database must exercise the new
+	// output column correctly.
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC))
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if len(newChecks) != 2 || newChecks[1].Output != "boom" {
+		t.Errorf("Run(run-new) checks = %+v, want checks[1].Output = %q", newChecks, "boom")
 	}
 }
 
@@ -179,8 +302,62 @@ func TestStore_Emit_WritesTerminalEventAndChecks(t *testing.T) {
 	if checks[0].Name != "lint" || checks[0].Status != "passed" || checks[0].Duration != 500*time.Millisecond {
 		t.Errorf("Run() checks[0] = %+v", checks[0])
 	}
+	if checks[0].Output != "all clean" {
+		t.Errorf("Run() checks[0].Output = %q, want %q (passed checks store output too)", checks[0].Output, "all clean")
+	}
 	if checks[1].Name != "test" || checks[1].Status != "failed" || checks[1].Duration != 2500*time.Millisecond {
 		t.Errorf("Run() checks[1] = %+v", checks[1])
+	}
+	if checks[1].Output != "boom" {
+		t.Errorf("Run() checks[1].Output = %q, want %q", checks[1].Output, "boom")
+	}
+}
+
+// TestStore_Emit_OutputStoredVerbatimForAllStatuses confirms Output is
+// persisted exactly as carried on the CheckResult for every status —
+// passed, skipped, failed, and Err-set alike. Green output is diagnostics
+// too ("is it actually doing the thing" gets asked about green runs), so
+// history stores what was captured with no status condition and no re-cap:
+// the executor's 64KiB tail cap (executor.outputCap) is the only bound.
+func TestStore_Emit_OutputStoredVerbatimForAllStatuses(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	started := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+
+	// Larger than any history-side cap this store ever had (16KiB in an
+	// earlier draft of schema v2): must survive byte-for-byte.
+	big := strings.Repeat("a", 64*1024-40) + "THE ACTUAL FAILURE LINE"
+
+	rec := &core.RunRecord{
+		RunID:  "run-outputs",
+		Target: "main",
+		Checks: []core.CheckResult{
+			{Name: "passed", Status: core.CheckPassed, Output: "green diagnostics"},
+			{Name: "skipped", Status: core.CheckSkipped, Output: "skip reason"},
+			{Name: "failed", Status: core.CheckFailed, Output: big},
+			{Name: "errored", Err: fmt.Errorf("boom"), Output: "daemon error tail"},
+			{Name: "empty", Status: core.CheckPassed},
+		},
+		Outcome:   core.OutcomeError,
+		StartedAt: started,
+		EndedAt:   started.Add(time.Second),
+	}
+	if err := s.Emit(ctx, core.Event{Kind: core.EventError, Target: "main", RunID: "run-outputs", Record: rec}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	_, checks, err := s.Run("run-outputs")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(checks) != len(rec.Checks) {
+		t.Fatalf("Run() checks = %d, want %d", len(checks), len(rec.Checks))
+	}
+	for i, cr := range rec.Checks {
+		if checks[i].Output != cr.Output {
+			t.Errorf("checks[%d] (%s).Output = %d bytes %.40q..., want %d bytes (verbatim)",
+				i, cr.Name, len(checks[i].Output), checks[i].Output, len(cr.Output))
+		}
 	}
 }
 
@@ -443,5 +620,52 @@ func TestStore_DepthSeries_RoundTrip(t *testing.T) {
 	}
 	if points[0].Waiting != 42 {
 		t.Errorf("DepthSeries[0].Waiting after replace = %d, want 42", points[0].Waiting)
+	}
+}
+
+// TestStore_PruneDepth confirms PruneDepth deletes only queue_depth rows
+// strictly older than its cutoff, leaving rows at or after the cutoff (and
+// other targets' rows in the same window) untouched, and — the deliberate
+// asymmetry the doc comment calls out — never touches runs/checks even when
+// those rows are far older than any depth-series retention window.
+func TestStore_PruneDepth(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+
+	for i, at := range []time.Time{base, base.Add(time.Hour), base.Add(2 * time.Hour)} {
+		if err := s.RecordDepth(at, "main", i, i, i); err != nil {
+			t.Fatalf("RecordDepth(%v): %v", at, err)
+		}
+	}
+
+	// A very old run/check row: pruning must leave it alone regardless of
+	// how the depth cutoff is chosen below.
+	oldRec := sampleRecord("run-ancient", "main", base.Add(-24*time.Hour))
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-ancient", Record: oldRec}); err != nil {
+		t.Fatalf("Emit(run-ancient): %v", err)
+	}
+
+	if err := s.PruneDepth(base.Add(time.Hour)); err != nil {
+		t.Fatalf("PruneDepth: %v", err)
+	}
+
+	points, err := s.DepthSeries("main", time.Unix(0, 0))
+	if err != nil {
+		t.Fatalf("DepthSeries: %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("DepthSeries after prune = %d points, want 2 (base and base+1h kept, base+1h is the boundary)", len(points))
+	}
+	if !points[0].At.Equal(base.Add(time.Hour)) || !points[1].At.Equal(base.Add(2*time.Hour)) {
+		t.Errorf("DepthSeries after prune = %+v, want [base+1h base+2h]", points)
+	}
+
+	runs, err := s.RecentRuns("main", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunID != "run-ancient" {
+		t.Errorf("RecentRuns after PruneDepth = %+v, want run-ancient untouched", runs)
 	}
 }

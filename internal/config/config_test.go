@@ -55,6 +55,9 @@ func TestLoadDaemon_Example(t *testing.T) {
 	if d.History.SampleEvery != 10*time.Second {
 		t.Errorf("History.SampleEvery = %v, want 10s", d.History.SampleEvery)
 	}
+	if d.History.DepthRetention != 336*time.Hour {
+		t.Errorf("History.DepthRetention = %v, want 336h", d.History.DepthRetention)
+	}
 	if d.Dashboard.Bind != "localhost:8080" {
 		t.Errorf("Dashboard.Bind = %q", d.Dashboard.Bind)
 	}
@@ -170,6 +173,9 @@ target "main" branch="main"
 	}
 	if d.History.SampleEvery != 0 {
 		t.Errorf("History.SampleEvery = %v, want 0 (not defaulted when disabled)", d.History.SampleEvery)
+	}
+	if d.History.DepthRetention != 0 {
+		t.Errorf("History.DepthRetention = %v, want 0 (not defaulted when disabled)", d.History.DepthRetention)
 	}
 	if d.Dashboard.Bind != "" {
 		t.Errorf("Dashboard.Bind = %q, want empty (disabled)", d.Dashboard.Bind)
@@ -345,6 +351,23 @@ committer {
 target "main" branch="main"
 history "/tmp/history.db" {
     sample-every "-5s"
+}
+`,
+			wantErr: "history",
+		},
+		{
+			// Semantic validation: History enabled (Path set) but an
+			// explicit non-positive depth-retention.
+			name: "history with non-positive depth-retention",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+history "/tmp/history.db" {
+    depth-retention "-336h"
 }
 `,
 			wantErr: "history",

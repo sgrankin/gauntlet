@@ -16,8 +16,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err)
-VALUES (?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output)
+VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	insertDepthSQL = `
 INSERT OR REPLACE INTO queue_depth (at, target, waiting, in_flight, parked)
@@ -49,6 +49,10 @@ type CheckRow struct {
 	Status   string // passed|failed|skipped
 	Duration time.Duration
 	Err      string
+	// Output is the check's captured output, stored verbatim for every
+	// status: green output is diagnostics too. The executor's 64KiB tail
+	// cap is the only bound; history does not re-cap.
+	Output string
 }
 
 // CheckStat summarizes one check's outcomes across a window of runs: how
@@ -109,7 +113,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -121,7 +125,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	for rows.Next() {
 		var c CheckRow
 		var durationMS int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond
