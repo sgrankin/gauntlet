@@ -6,5 +6,38 @@ committer {
     email "gauntlet@ci.acme.example"
 }
 merge-message "Merge {{.Topic}} ({{.User}})"   // optional
+
 target "main"    branch="main"
 target "release" branch="release/v2"
+
+// --- phase 2/3 additions (all optional) ---
+
+history "/var/lib/gauntlet/history.db" {
+    sample-every "10s"
+}
+
+dashboard "localhost:8080" {
+    url "https://gauntlet.internal.example"   // optional; used in outbound links
+}
+
+github "acme/widgets" {
+    token-env "GITHUB_TOKEN"
+    api-url "https://api.github.com"
+}
+
+slack "C0123456789" {
+    app-token-env "SLACK_APP_TOKEN"
+    bot-token-env "SLACK_BOT_TOKEN"
+}
+
+otlp "localhost:4318" {
+    insecure true
+}
+
+executor "container" {
+    runtime "container"
+    image "ghcr.io/acme/ci:latest"
+    workdir "/workspace"
+    cache "gocache"    path="/root/.cache/go-build"
+    cache "gomodcache" path="/go/pkg/mod"
+}

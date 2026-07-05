@@ -29,10 +29,28 @@ const (
 	defaultCheckSpec = ".gauntlet.kdl"
 )
 
+// Defaults for the phase-2/3 optional sections (docs/plans/phase23.md §3);
+// applied only when the section is enabled (its required key non-empty) and
+// the defaulted field is unset.
+const (
+	defaultGitHubTokenEnv = "GITHUB_TOKEN"
+	defaultGitHubAPIURL   = "https://api.github.com"
+	defaultSlackAppEnv    = "SLACK_APP_TOKEN"
+	defaultSlackBotEnv    = "SLACK_BOT_TOKEN"
+	defaultExecutorKind   = "local"
+	defaultRuntime        = "container"
+	defaultWorkdir        = "/workspace"
+)
+
 // Daemon is the admin-written daemon config (docs/plans/phase1.md §4): one
 // remote, the reconcile cadence, the committer identity used for merge
 // commits, the merge-message template, and the target branches to
-// reconcile.
+// reconcile. The phase-2/3 sections (docs/plans/phase23.md §3) are all
+// optional value structs (not pointers): kdl-go leaves a struct-typed field
+// at its zero value when the corresponding node is absent from the document
+// (confirmed against kdl-go's unmarshalNodesToStruct, which only visits
+// nodes actually present), so "section present" is encoded as "its required
+// key is non-empty" rather than a nil check.
 type Daemon struct {
 	Remote    string        `kdl:"remote"`
 	Poll      time.Duration `kdl:"poll-interval,format:units"`
@@ -40,6 +58,68 @@ type Daemon struct {
 	Committer core.Identity `kdl:"committer"`
 	MergeMsg  string        `kdl:"merge-message"`
 	Targets   []Target      `kdl:"target,multiple"`
+
+	History   History   `kdl:"history"`   // Path=="" ⇒ disabled
+	Dashboard Dashboard `kdl:"dashboard"` // Bind=="" ⇒ disabled
+	GitHub    GitHub    `kdl:"github"`    // Repo=="" ⇒ disabled
+	Slack     Slack     `kdl:"slack"`     // Channel=="" ⇒ disabled
+	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (phase-1 default)
+	Executor  Executor  `kdl:"executor"`  // Kind=="" ⇒ "local"
+}
+
+// History configures the optional SQLite run-history store
+// (docs/plans/phase23.md §4.1). Path=="" disables it.
+type History struct {
+	Path        string        `kdl:",arg"`
+	SampleEvery time.Duration `kdl:"sample-every,format:units"` // default = Poll
+}
+
+// Dashboard configures the optional read-only web dashboard
+// (docs/plans/phase23.md §4.2). Bind=="" disables it.
+type Dashboard struct {
+	Bind string `kdl:",arg"` // "localhost:8080"; "" disables
+	URL  string `kdl:"url"`  // §9.3: optional public base URL for outbound links
+}
+
+// GitHub configures the optional commit-status channel
+// (docs/plans/phase23.md §4.3). Repo=="" disables it.
+type GitHub struct {
+	Repo     string `kdl:",arg"`      // "owner/name"
+	TokenEnv string `kdl:"token-env"` // default "GITHUB_TOKEN"
+	APIURL   string `kdl:"api-url"`   // default "https://api.github.com"
+}
+
+// Slack configures the optional Slack channel (docs/plans/phase23.md §4.4).
+// Channel=="" disables it.
+type Slack struct {
+	Channel     string `kdl:",arg"`          // channel ID
+	AppTokenEnv string `kdl:"app-token-env"` // default "SLACK_APP_TOKEN"
+	BotTokenEnv string `kdl:"bot-token-env"` // default "SLACK_BOT_TOKEN"
+}
+
+// OTLP configures the optional OTLP trace exporter (docs/plans/phase23.md
+// §4.6). Endpoint=="" leaves tracing a no-op (the phase-1 default).
+type OTLP struct {
+	Endpoint string `kdl:",arg"`
+	Insecure bool   `kdl:"insecure"`
+}
+
+// Executor selects the check-execution backend (docs/plans/phase23.md §4.5).
+// Kind=="" defaults to "local" (the phase-1 in-process executor); "container"
+// requires Image.
+type Executor struct {
+	Kind    string  `kdl:",arg"`    // "local" (default) | "container"
+	Runtime string  `kdl:"runtime"` // "docker"|"podman"|"container"; default "container"
+	Image   string  `kdl:"image"`   // required when Kind=="container"
+	Workdir string  `kdl:"workdir"` // default "/workspace"
+	Caches  []Cache `kdl:"cache,multiple"`
+}
+
+// Cache is one persistent named cache volume mounted into the container
+// executor.
+type Cache struct {
+	Name string `kdl:",arg"`
+	Path string `kdl:"path"`
 }
 
 // Target is one target branch the daemon reconciles candidates onto. Name
@@ -79,6 +159,55 @@ func (d *Daemon) applyDefaults() {
 	if d.CheckSpec == "" {
 		d.CheckSpec = defaultCheckSpec
 	}
+
+	// History: SampleEvery defaults to the reconcile cadence. Only meaningful
+	// (and only defaulted) when history is enabled.
+	if d.History.Path != "" && d.History.SampleEvery == 0 {
+		d.History.SampleEvery = d.Poll
+	}
+
+	// Dashboard: URL defaults to an http:// URL built from Bind (§9.3) —
+	// outbound links (e.g. GitHub target_url) must not point at a bind
+	// address like "0.0.0.0:8080" or "localhost:8080" in a way that's
+	// unreachable from outside, but absent an explicit URL that's the best
+	// available default.
+	if d.Dashboard.Bind != "" && d.Dashboard.URL == "" {
+		d.Dashboard.URL = "http://" + d.Dashboard.Bind
+	}
+
+	if d.GitHub.Repo != "" {
+		if d.GitHub.TokenEnv == "" {
+			d.GitHub.TokenEnv = defaultGitHubTokenEnv
+		}
+		if d.GitHub.APIURL == "" {
+			d.GitHub.APIURL = defaultGitHubAPIURL
+		}
+	}
+
+	if d.Slack.Channel != "" {
+		if d.Slack.AppTokenEnv == "" {
+			d.Slack.AppTokenEnv = defaultSlackAppEnv
+		}
+		if d.Slack.BotTokenEnv == "" {
+			d.Slack.BotTokenEnv = defaultSlackBotEnv
+		}
+	}
+
+	// Executor.Kind always defaults to "local", regardless of whether the
+	// "executor" node was present at all (an absent node ⇒ local executor,
+	// matching phase-1 behavior). Runtime/Workdir only matter for the
+	// container executor, so only default them in that case.
+	if d.Executor.Kind == "" {
+		d.Executor.Kind = defaultExecutorKind
+	}
+	if d.Executor.Kind == "container" {
+		if d.Executor.Runtime == "" {
+			d.Executor.Runtime = defaultRuntime
+		}
+		if d.Executor.Workdir == "" {
+			d.Executor.Workdir = defaultWorkdir
+		}
+	}
 }
 
 func (d *Daemon) validate() error {
@@ -101,6 +230,7 @@ func (d *Daemon) validate() error {
 		return fmt.Errorf("no target defined")
 	}
 	seen := make(map[string]bool, len(d.Targets))
+	seenBranch := make(map[string]string, len(d.Targets)) // branch -> owning target name
 	for _, t := range d.Targets {
 		if t.Name == "" {
 			return fmt.Errorf("target: name must not be empty")
@@ -115,6 +245,40 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("target %q: duplicate", t.Name)
 		}
 		seen[t.Name] = true
+		// Two targets on the same branch would contend via CAS (phase-1
+		// review finding O2): reject at config load instead.
+		if owner, ok := seenBranch[t.Branch]; ok {
+			return fmt.Errorf("target %q: branch %q already used by target %q", t.Name, t.Branch, owner)
+		}
+		seenBranch[t.Branch] = t.Name
 	}
+
+	if d.History.Path != "" && d.History.SampleEvery <= 0 {
+		return fmt.Errorf("history: sample-every must be positive, got %s", d.History.SampleEvery)
+	}
+
+	if d.GitHub.Repo != "" && !strings.Contains(d.GitHub.Repo, "/") {
+		return fmt.Errorf("github: repo must be in \"owner/name\" form, got %q", d.GitHub.Repo)
+	}
+
+	switch d.Executor.Kind {
+	case "local":
+		// no further requirements
+	case "container":
+		if d.Executor.Image == "" {
+			return fmt.Errorf("executor: image must not be empty for kind \"container\"")
+		}
+	default:
+		return fmt.Errorf("executor: kind must be \"local\" or \"container\", got %q", d.Executor.Kind)
+	}
+	for _, c := range d.Executor.Caches {
+		if c.Name == "" {
+			return fmt.Errorf("executor: cache: name must not be empty")
+		}
+		if c.Path == "" {
+			return fmt.Errorf("executor: cache %q: path must not be empty", c.Name)
+		}
+	}
+
 	return nil
 }
