@@ -382,6 +382,36 @@ github "widgets"
 			wantErr: "github",
 		},
 		{
+			// Semantic validation: Repo has a slash but an empty name half
+			// ("owner/"). Contains("/") alone would wrongly accept this.
+			name: "github repo empty name",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "widgets/"
+`,
+			wantErr: "github",
+		},
+		{
+			// Semantic validation: Repo has a slash but an empty owner half
+			// ("/name"). Contains("/") alone would wrongly accept this.
+			name: "github repo empty owner",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "/widgets"
+`,
+			wantErr: "github",
+		},
+		{
 			// Structural: kdl-go rejects the unexpected property under
 			// "slack" (mirrors the dashboard/otlp structural cases above).
 			name: "slack with unexpected property",

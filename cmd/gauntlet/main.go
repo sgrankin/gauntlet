@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -162,16 +163,26 @@ func run() error {
 		return fmt.Errorf("init queue: %w", err)
 	}
 
-	startDashboard(ctx, cfg, d.Snapshot, store)
+	// wg tracks the dashboard's goroutines (Shutdown watcher + ListenAndServe)
+	// and the depth sampler, all of which may still be querying or writing
+	// store after d.Run returns on ctx cancellation. Waiting on wg before
+	// store.Close() runs (deferred above) keeps that Close from racing them
+	// (cmd wiring review, docs/plans/phase23.md): sampler exits, dashboard's
+	// graceful Shutdown completes, then — only then — the store closes.
+	var wg sync.WaitGroup
+	startDashboard(ctx, cfg, d.Snapshot, store, &wg)
 	if store != nil {
-		startDepthSampler(ctx, cfg, d.Snapshot, store)
+		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}
 
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()
 
-	if err := d.Run(ctx, ticker.C); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("run: %w", err)
+	runErr := d.Run(ctx, ticker.C)
+	wg.Wait()
+
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return fmt.Errorf("run: %w", runErr)
 	}
 	return nil
 }

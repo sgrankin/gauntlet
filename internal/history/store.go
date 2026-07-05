@@ -34,19 +34,27 @@ type Store struct {
 // Open opens (creating if absent) the SQLite database at path, applies the
 // embedded schema if it hasn't been applied yet, and returns a ready Store.
 //
-// The connection is single-writer by construction: WAL journaling, a 5s busy
-// timeout, and foreign keys are set via DSN pragmas, and the pool is capped
-// to one connection (modernc.org/sqlite is a single-conn-per-writer driver;
-// see docs/plans/phase23.md §1 Spike A). Schema versioning uses PRAGMA
-// user_version with no migration framework: version 0 means "apply
-// schema.sql and stamp version 1".
+// WAL journaling, a 5s busy timeout, and foreign keys are set via DSN
+// pragmas. Schema versioning uses PRAGMA user_version with no migration
+// framework: version 0 means "apply schema.sql and stamp version 1".
+//
+// The pool is capped at 4 connections, not 1: Emit runs inline on the
+// reconcile goroutine (docs/plans/phase23.md §4.1), so a writer that has to
+// wait behind a slow dashboard read (e.g. CheckStats's JOIN) would block
+// reconcile progress on an unrelated HTTP request. WAL mode is built for
+// exactly this — readers never block the writer and the writer never blocks
+// readers — so capping at 1 connection only self-inflicted serialization
+// that WAL doesn't require. 4 gives the dashboard's concurrent read handlers
+// room without letting an unbounded pool exhaust file descriptors; the busy
+// timeout above still covers the rare writer-vs-writer contention WAL does
+// serialize.
 func Open(path string) (*Store, error) {
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("history: open %s: %w", path, err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(4)
 
 	if err := migrate(db); err != nil {
 		db.Close()

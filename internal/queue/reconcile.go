@@ -344,7 +344,6 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 		return
 	}
 	obs.EndSpan(trialSpan, nil)
-	d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand})
 
 	// Run ID from the trial *tree* OID, not the merge commit OID — a
 	// deliberate deviation from §9.4's letter. The merge commit's message
@@ -360,8 +359,15 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 	// (§2.4) since same-second identical-tree trials would otherwise mint
 	// identical IDs. Commit-to-run correlation is the trailer's job;
 	// run-to-commit is RunRecord.MergeSHA's.
+	//
+	// Minted here, before EventTrialClean, and reused verbatim for the rest
+	// of the run: channels join every event for a run by RunID (Slack
+	// threading, ghstatus's target_url), so an EventTrialClean emitted
+	// without one breaks that join for the run's entire lifetime.
 	runID := newRunID(d.now(), trial.TreeOID)
 	rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
+
+	d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
 
 	msg, err := buildMergeMessage(d.cfg.MergeMessage, messageFields{Topic: cand.Topic, User: cand.User, Ref: cand.Ref, Target: t.Name, RunID: runID})
 	if err != nil {
@@ -497,7 +503,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 		Detail:    detail,
 	})
 
-	d.runs[t.Name] = nil
+	delete(d.runs, t.Name)
 }
 
 // recoverLanded implements Invariant 4's crash-recovery branch: cand.SHA is

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -310,6 +312,81 @@ func TestStore_CheckStats(t *testing.T) {
 	}
 	if len(stats) != 0 {
 		t.Fatalf("CheckStats (filtered) = %d entries, want 0", len(stats))
+	}
+}
+
+// TestStore_ConcurrentReadsDontBlockWrites is the sanity check for raising
+// SetMaxOpenConns from 1 to 4 (docs/plans/phase23.md review): Emit runs
+// inline on the reconcile goroutine in production, so a dashboard read must
+// never serialize behind it (or vice versa). This drives a batch of Emits
+// concurrently with a batch of read-side queries (RecentRuns, CheckStats —
+// the JOIN query called out as the risk) against one Store, under -race, and
+// simply asserts nothing errors or deadlocks: a pool capped at 1 connection
+// would still pass this correctness-wise (database/sql would just queue the
+// callers), so the real evidence the fix works is this test completing
+// promptly under `go test -race` rather than serializing to the point of
+// timing out — verified manually when this change was made.
+func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+
+	// Seed some rows so the read side has something to scan.
+	for i := 0; i < 20; i++ {
+		rec := sampleRecord(fmt.Sprintf("seed-%d", i), "main", base.Add(time.Duration(i)*time.Second))
+		if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: rec.RunID, Record: rec}); err != nil {
+			t.Fatalf("seed Emit(%d): %v", i, err)
+		}
+	}
+
+	const writers = 8
+	const readers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, writers+readers)
+
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				rec := sampleRecord(fmt.Sprintf("writer-%d-%d", w, i), "main", base.Add(time.Duration(w*100+i)*time.Second))
+				if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: rec.RunID, Record: rec}); err != nil {
+					errs <- fmt.Errorf("writer %d emit %d: %w", w, i, err)
+					return
+				}
+			}
+		}(w)
+	}
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if _, err := s.RecentRuns("main", 10); err != nil {
+					errs <- fmt.Errorf("RecentRuns: %w", err)
+					return
+				}
+				if _, err := s.CheckStats("main", base.Add(-time.Hour)); err != nil {
+					errs <- fmt.Errorf("CheckStats: %w", err)
+					return
+				}
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent reads/writes did not complete within 10s")
+	}
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

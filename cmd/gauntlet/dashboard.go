@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/config"
@@ -26,7 +27,13 @@ const dashboardShutdownTimeout = 5 * time.Second
 // http.ErrServerClosed is treated as fatal, matching main's "loud error,
 // exit 1" style, since a dashboard that silently failed to bind would
 // otherwise look "up" from the log alone.
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store) {
+//
+// wg gains one count per goroutine started here (zero if the dashboard is
+// disabled), released once each goroutine actually exits. main waits on wg
+// before closing the history store, so a query still in flight against store
+// (via the dashboard's history-backed views) can never race a Close (cmd
+// wiring review, docs/plans/phase23.md).
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -36,7 +43,9 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 		Handler: dashboard.New(snapshot, store),
 	}
 
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), dashboardShutdownTimeout)
 		defer cancel()
@@ -44,6 +53,7 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	}()
 
 	go func() {
+		defer wg.Done()
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(os.Stderr, "gauntlet: dashboard: %v\n", err)
 			os.Exit(1)
@@ -56,11 +66,24 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 // SampleEvery tick, read d.Snapshot() and record one queue_depth row per
 // target. Nil snapshots (no reconcile pass has completed yet) are skipped
 // rather than recorded as zero, so an idle-startup gap doesn't read as "an
-// empty queue" in the depth series. Only called when store != nil.
-func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store) {
+// empty queue" in the depth series. A snapshot whose At is unchanged from
+// the last one actually sampled is skipped too: RecordDepth's INSERT OR
+// REPLACE is keyed on (at, target), so re-sampling the same unchanged
+// snapshot on a poll interval shorter than SampleEvery's tick would silently
+// replace a real point with itself — harmless, but any timing where a
+// slow/short poll cadence lets the ticker fire twice against one unchanged
+// snapshot would otherwise drop a would-be-distinct sample in favor of a
+// duplicate. Only called when store != nil.
+//
+// wg gains one count, released once this goroutine exits on ctx.Done() — see
+// startDashboard's doc for why main waits on it before closing store.
+func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, wg *sync.WaitGroup) {
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		ticker := time.NewTicker(cfg.History.SampleEvery)
 		defer ticker.Stop()
+		var lastAt time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -70,6 +93,10 @@ func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() 
 				if snap == nil {
 					continue
 				}
+				if snap.At.Equal(lastAt) {
+					continue
+				}
+				lastAt = snap.At
 				for _, ts := range snap.Targets {
 					inFlight := 0
 					if ts.InFlight != nil {

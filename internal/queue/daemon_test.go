@@ -376,4 +376,24 @@ func TestReconcile_EventsPerTransition(t *testing.T) {
 			t.Errorf("events[%d] = %v, want %v", i, kinds[i], want[i])
 		}
 	}
+
+	// The contract-level assertion that would have caught the ship-blocker
+	// (docs/plans/phase23.md §10 review): every event from EventTrialClean
+	// onward — including EventTrialClean itself — must carry a non-empty
+	// RunID, and it must be the SAME RunID throughout the run. Channels
+	// (Slack threading, ghstatus target_url) join a run's events by RunID;
+	// an EventTrialClean minted without one breaks that join for the run's
+	// entire lifetime even though every later event still carries one.
+	events := h.ch.Events()
+	for i, e := range events {
+		if kinds[i] == core.EventQueued {
+			continue // pre-trial: no run (and so no RunID) exists yet
+		}
+		if e.RunID == "" {
+			t.Errorf("events[%d] (kind=%v) has empty RunID", i, e.Kind)
+		}
+		if e.RunID != runID {
+			t.Errorf("events[%d] (kind=%v) RunID = %q, want %q (same run throughout)", i, e.Kind, e.RunID, runID)
+		}
+	}
 }

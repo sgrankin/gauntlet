@@ -257,8 +257,11 @@ func (d *Daemon) validate() error {
 		return fmt.Errorf("history: sample-every must be positive, got %s", d.History.SampleEvery)
 	}
 
-	if d.GitHub.Repo != "" && !strings.Contains(d.GitHub.Repo, "/") {
-		return fmt.Errorf("github: repo must be in \"owner/name\" form, got %q", d.GitHub.Repo)
+	if d.GitHub.Repo != "" {
+		owner, name, ok := strings.Cut(d.GitHub.Repo, "/")
+		if !ok || owner == "" || name == "" {
+			return fmt.Errorf("github: repo must be in \"owner/name\" form, got %q", d.GitHub.Repo)
+		}
 	}
 
 	switch d.Executor.Kind {

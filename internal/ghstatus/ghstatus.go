@@ -220,10 +220,13 @@ func (c *Channel) post(ctx context.Context, ev core.Event, s state, description 
 	return nil
 }
 
-// runURL builds target_url = "<base>/run/<runID>", or "" when base is empty
-// (§4.3: omitted from the posted status unless a dashboard is configured).
+// runURL builds target_url = "<base>/run/<runID>", or "" when base or runID
+// is empty (§4.3: omitted from the posted status unless a dashboard is
+// configured; an empty runID would otherwise produce a dangling "<base>/run/"
+// URL — defense in depth now that the queue always mints a RunID before
+// EventTrialClean).
 func runURL(base, runID string) string {
-	if base == "" {
+	if base == "" || runID == "" {
 		return ""
 	}
 	return strings.TrimRight(base, "/") + "/run/" + runID
