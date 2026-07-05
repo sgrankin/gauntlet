@@ -138,6 +138,21 @@ func (r *Remote) Ref(ref string) string {
 	return strings.TrimSpace(out.String())
 }
 
+// Parents returns commit sha's parent OIDs, in order, as recorded on the
+// remote, or nil if sha does not exist there. Used to assert Invariant 6 (a
+// landed merge commit's second parent is the candidate SHA verbatim)
+// directly against the remote's own objects, not the daemon's view of them.
+func (r *Remote) Parents(sha string) []string {
+	r.t.Helper()
+	cmd := exec.Command("git", "-C", r.Dir, "log", "-1", "--format=%P", sha)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+	return strings.Fields(out.String())
+}
+
 func (r *Remote) workDir() string {
 	r.t.Helper()
 	if r.work == "" {
