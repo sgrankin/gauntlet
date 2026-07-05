@@ -75,13 +75,26 @@ func (c *Channel) Emit(ctx context.Context, ev core.Event) error { return nil }
 // handler built with WithChannel(c).
 func (c *Channel) Commands() <-chan core.Command { return c.cmds }
 
+// TrySend attempts to enqueue cmd onto c's inbound buffer, reporting
+// whether it was accepted. It never blocks: a full buffer reports false
+// rather than waiting for the queue to drain. Exported (chunk E5,
+// internal/mcp) so the MCP retry tool can feed the same channel POST
+// /api/v1/retry does and distinguish "queued" from "dropped, buffer
+// full" the way an HTTP response code lets api.go's caller do.
+func (c *Channel) TrySend(cmd core.Command) bool {
+	select {
+	case c.cmds <- cmd:
+		return true
+	default:
+		return false
+	}
+}
+
 // enqueue sends cmd, dropping (and logging) rather than blocking if the
 // buffer is full — never let a slow/stalled queue block an HTTP handler,
 // mirroring slack.Slack.Emit's full-outbox handling.
 func (c *Channel) enqueue(cmd core.Command) {
-	select {
-	case c.cmds <- cmd:
-	default:
+	if !c.TrySend(cmd) {
 		log.Printf("dashboard: retry: cmds buffer full (%d), dropping target=%s ref=%s", cmdsBuffer, cmd.Target, cmd.Ref)
 	}
 }

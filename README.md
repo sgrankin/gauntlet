@@ -208,7 +208,7 @@ executor "container" {
 
 The dashboard (`internal/dashboard`) exposes a small JSON API under
 `/api/v1`, mounted on the same handler/bind as the HTML pages (§4.2 above).
-It exists for agents, scripts, and a future `gauntlet mcp` that want
+It exists for agents, scripts, and the MCP server below that want
 machine-readable queue status and a way to trigger a retry without a
 browser. Every response is `Content-Type: application/json`, with stable
 lowerCamel field names; errors are always `{"error": "..."}`.
@@ -270,6 +270,41 @@ behind your proxy/tailnet if you need one. `retry` is non-destructive — it
 only re-queues an already-parked ref for another trial-merge-and-check
 pass; it never touches the target branch, force-lands anything, or bypasses
 a check.
+
+## MCP
+
+The daemon also exposes an MCP (Model Context Protocol) server
+(`internal/mcp`) at `/mcp`, mounted on the same bind/port as the dashboard
+and its JSON API above — there's no separate port to configure. It speaks
+the standard Streamable HTTP transport, so any MCP-capable agent or client
+can connect directly:
+
+```sh
+claude mcp add --transport http gauntlet http://localhost:8899/mcp
+```
+
+Four tools are exposed, mirroring the JSON API above (same lowerCamel field
+names, so an agent reading both sees one vocabulary):
+
+- **`status`** (`target` optional) — every target's live queue state, or
+  just one target's if `target` is given. Same shape as `GET /api/v1/status`.
+- **`runs`** (`target` required, `limit` optional, default 20) — a target's
+  recent runs from history, newest first. Errors with `"history disabled"`
+  if no `history` store is configured.
+- **`run`** (`run_id` required) — one run's full detail, including every
+  check's captured output — the JSON API's `GET /api/v1/run/{id}` omits
+  output (it's meant for a human on the dashboard's run page); this tool is
+  where an agent debugging a red run gets it.
+- **`retry`** (`target` and `ref` required) — re-queues a parked ref at its
+  current SHA, the same effect as `POST /api/v1/retry` or a Slack
+  `:recycle:` reaction. Returns `{"status": "queued"}` on success, or an
+  error if retry isn't wired up or the retry queue is full.
+
+**Trust model.** Same as the dashboard and its JSON API: no authentication
+of its own, so bind it to a trusted interface and put it behind your
+proxy/tailnet if agents need to reach it remotely. `retry` is the only tool
+that mutates anything, and it's non-destructive in the same way `POST
+/api/v1/retry` is — see "Trust model" above.
 
 ## Manual verification / setup guides
 
