@@ -435,3 +435,16 @@ Applied by the design reviewer; where these touch earlier sections, §9 wins (se
 3. **`Dashboard.URL`** (optional public base URL) added to config: outbound links (GitHub `target_url`) must not point at the bind address, which is typically localhost.
 4. **`drainCommands` sketch was pseudocode** (invalid `goto` placement): implement idiomatically.
 5. **Package-local constructor params**: D1/D3/D4/D5/D6 constructors take their own params structs; config→params mapping lives only in cmd (D7). Loosens D-cfg coupling and keeps the config package the sole KDL owner.
+
+## 10. Phase-1 review triage (adversarial review, 2026-07-05)
+
+The phase-1 review found no invariant violations (CAS foundation empirically re-verified against real git). Findings and dispositions:
+
+- **F1 → D0.** The `IsAncestor` recovery path treats any coincidental ancestor as "landed", runs no checks, and emits a terminal `EventLanded` with `Record==nil` — violating the documented terminal-event contract that D1's SQLite writer relies on. Fix: keep the CAS slot-delete (correct — the content is already in the target), but synthesize a proper `RunRecord` (zero checks, `OutcomeLanded`, detail "candidate already ancestor of target; checks not re-run"; run-ID stand-in = candidate SHA). Add a real-git integration test driving this daemon path end-to-end and asserting `Record != nil` (closes O5's coverage gap for this branch; O1 routes through the same emit and is fixed with it).
+- **F2 → D0 + D7.** Orphaned trial dirs are never swept. D0: `queue.Config` gains `WorkDir string`; trial exports root there when set (else `os.TempDir()` as today). D7: cmd passes `<state>/trials` and clears it at startup.
+- **F3 → D7.** No git-version guard. cmd probes `git --version` at startup and fails loudly below 2.38.
+- **F4 → D0.** Trial-merge span is orphaned from the run span (root span starts too late). Restructure: start the run root span before `MergeTree`; set `run.id`/`merge.sha` attributes when known.
+- **O2 → D-cfg** (dispatched): validate target *branch* uniqueness, not just name.
+- **O3 → ledger note, not fixed:** `extractTar` writes symlink entries verbatim; a candidate tree could plant an escape symlink a *later check* follows. Within the stated own-code threat model; revisit if the threat model ever widens.
+- **O4 → D0.** Refs under `for/` naming an unconfigured target are silently ignored. Add `core.EventIgnoredRef`, emitted once per (ref, SHA); LogChannel renders it; other channels ignore unknown kinds.
+- Review-quality note: the reviewer independently confirmed the clean areas but missed the run-ID same-second collision C7 had found (§2.4) — future "found clean" lists get weighed accordingly.
