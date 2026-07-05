@@ -43,11 +43,21 @@ const (
 
 	// defaultSummarizeModel matches internal/summarize.DefaultModel
 	// (duplicated here, not imported, per this file's existing pattern of
-	// owning its own defaults — see defaultGitHubTokenEnv et al.): a
-	// Haiku-class model, per the claude-api skill's guidance for a cheap
-	// 2-6 sentence summarization task.
-	defaultSummarizeModel     = "claude-haiku-4-5"
+	// owning its own defaults — see defaultGitHubTokenEnv et al.):
+	// Sonnet-class, per the operator decision to move the default off
+	// Haiku now that Effort (below) makes the intelligence/cost tradeoff
+	// configurable; prompt quality for this task was validated live
+	// against claude-sonnet-5.
+	defaultSummarizeModel     = "claude-sonnet-5"
 	defaultSummarizeAPIKeyEnv = "ANTHROPIC_API_KEY"
+
+	// defaultSummarizeEffort is applied whenever the "summarize" section
+	// is present and effort is left unset — "medium" balances quality
+	// against the per-call cost/latency this synchronous call adds to
+	// every clean trial (see defaultSummarizeTimeout below). Once
+	// defaulted, Summarize.Effort is never "" for a loaded config — see
+	// validSummarizeEfforts and validate()'s check below.
+	defaultSummarizeEffort = "medium"
 
 	// defaultSummarizeTimeout bounds the one Messages API call
 	// Config.MergeBody makes, synchronously, on the single-threaded
@@ -71,6 +81,20 @@ const (
 	// matters, not only when some optional section is enabled.
 	defaultLogRetention = 30 * 24 * time.Hour
 )
+
+// validSummarizeEfforts are the legal Summarize.Effort values, per the
+// claude-api skill's output_config.effort reference: "low"/"medium"/"high"
+// are broadly supported, "xhigh" and "max" only on newer Sonnet/Opus-tier
+// models (which includes defaultSummarizeModel). validate() checks against
+// this set; "" is impossible for a loaded config because applyDefaults
+// always fills it in first when the "summarize" section is present.
+var validSummarizeEfforts = map[string]bool{
+	"low":    true,
+	"medium": true,
+	"high":   true,
+	"xhigh":  true,
+	"max":    true,
+}
 
 // Daemon is the admin-written daemon config (docs/plans/phase1.md §4): one
 // remote, the reconcile cadence, the committer identity used for merge
@@ -188,6 +212,13 @@ type Cache struct {
 type Summarize struct {
 	Model     string `kdl:"model"`       // default defaultSummarizeModel
 	APIKeyEnv string `kdl:"api-key-env"` // default "ANTHROPIC_API_KEY"
+
+	// Effort is the output_config.effort value sent with every summarize
+	// call (see internal/summarize.Params.Effort) — "low", "medium",
+	// "high", "xhigh", or "max". Defaults to "medium" whenever the
+	// "summarize" section is present; validate() rejects any other
+	// value, so a loaded config's Effort is never "".
+	Effort string `kdl:"effort"`
 
 	// Timeout bounds the single Messages API call per trial (default 5s).
 	// Because that call runs synchronously on gauntlet's single-threaded
@@ -316,6 +347,9 @@ func (d *Daemon) applyDefaults() {
 		if d.Summarize.APIKeyEnv == "" {
 			d.Summarize.APIKeyEnv = defaultSummarizeAPIKeyEnv
 		}
+		if d.Summarize.Effort == "" {
+			d.Summarize.Effort = defaultSummarizeEffort
+		}
 		if d.Summarize.Timeout == 0 {
 			d.Summarize.Timeout = defaultSummarizeTimeout
 		}
@@ -421,6 +455,9 @@ func (d *Daemon) validate() error {
 		}
 		if d.Summarize.APIKeyEnv == "" {
 			return fmt.Errorf("summarize: api-key-env must not be empty")
+		}
+		if !validSummarizeEfforts[d.Summarize.Effort] {
+			return fmt.Errorf("summarize: effort must be one of low, medium, high, xhigh, max, got %q", d.Summarize.Effort)
 		}
 		if d.Summarize.Timeout <= 0 {
 			return fmt.Errorf("summarize: timeout must be positive, got %s", d.Summarize.Timeout)

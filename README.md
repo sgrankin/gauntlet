@@ -173,8 +173,9 @@ executor "container" {
 }
 
 summarize {
-    model "claude-haiku-4-5"
+    model "claude-sonnet-5"
     api-key-env "ANTHROPIC_API_KEY"
+    effort "medium"
     timeout "5s"
 }
 ```
@@ -264,10 +265,29 @@ on every clean trial. Keep it well under `poll-interval`.
 
 Configuration (all fields optional; defaults shown in the example above):
 
-- **`model`** — the Claude model ID to call. Defaults to `claude-haiku-4-5`
-  — Haiku-class, chosen because a 2-6 sentence summary is a cheap,
-  classification-shaped task, not a coding or planning workload. Fully
-  overridable for operators who want a different tier.
+- **`model`** — the Claude model ID to call. Defaults to `claude-sonnet-5`
+  — prompt quality for this task was validated live against it, and its
+  configurable `effort` (below) lets operators dial intelligence vs. cost
+  rather than being stuck on a fixed tier. Fully overridable for operators
+  who want a different model, including the former default,
+  `claude-haiku-4-5` (see the `effort` note below if you do).
+- **`effort`** — the `output_config.effort` value sent with every
+  summarize call: one of `low`, `medium`, `high`, `xhigh`, `max`. Defaults
+  to `medium` whenever the `summarize` section is present, regardless of
+  `model` (same "node present ⇒ every field gets its default" rule as the
+  rest of this section). Only valid on models that support it —
+  `claude-sonnet-5` (the default model) does, but **`claude-haiku-4-5` and
+  Sonnet 4.5 do not, at any effort value**: the Messages API rejects the
+  request outright (a 400). If you switch `model` to one of those, this
+  config layer has no way to suppress the `effort` field (there is no KDL
+  syntax that round-trips to "explicitly empty" instead of "defaulted"),
+  so every summarize call will 400. That failure is not silent — it hits
+  the same degradation path as any other summarize error: logged as a
+  single line, answered with an empty body, never a blocked landing — but
+  it means summarization is effectively unusable with those models through
+  this config node today. This is the intended tradeoff, not a bug to
+  work around: pairing `effort` with a non-supporting model is the
+  operator's responsibility, called out here so it isn't a surprise.
 - **`api-key-env`** — the environment variable holding the Anthropic API
   key. Defaults to `ANTHROPIC_API_KEY`. The daemon reads this at startup,
   once; it is never read from the config file itself.
@@ -286,6 +306,17 @@ green trial red.
 **Cost:** one small Messages API completion per landing (not per trial,
 not per check) — a single request against a handful of commit
 subjects/bodies and a diffstat, capped at a few hundred output tokens.
+Plainly: at the defaults (`claude-sonnet-5`, `effort "medium"`), that call
+costs on the order of **10x** what the old default (`claude-haiku-4-5`,
+no effort/thinking) cost per landing — Sonnet's per-token price is several
+times Haiku's, and `medium` effort spends some thinking tokens a
+no-thinking Haiku call never did. In absolute terms this is still small —
+a few hundred output tokens on one short completion per landing, not per
+trial or per check — but it is a real, deliberate step up from the
+previous default, made because prompt quality for this task was validated
+live against `claude-sonnet-5`. Set `model "claude-haiku-4-5"` (see the
+`effort` caveat above) or a lower `effort` if the per-landing cost
+matters at your merge volume.
 
 ## Hooks
 

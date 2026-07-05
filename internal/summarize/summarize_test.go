@@ -158,6 +158,76 @@ func TestMergeBody_CustomModel(t *testing.T) {
 	}
 }
 
+// TestMergeBody_EffortIncludedWhenConfigured covers the default-model,
+// effort-configured shape: output_config.effort must appear, nested (not
+// top-level), with exactly the configured value.
+func TestMergeBody_EffortIncludedWhenConfigured(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody = decodeRequest(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "ok"}},
+		})
+	}))
+	defer srv.Close()
+
+	s := summarize.New(summarize.Params{
+		Git:     &fakeGit{commits: []gitx.CommitInfo{{Subject: "x"}}},
+		APIKey:  "k",
+		Effort:  "medium",
+		BaseURL: srv.URL,
+	})
+	if got := s.MergeBody(context.Background(), candidate(), "base"); got != "ok" {
+		t.Fatalf("MergeBody = %q", got)
+	}
+	if gotBody["model"] != summarize.DefaultModel {
+		t.Errorf("model = %v, want default %q", gotBody["model"], summarize.DefaultModel)
+	}
+	oc, ok := gotBody["output_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("output_config missing or wrong shape: %v", gotBody["output_config"])
+	}
+	if oc["effort"] != "medium" {
+		t.Errorf("output_config.effort = %v, want %q", oc["effort"], "medium")
+	}
+	if _, top := gotBody["effort"]; top {
+		t.Errorf("effort must be nested under output_config, not top-level: %v", gotBody["effort"])
+	}
+}
+
+// TestMergeBody_EffortAbsentForHaikuWithEmptyEffort covers the
+// backward-compatibility contract: a haiku model configured with an empty
+// Effort (the zero value) must keep working exactly as before Effort
+// existed — no output_config field sent at all, since claude-haiku-4-5
+// rejects it.
+func TestMergeBody_EffortAbsentForHaikuWithEmptyEffort(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody = decodeRequest(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "ok"}},
+		})
+	}))
+	defer srv.Close()
+
+	s := summarize.New(summarize.Params{
+		Git:     &fakeGit{commits: []gitx.CommitInfo{{Subject: "x"}}},
+		APIKey:  "k",
+		Model:   "claude-haiku-4-5",
+		Effort:  "",
+		BaseURL: srv.URL,
+	})
+	if got := s.MergeBody(context.Background(), candidate(), "base"); got != "ok" {
+		t.Fatalf("MergeBody = %q", got)
+	}
+	if gotBody["model"] != "claude-haiku-4-5" {
+		t.Errorf("model = %v, want claude-haiku-4-5", gotBody["model"])
+	}
+	if _, ok := gotBody["output_config"]; ok {
+		t.Errorf("output_config = %v, want absent when Effort is empty", gotBody["output_config"])
+	}
+}
+
 func TestMergeBody_NoCommitsSkipsAPICall(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

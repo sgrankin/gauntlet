@@ -28,13 +28,16 @@ import (
 )
 
 // DefaultModel is the model MergeBody calls when Params.Model is empty.
-// Haiku-class: per the claude-api skill's guidance, a 2-6 sentence
-// summarization task is a single cheap classification-shaped call, not a
-// coding or planning workload, so there is no reason to spend Sonnet/Opus
-// tier latency or tokens on it. Model is still fully configurable (Params.
-// Model / the "summarize { model ... }" config node) for operators who
-// want a different tier.
-const DefaultModel = "claude-haiku-4-5"
+// Sonnet-class as of this default (operator decision): prompt quality for
+// this task was validated live against claude-sonnet-5, and its
+// configurable Effort (see Params.Effort) lets operators dial the
+// intelligence/cost tradeoff for the 2-6 sentence summary rather than
+// being stuck on a fixed Haiku-tier call. Model is still fully
+// configurable (Params.Model / the "summarize { model ... }" config node)
+// for operators who want a different tier — including the former default,
+// claude-haiku-4-5, which continues to work unchanged as long as Effort is
+// left empty for it (see Params.Effort doc).
+const DefaultModel = "claude-sonnet-5"
 
 const (
 	defaultMaxTokens = 512
@@ -81,6 +84,26 @@ type Params struct {
 	// DefaultModel.
 	Model string
 
+	// Effort is the output_config.effort value to send with every
+	// request — "low", "medium", "high", "xhigh", or "max" per the
+	// claude-api skill. Empty omits output_config.effort from the
+	// request entirely.
+	//
+	// Effort is GA (no beta header) and accepted on Sonnet 5 (this
+	// package's default model) and most current Sonnet/Opus-tier
+	// models, but the API rejects it outright on models that don't
+	// support it — notably Sonnet 4.5 and claude-haiku-4-5, the former
+	// default here. Params does not cross-validate Effort against Model:
+	// pairing a non-empty Effort with a non-supporting Model is the
+	// operator's responsibility, and the failure mode is not silent —
+	// the Messages API returns a 400, which call() surfaces as an error
+	// and MergeBody logs as a single clear line ("summarize: <ref>: api
+	// status 400: ...") before falling back to "", per this package's
+	// degradation guarantee. Leaving Effort empty (the zero value) keeps
+	// any model, including claude-haiku-4-5, working exactly as before
+	// this field was added.
+	Effort string
+
 	// APIKey authenticates against the Messages API.
 	APIKey string
 
@@ -107,6 +130,7 @@ type Params struct {
 type Summarizer struct {
 	git       Git
 	model     string
+	effort    string
 	apiKey    string
 	maxTokens int
 	timeout   time.Duration
@@ -141,6 +165,7 @@ func New(p Params) *Summarizer {
 	return &Summarizer{
 		git:       p.Git,
 		model:     model,
+		effort:    p.Effort,
 		apiKey:    p.APIKey,
 		maxTokens: maxTokens,
 		timeout:   timeout,
@@ -216,14 +241,26 @@ func buildPrompt(cand core.Candidate, commits []gitx.CommitInfo, diffstat string
 
 // messageRequest and messageResponse are the minimal Messages API request
 // and response shapes this package needs — see the claude-api skill for
-// the full request/response reference. No thinking/effort fields: Haiku
-// (and Haiku-tier models generally) doesn't support them, and this task
-// doesn't need them regardless.
+// the full request/response reference. No thinking field: this task
+// doesn't need it, and it isn't universally accepted the way effort is
+// documented to be — see outputConfig / Params.Effort.
 type messageRequest struct {
 	Model     string           `json:"model"`
 	MaxTokens int              `json:"max_tokens"`
 	System    string           `json:"system,omitempty"`
 	Messages  []requestMessage `json:"messages"`
+
+	// OutputConfig carries effort, per the claude-api skill's
+	// "output_config: {effort: ...}" shape (nested, not top-level).
+	// Nil omits the field entirely — see call()'s construction and
+	// Params.Effort's doc for when that happens.
+	OutputConfig *outputConfig `json:"output_config,omitempty"`
+}
+
+// outputConfig is the nested request object carrying effort. Effort is
+// always a plain string per the skill (no separate "type" discriminator).
+type outputConfig struct {
+	Effort string `json:"effort"`
 }
 
 type requestMessage struct {
@@ -250,6 +287,12 @@ func (s *Summarizer) call(ctx context.Context, userPrompt string) (string, error
 		MaxTokens: s.maxTokens,
 		System:    systemPrompt,
 		Messages:  []requestMessage{{Role: "user", Content: userPrompt}},
+	}
+	// Only send output_config.effort when configured — see Params.Effort's
+	// doc for why this package never defaults or validates it against
+	// Model.
+	if s.effort != "" {
+		reqBody.OutputConfig = &outputConfig{Effort: s.effort}
 	}
 	data, err := json.Marshal(reqBody)
 	if err != nil {

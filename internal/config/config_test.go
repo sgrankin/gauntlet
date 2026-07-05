@@ -249,6 +249,9 @@ summarize {
 	if d.Summarize.APIKeyEnv != defaultSummarizeAPIKeyEnv {
 		t.Errorf("Summarize.APIKeyEnv = %q, want default %q", d.Summarize.APIKeyEnv, defaultSummarizeAPIKeyEnv)
 	}
+	if d.Summarize.Effort != defaultSummarizeEffort {
+		t.Errorf("Summarize.Effort = %q, want default %q", d.Summarize.Effort, defaultSummarizeEffort)
+	}
 	if d.Summarize.Timeout != defaultSummarizeTimeout {
 		t.Errorf("Summarize.Timeout = %v, want default %v", d.Summarize.Timeout, defaultSummarizeTimeout)
 	}
@@ -269,6 +272,7 @@ target "main" branch="main"
 summarize {
     model "claude-opus-4-8"
     api-key-env "MY_ANTHROPIC_KEY"
+    effort "high"
     timeout "30s"
 }
 `)
@@ -287,6 +291,9 @@ summarize {
 	}
 	if d.Summarize.APIKeyEnv != "MY_ANTHROPIC_KEY" {
 		t.Errorf("Summarize.APIKeyEnv = %q", d.Summarize.APIKeyEnv)
+	}
+	if d.Summarize.Effort != "high" {
+		t.Errorf("Summarize.Effort = %q, want %q", d.Summarize.Effort, "high")
 	}
 	if d.Summarize.Timeout != 30*time.Second {
 		t.Errorf("Summarize.Timeout = %v, want 30s", d.Summarize.Timeout)
@@ -747,6 +754,23 @@ target "main" branch="main"
 summarize {
     model "claude-haiku-4-5"
     bogus "nope"
+}
+`,
+			wantErr: "summarize",
+		},
+		{
+			// Semantic validation: effort must be one of the claude-api
+			// skill's legal output_config.effort values.
+			name: "summarize with invalid effort",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+summarize {
+    effort "extreme"
 }
 `,
 			wantErr: "summarize",

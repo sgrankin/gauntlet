@@ -103,6 +103,7 @@ func buildSummarizer(cfg *config.Daemon, git summarize.Git) (*summarize.Summariz
 	return summarize.New(summarize.Params{
 		Git:     git,
 		Model:   cfg.Summarize.Model,
+		Effort:  cfg.Summarize.Effort,
 		APIKey:  key,
 		Timeout: cfg.Summarize.Timeout,
 		Log:     os.Stderr,
