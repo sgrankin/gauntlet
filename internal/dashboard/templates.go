@@ -35,5 +35,6 @@ var (
 	indexTmpl  = mustParse("index.html")
 	targetTmpl = mustParse("target.html")
 	runTmpl    = mustParse("run.html")
+	batchTmpl  = mustParse("batch.html")
 	checksTmpl = mustParse("checks.html")
 )

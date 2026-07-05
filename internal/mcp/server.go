@@ -305,6 +305,15 @@ type runSummary struct {
 	StartedAt  string `json:"startedAt"`
 	EndedAt    string `json:"endedAt"`
 	DurationMs int64  `json:"durationMs"`
+
+	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
+	// §10 amendment 1) as-is, mirroring dashboard/api.go's runSummaryJSON:
+	// omitted entirely for a serial or speculate run (BatchID == ""), present
+	// for a batch member. See that type's doc for the omitempty/position-0
+	// caveat (batchId's presence is the real batch-membership signal).
+	BatchID   string `json:"batchId,omitempty"`
+	Position  int    `json:"position,omitempty"`
+	BatchSize int    `json:"batchSize,omitempty"`
 }
 
 func handleRuns(p Params, in runsIn) (runsOut, error) {
@@ -327,14 +336,18 @@ func handleRuns(p Params, in runsIn) (runsOut, error) {
 
 	out := runsOut{Runs: make([]runSummary, 0, len(rows))}
 	for _, row := range rows {
-		out.Runs = append(out.Runs, runSummary{
+		rs := runSummary{
 			RunID: row.RunID, Target: row.Target, Ref: row.CandidateRef,
 			User: row.CandidateUser, Topic: row.CandidateTopic, SHA: row.CandidateSHA,
 			Outcome: row.Outcome, Detail: row.Detail,
 			StartedAt:  formatRFC3339(row.StartedAt),
 			EndedAt:    formatRFC3339(row.EndedAt),
 			DurationMs: row.Duration.Milliseconds(),
-		})
+		}
+		if row.BatchID != "" {
+			rs.BatchID, rs.Position, rs.BatchSize = row.BatchID, row.Position, row.BatchSize
+		}
+		out.Runs = append(out.Runs, rs)
 	}
 	return out, nil
 }
@@ -366,6 +379,15 @@ type runOut struct {
 	// failed deploy hook needs it exactly as much as a failed check's).
 	// Always present as an array (possibly empty, never omitted).
 	Hooks []checkDetail `json:"hooks"`
+
+	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
+	// §10 amendment 1) as-is, mirroring dashboard/api.go's runDetailResponse:
+	// omitted entirely for a serial or speculate run (BatchID == ""), present
+	// for a batch member. See runSummary's doc for the omitempty/position-0
+	// caveat.
+	BatchID   string `json:"batchId,omitempty"`
+	Position  int    `json:"position,omitempty"`
+	BatchSize int    `json:"batchSize,omitempty"`
 }
 
 // checkDetail is api.go's checkJSON plus Output: an agent debugging a red
@@ -414,6 +436,9 @@ func handleRun(p Params, in runIn) (runOut, error) {
 		EndedAt:    formatRFC3339(row.EndedAt),
 		DurationMs: row.Duration.Milliseconds(),
 		Checks:     make([]checkDetail, 0, len(checks)),
+	}
+	if row.BatchID != "" {
+		out.BatchID, out.Position, out.BatchSize = row.BatchID, row.Position, row.BatchSize
 	}
 	for _, c := range checks {
 		out.Checks = append(out.Checks, checkDetail{

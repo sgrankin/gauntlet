@@ -58,6 +58,7 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /t/{target}", d.handleTarget)
 	mux.HandleFunc("GET /run/{runID}", d.handleRun)
 	mux.HandleFunc("GET /run/{runID}/log/{checkName}", d.handleRunLog)
+	mux.HandleFunc("GET /batch/{batchID}", d.handleBatch)
 	mux.HandleFunc("GET /checks", d.handleChecks)
 	d.mountAPIRoutes(mux)
 	return mux
@@ -211,7 +212,12 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			BaseOID: row.BaseOID, MergeSHA: row.MergeSHA, TrialClean: row.TrialClean,
 			Outcome: wordTag(row.Outcome), Detail: row.Detail,
 			StartedAt: formatTime(row.StartedAt), EndedAt: formatTime(row.EndedAt), Duration: formatDuration(row.Duration),
+			BatchID: row.BatchID,
 		},
+	}
+	if row.BatchID != "" {
+		// "k of n": Position is 0-based, displayed 1-based.
+		data.Run.BatchPosition = fmt.Sprintf("%d of %d", row.Position+1, row.BatchSize)
 	}
 	for _, c := range checks {
 		data.Checks = append(data.Checks, checkView{
@@ -494,6 +500,47 @@ func pathUnder(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// --- /batch/{batchID} ---------------------------------------------------------
+
+// handleBatch renders the members of one batch run (docs/plans/phase5.md
+// §10 amendment 1): the link from /run/{id}'s "landed in batch <id> (k of
+// n)" line. Each member is its own history row (§3.3: per-member RunRecords
+// sharing a BatchID), so this is a small listing over history.BatchMembers,
+// not a new data source.
+func (d *dash) handleBatch(w http.ResponseWriter, r *http.Request) {
+	batchID := r.PathValue("batchID")
+	if d.store == nil {
+		render(w, batchTmpl, batchData{baseData: d.newBase("batch", nil, false), BatchID: batchID})
+		return
+	}
+
+	members, err := d.store.BatchMembers(batchID)
+	if err != nil {
+		log.Printf("dashboard: batch %s: %v", batchID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if len(members) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	data := batchData{
+		baseData:     d.newBase("batch "+batchID, nil, false),
+		BatchID:      batchID,
+		StoreEnabled: true,
+	}
+	for _, m := range members {
+		data.Members = append(data.Members, batchMemberView{
+			RunID: m.RunID, Position: m.Position, Target: m.Target,
+			User: m.CandidateUser, Topic: m.CandidateTopic, SHA: m.CandidateSHA,
+			Outcome: wordTag(m.Outcome), Detail: m.Detail,
+			StartedAt: formatTime(m.StartedAt), Duration: formatDuration(m.Duration),
+		})
+	}
+	render(w, batchTmpl, data)
+}
+
 // --- /checks?target=&since= --------------------------------------------------
 
 // maxStatsRows caps the per-check stats table: it's grouped by check name,
@@ -694,6 +741,7 @@ func (d *dash) recentRuns(target string, limit int, at time.Time) ([]runSummary,
 			Title:     chipTitle(row.Outcome, row.CandidateTopic, row.StartedAt, at),
 			Detail:    row.Detail,
 			StartedAt: formatTime(row.StartedAt), Duration: formatDuration(row.Duration),
+			Batched: row.BatchID != "",
 		})
 	}
 	return out, true
@@ -1021,6 +1069,14 @@ type runSummary struct {
 	Title               string // tooltip: "landed · topic · 2m ago"
 	Detail              string
 	StartedAt, Duration string
+
+	// Batched is whether this run landed as part of a batch (RunRow.BatchID
+	// != "") — the recent-runs chip strip (index.html, target.html) adds a
+	// distinguishing ring around a batched chip (CSS .chip-batched) so a
+	// batch's members read as visually grouped without redesigning the
+	// strip. Purely cosmetic; the underlying data is BatchID itself
+	// (exposed via the API/MCP fields, not this view struct).
+	Batched bool
 }
 
 type targetData struct {
@@ -1072,6 +1128,31 @@ type runSummaryFull struct {
 	Outcome                      tag
 	Detail                       string
 	StartedAt, EndedAt, Duration string
+
+	// BatchID is this run's batch, empty for serial/speculate — run.html
+	// only renders the "landed in batch <id>" line when it's non-empty.
+	// BatchPosition is the pre-formatted "k of n" string (Position+1 of
+	// BatchSize), computed by handleRun rather than in the template.
+	BatchID       string
+	BatchPosition string
+}
+
+// batchData is /batch/{id}'s view model: the members of one batch run
+// (docs/plans/phase5.md §10 amendment 1), linked from /run/{id}.
+type batchData struct {
+	baseData
+	BatchID      string
+	StoreEnabled bool
+	Members      []batchMemberView
+}
+
+type batchMemberView struct {
+	RunID, Target       string
+	Position            int
+	User, Topic, SHA    string
+	Outcome             tag
+	Detail              string
+	StartedAt, Duration string
 }
 
 type checksData struct {

@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 4).
+-- schema.sql: gauntlet history store schema (user_version = 5).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -21,9 +21,21 @@ CREATE TABLE runs (
   detail       TEXT NOT NULL,
   started_at   INTEGER NOT NULL,          -- unix millis
   ended_at     INTEGER NOT NULL,
-  duration_ms  INTEGER NOT NULL
+  duration_ms  INTEGER NOT NULL,
+  -- batch_id/position/batch_size (v5+, docs/plans/phase5.md §10 amendment 1):
+  -- batch_id groups the per-member records of one batch run (empty for
+  -- serial and speculate; core.RunRecord.BatchID verbatim). position is this
+  -- member's 0-based index within its batch (0 for serial/speculate).
+  -- batch_size is the batch's member count (1 otherwise). Together these
+  -- let CheckStats count one suite per distinct
+  -- COALESCE(NULLIF(batch_id,''), run_id) instead of once per duplicated
+  -- member record.
+  batch_id     TEXT NOT NULL DEFAULT '',
+  position     INTEGER NOT NULL DEFAULT 0,
+  batch_size   INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';
 
 CREATE TABLE checks (
   run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,

@@ -524,6 +524,151 @@ func TestMigrate_V1ToV3_MultiHop(t *testing.T) {
 	}
 }
 
+// schemaV4SQL is schema.sql as it existed before chunk P5-J added the
+// batch_id/position/batch_size columns to runs: hooks exists (v4) but runs
+// has none of the batch columns. Kept here, verbatim, so
+// TestMigrate_V4ToV5 can build a genuine v4 database by hand and prove the
+// running code migrates it forward correctly.
+const schemaV4SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE hooks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_hooks_name ON hooks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+`
+
+// TestMigrate_V4ToV5 builds a v4 database by hand (schemaV4SQL, runs has no
+// batch_id/position/batch_size columns, user_version stamped to 4 — exactly
+// what an already-deployed v4 Store would have on disk) and confirms that
+// opening it with the current code migrates it in place: user_version lands
+// on schemaVersion, the pre-existing run row survives with the new columns
+// readable at their documented defaults (batch_id="", position=0,
+// batch_size=1), and a fresh batch write against the migrated database
+// round-trips the new columns correctly.
+func TestMigrate_V4ToV5(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV4SQL); err != nil {
+		t.Fatalf("apply v4 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 4`); err != nil {
+		t.Fatalf("stamp user_version=4: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000)`,
+	); err != nil {
+		t.Fatalf("seed v4 run: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '')`,
+	); err != nil {
+		t.Fatalf("seed v4 check: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v4 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	run, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if run.RunID != "run-old" || len(checks) != 1 || checks[0].Output != "clean" {
+		t.Errorf("Run(run-old) after migrate = %+v / %+v, want the pre-existing row untouched", run, checks)
+	}
+	if run.BatchID != "" || run.Position != 0 || run.BatchSize != 1 {
+		t.Errorf("Run(run-old).BatchID/Position/BatchSize = %q/%d/%d, want \"\"/0/1 (column defaults)",
+			run.BatchID, run.Position, run.BatchSize)
+	}
+
+	// A fresh batch write against the migrated database must round-trip the
+	// new columns correctly.
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC))
+	rec.BatchID = "batch-xyz"
+	rec.Position = 1
+	rec.BatchSize = 3
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	newRun, _, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if newRun.BatchID != "batch-xyz" || newRun.Position != 1 || newRun.BatchSize != 3 {
+		t.Errorf("Run(run-new) batch fields = %q/%d/%d, want batch-xyz/1/3",
+			newRun.BatchID, newRun.Position, newRun.BatchSize)
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }
@@ -914,6 +1059,157 @@ func TestStore_CheckStats(t *testing.T) {
 	}
 	if len(stats) != 0 {
 		t.Fatalf("CheckStats (filtered) = %d entries, want 0", len(stats))
+	}
+}
+
+// TestStore_CheckStats_DedupesBatchMembers is the statistical-honesty test
+// for docs/plans/phase5.md §10 amendment 1: a batch of 3 member RunRecords
+// sharing one BatchID, each carrying the *same* duplicated check results
+// (the batch's checks ran once against the chain tip and were duplicated
+// onto every member's record, §3.3) must count as ONE suite in CheckStats,
+// not three — otherwise a green batch of N deflates the red-rate and a red
+// batch's duplicated failures inflate it. A fourth, unrelated serial run
+// (its own distinct check result, no BatchID) must still count as its own
+// suite. So across 4 run rows total, CheckStats must report Total=2 for the
+// shared check name, not 4.
+func TestStore_CheckStats_DedupesBatchMembers(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	// The batch's checks: one passed check, duplicated verbatim onto every
+	// member record, exactly as queue/reconcile.go's batch landing path does
+	// (§3.3's "Checks = the batch's check results, duplicated onto every
+	// member record").
+	batchChecks := []core.CheckResult{
+		{Name: "lint", Status: core.CheckPassed, Duration: 1 * time.Second},
+	}
+	for i, id := range []string{"batch-run-0", "batch-run-1", "batch-run-2"} {
+		rec := &core.RunRecord{
+			RunID: id, Target: "main",
+			Checks:    batchChecks,
+			Outcome:   core.OutcomeLanded,
+			BatchID:   "batch-xyz",
+			Position:  i,
+			BatchSize: 3,
+			StartedAt: base.Add(time.Duration(i) * time.Second),
+			EndedAt:   base.Add(time.Duration(i)*time.Second + time.Second),
+		}
+		if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: id, Record: rec}); err != nil {
+			t.Fatalf("Emit(%s): %v", id, err)
+		}
+	}
+
+	// One unrelated serial run: its own distinct (failed) "lint" result, no
+	// BatchID — must count as its own suite, separately from the batch.
+	serialRec := &core.RunRecord{
+		RunID: "serial-run", Target: "main",
+		Checks:    []core.CheckResult{{Name: "lint", Status: core.CheckFailed, Duration: 3 * time.Second}},
+		Outcome:   core.OutcomeRejected,
+		StartedAt: base.Add(time.Minute),
+		EndedAt:   base.Add(time.Minute + 3*time.Second),
+	}
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "serial-run", Record: serialRec}); err != nil {
+		t.Fatalf("Emit(serial-run): %v", err)
+	}
+
+	stats, err := s.CheckStats("main", base.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CheckStats: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("CheckStats = %d entries, want 1", len(stats))
+	}
+	st := stats[0]
+	if st.Name != "lint" {
+		t.Fatalf("CheckStats[0].Name = %q, want lint", st.Name)
+	}
+	if st.Total != 2 {
+		t.Errorf("CheckStats[0].Total = %d, want 2 (one suite for the 3-member batch, one for the serial run — not 4)", st.Total)
+	}
+	if st.Failed != 1 {
+		t.Errorf("CheckStats[0].Failed = %d, want 1 (only the serial run failed; the batch's single counted suite passed)", st.Failed)
+	}
+	if st.RedRate != 0.5 {
+		t.Errorf("CheckStats[0].RedRate = %v, want 0.5 (1/2, not 1/4)", st.RedRate)
+	}
+	// Duration comes from whichever run was picked representative for the
+	// batch suite (deterministic: MIN(run_id) = "batch-run-0", also 1s) plus
+	// the serial run's 3s: avg 2s, max 3s.
+	if st.AvgDuration != 2*time.Second {
+		t.Errorf("CheckStats[0].AvgDuration = %v, want 2s", st.AvgDuration)
+	}
+	if st.MaxDuration != 3*time.Second {
+		t.Errorf("CheckStats[0].MaxDuration = %v, want 3s", st.MaxDuration)
+	}
+}
+
+// TestStore_BatchMembers confirms BatchMembers returns exactly the rows
+// sharing a batch_id, ordered by position, and that an empty/unknown batchID
+// returns an empty result rather than every serial run (which all share the
+// "" batch_id column default).
+func TestStore_BatchMembers(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	for i, id := range []string{"member-2", "member-0", "member-1"} {
+		// Insert out of position order to prove the query sorts by position,
+		// not insertion/started_at order.
+		pos := map[string]int{"member-2": 2, "member-0": 0, "member-1": 1}[id]
+		rec := &core.RunRecord{
+			RunID: id, Target: "main",
+			Outcome:   core.OutcomeLanded,
+			BatchID:   "batch-abc",
+			Position:  pos,
+			BatchSize: 3,
+			StartedAt: base.Add(time.Duration(i) * time.Second),
+			EndedAt:   base.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: id, Record: rec}); err != nil {
+			t.Fatalf("Emit(%s): %v", id, err)
+		}
+	}
+	// An unrelated serial run must never show up in a batch's members.
+	other := sampleRecord("solo-run", "main", base)
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "solo-run", Record: other}); err != nil {
+		t.Fatalf("Emit(solo-run): %v", err)
+	}
+
+	members, err := s.BatchMembers("batch-abc")
+	if err != nil {
+		t.Fatalf("BatchMembers: %v", err)
+	}
+	if len(members) != 3 {
+		t.Fatalf("BatchMembers = %d rows, want 3", len(members))
+	}
+	for i, m := range members {
+		if m.Position != i {
+			t.Errorf("members[%d].Position = %d, want %d (position order)", i, m.Position, i)
+		}
+		if m.BatchID != "batch-abc" || m.BatchSize != 3 {
+			t.Errorf("members[%d] = %+v, want BatchID=batch-abc BatchSize=3", i, m)
+		}
+	}
+	if members[0].RunID != "member-0" || members[1].RunID != "member-1" || members[2].RunID != "member-2" {
+		t.Errorf("members order = [%s %s %s], want [member-0 member-1 member-2]",
+			members[0].RunID, members[1].RunID, members[2].RunID)
+	}
+
+	empty, err := s.BatchMembers("")
+	if err != nil {
+		t.Fatalf("BatchMembers(\"\"): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("BatchMembers(\"\") = %d rows, want 0 (not every serial run)", len(empty))
+	}
+
+	unknown, err := s.BatchMembers("does-not-exist")
+	if err != nil {
+		t.Fatalf("BatchMembers(unknown): %v", err)
+	}
+	if len(unknown) != 0 {
+		t.Errorf("BatchMembers(unknown) = %d rows, want 0", len(unknown))
 	}
 }
 

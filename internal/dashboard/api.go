@@ -313,6 +313,17 @@ type runSummaryJSON struct {
 	StartedAt  string `json:"startedAt"`
 	EndedAt    string `json:"endedAt"`
 	DurationMs int64  `json:"durationMs"`
+
+	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
+	// §10 amendment 1) as-is: all three are omitted entirely for a serial or
+	// speculate run (BatchID == ""), present for a batch member. Note
+	// omitempty's one blind spot: a batch's member 0 also omits "position"
+	// (Go's zero value for int), so a client must treat "batchId present,
+	// position absent" as position 0, not "not a batch member" — batchId's
+	// presence is the actual batch-membership signal.
+	BatchID   string `json:"batchId,omitempty"`
+	Position  int    `json:"position,omitempty"`
+	BatchSize int    `json:"batchSize,omitempty"`
 }
 
 func (d *dash) handleAPIRuns(w http.ResponseWriter, r *http.Request) {
@@ -349,7 +360,7 @@ func (d *dash) handleAPIRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func runRowToJSON(row history.RunRow) runSummaryJSON {
-	return runSummaryJSON{
+	out := runSummaryJSON{
 		RunID: row.RunID, Target: row.Target, Ref: row.CandidateRef,
 		User: row.CandidateUser, Topic: row.CandidateTopic, SHA: row.CandidateSHA,
 		Outcome: row.Outcome, Detail: row.Detail,
@@ -357,6 +368,10 @@ func runRowToJSON(row history.RunRow) runSummaryJSON {
 		EndedAt:    formatRFC3339(row.EndedAt),
 		DurationMs: row.Duration.Milliseconds(),
 	}
+	if row.BatchID != "" {
+		out.BatchID, out.Position, out.BatchSize = row.BatchID, row.Position, row.BatchSize
+	}
+	return out
 }
 
 // --- GET /api/v1/run/{id} -----------------------------------------------------
@@ -382,6 +397,17 @@ type runDetailResponse struct {
 	// omitted) — a client that doesn't care about hooks can simply ignore an
 	// empty one.
 	Hooks []checkJSON `json:"hooks"`
+
+	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
+	// §10 amendment 1) as-is: all three are omitted entirely for a serial or
+	// speculate run (BatchID == ""), present for a batch member. Note
+	// omitempty's one blind spot: a batch's member 0 also omits "position"
+	// (Go's zero value for int), so a client must treat "batchId present,
+	// position absent" as position 0, not "not a batch member" — batchId's
+	// presence is the actual batch-membership signal.
+	BatchID   string `json:"batchId,omitempty"`
+	Position  int    `json:"position,omitempty"`
+	BatchSize int    `json:"batchSize,omitempty"`
 }
 
 type checkJSON struct {
@@ -427,6 +453,9 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 		EndedAt:    formatRFC3339(row.EndedAt),
 		DurationMs: row.Duration.Milliseconds(),
 		Checks:     make([]checkJSON, 0, len(checks)),
+	}
+	if row.BatchID != "" {
+		resp.BatchID, resp.Position, resp.BatchSize = row.BatchID, row.Position, row.BatchSize
 	}
 	for _, c := range checks {
 		resp.Checks = append(resp.Checks, checkJSON{

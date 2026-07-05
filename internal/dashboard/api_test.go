@@ -240,6 +240,58 @@ func TestAPIRuns_Shape(t *testing.T) {
 	}
 }
 
+// TestAPIRuns_BatchFieldsPresentForBatchMemberOmittedForSerial confirms
+// GET /api/v1/runs surfaces batchId/position/batchSize (docs/plans/phase5.md
+// §10 amendment 1) for a batch member, and omits all three (omitempty) for
+// an ordinary serial run in the same result set.
+func TestAPIRuns_BatchFieldsPresentForBatchMemberOmittedForSerial(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, batchMemberRecord("batch-run-1", "main", "batch-xyz", 1))
+	emitRun(t, store, sampleRecord("run-hist-1", "main"))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/runs?target=main&limit=10")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	runs, ok := m["runs"].([]any)
+	if !ok || len(runs) != 2 {
+		t.Fatalf("runs = %v", m["runs"])
+	}
+
+	var batched, serial map[string]any
+	for _, rv := range runs {
+		rm := rv.(map[string]any)
+		switch rm["runID"] {
+		case "batch-run-1":
+			batched = rm
+		case "run-hist-1":
+			serial = rm
+		}
+	}
+	if batched == nil || serial == nil {
+		t.Fatalf("expected both runs present: %v", runs)
+	}
+
+	if batched["batchId"] != "batch-xyz" {
+		t.Errorf("batched run batchId = %v, want batch-xyz", batched["batchId"])
+	}
+	if batched["position"] != float64(1) {
+		t.Errorf("batched run position = %v, want 1", batched["position"])
+	}
+	if batched["batchSize"] != float64(3) {
+		t.Errorf("batched run batchSize = %v, want 3", batched["batchSize"])
+	}
+
+	for _, key := range []string{"batchId", "position", "batchSize"} {
+		if _, ok := serial[key]; ok {
+			t.Errorf("serial run must omit %q (omitempty), got %v", key, serial[key])
+		}
+	}
+}
+
 func TestAPIRuns_UnknownTargetEmpty(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, sampleRecord("run-hist-1", "main"))
@@ -320,6 +372,49 @@ func TestAPIRun_Shape(t *testing.T) {
 	}
 	if c0["name"] != "lint" || c0["status"] != "passed" {
 		t.Errorf("checks[0] = %v", c0)
+	}
+}
+
+// TestAPIRun_BatchFieldsPresentForBatchMember confirms GET /api/v1/run/{id}
+// surfaces batchId/position/batchSize (docs/plans/phase5.md §10 amendment 1)
+// for a batch member.
+func TestAPIRun_BatchFieldsPresentForBatchMember(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, batchMemberRecord("batch-run-2", "main", "batch-xyz", 2))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/run/batch-run-2")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	if m["batchId"] != "batch-xyz" {
+		t.Errorf("batchId = %v, want batch-xyz", m["batchId"])
+	}
+	if m["position"] != float64(2) {
+		t.Errorf("position = %v, want 2", m["position"])
+	}
+	if m["batchSize"] != float64(3) {
+		t.Errorf("batchSize = %v, want 3", m["batchSize"])
+	}
+}
+
+// TestAPIRun_BatchFieldsOmittedForSerialRun confirms an ordinary serial run
+// (never touched by batching) omits all three batch fields entirely
+// (omitempty), rather than reporting batchSize=0/position=0 noise.
+func TestAPIRun_BatchFieldsOmittedForSerialRun(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hist-1", "main"))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/api/v1/run/run-hist-1")
+
+	m := decodeJSON(t, body)
+	for _, key := range []string{"batchId", "position", "batchSize"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("serial run must omit %q (omitempty), got %v", key, m[key])
+		}
 	}
 }
 

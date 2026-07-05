@@ -6,6 +6,12 @@
 <strong>{{.Run.User}}/{{.Run.Topic}}</strong> on target <a href="/t/{{.Run.Target}}">{{.Run.Target}}</a>
 &middot; <span class="tag {{.Run.Outcome.Class}}">{{.Run.Outcome.Word}}</span>
 </p>
+{{if .Run.BatchID}}
+<!-- Batch identity (docs/plans/phase5.md §10 amendment 1): this run's checks
+     were tested once against the whole batch's chain tip, not just this
+     candidate alone — see the members link for the rest of the batch. -->
+<p class="muted">landed in batch <code title="{{.Run.BatchID}}">{{shortSHA .Run.BatchID}}</code> ({{.Run.BatchPosition}}) &middot; <a href="/batch/{{.Run.BatchID}}">view batch members</a></p>
+{{end}}
 <table>
 <tr><th>ref</th><td class="mono" title="{{.Run.Ref}}">{{compactRef .Run.Ref}}</td></tr>
 <tr><th>candidate sha</th><td><code title="{{.Run.SHA}}">{{shortSHA .Run.SHA}}</code></td></tr>

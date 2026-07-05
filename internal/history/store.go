@@ -23,7 +23,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 4
+const schemaVersion = 5
 
 var _ core.Channel = (*Store)(nil)
 
@@ -86,6 +86,9 @@ func Open(path string) (*Store, error) {
 //     COLUMN log_path, stamp user_version=3, loop.
 //   - 3 (schema v3: no hooks table): CREATE TABLE hooks (log/history parity
 //     for post-land hooks, internal/hooks), stamp user_version=4, loop.
+//   - 4 (schema v4: runs has no batch columns): ALTER TABLE runs ADD COLUMN
+//     batch_id/position/batch_size (docs/plans/phase5.md §10 amendment 1,
+//     batch-aware CheckStats), stamp user_version=5, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -141,6 +144,22 @@ CREATE TABLE hooks (
 			}
 			if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
 				return fmt.Errorf("history: set user_version=4: %w", err)
+			}
+		case 4:
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v4->v5 (runs.batch_id): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN position INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v4->v5 (runs.position): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 1`); err != nil {
+				return fmt.Errorf("history: migrate v4->v5 (runs.batch_size): %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != ''`); err != nil {
+				return fmt.Errorf("history: migrate v4->v5 (runs.batch_id index): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 5`); err != nil {
+				return fmt.Errorf("history: set user_version=5: %w", err)
 			}
 		case schemaVersion:
 			return nil
@@ -212,6 +231,9 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		started,
 		ended,
 		duration,
+		rec.BatchID,
+		rec.Position,
+		batchSizeOrDefault(rec.BatchSize),
 	); err != nil {
 		return fmt.Errorf("history: insert run: %w", err)
 	}
@@ -327,6 +349,20 @@ func (s *Store) PruneDepth(cutoff time.Time) error {
 		return fmt.Errorf("history: prune depth: %w", err)
 	}
 	return nil
+}
+
+// batchSizeOrDefault normalizes RunRecord.BatchSize for storage: callers that
+// never touch batching (serial's tryStartTrial/rejectRun/rejectPreMerge/
+// recoverLanded, internal/queue) leave BatchSize at its Go zero value, but
+// the documented semantics (core.RunRecord.BatchSize's doc, schema.sql's
+// column default) are "1 otherwise" — a lone run is a batch of one. Only an
+// explicit BatchSize <= 0 gets this treatment; a real batch always sets it
+// to len(members) >= 1 already (internal/queue/reconcile.go).
+func batchSizeOrDefault(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	return n
 }
 
 func boolToInt(b bool) int {

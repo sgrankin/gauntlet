@@ -23,7 +23,7 @@
 {{if .StoreEnabled}}
 <p class="muted">recent:</p>
 <p class="chips">
-{{range .RecentRuns}}<a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}" title="{{.Title}}"></a>{{else}}<span class="muted">none</span>{{end}}
+{{range .RecentRuns}}<a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a>{{else}}<span class="muted">none</span>{{end}}
 </p>
 {{else}}
 <p class="muted">history disabled</p>

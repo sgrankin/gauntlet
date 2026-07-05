@@ -1,0 +1,23 @@
+{{define "content"}}
+{{if not .StoreEnabled}}
+<p class="muted">history disabled</p>
+{{else if not .Members}}
+<p class="muted">no such batch</p>
+{{else}}
+<p>batch <code>{{.BatchID}}</code> &middot; {{len .Members}} members</p>
+<table>
+<tr><th>#</th><th>run</th><th>user/topic</th><th>outcome</th><th>detail</th><th>started</th><th>duration</th></tr>
+{{range .Members}}
+<tr>
+<td>{{.Position}}</td>
+<td><a href="/run/{{.RunID}}">{{.RunID}}</a></td>
+<td>{{.User}}/{{.Topic}}</td>
+<td><span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span></td>
+<td>{{.Detail}}</td>
+<td class="muted">{{.StartedAt}}</td>
+<td>{{.Duration}}</td>
+</tr>
+{{end}}
+</table>
+{{end}}
+{{end}}

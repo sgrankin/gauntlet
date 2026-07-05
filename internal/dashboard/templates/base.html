@@ -82,6 +82,11 @@ footer { margin-top: 2rem; }
 .chip-conflict { background: var(--conflict); }
 .chip-error { background: var(--error); }
 .chip-neutral { background: var(--neutral); }
+/* chip-batched: a thin ring around a chip whose run landed as part of a
+   batch (docs/plans/phase5.md §10 amendment 1) — enough to read the strip
+   as visually grouped without a redesign; the ring color is deliberately
+   neutral (not tied to outcome) so it layers over any chip-<class> fill. */
+.chip-batched { box-shadow: 0 0 0 2px var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; min-width: 0; }
 
 /* --- pipeline stacked list (/t/{target}, docs/plans/phase5.md §3.4) ----- */

@@ -88,7 +88,7 @@
 <table>
 <tr><th>run</th><th>user/topic</th><th>outcome</th><th>detail</th><th>started</th><th>duration</th></tr>
 {{range .RecentRuns}}
-<tr><td><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}" title="{{.Title}}"></a></td><td>{{.Detail}}</td><td class="muted">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
+<tr><td><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a></td><td>{{.Detail}}</td><td class="muted">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
 {{end}}
 </table>
 {{else}}

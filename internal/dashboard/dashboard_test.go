@@ -636,3 +636,99 @@ func TestRun_PassedCheckWithNoOutputStaysFlat(t *testing.T) {
 		t.Errorf("lint (no output) appears to be wrapped in a <details>, want a flat row:\n%s", body)
 	}
 }
+
+// --- batch identity (docs/plans/phase5.md §10 amendment 1) --------------------
+
+// batchMemberRecord builds one member's RunRecord of a 3-member batch sharing
+// batchID, mirroring queue/reconcile.go's per-member RunRecords (§3.3): same
+// shape as sampleRecord, but with BatchID/Position/BatchSize set.
+func batchMemberRecord(runID, target, batchID string, position int) *core.RunRecord {
+	rec := sampleRecord(runID, target)
+	rec.BatchID = batchID
+	rec.Position = position
+	rec.BatchSize = 3
+	return rec
+}
+
+func TestRun_ShowsBatchIdentityAndLink(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, batchMemberRecord("batch-run-0", "main", "batch-xyz", 0))
+	emitRun(t, store, batchMemberRecord("batch-run-1", "main", "batch-xyz", 1))
+	emitRun(t, store, batchMemberRecord("batch-run-2", "main", "batch-xyz", 2))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/run/batch-run-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "landed in batch") {
+		t.Errorf("expected batch identity line, body:\n%s", body)
+	}
+	if !strings.Contains(body, "2 of 3") {
+		t.Errorf("expected 1-based position \"2 of 3\" (Position=1, BatchSize=3), body:\n%s", body)
+	}
+	if !strings.Contains(body, `href="/batch/batch-xyz"`) {
+		t.Errorf("expected a link to /batch/batch-xyz, body:\n%s", body)
+	}
+}
+
+func TestRun_OmitsBatchIdentityForSerialRun(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hist-1", "main")) // no BatchID
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/run/run-hist-1")
+	if strings.Contains(body, "landed in batch") {
+		t.Errorf("serial run must not show a batch identity line:\n%s", body)
+	}
+}
+
+func TestBatch_ListsMembersInPositionOrder(t *testing.T) {
+	store := openTestStore(t)
+	// Emitted out of position order to prove the page sorts by position.
+	emitRun(t, store, batchMemberRecord("batch-run-2", "main", "batch-xyz", 2))
+	emitRun(t, store, batchMemberRecord("batch-run-0", "main", "batch-xyz", 0))
+	emitRun(t, store, batchMemberRecord("batch-run-1", "main", "batch-xyz", 1))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/batch/batch-xyz")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	i0 := strings.Index(body, "batch-run-0")
+	i1 := strings.Index(body, "batch-run-1")
+	i2 := strings.Index(body, "batch-run-2")
+	if i0 == -1 || i1 == -1 || i2 == -1 {
+		t.Fatalf("expected all 3 members listed, body:\n%s", body)
+	}
+	if !(i0 < i1 && i1 < i2) {
+		t.Errorf("expected members in position order (0, 1, 2), got offsets %d, %d, %d:\n%s", i0, i1, i2, body)
+	}
+}
+
+func TestBatch_UnknownID404(t *testing.T) {
+	store := openTestStore(t)
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, _ := get(t, h, "/batch/does-not-exist")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestIndex_BatchedRunGetsChipBatchedClass confirms the recent-runs chip
+// strip's trivial visual grouping (docs/plans/phase5.md §10 amendment 1,
+// "shared left-border/badge is enough"): a batch member's chip gets the
+// chip-batched CSS class layered on top of its outcome class, a serial run's
+// does not.
+func TestIndex_BatchedRunGetsChipBatchedClass(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, batchMemberRecord("batch-run-0", "main", "batch-xyz", 0))
+
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+	_, body := get(t, h, "/")
+
+	if !strings.Contains(body, `class="chip chip-bad chip-batched"`) {
+		t.Errorf("expected the batched run's chip to carry chip-batched, body:\n%s", body)
+	}
+}

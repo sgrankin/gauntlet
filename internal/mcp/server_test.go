@@ -292,6 +292,85 @@ func TestRun_OutputIncluded(t *testing.T) {
 	}
 }
 
+// batchMemberRecord builds one member's RunRecord of a 3-member batch
+// sharing batchID, mirroring queue/reconcile.go's per-member RunRecords
+// (§3.3): same shape as sampleRecord, but with BatchID/Position/BatchSize
+// set (docs/plans/phase5.md §10 amendment 1).
+func batchMemberRecord(runID, batchID string, position int) *core.RunRecord {
+	rec := sampleRecord(runID, "main")
+	rec.BatchID = batchID
+	rec.Position = position
+	rec.BatchSize = 3
+	return rec
+}
+
+// TestRun_BatchFieldsIncludedForBatchMember confirms the run tool mirrors
+// batchId/position/batchSize (docs/plans/phase5.md §10 amendment 1) for a
+// batch member.
+func TestRun_BatchFieldsIncludedForBatchMember(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: batchMemberRecord("batch-run-2", "batch-xyz", 2)}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "batch-run-2"})
+	if res.IsError {
+		t.Fatalf("run errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{`"batchId":"batch-xyz"`, `"position":2`, `"batchSize":3`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("run content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRun_BatchFieldsOmittedForSerialRun confirms an ordinary serial run
+// omits all three batch fields entirely (omitempty).
+func TestRun_BatchFieldsOmittedForSerialRun(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hist-1", "main")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-hist-1"})
+	text := textOf(t, res)
+	for _, absent := range []string{`"batchId"`, `"position"`, `"batchSize"`} {
+		if strings.Contains(text, absent) {
+			t.Errorf("serial run must omit %q (omitempty):\n%s", absent, text)
+		}
+	}
+}
+
+// TestRuns_BatchFieldsIncludedForBatchMember confirms the runs tool mirrors
+// the same batch fields alongside a serial run in the same result set.
+func TestRuns_BatchFieldsIncludedForBatchMember(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: batchMemberRecord("batch-run-1", "batch-xyz", 1)}); err != nil {
+		t.Fatalf("Emit (batch): %v", err)
+	}
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hist-1", "main")}); err != nil {
+		t.Fatalf("Emit (serial): %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "runs", map[string]any{"target": "main"})
+	if res.IsError {
+		t.Fatalf("runs errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{`"batchId":"batch-xyz"`, `"position":1`, `"batchSize":3`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("runs content missing %q:\n%s", want, text)
+		}
+	}
+}
+
 // logRecord builds a run record with one check carrying a non-empty
 // LogPath, for exercising the run tool's logPath/logUrl fields (chunk F-b).
 func logRecord(runID string) *core.RunRecord {
