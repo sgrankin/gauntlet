@@ -278,11 +278,20 @@ workflows, or touches repo settings.
 ## Slack token summary
 
 If you enable the Slack channel, see README's ["Slack app" setup
-guide](../README.md#slack-app) for the manifest (socket mode, `chat:write` +
-`reactions:read` bot scopes, `connections:write` app-level scope,
-`reaction_added` event subscription) and the two resulting tokens
-(`SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN`) referenced by `gauntlet.kdl`'s
-`app-token-env` / `bot-token-env`.
+guide](../README.md#slack-app) for the manifest (socket mode, bot scopes
+`chat:write`, `reactions:read`, `reactions:write`, and `channels:history`,
+`connections:write` app-level scope, `reaction_added` event subscription)
+and the two resulting tokens (`SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN`)
+referenced by `gauntlet.kdl`'s `app-token-env` / `bot-token-env`. All four
+bot scopes are required, not just `chat:write` — `reactions:write` is what
+lets the daemon acknowledge a reaction command with its own 👀, and
+`channels:history` is what lets it resolve a reaction on a root message
+*after* that run has already terminated (the common case — a human reacts
+to a finished ❌, not a still-running ⏳), since the daemon's own in-memory
+run-tracking is deliberately forgotten the instant a run terminates. Without
+`channels:history`, reacting on anything but a still-in-flight run silently
+does nothing. For a **private** posting channel, that fetch needs
+`groups:history` instead — `channels:history` covers public channels only.
 
 ## Dashboard / API / MCP exposure guidance
 

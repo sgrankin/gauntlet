@@ -174,6 +174,7 @@ log-retention "720h"   // optional; default 30 days ("720h")
 
 history "/var/lib/gauntlet/history.db" {
     sample-every "10s"
+    depth-retention "336h"   // optional; default 14 days ("336h"); queue-depth series only
 }
 
 dashboard "localhost:8080" {
@@ -220,11 +221,28 @@ summarize {
   this one has no "absent ⇒ disabled" state: full logging is always wired
   up, so absence just means the default (30 days, `"720h"`) applies. Every
   value must be positive.
+- **`merge-message <template>`** — a Go `text/template` string for the merge
+  commit's subject line (`internal/queue`). Available fields: `.Topic`,
+  `.User`, `.Ref`, `.RunID`, `.Target`. **Absent ⇒ the built-in default**,
+  the one place the daemon does its own variant switching: `"Merge {{.Topic}}
+  ({{.User}})"` when the candidate ref carries a user (the normal case), or
+  `"Merge {{.Topic}}"` when it doesn't (solo setups, or a ref with no user
+  segment) — dropping the parens rather than rendering a bare
+  `Merge topic ()`. A configured template gets none of that switching: it
+  renders exactly as written for every candidate, empty `.User` included.
+  Either way, the `Gauntlet-Ref: <ref>` / `Gauntlet-Run: <runID>` trailers
+  are appended unconditionally after the subject (and any `summarize` body
+  — see "Summaries" below), regardless of whether a template is configured.
 - **`history <path>`** — SQLite database file for run/check/queue-depth
   history (`internal/history`), read by the dashboard's history views.
   `sample-every` sets the queue-depth sampling interval; defaults to
-  `poll-interval`. **Path absent ⇒ disabled**: no SQLite store is opened, and
-  the daemon runs exactly as it does today.
+  `poll-interval`. `depth-retention` sets how long queue-depth samples are
+  kept before the sampler prunes them; defaults to 14 days (`"336h"`),
+  validated like every duration here. It prunes only the queue-depth sample
+  series — `runs`/`checks`/`hooks` rows are never pruned (see DESIGN.md's
+  decision ledger, "History grows unboundedly by design"). **Path absent ⇒
+  disabled**: no SQLite store is opened, and the daemon runs exactly as it
+  does today.
 - **`dashboard <bind>`** — starts the read-only web dashboard
   (`internal/dashboard`) on `<bind>` (e.g. `localhost:8080`). `url` is an
   optional public base URL used only for outbound links (e.g. the GitHub
@@ -849,7 +867,11 @@ own — e.g. a clone the check maintains in a cache volume, or a shallow fetch
 of just those two SHAs. Gauntlet hands you the SHAs; how you turn them into
 a diff is repo-owned, same as everything else about what a check does.
 
-**Status:** phase 1 is under construction.
+**Status:** feature-complete through phase 5 — serial/batch/speculate
+modes, local+container executors, dashboard/API/MCP, Slack duplex with
+reaction commands, GitHub statuses, post-land hooks, Claude merge
+summaries, full log capture, and park persistence are all shipped;
+post-completion consistency audit done.
 
 See [DESIGN.md](DESIGN.md) for the full design and rationale.
 
