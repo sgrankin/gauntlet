@@ -58,6 +58,20 @@ func (c *LogChannel) Emit(ctx context.Context, ev core.Event) error {
 			line += "\n" + block
 		}
 	}
+	// EventHookStarted/EventHookSkipped (S5-surface, the "surfaced
+	// everywhere" half of S1-C's discoverability requirement): a distinct,
+	// greppable marker line beyond formatEvent's generic kind=/target=/
+	// check=/detail= rendering (which already covers every field these two
+	// kinds carry).
+	switch ev.Kind {
+	case core.EventHookStarted:
+		line += fmt.Sprintf("\n  ▶ hook %s", ev.CheckName)
+	case core.EventHookSkipped:
+		line += "\n  ⚠ hooks skipped (recovery)"
+		if ev.Detail != "" {
+			line += ": " + ev.Detail
+		}
+	}
 	if ev.Record != nil {
 		line += "\n" + formatRunRecord(ev.Record)
 		if block := formatFailureBlock(ev.Record.FirstFailure()); block != "" {
@@ -204,6 +218,12 @@ func eventKindString(k core.EventKind) string {
 		return "ignored_ref"
 	case core.EventHookFinished:
 		return "hook_finished"
+	case core.EventHookStarted:
+		return "hook_started"
+	case core.EventHookSkipped:
+		return "hook_skipped"
+	case core.EventRetryRequested:
+		return "retry_requested"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(k))
 	}

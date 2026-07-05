@@ -85,6 +85,12 @@ type dash struct {
 	// hookCancel is nil unless New was called with WithHookCancel: POST
 	// /api/v1/hooks/cancel responds 503 "hooks disabled" in that case (api.go).
 	hookCancel func(target string) bool
+
+	// hookSnapshot is nil unless New was called with WithHookSnapshot: both
+	// GET /api/v1/status's per-target liveHook field and the target page's
+	// "Post-land hooks" live section simply omit live-hook data in that case
+	// (S5-surface, api.go's WithHookSnapshot doc).
+	hookSnapshot func(target string) (LiveHook, bool)
 }
 
 // --- / --------------------------------------------------------------------
@@ -112,6 +118,21 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		card.RecentRuns, card.StoreEnabled = d.recentRuns(ts.Name, 6, snap.At)
 		data.Targets = append(data.Targets, card)
+	}
+
+	// Recently ignored refs (S7c): a DAEMON-level section, not per-target —
+	// an ignored ref's defining property is that its target segment names no
+	// configured target (that's why it was ignored), so it can't belong to
+	// any target page. A query error degrades to "no section" (logged),
+	// same convention as recentRuns.
+	if d.store != nil {
+		if refs, err := d.store.IgnoredRefs(ignoredRefsLimit); err != nil {
+			log.Printf("dashboard: index: ignored refs: %v", err)
+		} else {
+			for _, ir := range refs {
+				data.IgnoredRefs = append(data.IgnoredRefs, ignoredRefView{Ref: ir.Ref, Detail: ir.Detail, At: formatTime(ir.At)})
+			}
+		}
 	}
 	render(w, indexTmpl, data)
 }
@@ -175,6 +196,29 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data.RecentRuns, data.StoreEnabled = d.recentRuns(ts.Name, 25, snap.At)
+
+	// Post-land hooks (S5-surface): live state comes from the hookSnapshot
+	// closure (nil-safe, WithHookSnapshot), durable state from the history
+	// store (nil-safe; a query error degrades to "log and omit" rather than
+	// failing the whole page — same convention as recentRuns/Hooks above).
+	// Ignored refs are deliberately NOT here: they're daemon-level (their
+	// target segment names no configured target), rendered on the index page
+	// — see handleIndex.
+	if d.hookSnapshot != nil {
+		if lh, ok := d.hookSnapshot(ts.Name); ok {
+			data.LiveHook = buildLiveHookView(lh, snap.At)
+		}
+	}
+	if d.store != nil {
+		if runs, err := d.store.HookRunSummaries(ts.Name, hookRunsLimit); err != nil {
+			log.Printf("dashboard: target %s: hook run summaries: %v", ts.Name, err)
+		} else {
+			for _, hr := range runs {
+				data.HookRuns = append(data.HookRuns, buildHookRunView(hr))
+			}
+		}
+	}
+
 	render(w, targetTmpl, data)
 }
 
@@ -800,6 +844,32 @@ func buildPipelineRun(rs *queue.RunSnapshot, at time.Time) pipelineRunView {
 	return v
 }
 
+// buildLiveHookView builds one liveHookView from a LiveHook snapshot
+// (WithHookSnapshot), computing its elapsed-since-start string the same way
+// buildInFlight/buildPipelineRun do for a check's current-elapsed field.
+func buildLiveHookView(lh LiveHook, at time.Time) *liveHookView {
+	v := &liveHookView{
+		Running: lh.Running, CurrentHook: lh.CurrentHook,
+		HookIndex: lh.HookIndex, HookCount: lh.HookCount,
+		BacklogDepth: lh.BacklogDepth,
+	}
+	if lh.Running && !lh.StartedAt.IsZero() {
+		v.Elapsed = formatDuration(at.Sub(lh.StartedAt))
+	}
+	return v
+}
+
+// buildHookRunView builds one hookRunView from a history.HookRunSummary row,
+// computing Incomplete the same way api.go's hookRunStatus does (OwedCount >
+// DoneCount && !Skipped — a crash-incomplete hook chain, S1-C).
+func buildHookRunView(hr history.HookRunSummary) hookRunView {
+	return hookRunView{
+		RunID: hr.RunID, Owed: hr.OwedCount, Done: hr.DoneCount,
+		StartedAt: formatTime(hr.StartedAt), Skipped: hr.Skipped, SkipReason: hr.SkipReason,
+		Incomplete: hr.OwedCount > hr.DoneCount && !hr.Skipped,
+	}
+}
+
 // render executes t's "base" template into a buffer first, so a template
 // error never leaves a half-written 200 response on the wire.
 func render(w http.ResponseWriter, t *template.Template, data any) {
@@ -993,6 +1063,14 @@ func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool) baseDat
 type indexData struct {
 	baseData
 	Targets []targetCard
+
+	// IgnoredRefs is recently pushed refs naming no configured target
+	// (history.Store.IgnoredRefs, S7c), newest first, daemon-wide — a
+	// daemon-level section on the index page, not per-target, since an
+	// ignored ref by definition belongs to no configured target. Nil when
+	// history is disabled or the query errors (logged, degraded to "no
+	// section").
+	IgnoredRefs []ignoredRefView
 }
 
 type targetCard struct {
@@ -1098,6 +1176,44 @@ type targetData struct {
 	// of the plain .InFlight card when it's set; a single-run single-member
 	// lane leaves this nil and renders exactly as before.
 	Pipeline []pipelineRunView
+
+	// LiveHook is this target's current post-land hook progress
+	// (WithHookSnapshot), nil when no hook is running right now or
+	// WithHookSnapshot was never wired up (S5-surface).
+	LiveHook *liveHookView
+
+	// HookRuns is the durable hook-run ledger (history.Store.
+	// HookRunSummaries, S1-C/S5), newest first, nil when history is disabled
+	// or the query errors (logged, degraded to "none" — matching
+	// RecentRuns/Hooks's own error-handling convention). Ignored refs are
+	// NOT here: they're a daemon-level index-page section (indexData.
+	// IgnoredRefs), since an ignored ref belongs to no configured target.
+	HookRuns []hookRunView
+}
+
+// liveHookView is target.html's view of one target's LiveHook.
+type liveHookView struct {
+	Running              bool
+	CurrentHook          string
+	HookIndex, HookCount int
+	Elapsed              string
+	BacklogDepth         int
+}
+
+// hookRunView is target.html's view of one history.HookRunSummary row.
+type hookRunView struct {
+	RunID      string
+	Owed, Done int
+	StartedAt  string
+	Skipped    bool
+	SkipReason string
+	Incomplete bool
+}
+
+// ignoredRefView is index.html's view of one history.IgnoredRef row (the
+// daemon-level "recently ignored refs" section).
+type ignoredRefView struct {
+	Ref, Detail, At string
 }
 
 type waitingView struct {

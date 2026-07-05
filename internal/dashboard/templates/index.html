@@ -31,5 +31,17 @@
 </div>
 {{end}}
 </div>
+{{if .IgnoredRefs}}
+<div class="section">
+<h2>Recently ignored refs</h2>
+<p class="muted">pushed refs whose target segment names no configured target — likely typos or missing config</p>
+<table>
+<tr><th>ref</th><th>detail</th><th>at</th></tr>
+{{range .IgnoredRefs}}
+<tr><td class="mono muted" title="{{.Ref}}">{{compactRef .Ref}}</td><td>{{.Detail}}</td><td class="muted">{{.At}}</td></tr>
+{{end}}
+</table>
+</div>
+{{end}}
 {{end}}
 {{end}}

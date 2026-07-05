@@ -82,6 +82,23 @@
 </div>
 
 <div class="section">
+<h2>Post-land hooks</h2>
+{{if .LiveHook}}
+<p>{{if .LiveHook.Running}}running <strong>{{.LiveHook.CurrentHook}}</strong> ({{.LiveHook.HookIndex}}/{{.LiveHook.HookCount}}) &middot; {{.LiveHook.Elapsed}}{{else}}<span class="muted">idle</span>{{end}}{{if gt .LiveHook.BacklogDepth 0}} &middot; backlog {{.LiveHook.BacklogDepth}}{{end}}</p>
+{{end}}
+{{if .HookRuns}}
+<table>
+<tr><th>run</th><th>owed</th><th>done</th><th>started</th><th>status</th></tr>
+{{range .HookRuns}}
+<tr><td><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.Owed}}</td><td>{{.Done}}</td><td class="muted">{{.StartedAt}}</td><td>{{if .Skipped}}<span class="tag warn">skipped</span> {{.SkipReason}}{{else if .Incomplete}}<span class="tag bad">crash-incomplete</span>{{else}}<span class="tag ok">complete</span>{{end}}</td></tr>
+{{end}}
+</table>
+{{else if not .LiveHook}}
+<p class="muted">none</p>
+{{end}}
+</div>
+
+<div class="section">
 <h2>Recent runs</h2>
 {{if .StoreEnabled}}
 {{if .RecentRuns}}

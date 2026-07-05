@@ -32,6 +32,12 @@ const defaultDashboardURL = "http://localhost:8899"
 type statusAPIResponse struct {
 	SnapshotAt string            `json:"snapshotAt"`
 	Targets    []statusAPITarget `json:"targets"`
+
+	// IgnoredRefs mirrors dashboard.statusResponse's own TOP-LEVEL,
+	// daemon-wide field (S7c, internal/dashboard/api.go): recently pushed
+	// refs whose target segment names NO configured target — which is why
+	// they can't be scoped to any target object.
+	IgnoredRefs []statusAPIIgnoredRef `json:"ignoredRefs"`
 }
 
 type statusAPITarget struct {
@@ -42,6 +48,38 @@ type statusAPITarget struct {
 	Pipeline []statusAPIPipeline `json:"pipeline"`
 	Waiting  []statusAPIWaiting  `json:"waiting"`
 	Parked   []statusAPIParked   `json:"parked"`
+
+	// LiveHook and HookRuns mirror dashboard.targetStatus's own additions
+	// field-for-field (S5-surface, internal/dashboard/api.go) — see that
+	// file's doc on why this is a separate type rather than a shared import.
+	LiveHook *statusAPILiveHook `json:"liveHook"`
+	HookRuns []statusAPIHookRun `json:"hookRuns"`
+}
+
+type statusAPILiveHook struct {
+	Running      bool   `json:"running"`
+	CurrentHook  string `json:"currentHook"`
+	HookIndex    int    `json:"hookIndex"`
+	HookCount    int    `json:"hookCount"`
+	StartedAt    string `json:"startedAt"`
+	BacklogDepth int    `json:"backlogDepth"`
+}
+
+type statusAPIHookRun struct {
+	RunID      string `json:"runID"`
+	OwedCount  int    `json:"owedCount"`
+	DoneCount  int    `json:"doneCount"`
+	StartedAt  string `json:"startedAt"`
+	Skipped    bool   `json:"skipped"`
+	SkipReason string `json:"skipReason"`
+	Incomplete bool   `json:"incomplete"`
+}
+
+type statusAPIIgnoredRef struct {
+	At     string `json:"at"`
+	Target string `json:"target"` // the UNCONFIGURED name the ref's segment named
+	Ref    string `json:"ref"`
+	Detail string `json:"detail"`
 }
 
 type statusAPIInFlight struct {
@@ -195,9 +233,43 @@ func renderStatus(w io.Writer, resp statusAPIResponse, target string) error {
 				fmt.Fprintf(w, "    %s [%s]: %s\n", p.Ref, p.Outcome, p.Reason)
 			}
 		}
+
+		// Post-land hooks (S5-surface): live progress first (only when a
+		// hook is actually running right now), then the durable owed/done
+		// ledger — a crash-incomplete or recovery-skipped landing is
+		// visible here the same way the dashboard/MCP surfaces it.
+		if t.LiveHook != nil && t.LiveHook.Running {
+			fmt.Fprintf(w, "  hooks: running %s (%d/%d)\n", t.LiveHook.CurrentHook, t.LiveHook.HookIndex, t.LiveHook.HookCount)
+		}
+		if len(t.HookRuns) > 0 {
+			fmt.Fprintf(w, "  hook runs:\n")
+			for _, hr := range t.HookRuns {
+				status := "complete"
+				switch {
+				case hr.Skipped:
+					status = "skipped: " + hr.SkipReason
+				case hr.Incomplete:
+					status = "crash-incomplete"
+				}
+				fmt.Fprintf(w, "    %s owed=%d done=%d [%s]\n", hr.RunID, hr.OwedCount, hr.DoneCount, status)
+			}
+		}
+
 	}
 	if shown == 0 && target != "" {
 		fmt.Fprintf(w, "no such target: %s\n", target)
+	}
+
+	// Recently ignored refs (S7c): a DAEMON-level section, rendered once at
+	// the end — an ignored ref's target segment names no configured target
+	// (that's why it was ignored), so it belongs to no target above. Printed
+	// regardless of any -target filter: a misconfiguration is exactly the
+	// kind of thing a filtered view shouldn't hide.
+	if len(resp.IgnoredRefs) > 0 {
+		fmt.Fprintf(w, "ignored refs (no configured target):\n")
+		for _, ir := range resp.IgnoredRefs {
+			fmt.Fprintf(w, "  %s: %s\n", ir.Ref, ir.Detail)
+		}
 	}
 	return nil
 }

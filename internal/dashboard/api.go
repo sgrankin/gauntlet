@@ -139,6 +139,42 @@ func WithHookCancel(fn func(target string) bool) Option {
 	return func(d *dash) { d.hookCancel = fn }
 }
 
+// LiveHook mirrors hooks.LiveState (internal/hooks) as a dashboard-local
+// struct, so this package never needs to import internal/hooks just to read
+// one target's live post-land hook progress (S5-surface, phase-6 B-track
+// plan). Target is included even though a caller always already knows which
+// target it asked WithHookSnapshot's func for, purely so LiveHook is a
+// complete, self-describing value on its own.
+type LiveHook struct {
+	Target       string
+	Running      bool
+	CurrentHook  string
+	HookIndex    int
+	HookCount    int
+	StartedAt    time.Time
+	BacklogDepth int
+}
+
+// WithHookSnapshot wires fn so GET /api/v1/status (per target) and the
+// target page's "Post-land hooks" section can render a target's current
+// in-flight hook progress (S5-surface: hooks.Runner.Snapshot, chunk 3's
+// nil-safe wiring mirroring WithHookCancel). Without this option, both
+// surfaces simply omit live-hook data (ok=false, as if no hook were ever
+// running) — the durable hookRuns/HookRunSummaries data (from the history
+// store, independent of this) still renders regardless.
+func WithHookSnapshot(fn func(target string) (LiveHook, bool)) Option {
+	return func(d *dash) { d.hookSnapshot = fn }
+}
+
+// hookRunsLimit/ignoredRefsLimit cap how many durable hook-run summaries /
+// ignored-ref rows GET /api/v1/status and the target page fetch per target —
+// both are meant as a recent-activity glance, not a full history browse (that
+// belongs to /run/{id} and a future ignored-refs list view).
+const (
+	hookRunsLimit    = 10
+	ignoredRefsLimit = 10
+)
+
 // mountAPIRoutes registers the JSON API beside the HTML routes New already
 // registers. /api/v1/retry is registered without a method verb (unlike the
 // GET-only routes) because its handler needs full control over the 405
@@ -148,6 +184,8 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/status", d.handleAPIStatus)
 	mux.HandleFunc("GET /api/v1/runs", d.handleAPIRuns)
 	mux.HandleFunc("GET /api/v1/run/{id}", d.handleAPIRun)
+	mux.HandleFunc("GET /api/v1/batch/{id}", d.handleAPIBatch)
+	mux.HandleFunc("GET /api/v1/checks", d.handleAPIChecks)
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
 	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
@@ -158,6 +196,17 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 type statusResponse struct {
 	SnapshotAt string         `json:"snapshotAt"`
 	Targets    []targetStatus `json:"targets"`
+
+	// IgnoredRefs surfaces recently pushed refs that named NO configured
+	// target (history.Store.IgnoredRefs, S7c). Deliberately a top-level,
+	// daemon-wide field rather than per-target (phase-6 B-track integration
+	// finding): an ignored ref's defining property is that its target
+	// segment names no configured target — reconcile emits EventIgnoredRef
+	// under that unconfigured name — so a per-configured-target list could
+	// never match anything. Each entry's target field carries the
+	// unconfigured name for display. Omitted (not just empty) when history
+	// is disabled.
+	IgnoredRefs []ignoredRefStatus `json:"ignoredRefs,omitempty"`
 }
 
 type targetStatus struct {
@@ -168,6 +217,54 @@ type targetStatus struct {
 	Pipeline []pipelineStatus `json:"pipeline"`
 	Waiting  []waitingStatus  `json:"waiting"`
 	Parked   []parkedStatus   `json:"parked"`
+
+	// LiveHook is this target's current post-land hook progress
+	// (hooks.Runner.Snapshot via WithHookSnapshot), nil when no hook is
+	// running right now or WithHookSnapshot was never wired up (S5-surface).
+	LiveHook *liveHookStatus `json:"liveHook,omitempty"`
+
+	// HookRuns surfaces the durable hook-run ledger (history.Store.
+	// HookRunSummaries, S1-C/S5): each landing's owed/done hook count, so a
+	// crash-incomplete or recovery-skipped hook chain is visible without
+	// digging into /run/{id}. Omitted (not just empty) when history is
+	// disabled. (Ignored refs, by contrast, live at the response's top
+	// level — see statusResponse.IgnoredRefs for why they can't be
+	// target-scoped.)
+	HookRuns []hookRunStatus `json:"hookRuns,omitempty"`
+}
+
+// liveHookStatus is GET /api/v1/status's JSON view of one target's LiveHook.
+type liveHookStatus struct {
+	Running      bool   `json:"running"`
+	CurrentHook  string `json:"currentHook"`
+	HookIndex    int    `json:"hookIndex"`
+	HookCount    int    `json:"hookCount"`
+	StartedAt    string `json:"startedAt"`
+	BacklogDepth int    `json:"backlogDepth"`
+}
+
+// hookRunStatus is GET /api/v1/status's JSON view of one history.
+// HookRunSummary row. Incomplete is computed here (OwedCount > DoneCount &&
+// !Skipped) rather than left for the client to derive, matching the plan's
+// "crash-incomplete" signal.
+type hookRunStatus struct {
+	RunID      string `json:"runID"`
+	OwedCount  int    `json:"owedCount"`
+	DoneCount  int    `json:"doneCount"`
+	StartedAt  string `json:"startedAt"`
+	Skipped    bool   `json:"skipped"`
+	SkipReason string `json:"skipReason,omitempty"`
+	Incomplete bool   `json:"incomplete"`
+}
+
+// ignoredRefStatus is GET /api/v1/status's JSON view of one history.
+// IgnoredRef row. Target is the UNCONFIGURED target name the ref's segment
+// named (the reason it was ignored), carried purely for display.
+type ignoredRefStatus struct {
+	At     string `json:"at"`
+	Target string `json:"target"`
+	Ref    string `json:"ref"`
+	Detail string `json:"detail"`
 }
 
 type inFlightStatus struct {
@@ -224,12 +321,28 @@ func (d *dash) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 		Targets:    make([]targetStatus, 0, len(snap.Targets)),
 	}
 	for _, ts := range snap.Targets {
-		resp.Targets = append(resp.Targets, buildTargetStatus(ts))
+		resp.Targets = append(resp.Targets, d.buildTargetStatus(ts))
+	}
+	if d.store != nil {
+		if refs, err := d.store.IgnoredRefs(ignoredRefsLimit); err != nil {
+			log.Printf("dashboard: api: ignored refs: %v", err)
+		} else {
+			resp.IgnoredRefs = make([]ignoredRefStatus, 0, len(refs))
+			for _, ir := range refs {
+				resp.IgnoredRefs = append(resp.IgnoredRefs, ignoredRefStatus{
+					At: formatRFC3339(ir.At), Target: ir.Target, Ref: ir.Ref, Detail: ir.Detail,
+				})
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
+// buildTargetStatus is a method (rather than a free function) so it can
+// reach d.hookSnapshot/d.store for the live/durable hook fields
+// (S5-surface) — every other field is built exactly as before. Ignored refs
+// are daemon-level, populated by handleAPIStatus itself, not here.
+func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
 		Name:     ts.Name,
 		Branch:   ts.Branch,
@@ -259,6 +372,30 @@ func buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 			Ref: pe.Candidate.Ref, SHA: pe.Candidate.SHA,
 			Outcome: outcomeWord(pe.Outcome), Reason: pe.Reason, At: formatRFC3339(pe.At),
 		})
+	}
+
+	if d.hookSnapshot != nil {
+		if lh, ok := d.hookSnapshot(ts.Name); ok {
+			out.LiveHook = &liveHookStatus{
+				Running: lh.Running, CurrentHook: lh.CurrentHook,
+				HookIndex: lh.HookIndex, HookCount: lh.HookCount,
+				StartedAt: formatRFC3339(lh.StartedAt), BacklogDepth: lh.BacklogDepth,
+			}
+		}
+	}
+	if d.store != nil {
+		if runs, err := d.store.HookRunSummaries(ts.Name, hookRunsLimit); err != nil {
+			log.Printf("dashboard: api: hook run summaries %s: %v", ts.Name, err)
+		} else {
+			out.HookRuns = make([]hookRunStatus, 0, len(runs))
+			for _, hr := range runs {
+				out.HookRuns = append(out.HookRuns, hookRunStatus{
+					RunID: hr.RunID, OwedCount: hr.OwedCount, DoneCount: hr.DoneCount,
+					StartedAt: formatRFC3339(hr.StartedAt), Skipped: hr.Skipped, SkipReason: hr.SkipReason,
+					Incomplete: hr.OwedCount > hr.DoneCount && !hr.Skipped,
+				})
+			}
+		}
 	}
 	return out
 }
@@ -496,6 +633,147 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 			Output:  h.Output,
 			LogPath: h.LogPath,
 			LogURL:  d.runLogURL(row.RunID, h.Name, h.LogPath),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- GET /api/v1/batch/{id} ---------------------------------------------------
+
+// batchMemberJSON is one member of GET /api/v1/batch/{id}'s response — the
+// same data handleBatch (server.go) already renders as HTML, over
+// history.Store.BatchMembers (S7a: no new data source, just a JSON surface
+// for it).
+type batchMemberJSON struct {
+	RunID      string `json:"runID"`
+	Target     string `json:"target"`
+	Position   int    `json:"position"`
+	User       string `json:"user"`
+	Topic      string `json:"topic"`
+	SHA        string `json:"sha"`
+	Outcome    string `json:"outcome"`
+	Detail     string `json:"detail"`
+	StartedAt  string `json:"startedAt"`
+	EndedAt    string `json:"endedAt"`
+	DurationMs int64  `json:"durationMs"`
+}
+
+type batchResponse struct {
+	BatchID string            `json:"batchId"`
+	Members []batchMemberJSON `json:"members"`
+}
+
+// handleAPIBatch mirrors handleBatch (server.go) but as JSON: unknown batch
+// ID (or an empty result — BatchMembers' own "empty batchID" doc) 404s, same
+// as the HTML route.
+func (d *dash) handleAPIBatch(w http.ResponseWriter, r *http.Request) {
+	if d.store == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "history disabled")
+		return
+	}
+
+	id := r.PathValue("id")
+	members, err := d.store.BatchMembers(id)
+	if err != nil {
+		log.Printf("dashboard: api: batch %s: %v", id, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if len(members) == 0 {
+		writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	resp := batchResponse{BatchID: id, Members: make([]batchMemberJSON, 0, len(members))}
+	for _, m := range members {
+		resp.Members = append(resp.Members, batchMemberJSON{
+			RunID: m.RunID, Target: m.Target, Position: m.Position,
+			User: m.CandidateUser, Topic: m.CandidateTopic, SHA: m.CandidateSHA,
+			Outcome: m.Outcome, Detail: m.Detail,
+			StartedAt:  formatRFC3339(m.StartedAt),
+			EndedAt:    formatRFC3339(m.EndedAt),
+			DurationMs: m.Duration.Milliseconds(),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- GET /api/v1/checks?target=&since= ----------------------------------------
+
+// checkStatJSON is one row of GET /api/v1/checks's per-check stats table,
+// mirroring history.CheckStat field-for-field.
+type checkStatJSON struct {
+	Name          string  `json:"name"`
+	Total         int     `json:"total"`
+	Failed        int     `json:"failed"`
+	RedRate       float64 `json:"redRate"`
+	AvgDurationMs int64   `json:"avgDurationMs"`
+	MaxDurationMs int64   `json:"maxDurationMs"`
+}
+
+// depthPointJSON is one sample of GET /api/v1/checks's depth series,
+// mirroring history.DepthPoint field-for-field.
+type depthPointJSON struct {
+	At       string `json:"at"`
+	Waiting  int    `json:"waiting"`
+	InFlight int    `json:"inFlight"`
+	Parked   int    `json:"parked"`
+}
+
+type checksAPIResponse struct {
+	Target string           `json:"target"`
+	Since  string           `json:"since"`
+	Stats  []checkStatJSON  `json:"stats"`
+	Depth  []depthPointJSON `json:"depth"`
+}
+
+// handleAPIChecks is the JSON counterpart to handleChecks (server.go), the
+// one HTML section (red-rate/avg-duration table + depth chart) that was
+// previously machine-unreadable (S7b): it reuses the exact same
+// CheckStats/DepthSeries queries and parseSince parsing, just serialized as
+// JSON numbers/points instead of an SVG.
+func (d *dash) handleAPIChecks(w http.ResponseWriter, r *http.Request) {
+	if d.store == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "history disabled")
+		return
+	}
+
+	target := r.URL.Query().Get("target")
+	if target == "" {
+		writeJSONError(w, http.StatusBadRequest, "target is required")
+		return
+	}
+
+	now := time.Now()
+	since := parseSince(r.URL.Query().Get("since"), now)
+
+	stats, err := d.store.CheckStats(target, since)
+	if err != nil {
+		log.Printf("dashboard: api: check stats %s: %v", target, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	depth, err := d.store.DepthSeries(target, since)
+	if err != nil {
+		log.Printf("dashboard: api: depth series %s: %v", target, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	resp := checksAPIResponse{
+		Target: target, Since: formatRFC3339(since),
+		Stats: make([]checkStatJSON, 0, len(stats)),
+		Depth: make([]depthPointJSON, 0, len(depth)),
+	}
+	for _, st := range stats {
+		resp.Stats = append(resp.Stats, checkStatJSON{
+			Name: st.Name, Total: st.Total, Failed: st.Failed, RedRate: st.RedRate,
+			AvgDurationMs: st.AvgDuration.Milliseconds(), MaxDurationMs: st.MaxDuration.Milliseconds(),
+		})
+	}
+	for _, p := range depth {
+		resp.Depth = append(resp.Depth, depthPointJSON{
+			At: formatRFC3339(p.At), Waiting: p.Waiting, InFlight: p.InFlight, Parked: p.Parked,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

@@ -766,6 +766,125 @@ func TestBatch_UnknownID404(t *testing.T) {
 	}
 }
 
+// --- post-land hooks + ignored refs (S5-surface, S7c) -------------------------
+
+// TestTarget_RendersLiveHookSection confirms the target page's "Post-land
+// hooks" section renders a running hook's progress when WithHookSnapshot
+// reports one for this target.
+func TestTarget_RendersLiveHookSection(t *testing.T) {
+	snap := testSnapshot()
+	hookSnapshot := func(target string) (dashboard.LiveHook, bool) {
+		if target != "main" {
+			return dashboard.LiveHook{}, false
+		}
+		return dashboard.LiveHook{Target: "main", Running: true, CurrentHook: "deploy", HookIndex: 1, HookCount: 2}, true
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithHookSnapshot(hookSnapshot))
+
+	_, body := get(t, h, "/t/main")
+	for _, want := range []string{"Post-land hooks", "deploy", "1", "2"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("target body missing %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+// TestTarget_NoHookSnapshotShowsIdle confirms the target page still renders
+// the "Post-land hooks" section even without WithHookSnapshot wired up — it
+// just omits live progress.
+func TestTarget_NoHookSnapshotShowsIdle(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/t/main")
+	if !strings.Contains(body, "Post-land hooks") {
+		t.Errorf("target body missing Post-land hooks section:\n%s", body)
+	}
+}
+
+// TestTarget_RendersDurableHookRuns confirms the target page renders the
+// durable hook-run ledger (history.Store.HookRunSummaries, S1-C/S5) when a
+// store is configured, seeded through the store's real Emit path: a terminal
+// run (the runs row hook_runs FK-references), one EventHookStarted with
+// HookCount=2 (owed=2), and one EventHookFinished (done=1) — owed>done and
+// not skipped, so the row must render as crash-incomplete.
+func TestTarget_RendersDurableHookRuns(t *testing.T) {
+	snap := testSnapshot()
+	store := openTestStore(t)
+	at := time.Date(2026, 7, 5, 11, 30, 0, 0, time.UTC)
+
+	emitRun(t, store, sampleRecord("run-hooks-page", "main"))
+	if err := store.Emit(context.Background(), core.Event{
+		Kind: core.EventHookStarted, Target: "main", RunID: "run-hooks-page",
+		CheckName: "deploy", HookIndex: 0, HookCount: 2, At: at,
+	}); err != nil {
+		t.Fatalf("Emit(EventHookStarted): %v", err)
+	}
+	emitHook(t, store, "run-hooks-page", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 100 * time.Millisecond})
+
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+
+	_, body := get(t, h, "/t/main")
+	for _, want := range []string{"Post-land hooks", "run-hooks-page", "crash-incomplete"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("target body missing %q\nbody:\n%s", want, body)
+		}
+	}
+	// Ignored refs are a daemon-level index-page section, never per-target
+	// (their target segment names no configured target).
+	if strings.Contains(body, "Recently ignored refs") {
+		t.Errorf("target page must not render the ignored-refs section (daemon-level, index page only):\n%s", body)
+	}
+}
+
+// TestIndex_RendersIgnoredRefs confirms the index page renders the
+// daemon-level "Recently ignored refs" section (history.Store.IgnoredRefs,
+// S7c) when a store holds ignored-ref rows — seeded through the store's real
+// Emit path with the UNCONFIGURED target name ("nope"), exactly as
+// reconcile's checkIgnoredRefs emits it. The section is daemon-level
+// because an ignored ref's defining property is that its target segment
+// names no configured target.
+func TestIndex_RendersIgnoredRefs(t *testing.T) {
+	snap := testSnapshot()
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{
+		Kind: core.EventIgnoredRef, Target: "nope",
+		Candidate: core.Candidate{Ref: "refs/heads/for/nope/kim/typo"},
+		Detail:    `target "nope" is not configured`,
+		At:        time.Date(2026, 7, 5, 11, 30, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Emit(EventIgnoredRef): %v", err)
+	}
+
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+
+	_, body := get(t, h, "/")
+	for _, want := range []string{
+		"Recently ignored refs",
+		"no configured target",
+		"nope/kim/typo",
+		"target &#34;nope&#34; is not configured",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("index body missing %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+// TestIndex_OmitsIgnoredRefsSectionWhenNone confirms the index page renders
+// no ignored-refs section at all when the store holds no rows — the section
+// is an attention flag, not a permanent fixture.
+func TestIndex_OmitsIgnoredRefsSectionWhenNone(t *testing.T) {
+	snap := testSnapshot()
+	store := openTestStore(t)
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+
+	_, body := get(t, h, "/")
+	if strings.Contains(body, "Recently ignored refs") {
+		t.Errorf("index body has an ignored-refs section with no rows:\n%s", body)
+	}
+}
+
 // TestIndex_BatchedRunGetsChipBatchedClass confirms the recent-runs chip
 // strip's trivial visual grouping (docs/plans/phase5.md §10 amendment 1,
 // "shared left-border/badge is enough"): a batch member's chip gets the

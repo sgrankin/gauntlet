@@ -400,6 +400,74 @@ func TestSlack_HookFinishedNilCheckPostsNothing(t *testing.T) {
 	}
 }
 
+// TestSlack_HookStartedPostsStandaloneMessage confirms EventHookStarted
+// (S5-surface, the "surfaced everywhere" half of S1-C's discoverability
+// requirement) posts a standalone (non-threaded) message naming the hook —
+// same reasoning as postHookFinished: by hook time the run's root is already
+// forgotten, so there's no thread to reply on.
+func TestSlack_HookStartedPostsStandaloneMessage(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/jill/deploy", Target: "main", User: "jill", Topic: "deploy", SHA: "cafefeed"}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookStarted, Target: "main", Candidate: cand, RunID: "run-hook-started", CheckName: "deploy"})
+
+	posts := fake.waitForPosts(1, testTimeout)
+	post := posts[0]
+	if post.method != "chat.postMessage" || post.threadTS != "" {
+		t.Fatalf("hook-started post = %+v, want a standalone (non-threaded) chat.postMessage", post)
+	}
+	for _, want := range []string{"▶", "deploy", "main"} {
+		if !strings.Contains(post.text, want) {
+			t.Errorf("hook-started text = %q, want it to contain %q", post.text, want)
+		}
+	}
+}
+
+// TestSlack_HookSkippedPostsStandaloneMessage confirms EventHookSkipped
+// (S1-C: a recovery-skipped landing's hooks never ran at all) posts a
+// standalone message including Detail, distinct from a normal hook result.
+func TestSlack_HookSkippedPostsStandaloneMessage(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookSkipped, Target: "main", RunID: "run-hook-skipped", Detail: "recovered landing; hooks not run"})
+
+	posts := fake.waitForPosts(1, testTimeout)
+	post := posts[0]
+	if post.method != "chat.postMessage" || post.threadTS != "" {
+		t.Fatalf("hook-skipped post = %+v, want a standalone (non-threaded) chat.postMessage", post)
+	}
+	for _, want := range []string{"⚠", "skipped", "main", "recovered landing; hooks not run"} {
+		if !strings.Contains(post.text, want) {
+			t.Errorf("hook-skipped text = %q, want it to contain %q", post.text, want)
+		}
+	}
+}
+
+// TestSlack_RetryRequestedPostsNothing confirms EventRetryRequested (S3, a
+// history-only durability signal per the phase-6 B-track plan: "other
+// channels default-ignore it; only history acts") produces no Slack post —
+// Slack falls through handleOutbound's switch exactly like any other kind it
+// doesn't render.
+func TestSlack_RetryRequestedPostsNothing(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/kim/topic", Target: "main", SHA: "abc123"}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventRetryRequested, Target: "main", Candidate: cand})
+
+	s.mu.Lock()
+	wake := s.notify
+	s.mu.Unlock()
+	select {
+	case <-wake:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the event to be processed")
+	}
+
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no Slack post for EventRetryRequested, got %+v", got)
+	}
+}
+
 // TestSlack_UnknownEventKindPostsNothing is S14's universal contract test
 // for Slack: handleOutbound's switch falls through to no-op for any Kind it
 // doesn't recognize (mirroring core.Channel's "ignore unknown kinds"

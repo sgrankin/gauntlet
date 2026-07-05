@@ -428,6 +428,13 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 		s.logf("slack: ignored ref target=%s ref=%s", ev.Target, ev.Candidate.Ref)
 	case ev.Kind == core.EventHookFinished:
 		s.postHookFinished(ctx, ev)
+	case ev.Kind == core.EventHookStarted:
+		s.postHookStarted(ctx, ev)
+	case ev.Kind == core.EventHookSkipped:
+		s.postHookSkipped(ctx, ev)
+		// EventRetryRequested is a history-only durability signal (S3, phase-6
+		// B-track plan): "Other channels default-ignore it; only history acts."
+		// Falling through here (no case) is deliberate, not an oversight.
 	}
 }
 
@@ -752,6 +759,36 @@ func (s *Slack) postHookFinished(ctx context.Context, ev core.Event) {
 
 	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false)); err != nil {
 		s.logf("slack: hook-failed post failed run=%s hook=%s: %v", ev.RunID, ev.CheckName, err)
+	}
+}
+
+// postHookStarted posts a standalone (non-threaded) channel message
+// announcing that a post-land hook has begun (S5-surface, the "surfaced
+// everywhere" half of S1-C's discoverability requirement). Like
+// postHookFinished, by hook time the run's root ts is already forgotten
+// (postTerminal's forget call runs at landing time, before any hook has even
+// started), so there is no thread to reply on — this posts a fresh
+// top-level message instead.
+func (s *Slack) postHookStarted(ctx context.Context, ev core.Event) {
+	text := fmt.Sprintf("▶ hook %s (%s) → %s", ev.CheckName, ev.Candidate.Topic, ev.Target)
+	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false)); err != nil {
+		s.logf("slack: hook-started post failed run=%s hook=%s: %v", ev.RunID, ev.CheckName, err)
+	}
+}
+
+// postHookSkipped posts a standalone channel message when a recovery-skipped
+// landing's hooks never ran at all (S1-C discoverability): a crash-recovered
+// landing has no merge SHA to export a tree from
+// (hooks.Runner.runLanding's "recovered landing, skipping hooks" doc), so its
+// hooks are skipped entirely — this is the whole point of S1-C's durable,
+// surfaced-everywhere marker.
+func (s *Slack) postHookSkipped(ctx context.Context, ev core.Event) {
+	text := fmt.Sprintf("⚠ hooks skipped (recovery) → %s", ev.Target)
+	if ev.Detail != "" {
+		text += ": " + ev.Detail
+	}
+	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false)); err != nil {
+		s.logf("slack: hook-skipped post failed run=%s: %v", ev.RunID, err)
 	}
 }
 

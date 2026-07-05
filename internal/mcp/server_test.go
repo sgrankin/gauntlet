@@ -700,3 +700,200 @@ func TestHookCancel_NilHookCancelFunc_ErrorResult(t *testing.T) {
 		t.Fatalf("expected error result when hook cancel is disabled, got: %s", textOf(t, res))
 	}
 }
+
+// --- status: liveHook/hookRuns/ignoredRefs (S5-surface, S7c) -----------------
+
+func TestStatus_LiveHookFieldFromHookSnapshotClosure(t *testing.T) {
+	snap := testSnapshot()
+	hookSnapshot := func(target string) (mcpsrv.LiveHook, bool) {
+		if target != "main" {
+			return mcpsrv.LiveHook{}, false
+		}
+		return mcpsrv.LiveHook{Target: "main", Running: true, CurrentHook: "deploy", HookIndex: 1, HookCount: 3, BacklogDepth: 2}, true
+	}
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }, HookSnapshot: hookSnapshot})
+
+	res := callTool(t, session, "status", map[string]any{"target": "main"})
+	if res.IsError {
+		t.Fatalf("status errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{`"liveHook"`, `"running":true`, `"currentHook":"deploy"`, `"hookIndex":1`, `"hookCount":3`, `"backlogDepth":2`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("status content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestStatus_NoHookSnapshotOmitsLiveHook(t *testing.T) {
+	snap := testSnapshot()
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }})
+
+	res := callTool(t, session, "status", map[string]any{"target": "main"})
+	text := textOf(t, res)
+	if strings.Contains(text, `"liveHook"`) {
+		t.Errorf("status content includes liveHook without HookSnapshot wired:\n%s", text)
+	}
+}
+
+// TestStatus_HookRunsAndIgnoredRefsFromStore confirms the status tool
+// surfaces the durable hook-run ledger per target (S1-C/S5) and
+// recently-ignored refs at the TOP level (S7c, daemon-wide — an ignored
+// ref's target segment names no configured target, so it can't be scoped to
+// one) when a store is configured — seeded through the store's real Emit
+// path: a terminal run first (the runs row hook_runs FK-references), one
+// EventHookStarted with HookCount=2 (owed=2), one EventHookFinished
+// (done=1 ⇒ crash-incomplete), and one EventIgnoredRef under the
+// UNCONFIGURED target name "nope".
+func TestStatus_HookRunsAndIgnoredRefsFromStore(t *testing.T) {
+	snap := testSnapshot()
+	store := openTestStore(t)
+	at := time.Date(2026, 7, 5, 11, 30, 0, 0, time.UTC)
+
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hooks-status", "main")}); err != nil {
+		t.Fatalf("Emit(run): %v", err)
+	}
+	if err := store.Emit(context.Background(), core.Event{
+		Kind: core.EventHookStarted, Target: "main", RunID: "run-hooks-status",
+		CheckName: "deploy", HookIndex: 0, HookCount: 2, At: at,
+	}); err != nil {
+		t.Fatalf("Emit(EventHookStarted): %v", err)
+	}
+	emitHook(t, store, "run-hooks-status", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 100 * time.Millisecond})
+	if err := store.Emit(context.Background(), core.Event{
+		Kind: core.EventIgnoredRef, Target: "nope",
+		Candidate: core.Candidate{Ref: "refs/heads/for/nope/kim/typo"},
+		Detail:    `target "nope" is not configured`, At: at,
+	}); err != nil {
+		t.Fatalf("Emit(EventIgnoredRef): %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }, Store: store})
+
+	res := callTool(t, session, "status", map[string]any{"target": "main"})
+	if res.IsError {
+		t.Fatalf("status errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{
+		`"hookRuns"`, `"runID":"run-hooks-status"`, `"owedCount":2`, `"doneCount":1`, `"incomplete":true`,
+		// Top-level, daemon-wide: present even though the query filtered to
+		// target "main" — the ignored ref's own target is the unconfigured
+		// "nope", carried for display.
+		`"ignoredRefs"`, `"target":"nope"`, `"ref":"refs/heads/for/nope/kim/typo"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("status content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestStatus_NoStoreOmitsHookRunsAndIgnoredRefs(t *testing.T) {
+	snap := testSnapshot()
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }})
+
+	res := callTool(t, session, "status", map[string]any{"target": "main"})
+	text := textOf(t, res)
+	for _, absent := range []string{`"hookRuns"`, `"ignoredRefs"`} {
+		if strings.Contains(text, absent) {
+			t.Errorf("status content includes %q without a store:\n%s", absent, text)
+		}
+	}
+}
+
+// --- batch (S7a) --------------------------------------------------------------
+
+func TestBatch_Shape(t *testing.T) {
+	store := openTestStore(t)
+	for i, runID := range []string{"batch-run-0", "batch-run-1", "batch-run-2"} {
+		if err := store.Emit(context.Background(), core.Event{Record: batchMemberRecord(runID, "batch-xyz", i)}); err != nil {
+			t.Fatalf("Emit: %v", err)
+		}
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "batch", map[string]any{"batch_id": "batch-xyz"})
+	if res.IsError {
+		t.Fatalf("batch errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{
+		`"batchId":"batch-xyz"`, `"runID":"batch-run-0"`, `"runID":"batch-run-1"`, `"runID":"batch-run-2"`,
+		`"position":0`, `"position":1`, `"position":2`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("batch content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestBatch_UnknownID_ErrorResult(t *testing.T) {
+	store := openTestStore(t)
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "batch", map[string]any{"batch_id": "does-not-exist"})
+	if !res.IsError {
+		t.Fatalf("expected error result for unknown batch_id, got: %s", textOf(t, res))
+	}
+}
+
+func TestBatch_NilStore_ErrorResult(t *testing.T) {
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }})
+
+	res := callTool(t, session, "batch", map[string]any{"batch_id": "batch-xyz"})
+	if !res.IsError {
+		t.Fatalf("expected error result when history is disabled, got: %s", textOf(t, res))
+	}
+	if !strings.Contains(textOf(t, res), "history disabled") {
+		t.Errorf("expected \"history disabled\" in error text, got: %s", textOf(t, res))
+	}
+}
+
+// --- checks (S7b) --------------------------------------------------------------
+
+func TestChecks_Shape(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hist-1", "main")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := store.RecordDepth(now.Add(-time.Hour), "main", 2, 1, 0); err != nil {
+		t.Fatalf("RecordDepth: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "checks", map[string]any{"target": "main", "since": "720h"})
+	if res.IsError {
+		t.Fatalf("checks errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{
+		`"target":"main"`, `"stats"`, `"name":"lint"`, `"name":"test"`,
+		`"depth"`, `"waiting":2`, `"inFlight":1`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("checks content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestChecks_MissingTarget_ErrorResult(t *testing.T) {
+	store := openTestStore(t)
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "checks", map[string]any{})
+	if !res.IsError {
+		t.Fatalf("expected error result for missing target, got: %s", textOf(t, res))
+	}
+}
+
+func TestChecks_NilStore_ErrorResult(t *testing.T) {
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }})
+
+	res := callTool(t, session, "checks", map[string]any{"target": "main"})
+	if !res.IsError {
+		t.Fatalf("expected error result when history is disabled, got: %s", textOf(t, res))
+	}
+}

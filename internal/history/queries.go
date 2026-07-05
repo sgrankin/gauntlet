@@ -449,17 +449,25 @@ type IgnoredRef struct {
 	Detail string
 }
 
-// IgnoredRefs returns target's most recently ignored refs, newest first,
-// capped at limit — the read side of S7c's durable misconfig capture: an
-// operator not watching the log/Slack at the instant a misnamed/
-// misconfigured ref was pushed can still discover it here after the fact.
-func (s *Store) IgnoredRefs(target string, limit int) ([]IgnoredRef, error) {
+// IgnoredRefs returns the most recently ignored refs across the whole
+// daemon, newest first, capped at limit — the read side of S7c's durable
+// misconfig capture: an operator not watching the log/Slack at the instant
+// a misnamed/misconfigured ref was pushed can still discover it here after
+// the fact.
+//
+// Deliberately NOT filtered by target (integration finding, phase-6
+// B-track): an ignored ref's defining property is that its target segment
+// names NO configured target — checkIgnoredRefs emits it under that
+// unconfigured name — so a per-configured-target query would never match
+// anything. The IgnoredRef.Target field carries the unconfigured name for
+// display ("for/nope/… — target \"nope\" is not configured").
+func (s *Store) IgnoredRefs(limit int) ([]IgnoredRef, error) {
 	rows, err := s.db.Query(
-		`SELECT at, target, ref, detail FROM ignored_refs WHERE target = ? ORDER BY at DESC LIMIT ?`,
-		target, limit,
+		`SELECT at, target, ref, detail FROM ignored_refs ORDER BY at DESC LIMIT ?`,
+		limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("history: ignored refs %s: %w", target, err)
+		return nil, fmt.Errorf("history: ignored refs: %w", err)
 	}
 	defer rows.Close()
 
@@ -468,13 +476,13 @@ func (s *Store) IgnoredRefs(target string, limit int) ([]IgnoredRef, error) {
 		var r IgnoredRef
 		var atMS int64
 		if err := rows.Scan(&atMS, &r.Target, &r.Ref, &r.Detail); err != nil {
-			return nil, fmt.Errorf("history: ignored refs %s: %w", target, err)
+			return nil, fmt.Errorf("history: ignored refs: %w", err)
 		}
 		r.At = time.UnixMilli(atMS)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("history: ignored refs %s: %w", target, err)
+		return nil, fmt.Errorf("history: ignored refs: %w", err)
 	}
 	return out, nil
 }

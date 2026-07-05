@@ -5,6 +5,7 @@ package dashboard_test
 // dashboard_test.go (same package).
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -820,5 +821,319 @@ func TestAPIHookCancel_MethodNotAllowed405(t *testing.T) {
 	m := decodeJSON(t, body)
 	if m["error"] == nil {
 		t.Errorf("expected error field: %s", body)
+	}
+}
+
+// --- GET /api/v1/status: liveHook/hookRuns/ignoredRefs (S5-surface, S7c) -----
+//
+// HookRunSummaries/IgnoredRefs are backed by internal/history's
+// btrack_contract_stub.go (chunk 1 not landed yet): the stub returns one
+// fixed canned row per target regardless of target name, which is exactly
+// enough to prove the handler shape end-to-end. See that file's doc.
+
+func TestAPIStatus_LiveHookFieldFromSnapshotCloser(t *testing.T) {
+	snap := testSnapshot()
+	hookSnapshot := func(target string) (dashboard.LiveHook, bool) {
+		if target != "main" {
+			return dashboard.LiveHook{}, false
+		}
+		return dashboard.LiveHook{
+			Target: "main", Running: true, CurrentHook: "deploy",
+			HookIndex: 1, HookCount: 3, BacklogDepth: 2,
+		}, true
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithHookSnapshot(hookSnapshot))
+
+	resp, body := get(t, h, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	targets := m["targets"].([]any)
+	var main, release map[string]any
+	for _, tv := range targets {
+		tm := tv.(map[string]any)
+		switch tm["name"] {
+		case "main":
+			main = tm
+		case "release":
+			release = tm
+		}
+	}
+
+	liveHook, ok := main["liveHook"].(map[string]any)
+	if !ok {
+		t.Fatalf("main.liveHook = %v, want an object", main["liveHook"])
+	}
+	if liveHook["running"] != true || liveHook["currentHook"] != "deploy" {
+		t.Errorf("liveHook = %v", liveHook)
+	}
+	if liveHook["hookIndex"] != float64(1) || liveHook["hookCount"] != float64(3) {
+		t.Errorf("liveHook index/count = %v", liveHook)
+	}
+	if liveHook["backlogDepth"] != float64(2) {
+		t.Errorf("liveHook backlogDepth = %v", liveHook["backlogDepth"])
+	}
+
+	// "release" has no running hook per the closure above, so liveHook must
+	// be entirely absent (omitempty), not present-but-idle.
+	if _, ok := release["liveHook"]; ok {
+		t.Errorf("release.liveHook = %v, want absent (closure reported ok=false)", release["liveHook"])
+	}
+}
+
+func TestAPIStatus_NoHookSnapshotOmitsLiveHook(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	targets := m["targets"].([]any)
+	main := targets[0].(map[string]any)
+	if _, ok := main["liveHook"]; ok {
+		t.Errorf("liveHook = %v, want absent without WithHookSnapshot", main["liveHook"])
+	}
+}
+
+// TestAPIStatus_HookRunsAndIgnoredRefsFromStore confirms GET /api/v1/status
+// surfaces the durable hook-run ledger per target (S1-C/S5) and
+// recently-ignored refs at the TOP level (S7c, daemon-wide — an ignored
+// ref's target segment names no configured target, so it can't be scoped to
+// one) when a store is configured — seeded through the store's real Emit
+// path, exactly as the daemon writes these rows:
+//
+//   - a terminal run record first (the runs row hook_runs FK-references);
+//   - EventHookStarted with HookCount=2 (the owed row, owed=2);
+//   - one EventHookFinished (one hooks row, done=1) — owed>done, not
+//     skipped, so the summary reads crash-incomplete;
+//   - EventIgnoredRef under the UNCONFIGURED target name "nope".
+func TestAPIStatus_HookRunsAndIgnoredRefsFromStore(t *testing.T) {
+	snap := testSnapshot()
+	store := openTestStore(t)
+	at := time.Date(2026, 7, 5, 11, 30, 0, 0, time.UTC)
+
+	emitRun(t, store, sampleRecord("run-hooks-status", "main"))
+	if err := store.Emit(context.Background(), core.Event{
+		Kind: core.EventHookStarted, Target: "main", RunID: "run-hooks-status",
+		CheckName: "deploy", HookIndex: 0, HookCount: 2, At: at,
+	}); err != nil {
+		t.Fatalf("Emit(EventHookStarted): %v", err)
+	}
+	emitHook(t, store, "run-hooks-status", "deploy", core.CheckResult{Status: core.CheckPassed, Duration: 100 * time.Millisecond})
+	if err := store.Emit(context.Background(), core.Event{
+		Kind: core.EventIgnoredRef, Target: "nope",
+		Candidate: core.Candidate{Ref: "refs/heads/for/nope/kim/typo"},
+		Detail:    `target "nope" is not configured`, At: at,
+	}); err != nil {
+		t.Fatalf("Emit(EventIgnoredRef): %v", err)
+	}
+
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+
+	resp, body := get(t, h, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	targets := m["targets"].([]any)
+	main := targets[0].(map[string]any)
+
+	hookRuns, ok := main["hookRuns"].([]any)
+	if !ok || len(hookRuns) != 1 {
+		t.Fatalf("hookRuns = %v", main["hookRuns"])
+	}
+	hr := hookRuns[0].(map[string]any)
+	for _, key := range []string{"runID", "owedCount", "doneCount", "startedAt", "skipped", "incomplete"} {
+		if _, ok := hr[key]; !ok {
+			t.Errorf("hookRun missing key %q: %v", key, hr)
+		}
+	}
+	if hr["runID"] != "run-hooks-status" {
+		t.Errorf("hookRun runID = %v", hr["runID"])
+	}
+	if hr["owedCount"] != float64(2) || hr["doneCount"] != float64(1) {
+		t.Errorf("hookRun owed/done = %v", hr)
+	}
+	if hr["incomplete"] != true {
+		t.Errorf("hookRun incomplete = %v, want true (owed=2 > done=1, not skipped)", hr["incomplete"])
+	}
+
+	// Ignored refs are TOP-LEVEL (daemon-wide), never on a target object:
+	// the ref was ignored precisely because "nope" names no configured
+	// target, so no configured target's object could carry it.
+	for _, tv := range targets {
+		tm := tv.(map[string]any)
+		if _, ok := tm["ignoredRefs"]; ok {
+			t.Errorf("target %v carries ignoredRefs; want top-level only", tm["name"])
+		}
+	}
+	ignoredRefs, ok := m["ignoredRefs"].([]any)
+	if !ok || len(ignoredRefs) != 1 {
+		t.Fatalf("top-level ignoredRefs = %v", m["ignoredRefs"])
+	}
+	ir := ignoredRefs[0].(map[string]any)
+	for _, key := range []string{"at", "target", "ref", "detail"} {
+		if _, ok := ir[key]; !ok {
+			t.Errorf("ignoredRef missing key %q: %v", key, ir)
+		}
+	}
+	if ir["target"] != "nope" || ir["ref"] != "refs/heads/for/nope/kim/typo" {
+		t.Errorf("ignoredRef = %v", ir)
+	}
+}
+
+func TestAPIStatus_NoStoreOmitsHookRunsAndIgnoredRefs(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	if _, ok := m["ignoredRefs"]; ok {
+		t.Errorf("top-level ignoredRefs = %v, want absent without a store", m["ignoredRefs"])
+	}
+	targets := m["targets"].([]any)
+	main := targets[0].(map[string]any)
+	if _, ok := main["hookRuns"]; ok {
+		t.Errorf("main.hookRuns = %v, want absent without a store", main["hookRuns"])
+	}
+}
+
+// --- GET /api/v1/batch/{id} (S7a) --------------------------------------------
+
+func TestAPIBatch_Shape(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, batchMemberRecord("batch-run-0", "main", "batch-xyz", 0))
+	emitRun(t, store, batchMemberRecord("batch-run-1", "main", "batch-xyz", 1))
+	emitRun(t, store, batchMemberRecord("batch-run-2", "main", "batch-xyz", 2))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/batch/batch-xyz")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	assertJSONContentType(t, resp)
+
+	m := decodeJSON(t, body)
+	if m["batchId"] != "batch-xyz" {
+		t.Errorf("batchId = %v, want batch-xyz", m["batchId"])
+	}
+	members, ok := m["members"].([]any)
+	if !ok || len(members) != 3 {
+		t.Fatalf("members = %v, want a 3-element array", m["members"])
+	}
+	m0 := members[0].(map[string]any)
+	for _, key := range []string{"runID", "target", "position", "user", "topic", "sha", "outcome", "detail", "startedAt", "endedAt", "durationMs"} {
+		if _, ok := m0[key]; !ok {
+			t.Errorf("member missing key %q: %v", key, m0)
+		}
+	}
+	if m0["runID"] != "batch-run-0" || m0["position"] != float64(0) {
+		t.Errorf("members[0] = %v", m0)
+	}
+	if members[2].(map[string]any)["runID"] != "batch-run-2" {
+		t.Errorf("members not in position order: %v", members)
+	}
+}
+
+func TestAPIBatch_UnknownID404(t *testing.T) {
+	store := openTestStore(t)
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+
+	resp, body := get(t, h, "/api/v1/batch/does-not-exist")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["error"] != "not found" {
+		t.Errorf("error = %v", m["error"])
+	}
+}
+
+func TestAPIBatch_NoStore503(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := get(t, h, "/api/v1/batch/whatever")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["error"] != "history disabled" {
+		t.Errorf("error = %v", m["error"])
+	}
+}
+
+// --- GET /api/v1/checks?target=&since= (S7b) ---------------------------------
+
+func TestAPIChecks_Shape(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-hist-1", "main"))
+	now := time.Now().UTC()
+	if err := store.RecordDepth(now.Add(-time.Hour), "main", 2, 1, 0); err != nil {
+		t.Fatalf("RecordDepth: %v", err)
+	}
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/checks?target=main&since=720h")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	assertJSONContentType(t, resp)
+
+	m := decodeJSON(t, body)
+	if m["target"] != "main" {
+		t.Errorf("target = %v", m["target"])
+	}
+	stats, ok := m["stats"].([]any)
+	if !ok || len(stats) != 2 {
+		t.Fatalf("stats = %v, want a 2-element array (lint, test)", m["stats"])
+	}
+	st0 := stats[0].(map[string]any)
+	for _, key := range []string{"name", "total", "failed", "redRate", "avgDurationMs", "maxDurationMs"} {
+		if _, ok := st0[key]; !ok {
+			t.Errorf("stat missing key %q: %v", key, st0)
+		}
+	}
+
+	depth, ok := m["depth"].([]any)
+	if !ok || len(depth) != 1 {
+		t.Fatalf("depth = %v, want a 1-element array", m["depth"])
+	}
+	dp := depth[0].(map[string]any)
+	for _, key := range []string{"at", "waiting", "inFlight", "parked"} {
+		if _, ok := dp[key]; !ok {
+			t.Errorf("depth point missing key %q: %v", key, dp)
+		}
+	}
+	if dp["waiting"] != float64(2) {
+		t.Errorf("depth[0].waiting = %v, want 2", dp["waiting"])
+	}
+}
+
+func TestAPIChecks_MissingTarget400(t *testing.T) {
+	store := openTestStore(t)
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+
+	resp, body := get(t, h, "/api/v1/checks")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["error"] == nil {
+		t.Errorf("expected error field: %s", body)
+	}
+}
+
+func TestAPIChecks_NoStore503(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := get(t, h, "/api/v1/checks?target=main")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["error"] != "history disabled" {
+		t.Errorf("error = %v", m["error"])
 	}
 }

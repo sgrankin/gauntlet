@@ -90,6 +90,28 @@ type Params struct {
 	// that route too. Empty (the default) omits logUrl entirely, same as
 	// the dashboard's own JSON API when WithLogRoot isn't used.
 	LogRoot string
+
+	// HookSnapshot mirrors dashboard.WithHookSnapshot (hooks.Runner.Snapshot,
+	// wired nil-safely by cmd/gauntlet exactly like HookCancel): the status
+	// tool's per-target liveHook field is simply omitted (ok=false) when this
+	// is nil. See dashboard/api.go's LiveHook doc for why this package
+	// defines its own local LiveHook rather than importing internal/hooks or
+	// internal/dashboard (same "duplicated rather than imported" convention
+	// as targetStatus and friends — see the package doc).
+	HookSnapshot func(target string) (LiveHook, bool)
+}
+
+// LiveHook mirrors hooks.LiveState (internal/hooks) / dashboard.LiveHook
+// field-for-field, deliberately duplicated rather than imported (package
+// doc's "status tool's view structs deliberately mirror api.go's").
+type LiveHook struct {
+	Target       string
+	Running      bool
+	CurrentHook  string
+	HookIndex    int
+	HookCount    int
+	StartedAt    time.Time
+	BacklogDepth int
 }
 
 // New builds the MCP-over-Streamable-HTTP handler: one *sdkmcp.Server,
@@ -152,6 +174,24 @@ func New(p Params) http.Handler {
 		return nil, out, err
 	})
 
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "batch",
+		Description: "Batch membership for a batch ID: every member run (runID, ref, position, outcome, sha). " +
+			"Mirrors GET /api/v1/batch/{id}. Requires run history to be enabled.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in batchIn) (*sdkmcp.CallToolResult, batchOut, error) {
+		out, err := handleBatch(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "checks",
+		Description: "Per-check red-rate/duration stats plus the queue-depth series for one target over a " +
+			"time window. Mirrors GET /api/v1/checks. Requires run history to be enabled.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in checksIn) (*sdkmcp.CallToolResult, checksOut, error) {
+		out, err := handleChecks(p, in)
+		return nil, out, err
+	})
+
 	return sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return srv }, nil)
 }
 
@@ -164,6 +204,14 @@ type statusIn struct {
 type statusOut struct {
 	SnapshotAt string         `json:"snapshotAt"`
 	Targets    []targetStatus `json:"targets"`
+
+	// IgnoredRefs mirrors dashboard/api.go's statusResponse.IgnoredRefs: a
+	// TOP-LEVEL, daemon-wide list (S7c), not per-target — an ignored ref's
+	// defining property is that its target segment names no configured
+	// target, so a per-configured-target list could never match anything.
+	// Each entry's target field carries the unconfigured name for display.
+	// Omitted when history is disabled.
+	IgnoredRefs []ignoredRefStatus `json:"ignoredRefs,omitempty"`
 }
 
 // targetStatus, inFlightStatus, waitingStatus, and parkedStatus mirror
@@ -178,6 +226,44 @@ type targetStatus struct {
 	Pipeline []pipelineStatus `json:"pipeline"`
 	Waiting  []waitingStatus  `json:"waiting"`
 	Parked   []parkedStatus   `json:"parked"`
+
+	// LiveHook and HookRuns mirror dashboard/api.go's own targetStatus
+	// additions field-for-field (S5-surface): live post-land hook progress
+	// (Params.HookSnapshot) and the durable hook-run ledger (Store.
+	// HookRunSummaries) — both omitted (not present, not just empty) when
+	// their respective data source is unavailable. Ignored refs live at
+	// statusOut's top level, not here — see that field's doc.
+	LiveHook *liveHookStatus `json:"liveHook,omitempty"`
+	HookRuns []hookRunStatus `json:"hookRuns,omitempty"`
+}
+
+type liveHookStatus struct {
+	Running      bool   `json:"running"`
+	CurrentHook  string `json:"currentHook"`
+	HookIndex    int    `json:"hookIndex"`
+	HookCount    int    `json:"hookCount"`
+	StartedAt    string `json:"startedAt"`
+	BacklogDepth int    `json:"backlogDepth"`
+}
+
+type hookRunStatus struct {
+	RunID      string `json:"runID"`
+	OwedCount  int    `json:"owedCount"`
+	DoneCount  int    `json:"doneCount"`
+	StartedAt  string `json:"startedAt"`
+	Skipped    bool   `json:"skipped"`
+	SkipReason string `json:"skipReason,omitempty"`
+	Incomplete bool   `json:"incomplete"`
+}
+
+// ignoredRefStatus mirrors dashboard/api.go's own: Target is the
+// UNCONFIGURED target name the ref's segment named (the reason it was
+// ignored), carried purely for display.
+type ignoredRefStatus struct {
+	At     string `json:"at"`
+	Target string `json:"target"`
+	Ref    string `json:"ref"`
+	Detail string `json:"detail"`
 }
 
 type inFlightStatus struct {
@@ -236,12 +322,29 @@ func handleStatus(p Params, in statusIn) statusOut {
 		if in.Target != "" && ts.Name != in.Target {
 			continue
 		}
-		out.Targets = append(out.Targets, buildTargetStatus(ts))
+		out.Targets = append(out.Targets, buildTargetStatus(p, ts))
+	}
+	if p.Store != nil {
+		if refs, err := p.Store.IgnoredRefs(ignoredRefsLimit); err == nil {
+			out.IgnoredRefs = make([]ignoredRefStatus, 0, len(refs))
+			for _, ir := range refs {
+				out.IgnoredRefs = append(out.IgnoredRefs, ignoredRefStatus{
+					At: formatRFC3339(ir.At), Target: ir.Target, Ref: ir.Ref, Detail: ir.Detail,
+				})
+			}
+		}
 	}
 	return out
 }
 
-func buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
+// hookRunsLimit/ignoredRefsLimit mirror dashboard/api.go's own limits: a
+// recent-activity glance per target, not a full history browse.
+const (
+	hookRunsLimit    = 10
+	ignoredRefsLimit = 10
+)
+
+func buildTargetStatus(p Params, ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
 		Name:     ts.Name,
 		Branch:   ts.Branch,
@@ -271,6 +374,28 @@ func buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 			Ref: pe.Candidate.Ref, SHA: pe.Candidate.SHA,
 			Outcome: outcomeWord(pe.Outcome), Reason: pe.Reason, At: formatRFC3339(pe.At),
 		})
+	}
+
+	if p.HookSnapshot != nil {
+		if lh, ok := p.HookSnapshot(ts.Name); ok {
+			out.LiveHook = &liveHookStatus{
+				Running: lh.Running, CurrentHook: lh.CurrentHook,
+				HookIndex: lh.HookIndex, HookCount: lh.HookCount,
+				StartedAt: formatRFC3339(lh.StartedAt), BacklogDepth: lh.BacklogDepth,
+			}
+		}
+	}
+	if p.Store != nil {
+		if runs, err := p.Store.HookRunSummaries(ts.Name, hookRunsLimit); err == nil {
+			out.HookRuns = make([]hookRunStatus, 0, len(runs))
+			for _, hr := range runs {
+				out.HookRuns = append(out.HookRuns, hookRunStatus{
+					RunID: hr.RunID, OwedCount: hr.OwedCount, DoneCount: hr.DoneCount,
+					StartedAt: formatRFC3339(hr.StartedAt), Skipped: hr.Skipped, SkipReason: hr.SkipReason,
+					Incomplete: hr.OwedCount > hr.DoneCount && !hr.Skipped,
+				})
+			}
+		}
 	}
 	return out
 }
@@ -578,6 +703,149 @@ func handleHookCancel(p Params, in hookCancelIn) (hookCancelOut, error) {
 		return hookCancelOut{Status: "cancelled"}, nil
 	}
 	return hookCancelOut{Status: "no-op"}, nil
+}
+
+// --- batch (S7a) ----------------------------------------------------------
+
+type batchIn struct {
+	BatchID string `json:"batch_id" jsonschema:"the batch ID to list members for (see a run's batchId field)"`
+}
+
+// batchMember mirrors dashboard/api.go's batchMemberJSON field-for-field.
+type batchMember struct {
+	RunID      string `json:"runID"`
+	Target     string `json:"target"`
+	Position   int    `json:"position"`
+	User       string `json:"user"`
+	Topic      string `json:"topic"`
+	SHA        string `json:"sha"`
+	Outcome    string `json:"outcome"`
+	Detail     string `json:"detail"`
+	StartedAt  string `json:"startedAt"`
+	EndedAt    string `json:"endedAt"`
+	DurationMs int64  `json:"durationMs"`
+}
+
+type batchOut struct {
+	BatchID string        `json:"batchId"`
+	Members []batchMember `json:"members"`
+}
+
+func handleBatch(p Params, in batchIn) (batchOut, error) {
+	if p.Store == nil {
+		return batchOut{}, errors.New("history disabled")
+	}
+	if in.BatchID == "" {
+		return batchOut{}, errors.New("batch_id is required")
+	}
+
+	members, err := p.Store.BatchMembers(in.BatchID)
+	if err != nil {
+		return batchOut{}, fmt.Errorf("batch %s: %w", in.BatchID, err)
+	}
+	if len(members) == 0 {
+		return batchOut{}, fmt.Errorf("batch not found: %s", in.BatchID)
+	}
+
+	out := batchOut{BatchID: in.BatchID, Members: make([]batchMember, 0, len(members))}
+	for _, m := range members {
+		out.Members = append(out.Members, batchMember{
+			RunID: m.RunID, Target: m.Target, Position: m.Position,
+			User: m.CandidateUser, Topic: m.CandidateTopic, SHA: m.CandidateSHA,
+			Outcome: m.Outcome, Detail: m.Detail,
+			StartedAt:  formatRFC3339(m.StartedAt),
+			EndedAt:    formatRFC3339(m.EndedAt),
+			DurationMs: m.Duration.Milliseconds(),
+		})
+	}
+	return out, nil
+}
+
+// --- checks (S7b) -----------------------------------------------------------
+
+type checksIn struct {
+	Target string `json:"target" jsonschema:"the target name to compute check stats/depth for"`
+	Since  string `json:"since,omitempty" jsonschema:"a Go duration (e.g. '24h') or an RFC3339 timestamp; defaults to 24h"`
+}
+
+// checkStat mirrors dashboard/api.go's checkStatJSON field-for-field.
+type checkStat struct {
+	Name          string  `json:"name"`
+	Total         int     `json:"total"`
+	Failed        int     `json:"failed"`
+	RedRate       float64 `json:"redRate"`
+	AvgDurationMs int64   `json:"avgDurationMs"`
+	MaxDurationMs int64   `json:"maxDurationMs"`
+}
+
+// depthPoint mirrors dashboard/api.go's depthPointJSON field-for-field.
+type depthPoint struct {
+	At       string `json:"at"`
+	Waiting  int    `json:"waiting"`
+	InFlight int    `json:"inFlight"`
+	Parked   int    `json:"parked"`
+}
+
+type checksOut struct {
+	Target string       `json:"target"`
+	Since  string       `json:"since"`
+	Stats  []checkStat  `json:"stats"`
+	Depth  []depthPoint `json:"depth"`
+}
+
+func handleChecks(p Params, in checksIn) (checksOut, error) {
+	if p.Store == nil {
+		return checksOut{}, errors.New("history disabled")
+	}
+	if in.Target == "" {
+		return checksOut{}, errors.New("target is required")
+	}
+
+	now := time.Now()
+	since := parseSince(in.Since, now)
+
+	stats, err := p.Store.CheckStats(in.Target, since)
+	if err != nil {
+		return checksOut{}, fmt.Errorf("check stats %s: %w", in.Target, err)
+	}
+	depth, err := p.Store.DepthSeries(in.Target, since)
+	if err != nil {
+		return checksOut{}, fmt.Errorf("depth series %s: %w", in.Target, err)
+	}
+
+	out := checksOut{
+		Target: in.Target, Since: formatRFC3339(since),
+		Stats: make([]checkStat, 0, len(stats)),
+		Depth: make([]depthPoint, 0, len(depth)),
+	}
+	for _, st := range stats {
+		out.Stats = append(out.Stats, checkStat{
+			Name: st.Name, Total: st.Total, Failed: st.Failed, RedRate: st.RedRate,
+			AvgDurationMs: st.AvgDuration.Milliseconds(), MaxDurationMs: st.MaxDuration.Milliseconds(),
+		})
+	}
+	for _, dp := range depth {
+		out.Depth = append(out.Depth, depthPoint{At: formatRFC3339(dp.At), Waiting: dp.Waiting, InFlight: dp.InFlight, Parked: dp.Parked})
+	}
+	return out, nil
+}
+
+// parseSince mirrors dashboard/api.go's parseSince (server.go): a Go
+// duration ("24h") is relative to now; an RFC3339 timestamp is absolute;
+// anything else (including empty) falls back to a 24h window. Duplicated
+// rather than imported, matching this package's own convention.
+func parseSince(s string, now time.Time) time.Time {
+	def := now.Add(-24 * time.Hour)
+	if s == "" {
+		return def
+	}
+	if dur, err := time.ParseDuration(s); err == nil {
+		return now.Add(-dur)
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return def
 }
 
 // --- shared -------------------------------------------------------------------

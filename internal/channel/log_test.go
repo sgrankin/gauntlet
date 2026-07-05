@@ -314,6 +314,70 @@ func TestLogChannel_EmitHookFinishedNilCheckOmitsBlock(t *testing.T) {
 	}
 }
 
+// TestLogChannel_EmitHookStarted confirms EventHookStarted (S5-surface, the
+// "surfaced everywhere" half of S1-C's discoverability requirement) renders
+// its own distinct greppable marker line, in addition to formatEvent's
+// generic kind=/target=/check= fields.
+func TestLogChannel_EmitHookStarted(t *testing.T) {
+	ev := core.Event{Kind: core.EventHookStarted, Target: "main", RunID: "run-1", CheckName: "deploy"}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"kind=hook_started", "check=deploy", "▶ hook deploy"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestLogChannel_EmitHookSkipped confirms EventHookSkipped (S1-C: a
+// recovery-skipped landing's hooks never ran at all) renders a distinct
+// marker line including Detail.
+func TestLogChannel_EmitHookSkipped(t *testing.T) {
+	ev := core.Event{Kind: core.EventHookSkipped, Target: "main", RunID: "run-1", Detail: "recovered landing; hooks not run"}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"kind=hook_skipped", "⚠ hooks skipped (recovery)", "recovered landing; hooks not run"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestLogChannel_EmitRetryRequested confirms EventRetryRequested (S3, a
+// history-only durability signal per the phase-6 B-track plan) still renders
+// via formatEvent's generic fields — LogChannel logs every event
+// unconditionally (unlike Slack, which filters), so no special-case block is
+// needed beyond the eventKindString name.
+func TestLogChannel_EmitRetryRequested(t *testing.T) {
+	ev := core.Event{
+		Kind:      core.EventRetryRequested,
+		Target:    "main",
+		Candidate: core.Candidate{Ref: "refs/heads/for/main/alice/feat", SHA: "deadbeefcafef00d"},
+	}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"kind=retry_requested", "ref=refs/heads/for/main/alice/feat", "sha=deadbeef"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
 // TestLogChannel_EmitUnknownEventKindNoPanic is S14's universal contract
 // test for LogChannel: core.EventKind(999) (a future kind eventKindString's
 // switch has never heard of) must not panic Emit, matching the package doc's

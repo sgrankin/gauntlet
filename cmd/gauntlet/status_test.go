@@ -281,6 +281,111 @@ func TestRenderStatus_UnknownTargetNotice(t *testing.T) {
 	}
 }
 
+// hooksCanned is a canned API response with a target carrying a running
+// live hook and a durable hook-run ledger (one crash-incomplete, one
+// skipped), plus a TOP-LEVEL recently-ignored ref (S5-surface, S7c: ignored
+// refs are daemon-wide, not per-target — their target segment names no
+// configured target) — the shape dashboard/api.go's statusResponse carries
+// (canned here directly, since renderStatus is tested against hand-built
+// JSON, not a live dashboard).
+const hooksCanned = `{
+	"snapshotAt": "2026-07-05T12:00:00Z",
+	"targets": [
+		{
+			"name": "main",
+			"branch": "main",
+			"tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"inFlight": null,
+			"waiting": [],
+			"parked": [],
+			"liveHook": {
+				"running": true,
+				"currentHook": "deploy",
+				"hookIndex": 1,
+				"hookCount": 2,
+				"startedAt": "2026-07-05T11:59:00Z",
+				"backlogDepth": 1
+			},
+			"hookRuns": [
+				{"runID": "run-a", "owedCount": 2, "doneCount": 1, "startedAt": "2026-07-05T11:00:00Z", "skipped": false, "skipReason": "", "incomplete": true},
+				{"runID": "run-b", "owedCount": 3, "doneCount": 3, "startedAt": "2026-07-05T10:00:00Z", "skipped": true, "skipReason": "recovered landing; hooks not run", "incomplete": false}
+			]
+		}
+	],
+	"ignoredRefs": [
+		{"at": "2026-07-05T09:00:00Z", "target": "unknown", "ref": "refs/heads/for/unknown/alice/typo", "detail": "target \"unknown\" is not configured"}
+	]
+}`
+
+// TestRenderStatus_HookFieldsRendered confirms renderStatus prints the
+// live-hook progress line, the durable hook-run ledger (crash-incomplete and
+// skipped rows distinguished), and the daemon-level recently-ignored refs
+// section at the end (S5-surface, S7c; mirrors
+// TestRenderStatus_PipelineRendersPositionRefAndSpeculatedMarker's
+// canned-JSON approach for S10).
+func TestRenderStatus_HookFieldsRendered(t *testing.T) {
+	var resp statusAPIResponse
+	if err := json.Unmarshal([]byte(hooksCanned), &resp); err != nil {
+		t.Fatalf("decode hooksCanned JSON: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, ""); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"hooks: running deploy (1/2)",
+		"hook runs:",
+		"run-a owed=2 done=1 [crash-incomplete]",
+		"run-b owed=3 done=3 [skipped: recovered landing; hooks not run]",
+		"ignored refs (no configured target):",
+		`refs/heads/for/unknown/alice/typo: target "unknown" is not configured`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\noutput:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderStatus_IgnoredRefsSurviveTargetFilter confirms the daemon-level
+// ignored-refs section still renders under a -target filter — a
+// misconfiguration is exactly what a filtered view shouldn't hide, and the
+// refs belong to no configured target anyway.
+func TestRenderStatus_IgnoredRefsSurviveTargetFilter(t *testing.T) {
+	var resp statusAPIResponse
+	if err := json.Unmarshal([]byte(hooksCanned), &resp); err != nil {
+		t.Fatalf("decode hooksCanned JSON: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "main"); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ignored refs (no configured target):") {
+		t.Errorf("filtered output missing the daemon-level ignored-refs section:\n%s", buf.String())
+	}
+}
+
+// TestRenderStatus_NoHookFieldsOmitsSections confirms a target with no
+// liveHook/hookRuns/ignoredRefs (the existing "canned" fixture, decoded
+// before this chunk added these fields) renders none of the new sections —
+// pure additive change, no regression for a target that has nothing to show.
+func TestRenderStatus_NoHookFieldsOmitsSections(t *testing.T) {
+	resp := decodeCanned(t)
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "main"); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	out := buf.String()
+	for _, absent := range []string{"hooks: running", "hook runs:", "ignored refs"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("output unexpectedly contains %q:\n%s", absent, out)
+		}
+	}
+}
+
 func TestRenderStatus_NoParkedOmitsSection(t *testing.T) {
 	resp := decodeCanned(t)
 	var buf bytes.Buffer

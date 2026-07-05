@@ -810,7 +810,7 @@ func TestMigrate_V5ToV6(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Emit EventIgnoredRef after migrate: %v", err)
 	}
-	refs, err := s.IgnoredRefs("typoed", 10)
+	refs, err := s.IgnoredRefs(10)
 	if err != nil {
 		t.Fatalf("IgnoredRefs after migrate: %v", err)
 	}
@@ -1369,16 +1369,20 @@ func TestStore_IgnoredRefs_NewestFirstAndLimit(t *testing.T) {
 			t.Fatalf("Emit(%s): %v", ref, err)
 		}
 	}
-	// A different target must never leak into "typoed"'s result.
+	// A second unconfigured target — IgnoredRefs is deliberately global (an
+	// ignored ref never belongs to a configured target, so per-target
+	// filtering would hide everything; see the method doc). Emitted OLDER
+	// than every "typoed" row so the newest-first limit-2 result below is
+	// unchanged by it.
 	if err := s.Emit(ctx, core.Event{
-		Kind: core.EventIgnoredRef, At: base, Target: "other-typo",
+		Kind: core.EventIgnoredRef, At: base.Add(-time.Minute), Target: "other-typo",
 		Candidate: core.Candidate{Ref: "refs/heads/for/other-typo/x/y", SHA: "shaX"},
 		Detail:    `target "other-typo" is not configured`,
 	}); err != nil {
 		t.Fatalf("Emit(other-typo): %v", err)
 	}
 
-	refs, err := s.IgnoredRefs("typoed", 2)
+	refs, err := s.IgnoredRefs(2)
 	if err != nil {
 		t.Fatalf("IgnoredRefs: %v", err)
 	}
