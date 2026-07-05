@@ -37,7 +37,7 @@ func TestBuildMergeMessage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildMergeMessage(tc.tmpl, tc.fields)
+			got, err := buildMergeMessage(tc.tmpl, tc.fields, "")
 			if err != nil {
 				t.Fatalf("buildMergeMessage: %v", err)
 			}
@@ -56,7 +56,63 @@ func TestBuildMergeMessage(t *testing.T) {
 }
 
 func TestBuildMergeMessage_InvalidTemplate(t *testing.T) {
-	if _, err := buildMergeMessage("{{.Nope", messageFields{}); err == nil {
+	if _, err := buildMergeMessage("{{.Nope", messageFields{}, ""); err == nil {
 		t.Fatal("buildMergeMessage: want error for an unparseable template")
+	}
+}
+
+// TestBuildMergeMessage_EmptyBodyMatchesPriorShape locks in that an empty
+// body (Config.MergeBody nil, or returning "") produces byte-for-byte the
+// same message phase-1/2/3 always produced: subject, blank line, trailers,
+// nothing else in between.
+func TestBuildMergeMessage_EmptyBodyMatchesPriorShape(t *testing.T) {
+	f := messageFields{Topic: "widget", User: "alice", Ref: "refs/heads/for/main/alice/widget", RunID: "run1", Target: "main"}
+	got, err := buildMergeMessage("", f, "")
+	if err != nil {
+		t.Fatalf("buildMergeMessage: %v", err)
+	}
+	want := "Merge widget (alice)\n\nGauntlet-Ref: refs/heads/for/main/alice/widget\nGauntlet-Run: run1\n"
+	if got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+// TestBuildMergeMessage_BodyBetweenSubjectAndTrailers is the phase-4
+// contract: a non-empty body lands between the subject and the trailers,
+// each blank-line separated (standard git message shape), and the
+// trailers still parse (still the last two lines, still "Key: value").
+func TestBuildMergeMessage_BodyBetweenSubjectAndTrailers(t *testing.T) {
+	f := messageFields{Topic: "widget", User: "alice", Ref: "refs/heads/for/main/alice/widget", RunID: "run1", Target: "main"}
+	got, err := buildMergeMessage("", f, "  Adds widget rendering support.  \n")
+	if err != nil {
+		t.Fatalf("buildMergeMessage: %v", err)
+	}
+	want := "Merge widget (alice)\n\nAdds widget rendering support.\n\nGauntlet-Ref: refs/heads/for/main/alice/widget\nGauntlet-Run: run1\n"
+	if got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if lines[len(lines)-2] != "Gauntlet-Ref: refs/heads/for/main/alice/widget" {
+		t.Errorf("trailers not at the end: %q", got)
+	}
+	if lines[len(lines)-1] != "Gauntlet-Run: run1" {
+		t.Errorf("trailers not at the end: %q", got)
+	}
+}
+
+// TestBuildMergeMessage_WhitespaceOnlyBodyOmitted treats a
+// whitespace-only body (e.g. a summarizer that degraded to blanks) the
+// same as an empty one — trimmed to nothing, so it's dropped rather than
+// leaving a stray blank paragraph.
+func TestBuildMergeMessage_WhitespaceOnlyBodyOmitted(t *testing.T) {
+	f := messageFields{Topic: "widget", Ref: "r", RunID: "run1", Target: "main"}
+	got, err := buildMergeMessage("", f, "   \n\n  ")
+	if err != nil {
+		t.Fatalf("buildMergeMessage: %v", err)
+	}
+	want := "Merge widget\n\nGauntlet-Ref: r\nGauntlet-Run: run1\n"
+	if got != want {
+		t.Errorf("message = %q, want %q", got, want)
 	}
 }

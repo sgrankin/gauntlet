@@ -69,6 +69,7 @@ type casCall struct {
 type fakeCommit struct {
 	tree    string
 	parents []string
+	message string // captured verbatim, for tests asserting on merge-message shape (e.g. phase-4's optional body)
 }
 
 func newFakeGitRepo() *fakeGitRepo {
@@ -129,7 +130,7 @@ func (f *fakeGitRepo) CommitTree(ctx context.Context, tree string, parents []str
 	}
 
 	oid := hashString("commit", tree, strings.Join(parents, ","), message, who.Name, who.Email, fmt.Sprintf("%d", f.commitTreeCalls))
-	f.commits[oid] = fakeCommit{tree: tree, parents: append([]string(nil), parents...)}
+	f.commits[oid] = fakeCommit{tree: tree, parents: append([]string(nil), parents...), message: message}
 	return oid, nil
 }
 
@@ -311,6 +312,14 @@ func (f *fakeGitRepo) hasRef(ref string) bool {
 	defer f.mu.Unlock()
 	_, ok := f.refs[ref]
 	return ok
+}
+
+// commitMessage returns the exact message CommitTree was given for oid, for
+// tests asserting on merge-message shape (e.g. phase-4's optional body).
+func (f *fakeGitRepo) commitMessage(oid string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commits[oid].message
 }
 
 // scriptConflict makes a future MergeTree(base, candidate) call return a

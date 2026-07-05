@@ -178,6 +178,129 @@ func TestReadFileFromTree(t *testing.T) {
 	}
 }
 
+func TestLogReturnsCommitsOldestFirstWithBodies(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	candRef := remote.PushCandidate("main", "alice", "feat", map[string]string{"g.txt": "1\n"})
+	// PushCandidate's own commit message ("candidate feat") isn't
+	// controllable, so add two more commits with known subjects/bodies
+	// directly against a clone, bypassing testutil.
+	commitOn(t, remote.Dir, candRef, map[string]string{"h.txt": "1\n"}, "Add h\n\nExplains why h exists.\nSecond body line.")
+	commitOn(t, remote.Dir, candRef, map[string]string{"i.txt": "1\n"}, "Add i")
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	refs, err := repo.ListRefs(ctx)
+	if err != nil {
+		t.Fatalf("ListRefs: %v", err)
+	}
+	base, cand := refs["refs/heads/main"], refs[candRef]
+
+	commits, err := repo.Log(ctx, base, cand)
+	if err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if len(commits) != 3 {
+		t.Fatalf("Log returned %d commits, want 3: %+v", len(commits), commits)
+	}
+	if commits[0].Subject != "candidate feat" {
+		t.Errorf("commits[0].Subject = %q, want %q", commits[0].Subject, "candidate feat")
+	}
+	if commits[1].Subject != "Add h" {
+		t.Errorf("commits[1].Subject = %q, want %q", commits[1].Subject, "Add h")
+	}
+	wantBody := "Explains why h exists.\nSecond body line."
+	if commits[1].Body != wantBody {
+		t.Errorf("commits[1].Body = %q, want %q", commits[1].Body, wantBody)
+	}
+	if commits[2].Subject != "Add i" {
+		t.Errorf("commits[2].Subject = %q, want %q", commits[2].Subject, "Add i")
+	}
+	if commits[2].Body != "" {
+		t.Errorf("commits[2].Body = %q, want empty", commits[2].Body)
+	}
+}
+
+func TestLogEmptyRange(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	tip := remote.Ref("refs/heads/main")
+
+	commits, err := repo.Log(ctx, tip, tip)
+	if err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if len(commits) != 0 {
+		t.Fatalf("Log(tip, tip) = %+v, want empty", commits)
+	}
+}
+
+func TestDiffStat(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	candRef := remote.PushCandidate("main", "alice", "feat", map[string]string{"g.txt": "new file\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	refs, err := repo.ListRefs(ctx)
+	if err != nil {
+		t.Fatalf("ListRefs: %v", err)
+	}
+	base, cand := refs["refs/heads/main"], refs[candRef]
+
+	stat, err := repo.DiffStat(ctx, base, cand)
+	if err != nil {
+		t.Fatalf("DiffStat: %v", err)
+	}
+	if !strings.Contains(stat, "g.txt") {
+		t.Errorf("DiffStat = %q, want it to mention g.txt", stat)
+	}
+	if !strings.Contains(stat, "1 file changed") {
+		t.Errorf("DiffStat = %q, want a changed-file summary line", stat)
+	}
+}
+
+// commitOn adds one more commit with an arbitrary message onto ref's
+// current tip and force-pushes it back, bypassing testutil.Remote (whose
+// helpers hardcode their own commit messages) so Log's subject/body
+// parsing can be exercised against known text.
+func commitOn(t *testing.T, remoteDir, ref string, files map[string]string, message string) {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if out, err := exec.Command("git", "clone", "-q", remoteDir, dir).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v: %s", err, out)
+	}
+	run("fetch", "-q", "origin", ref+":refs/heads/commit-on-work")
+	run("checkout", "-q", "commit-on-work")
+	run("config", "user.name", "Test Author")
+	run("config", "user.email", "author@example.com")
+	for path, content := range files {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", message)
+	run("push", "-q", "origin", "HEAD:"+ref)
+}
+
 func TestIsAncestor(t *testing.T) {
 	ctx := context.Background()
 	repo, remote, _ := newRepo(t)

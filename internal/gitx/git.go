@@ -164,6 +164,50 @@ func (r *Repo) ReadFileFromTree(ctx context.Context, tree, path string) ([]byte,
 	return []byte(out), nil
 }
 
+// CommitInfo is one commit's subject and body, as returned by Log.
+type CommitInfo struct {
+	Subject string
+	Body    string
+}
+
+// Log returns, oldest-first, the subject and body of every commit reachable
+// from tip but not from base (base..tip) — the commits a candidate branch
+// actually introduces onto the target. internal/summarize uses this to
+// build the prompt for an optional Claude-written merge-commit body;
+// nothing else in gauntlet inspects commit bodies.
+//
+// The format string delimits fields with ASCII unit/record separators
+// (0x1F/0x1E) rather than blank lines, since a commit body can itself
+// contain blank lines and would otherwise be indistinguishable from the
+// boundary between commits.
+func (r *Repo) Log(ctx context.Context, base, tip string) ([]CommitInfo, error) {
+	out, err := r.run(ctx, "log", "--reverse", "--format=%s\x1f%b\x1e", base+".."+tip)
+	if err != nil {
+		return nil, fmt.Errorf("gitx: log %s..%s: %w", base, tip, err)
+	}
+	var commits []CommitInfo
+	for _, rec := range strings.Split(out, "\x1e") {
+		rec = strings.TrimPrefix(rec, "\n") // git terminates each %...\x1e record with its own newline
+		if rec == "" {
+			continue
+		}
+		subject, body, _ := strings.Cut(rec, "\x1f")
+		commits = append(commits, CommitInfo{Subject: subject, Body: strings.TrimRight(body, "\n")})
+	}
+	return commits, nil
+}
+
+// DiffStat returns git's diffstat summary for base..tip (the per-file
+// change lines plus the "N files changed, ..." total) verbatim, for use as
+// prompt context by internal/summarize.
+func (r *Repo) DiffStat(ctx context.Context, base, tip string) (string, error) {
+	out, err := r.run(ctx, "diff", "--stat", base+".."+tip)
+	if err != nil {
+		return "", fmt.Errorf("gitx: diff --stat %s..%s: %w", base, tip, err)
+	}
+	return strings.TrimRight(out, "\n"), nil
+}
+
 // IsAncestor reports whether maybeAncestor is an ancestor of ref.
 func (r *Repo) IsAncestor(ctx context.Context, maybeAncestor, ref string) (bool, error) {
 	_, err := r.run(ctx, "merge-base", "--is-ancestor", maybeAncestor, ref)

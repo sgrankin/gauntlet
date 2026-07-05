@@ -169,6 +169,12 @@ executor "container" {
     cache "gocache"    path="/root/.cache/go-build"
     cache "gomodcache" path="/go/pkg/mod"
 }
+
+summarize {
+    model "claude-haiku-4-5"
+    api-key-env "ANTHROPIC_API_KEY"
+    timeout "10s"
+}
 ```
 
 - **`history <path>`** — SQLite database file for run/check/queue-depth
@@ -218,6 +224,46 @@ executor "container" {
   `/workspace`) plus one named, persistent volume per `cache` entry (`name` +
   mount `path`) so warm caches (`GOCACHE`, module caches, …) survive across
   runs. `image` is required when `kind` is `"container"`.
+- **`summarize`** — enables a Claude-written merge-commit body
+  (`internal/summarize`); see [Summaries](#summaries) below. **Node absent
+  ⇒ disabled**: merge commits get exactly the phase-1/2/3 subject +
+  trailers, no body. Once the node is present (even empty, `summarize {}`),
+  an empty/unset `api-key-env` is a startup error, same rationale as
+  `github`/`slack` above.
+
+## Summaries
+
+`summarize` is an optional enricher: right before a trial lands, the daemon
+asks Claude for a short prose summary of what the candidate branch actually
+did — its own commit subjects/bodies and diffstat, `base..candidate` — and
+inserts that summary as the merge commit's body, between the templated
+subject line and the `Gauntlet-Ref`/`Gauntlet-Run` trailers. The
+`--first-parent` ledger view (`DESIGN.md`) then carries a real one-paragraph
+description of each landing, not just a topic/author subject line.
+
+Configuration (all fields optional; defaults shown in the example above):
+
+- **`model`** — the Claude model ID to call. Defaults to `claude-haiku-4-5`
+  — Haiku-class, chosen because a 2-6 sentence summary is a cheap,
+  classification-shaped task, not a coding or planning workload. Fully
+  overridable for operators who want a different tier.
+- **`api-key-env`** — the environment variable holding the Anthropic API
+  key. Defaults to `ANTHROPIC_API_KEY`. The daemon reads this at startup,
+  once; it is never read from the config file itself.
+- **`timeout`** — the per-call budget for the Messages API request.
+  Defaults to `10s`.
+
+**Degradation guarantee:** summarization is best-effort, by contract, all
+the way down. Any failure gathering the branch's own git history, any HTTP
+error, any timeout, any refusal, or an empty model response is logged as a
+single line and answered with an empty body — never an error, never a
+retry, never a blocked or failed landing. A merge commit with no summary is
+exactly as valid as one with one; enabling `summarize` can never turn a
+green trial red.
+
+**Cost:** one small Messages API completion per landing (not per trial,
+not per check) — a single request against a handful of commit
+subjects/bodies and a diffstat, capped at a few hundred output tokens.
 
 ## Hooks
 

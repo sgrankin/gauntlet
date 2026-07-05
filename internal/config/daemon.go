@@ -41,6 +41,15 @@ const (
 	defaultRuntime        = "container"
 	defaultWorkdir        = "/workspace"
 
+	// defaultSummarizeModel matches internal/summarize.DefaultModel
+	// (duplicated here, not imported, per this file's existing pattern of
+	// owning its own defaults — see defaultGitHubTokenEnv et al.): a
+	// Haiku-class model, per the claude-api skill's guidance for a cheap
+	// 2-6 sentence summarization task.
+	defaultSummarizeModel     = "claude-haiku-4-5"
+	defaultSummarizeAPIKeyEnv = "ANTHROPIC_API_KEY"
+	defaultSummarizeTimeout   = 10 * time.Second
+
 	// defaultDepthRetention is how long queue_depth samples are kept before
 	// the depth sampler prunes them (docs/plans phase23 E1). Runs/checks
 	// have no retention bound — this applies to the depth series only.
@@ -70,6 +79,17 @@ type Daemon struct {
 	Slack     Slack     `kdl:"slack"`     // Channel=="" ⇒ disabled
 	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (phase-1 default)
 	Executor  Executor  `kdl:"executor"`  // Kind=="" ⇒ "local"
+
+	// Summarize is a pointer, unlike every other optional section above:
+	// every one of its fields has its own default (Model, APIKeyEnv,
+	// Timeout), so "required field non-empty" can't serve as the
+	// presence signal the way GitHub.Repo/Slack.Channel/etc. do — a
+	// user-written "summarize {}" with nothing set must still count as
+	// enabled. kdl-go only allocates a pointer-typed child-node field
+	// when the node is actually present in the document (confirmed
+	// against its own unmarshal tests), so nil here means "the summarize
+	// node is absent" unambiguously, independent of what's inside it.
+	Summarize *Summarize `kdl:"summarize"`
 }
 
 // History configures the optional SQLite run-history store
@@ -126,6 +146,17 @@ type Executor struct {
 type Cache struct {
 	Name string `kdl:",arg"`
 	Path string `kdl:"path"`
+}
+
+// Summarize configures the optional Claude-written merge-commit body
+// enricher (internal/summarize). A nil *Daemon.Summarize (the node absent
+// from the document) disables it entirely; see the field doc on Daemon for
+// why presence, not any single field's non-emptiness, is the enable
+// signal.
+type Summarize struct {
+	Model     string        `kdl:"model"`                // default defaultSummarizeModel
+	APIKeyEnv string        `kdl:"api-key-env"`          // default "ANTHROPIC_API_KEY"
+	Timeout   time.Duration `kdl:"timeout,format:units"` // default 10s
 }
 
 // Target is one target branch the daemon reconciles candidates onto. Name
@@ -232,6 +263,18 @@ func (d *Daemon) applyDefaults() {
 			d.Executor.Workdir = defaultWorkdir
 		}
 	}
+
+	if d.Summarize != nil {
+		if d.Summarize.Model == "" {
+			d.Summarize.Model = defaultSummarizeModel
+		}
+		if d.Summarize.APIKeyEnv == "" {
+			d.Summarize.APIKeyEnv = defaultSummarizeAPIKeyEnv
+		}
+		if d.Summarize.Timeout == 0 {
+			d.Summarize.Timeout = defaultSummarizeTimeout
+		}
+	}
 }
 
 func (d *Daemon) validate() error {
@@ -321,6 +364,18 @@ func (d *Daemon) validate() error {
 		}
 		if c.Path == "" {
 			return fmt.Errorf("executor: cache %q: path must not be empty", c.Name)
+		}
+	}
+
+	if d.Summarize != nil {
+		if d.Summarize.Model == "" {
+			return fmt.Errorf("summarize: model must not be empty")
+		}
+		if d.Summarize.APIKeyEnv == "" {
+			return fmt.Errorf("summarize: api-key-env must not be empty")
+		}
+		if d.Summarize.Timeout <= 0 {
+			return fmt.Errorf("summarize: timeout must be positive, got %s", d.Summarize.Timeout)
 		}
 	}
 

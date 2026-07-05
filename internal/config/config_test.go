@@ -201,6 +201,87 @@ target "main" branch="main"
 	if d.Executor.Runtime != "" {
 		t.Errorf("Executor.Runtime = %q, want empty (only defaulted for container executor)", d.Executor.Runtime)
 	}
+	if d.Summarize != nil {
+		t.Errorf("Summarize = %+v, want nil (disabled, node absent)", d.Summarize)
+	}
+}
+
+// TestLoadDaemon_SummarizeDefaults covers the presence rule that makes
+// Summarize different from every other optional section: an empty
+// "summarize {}" node (no field set inside it) must still count as
+// enabled — enabled means "the node is present", not "some field is
+// non-empty" (every field here has its own default).
+func TestLoadDaemon_SummarizeDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+summarize {
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if d.Summarize == nil {
+		t.Fatal("Summarize = nil, want non-nil (node present, even though empty)")
+	}
+	if d.Summarize.Model != defaultSummarizeModel {
+		t.Errorf("Summarize.Model = %q, want default %q", d.Summarize.Model, defaultSummarizeModel)
+	}
+	if d.Summarize.APIKeyEnv != defaultSummarizeAPIKeyEnv {
+		t.Errorf("Summarize.APIKeyEnv = %q, want default %q", d.Summarize.APIKeyEnv, defaultSummarizeAPIKeyEnv)
+	}
+	if d.Summarize.Timeout != defaultSummarizeTimeout {
+		t.Errorf("Summarize.Timeout = %v, want default %v", d.Summarize.Timeout, defaultSummarizeTimeout)
+	}
+}
+
+// TestLoadDaemon_SummarizeExplicitValues covers every field set explicitly,
+// overriding all three defaults.
+func TestLoadDaemon_SummarizeExplicitValues(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+summarize {
+    model "claude-opus-4-8"
+    api-key-env "MY_ANTHROPIC_KEY"
+    timeout "30s"
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if d.Summarize == nil {
+		t.Fatal("Summarize = nil, want non-nil")
+	}
+	if d.Summarize.Model != "claude-opus-4-8" {
+		t.Errorf("Summarize.Model = %q", d.Summarize.Model)
+	}
+	if d.Summarize.APIKeyEnv != "MY_ANTHROPIC_KEY" {
+		t.Errorf("Summarize.APIKeyEnv = %q", d.Summarize.APIKeyEnv)
+	}
+	if d.Summarize.Timeout != 30*time.Second {
+		t.Errorf("Summarize.Timeout = %v, want 30s", d.Summarize.Timeout)
+	}
 }
 
 func TestLoadDaemon_TargetHooks(t *testing.T) {
@@ -606,6 +687,43 @@ executor "container" {
 }
 `,
 			wantErr: "executor",
+		},
+		{
+			// Semantic validation: an explicit non-positive timeout is
+			// rejected even though Timeout has a default (the default only
+			// applies when the field is the zero value, i.e. unset).
+			name: "summarize with non-positive timeout",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+summarize {
+    timeout "-5s"
+}
+`,
+			wantErr: "summarize",
+		},
+		{
+			// Structural: kdl-go rejects the unexpected property under
+			// "summarize" (mirrors the dashboard/otlp/slack structural
+			// cases above).
+			name: "summarize with unexpected property",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+summarize {
+    model "claude-haiku-4-5"
+    bogus "nope"
+}
+`,
+			wantErr: "summarize",
 		},
 	}
 	for _, tc := range cases {

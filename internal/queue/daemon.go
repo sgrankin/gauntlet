@@ -51,6 +51,25 @@ type Config struct {
 	// omit an empty user rather than being used as-is.
 	MergeMessage string
 
+	// MergeBody optionally builds a prose body for the merge commit
+	// message (internal/summarize, a Claude-written summary of what the
+	// branch did), inserted between the subject and the Gauntlet-*
+	// trailers. nil disables it entirely — the exact pre-phase-4 message
+	// shape. Called at most once per trial, immediately before
+	// buildMergeMessage; its return is trimmed and, if non-empty, becomes
+	// the body.
+	//
+	// This is best-effort by contract: the queue never retries it, never
+	// treats an error or empty return as a failure, and never blocks a
+	// landing on it — a body-less message is exactly as valid as one with
+	// a summary. Bounding the call (a timeout, a real deadline) is the
+	// caller's job, not the queue's: passing a ctx with no deadline here
+	// would let a hung MergeBody wedge the whole reconcile loop, since
+	// ReconcileOnce is never concurrent with itself. cmd's wiring closure
+	// is where that policy belongs (queue stays policy-free per this
+	// package's own doc comment).
+	MergeBody func(ctx context.Context, cand core.Candidate, baseOID string) string
+
 	// WorkDir is the directory trial-tree export dirs are created under
 	// (docs/plans/phase23.md §10, F2): os.MkdirTemp(WorkDir, ...). Empty
 	// selects the OS default temp dir, exactly the phase-1 behavior — this

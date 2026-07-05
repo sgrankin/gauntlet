@@ -31,9 +31,11 @@ const (
 
 // buildMergeMessage renders a merge commit's full message: the templated
 // subject line (tmplText, or the built-in default chosen per
-// messageFields.User when tmplText is empty), a blank line, and the
-// Gauntlet-Ref / Gauntlet-Run trailers (docs/plans/phase1.md §3).
-func buildMergeMessage(tmplText string, f messageFields) (string, error) {
+// messageFields.User when tmplText is empty), an optional blank-line
+// separated body (Config.MergeBody's return, trimmed — phase-4's
+// Claude-written summary; "" omits it entirely, the exact prior shape),
+// and the Gauntlet-Ref / Gauntlet-Run trailers (docs/plans/phase1.md §3).
+func buildMergeMessage(tmplText string, f messageFields, body string) (string, error) {
 	subjectTmpl := tmplText
 	if subjectTmpl == "" {
 		if f.User == "" {
@@ -53,5 +55,13 @@ func buildMergeMessage(tmplText string, f messageFields) (string, error) {
 	}
 	subject := strings.TrimRight(buf.String(), "\n")
 
-	return fmt.Sprintf("%s\n\nGauntlet-Ref: %s\nGauntlet-Run: %s\n", subject, f.Ref, f.RunID), nil
+	var msg strings.Builder
+	msg.WriteString(subject)
+	msg.WriteString("\n\n")
+	if body = strings.TrimSpace(body); body != "" {
+		msg.WriteString(body)
+		msg.WriteString("\n\n")
+	}
+	fmt.Fprintf(&msg, "Gauntlet-Ref: %s\nGauntlet-Run: %s\n", f.Ref, f.RunID)
+	return msg.String(), nil
 }

@@ -50,3 +50,9 @@ executor "container" {
     cache "gocache"    path="/root/.cache/go-build"
     cache "gomodcache" path="/go/pkg/mod"
 }
+
+// summarize {
+//     model "claude-haiku-4-5"          // optional; default shown
+//     api-key-env "ANTHROPIC_API_KEY"   // optional; default shown
+//     timeout "10s"                     // optional; default shown
+// }

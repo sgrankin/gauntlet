@@ -222,11 +222,30 @@ func run() error {
 		}()
 	}
 
+	// The summarizer's own Params.Timeout already bounds each Messages API
+	// call, but Config.MergeBody's contract (internal/queue/daemon.go)
+	// puts the timeout decision at the caller, not in queue: this closure
+	// is that caller, wrapping ctx with cfg.Summarize.Timeout before every
+	// call so a hung summarizer can never wedge the reconcile loop.
+	sum, err := buildSummarizer(cfg, repo)
+	if err != nil {
+		return fmt.Errorf("build summarizer: %w", err)
+	}
+	var mergeBody func(ctx context.Context, cand core.Candidate, baseOID string) string
+	if sum != nil {
+		timeout := cfg.Summarize.Timeout
+		mergeBody = func(ctx context.Context, cand core.Candidate, baseOID string) string {
+			cctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return sum.MergeBody(cctx, cand, baseOID)
+		}
+	}
 	d, err := queue.New(repo, ex, chans, queue.Config{
 		Targets:      cfg.Targets,
 		CheckSpec:    cfg.CheckSpec,
 		Committer:    cfg.Committer,
 		MergeMessage: cfg.MergeMsg,
+		MergeBody:    mergeBody,
 		WorkDir:      trialsDir,
 	}, nil)
 	if err != nil {

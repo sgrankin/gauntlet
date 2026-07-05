@@ -383,7 +383,18 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 
 	d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
 
-	msg, err := buildMergeMessage(d.cfg.MergeMessage, messageFields{Topic: cand.Topic, User: cand.User, Ref: cand.Ref, Target: t.Name, RunID: runID})
+	// Best-effort per Config.MergeBody's contract (daemon.go): called at
+	// most once per trial, right here, before the message (and therefore
+	// the merge commit) is built. No timeout is applied at this layer —
+	// that's cmd's job — and no error path exists to check: a nil or
+	// empty-string-returning hook behaves identically to no summarizer at
+	// all.
+	var body string
+	if d.cfg.MergeBody != nil {
+		body = d.cfg.MergeBody(ctx, cand, targetTip)
+	}
+
+	msg, err := buildMergeMessage(d.cfg.MergeMessage, messageFields{Topic: cand.Topic, User: cand.User, Ref: cand.Ref, Target: t.Name, RunID: runID}, body)
 	if err != nil {
 		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-message template: "+err.Error(), rootSpan)
 		return
