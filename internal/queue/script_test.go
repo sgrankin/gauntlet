@@ -510,8 +510,14 @@ func TestScriptFake(t *testing.T) {
 // ported scenarios needs anything fake-git can't cheaply satisfy (no genuine
 // remote-ref plumbing, no real-git content-addressing edge case), so there is
 // no fake-only subset to carve out here.
+//
+// Under -race (raceScenariosSerial, race_test.go), scenarios run through
+// serialScriptT instead of testscript.Run directly, so testscript's
+// unconditional per-scenario t.Parallel() becomes a no-op and scripts run
+// one at a time — see race_test.go for why (a macOS fork/TSan deadlock under
+// concurrent real-git child process spawns).
 func TestScriptReal(t *testing.T) {
-	testscript.Run(t, testscript.Params{
+	params := testscript.Params{
 		Dir:  "testdata/script",
 		Cmds: commands(),
 		Setup: func(env *testscript.Env) error {
@@ -521,8 +527,28 @@ func TestScriptReal(t *testing.T) {
 			env.Values[harnessKey{}] = scriptHarness(realScriptHarness{h: h, gated: gated})
 			return nil
 		},
-	})
+	}
+	if raceScenariosSerial {
+		testscript.RunT(serialScriptT{t}, params)
+	} else {
+		testscript.Run(t, params)
+	}
 }
+
+// serialScriptT adapts *testing.T to testscript.T exactly like testscript's
+// own (unexported) tshim, except Parallel is a deliberate no-op: it exists
+// only so TestScriptReal can serialize scenarios under -race
+// (raceScenariosSerial) without forking testscript itself. See race_test.go
+// for the deadlock this works around.
+type serialScriptT struct{ *testing.T }
+
+func (t serialScriptT) Run(name string, f func(testscript.T)) {
+	t.T.Run(name, func(t *testing.T) { f(serialScriptT{t}) })
+}
+
+func (t serialScriptT) Parallel() {}
+
+func (t serialScriptT) Verbose() bool { return testing.Verbose() }
 
 // --- commands ---
 

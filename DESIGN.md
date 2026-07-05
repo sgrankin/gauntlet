@@ -164,6 +164,18 @@ The review checklist. Every plan and every implementation gets graded against th
   scripts can't `git diff` the exported coordinates without their own object
   store. Options if this bites: export via clone instead, or mount the bare
   repo read-only alongside.
+- **`TestScriptReal` occasionally hung forever under `-race`** (macOS,
+  ~1-in-8 runs under load, never observed without `-race`, pre-phase-5
+  environmental issue): goroutine dumps on timeout showed the parent stuck
+  in `syscall.forkExec` → `readlen`, blocked reading the exec-status pipe of
+  a `git` child that never reached exec — testscript unconditionally runs
+  every scenario's real-git-spawning subtest in parallel, and forking a
+  child out of a heavily-threaded, TSan-instrumented process can wedge the
+  child pre-exec on a copied-in lock. Mitigated by serializing
+  `TestScriptReal`'s scenarios only when built with `-race`
+  (`internal/queue/race_test.go`, `serialScriptT` in `script_test.go`);
+  non-race builds are unaffected. If CI on Linux ever shows this hang,
+  re-open — the theory is macOS-specific fork/TSan behavior, not portable.
 
 First live run (crashtest demo, 2026-07-05) surfaced three more:
 
