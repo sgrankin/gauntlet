@@ -175,6 +175,59 @@ func TestChannel_EventKindsPostExpectedStatus(t *testing.T) {
 	}
 }
 
+func TestChannel_RejectedDescriptionUsesFirstLineOfFailingOutput(t *testing.T) {
+	srv, rec := newRecordingServer(t, http.StatusCreated)
+
+	c := New(Params{Owner: "acme", Repo: "widgets", Token: "tok", APIURL: srv.URL, Log: io.Discard})
+	ev := core.Event{
+		Kind:      core.EventRejected,
+		Target:    "main",
+		Candidate: core.Candidate{SHA: "deadbeefcafe"},
+		RunID:     "run-1",
+		Record: &core.RunRecord{
+			Detail: "check \"test\" failed",
+			Checks: []core.CheckResult{
+				{Name: "lint", Status: core.CheckPassed},
+				{Name: "test", Status: core.CheckFailed,
+					Output: "airbag_test.go:18: deploy at 148ms, want <= 25ms\nmore output\n"},
+			},
+		},
+	}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	got := rec.snapshot()
+	want := "airbag_test.go:18: deploy at 148ms, want <= 25ms"
+	if got.body.Description != want {
+		t.Errorf("description = %q, want %q", got.body.Description, want)
+	}
+}
+
+func TestChannel_RejectedDescriptionFallsBackToDetailWithoutFailingCheck(t *testing.T) {
+	srv, rec := newRecordingServer(t, http.StatusCreated)
+
+	c := New(Params{Owner: "acme", Repo: "widgets", Token: "tok", APIURL: srv.URL, Log: io.Discard})
+	ev := core.Event{
+		Kind:      core.EventRejected,
+		Target:    "main",
+		Candidate: core.Candidate{SHA: "deadbeefcafe"},
+		RunID:     "run-1",
+		Record: &core.RunRecord{
+			Detail: "missing .gauntlet.kdl",
+			Checks: []core.CheckResult{{Name: "lint", Status: core.CheckPassed}},
+		},
+	}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	got := rec.snapshot()
+	if got.body.Description != "missing .gauntlet.kdl" {
+		t.Errorf("description = %q, want fallback to Record.Detail", got.body.Description)
+	}
+}
+
 func TestChannel_SkippedDoesNotPost(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)

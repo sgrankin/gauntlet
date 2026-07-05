@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -148,6 +149,70 @@ func TestLogChannel_EmitRunRecordSummary(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q missing %q", out, want)
 		}
+	}
+}
+
+func TestLogChannel_EmitFailureBlock(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// 15 numbered lines plus the interesting failure line: with
+	// failureTailMaxLines=10, only the last 10 (dropping "line 1".."line
+	// 5") should make it into the rendered block.
+	var lines []string
+	for i := 1; i <= 15; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	lines = append(lines, "airbag_test.go:18: deploy at 148ms, want <= 25ms")
+	output := strings.Join(lines, "\n") + "\n"
+
+	rec := &core.RunRecord{
+		RunID:  "run-1",
+		Target: "main",
+		Checks: []core.CheckResult{
+			{Name: "lint", Status: core.CheckPassed, Duration: time.Second},
+			{Name: "test", Status: core.CheckFailed, Duration: time.Second, Output: output},
+		},
+		Outcome:   core.OutcomeRejected,
+		StartedAt: start,
+		EndedAt:   start.Add(2 * time.Second),
+	}
+	ev := core.Event{Kind: core.EventRejected, Target: "main", Record: rec}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "    | airbag_test.go:18: deploy at 148ms, want <= 25ms") {
+		t.Errorf("output %q missing indented failure block", out)
+	}
+	if strings.Contains(out, "    | line 5") {
+		t.Errorf("output %q should be capped to the last 10 lines, not include line 5", out)
+	}
+	if !strings.Contains(out, "    | line 15") {
+		t.Errorf("output %q should retain lines within the last-10-line cap", out)
+	}
+}
+
+func TestLogChannel_EmitOmitsFailureBlockWhenNoFailure(t *testing.T) {
+	rec := &core.RunRecord{
+		RunID:  "run-2",
+		Target: "main",
+		Checks: []core.CheckResult{
+			{Name: "lint", Status: core.CheckPassed, Duration: time.Second},
+		},
+		Outcome: core.OutcomeLanded,
+	}
+	ev := core.Event{Kind: core.EventLanded, Target: "main", Record: rec}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if strings.Contains(buf.String(), "    | ") {
+		t.Errorf("output %q should have no failure block for a landed run", buf.String())
 	}
 }
 

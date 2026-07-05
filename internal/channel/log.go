@@ -54,11 +54,45 @@ func (c *LogChannel) Emit(ctx context.Context, ev core.Event) error {
 	line := formatEvent(ev)
 	if ev.Record != nil {
 		line += "\n" + formatRunRecord(ev.Record)
+		if block := formatFailureBlock(ev.Record); block != "" {
+			line += "\n" + block
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fmt.Fprintln(c.w, line)
 	return nil
+}
+
+// Caps on the failing-check tail LogChannel appends after a terminal
+// summary (DESIGN.md Watch: "Channels should include the failing check's
+// output tail in terminal notifications"). Generous for a local terminal —
+// unlike Slack's 3000-char text limit, there's no hard ceiling here, just a
+// courtesy cap so one runaway check doesn't flood the log.
+const (
+	failureTailMaxLines = 10
+	failureTailMaxBytes = 1024
+)
+
+// formatFailureBlock renders the first failing check's output tail as an
+// indented, greppable block (each line prefixed with four spaces + "| "),
+// visually grouped under the summary line it follows. Returns "" when rec
+// has no failing check or the failing check's tail is empty (e.g. a
+// CheckSkipped-only rejection, or a check that failed with no output).
+func formatFailureBlock(rec *core.RunRecord) string {
+	res := rec.FirstFailure()
+	if res == nil {
+		return ""
+	}
+	tail := core.FailureTail(res, failureTailMaxLines, failureTailMaxBytes)
+	if tail == "" {
+		return ""
+	}
+	lines := strings.Split(tail, "\n")
+	for i, ln := range lines {
+		lines[i] = "    | " + ln
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Commands returns a channel that never yields. It is a real channel value

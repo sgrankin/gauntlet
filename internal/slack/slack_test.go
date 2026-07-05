@@ -195,6 +195,64 @@ func TestSlack_TerminalOutcomesEditRootWithExpectedEmojiAndClearMaps(t *testing.
 	}
 }
 
+func TestSlack_RejectedFinalSummaryIncludesFailingCheckOutput(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/erin/thing", Target: "main", User: "erin", Topic: "thing", SHA: "f00dcafe"}
+	runID := "run-rejected-output"
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	posts := fake.waitForPosts(1, testTimeout)
+	root := posts[0]
+
+	rec := &core.RunRecord{
+		RunID:  runID,
+		Target: "main",
+		Checks: []core.CheckResult{
+			{Name: "test", Status: core.CheckFailed, Duration: 148 * time.Millisecond,
+				Output: "airbag_test.go:18: deploy at 148ms, want <= 25ms\n"},
+		},
+		Outcome: core.OutcomeRejected,
+	}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventRejected, Target: "main", Candidate: cand, RunID: runID, Record: rec})
+	posts = fake.waitForPosts(3, testTimeout)
+
+	summary := posts[2]
+	if summary.method != "chat.postMessage" || summary.threadTS != root.ts {
+		t.Fatalf("final summary = %+v, want threaded on %q", summary, root.ts)
+	}
+	wantBlock := "```\nairbag_test.go:18: deploy at 148ms, want <= 25ms\n```"
+	if !strings.Contains(summary.text, wantBlock) {
+		t.Errorf("final summary text = %q, want it to contain the code block %q", summary.text, wantBlock)
+	}
+
+	waitForStatsZero(t, s, testTimeout)
+}
+
+func TestSlack_LandedFinalSummaryHasNoCodeBlock(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/frank/thing", Target: "main", User: "frank", Topic: "thing", SHA: "abad1dea"}
+	runID := "run-landed-no-block"
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	fake.waitForPosts(1, testTimeout)
+
+	rec := &core.RunRecord{
+		RunID:   runID,
+		Target:  "main",
+		Checks:  []core.CheckResult{{Name: "test", Status: core.CheckPassed, Duration: 148 * time.Millisecond}},
+		Outcome: core.OutcomeLanded,
+	}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cand, RunID: runID, Record: rec})
+	posts := fake.waitForPosts(3, testTimeout)
+
+	summary := posts[2]
+	if strings.Contains(summary.text, "```") {
+		t.Errorf("final summary text = %q, want no code block for a landed run", summary.text)
+	}
+
+	waitForStatsZero(t, s, testTimeout)
+}
+
 func TestSlack_TerminalWithoutKnownRootIsANoOp(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 

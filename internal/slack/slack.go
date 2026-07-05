@@ -335,8 +335,20 @@ func (s *Slack) signalProcessed() {
 	close(old)
 }
 
+// Caps on the failing-check tail included in the final threaded summary
+// (DESIGN.md Watch: "Channels should include the failing check's output
+// tail in terminal notifications"). Slack caps a message's text at 3000
+// characters; these are deliberately tighter than LogChannel's (which has no
+// hard ceiling) to leave headroom for the rest of summarizeRun's text (the
+// headline, per-check lines, run ID, Detail) plus the code-block fencing.
+const (
+	failureTailMaxLines = 20
+	failureTailMaxBytes = 2500
+)
+
 // summarizeRun renders rec as a final threaded summary: outcome, one line
-// per check (verdict + duration), the run ID, and Detail when present.
+// per check (verdict + duration), the run ID, Detail when present, and — for
+// a run with a failing check — that check's output tail in a code block.
 func summarizeRun(rec *core.RunRecord) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s — run %s", outcomeLabel(rec.Outcome), rec.RunID)
@@ -345,6 +357,11 @@ func summarizeRun(rec *core.RunRecord) string {
 	}
 	if rec.Detail != "" {
 		fmt.Fprintf(&b, "\n%s", rec.Detail)
+	}
+	if res := rec.FirstFailure(); res != nil {
+		if tail := core.FailureTail(res, failureTailMaxLines, failureTailMaxBytes); tail != "" {
+			fmt.Fprintf(&b, "\n```\n%s\n```", tail)
+		}
 	}
 	return b.String()
 }
