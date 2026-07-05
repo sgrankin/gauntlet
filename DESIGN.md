@@ -47,7 +47,7 @@ is agent-written and *how the branch got there* is data worth keeping.
 | **KEPT** | Templated merge commit | Subject `Merge <topic> (<author>)` — the `--first-parent` view should carry information. Trailers for machines: `Gauntlet-Ref:`, `Gauntlet-Run:`, CI URL. Optional Claude-generated summary in the body. Template in per-repo config. |
 | **KEPT** | Workload identity lives on the builder host | Azure managed identity / cloud-native federation is a property of where the executor runs, not of the queue. The daemon injects job metadata, not credentials. Daemon-side secrets (Slack, GitHub, Anthropic) from its own store. |
 | **KEPT** | Deployments as post-land hooks | A hook stage triggered by the land event, same executor machinery. Keeps the queue core pure; avoids growing a CD system in v1. The hook is a hard scope boundary: when deployment needs grow (health checks, rollback, progressive delivery), the hook *hands off* to a real CD system (Argo CD on k8s, terraform pipelines, whatever the environment runs) — gauntlet never grows one. |
-| **KEPT** | KDL for config | Queues / channels / executors nest naturally as KDL nodes; reads better than TOML for trees of typed things. Risk: thin Go ecosystem. Mitigation: all parsing isolated in one `config` package unmarshaling to plain structs; syntax is swappable. *(Spike: `sblinch/kdl-go` fitness, KDL 2.0 status.)* |
+| **OPEN** | Config language: KDL vs CUE (TOML rejected) | KDL: nicest syntax for trees of typed things, but Go ecosystem is one thin single-maintainer lib. CUE: first-party Go library, schema/validation/defaults built in, but a full unification language — concept-load risk for the repo-side file every adopter writes. Spike is a head-to-head on the same sample configs: lib maturity, unmarshal ergonomics, typo error-message quality. Either way all parsing is isolated in one `config` package unmarshaling to plain structs; syntax stays swappable. |
 | **KEPT** | One daemon, N queues | Multiple target branches and multiple repos per instance, config-driven. Cheap now, painful to retrofit. |
 | **KILLED** | A job/pipeline DSL | GHA-yaml is a programming language in a data-format costume. A **job is a named command**; structure (matrix, setup, ordering) belongs in the repo's own scripts (shell/make/just). A queue runs multiple named checks (`lint`, `test`, …), each a command; verdict = all green. Buys per-check history and per-check red pings with zero DSL. |
 | **KEPT** | Job spec lives in the repo, read from the trial tree | CI definition versions with the code; a candidate that changes its checks is tested by its own definition. Daemon config keeps only operations: remotes, credentials, channels, builders. |
@@ -115,7 +115,8 @@ The review checklist. Every plan and every implementation gets graded against th
 
 ## Open spikes
 
-- `sblinch/kdl-go` fitness; KDL 2.0 support status.
+- Config language head-to-head: `sblinch/kdl-go` (fitness, KDL 2.0 status) vs
+  `cuelang.org/go` (ergonomics in plain-data mode, error-message quality).
 - GitHub behavior for pushes to non-`refs/heads` custom namespaces (confirm the
   branches-not-refs decision).
 - `git merge-tree --write-tree` conflict-reporting details across git versions
