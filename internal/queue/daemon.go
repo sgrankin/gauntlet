@@ -120,9 +120,9 @@ const (
 )
 
 // runMember is one candidate within a run and its chain link
-// (docs/plans/phase5.md §3.1). len(run.members) is always 1 in this chunk
-// (serial); batch (P5-E) grows it to N, speculate (P5-F) keeps it at 1 but
-// grows lane.runs instead.
+// (docs/plans/phase5.md §3.1). len(run.members) is 1 for serial/speculate;
+// batch (P5-E, landed) grows it to N — up to Target.MaxBatch chained links,
+// one check suite over the chain tip's tree (§2.4, §3.3).
 type runMember struct {
 	cand     core.Candidate
 	mergeOID string          // this member's own --no-ff link (== run.chainTip for len(members)==1)
@@ -137,11 +137,11 @@ type runMember struct {
 // rerun, never correctness.
 type run struct {
 	target    string
-	members   []runMember // len 1 today (serial); batch/speculate grow this later
+	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch (P5-E, landed)
 	baseOID   string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto
 	chainTip  string      // the tested merge commit == members[len-1].mergeOID (== members[0].mergeOID for len(members)==1)
-	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false today
-	batchID   string      // "" unless batch (P5-E); shared across member records
+	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false until P5-F
+	batchID   string      // "" unless batch; shared across member records (runID reused verbatim, §3.2)
 	runID     string
 	dir       string // exported trial tree; removed on every terminal transition
 	checks    []config.Check
@@ -197,6 +197,19 @@ type Daemon struct {
 	// idle target — exactly as a nil run was pre-lane-refactor.
 	lanes map[string]*lane
 
+	// batchFallback is batch mode's in-memory red-recovery flag (§2.6,
+	// §10 amendment 2): target -> true while a prior batch run for it went
+	// red and no landing has occurred since. refillLane consults it to
+	// force the next refill into refillSerialOne (one candidate at a time,
+	// normal single-culprit park semantics) instead of refillBatch;
+	// landRun deletes the entry on any successful landing for that target,
+	// resuming batching. Reconstructible in the sense that losing it (a
+	// restart) costs at most one extra batch-red round before the culprit
+	// is found again — never a correctness issue (no ref reflects this
+	// flag; it's pure scheduling policy, not state any Invariant depends
+	// on).
+	batchFallback map[string]bool
+
 	// snap holds the most recently published Snapshot (docs/plans/phase23.md
 	// §2.1); nil until the first successful ReconcileOnce pass completes.
 	snap atomic.Pointer[Snapshot]
@@ -248,16 +261,17 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 	}
 
 	return &Daemon{
-		git:         git,
-		exec:        exec,
-		chans:       chans,
-		tr:          obs.Tracer(),
-		cfg:         cfg,
-		now:         now,
-		order:       make(map[string]map[string]int64),
-		done:        make(map[string]map[string]parkEntry),
-		ignoredRefs: make(map[string]string),
-		lanes:       make(map[string]*lane),
+		git:           git,
+		exec:          exec,
+		chans:         chans,
+		tr:            obs.Tracer(),
+		cfg:           cfg,
+		now:           now,
+		order:         make(map[string]map[string]int64),
+		done:          make(map[string]map[string]parkEntry),
+		ignoredRefs:   make(map[string]string),
+		lanes:         make(map[string]*lane),
+		batchFallback: make(map[string]bool),
 	}, nil
 }
 

@@ -1,0 +1,42 @@
+# Batch green lands the whole chain: 3 candidates batch together into one
+# --no-ff chain, one check suite runs over the combined tip tree, one CAS
+# push lands all three, and each gets its own EventLanded in FIFO order.
+# Ports docs/plans/phase5.md §5.2's batch_green_lands_chain row.
+
+set-mode main batch 8
+
+# The check spec must already be on main's tip before any candidate is
+# pushed: if each candidate independently introduced an IDENTICAL spec from
+# scratch, the very first member's link would "change" the spec from
+# absent to present and terminate the batch there (§10 amendment 3) —
+# exactly the behavior batch_member_repush_reforms.txtar and the
+# spec-change Go test exercise deliberately; this scenario is about the
+# happy path, so the spec is seeded once, up front.
+direct-push main files/spec
+
+push-candidate main alice a files/a
+push-candidate main bob b files/b
+push-candidate main carol c files/c
+tick                              # one refill: all 3 chain into one batch run; "test" starts once
+
+await-started test
+release-check test passed         # the batch's ONE check suite goes green: lands all three
+
+assert-event landed
+assert-landed-order main a b c
+assert-target-chain main a b c    # one merge per topic, oldest first, parent[1] verbatim (Invariant 1/6)
+assert-slot-gone main alice a
+assert-slot-gone main bob b
+assert-slot-gone main carol c
+assert-pipeline-depth main 0
+
+-- files/spec/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/a/a.txt --
+a
+-- files/b/b.txt --
+b
+-- files/c/c.txt --
+c

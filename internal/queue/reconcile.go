@@ -208,6 +208,45 @@ func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.
 	return cands[refs[0]], true
 }
 
+// pickUpTo returns up to n candidates in the same FIFO order as pickHead
+// (smallest order, lexical ref tie-break), excluding parked (ref, SHA)
+// entries and any ref in inFlight (docs/plans/phase5.md §2.5's
+// pickHead-generalized "pickNext (one, excluding in-flight) + pickUpTo (N)").
+// inFlight may be nil (batch's own refill: the lane is always empty when
+// refillLane runs, so nothing is ever already in flight — the parameter
+// exists so this helper is ready for speculation's window, P5-F, without a
+// second signature). The result may be shorter than n (fewer than n
+// candidates queued) or empty (nothing to pick).
+func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int, inFlight map[string]bool) []core.Candidate {
+	order := d.order[target]
+	done := d.done[target]
+
+	var refs []string
+	for ref, c := range cands {
+		if parked, ok := done[ref]; ok && parked.SHA == c.SHA {
+			continue
+		}
+		if inFlight[ref] {
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if order[refs[i]] != order[refs[j]] {
+			return order[refs[i]] < order[refs[j]]
+		}
+		return refs[i] < refs[j]
+	})
+	if n >= 0 && len(refs) > n {
+		refs = refs[:n]
+	}
+	out := make([]core.Candidate, len(refs))
+	for i, ref := range refs {
+		out[i] = cands[ref]
+	}
+	return out
+}
+
 // runInvalidated is the generalized Invariant-5 test (docs/plans/phase5.md
 // §2.2): true (with a human-readable reason) iff any member's candidate
 // ref moved or vanished, or — for the lane's head run (laneIndex==0) only —
@@ -273,11 +312,22 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 	}
 
 	// (c) Bubble: a run that just went red. Only the culprit parks; a
-	// future speculation window's suffix Skips unparked and re-queues.
+	// future speculation window's suffix Skips unparked and re-queues. A
+	// genuine multi-member batch (len(members) > 1) instead takes §10
+	// amendment 2's serial-fallback path (finishBatchRed): we don't know
+	// which member is guilty, so nothing parks there either — a batch
+	// formed with exactly one member (max-batch 1, or a queue that only
+	// offered one candidate) is NOT a "batch" for this purpose and takes the
+	// normal single-culprit park, since §4.1 promises max-batch 1 "degrades
+	// to serial behavior" byte for byte.
 	for i, r := range lane.runs {
 		if r.verdict == verdictRejected || r.verdict == verdictErrored {
-			outcome, detail := runRejectOutcome(r)
-			d.finishRun(ctx, t, r, outcome, detail, true)
+			if len(r.members) > 1 {
+				d.finishBatchRed(ctx, t, r)
+			} else {
+				outcome, detail := runRejectOutcome(r)
+				d.finishRun(ctx, t, r, outcome, detail, true)
+			}
 			d.invalidateSuffix(ctx, t, lane, i+1, "pipeline bubble")
 			lane.runs = lane.runs[:i]
 			return true
@@ -325,13 +375,27 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	select {
 	case res := <-r.cur.result:
 		obs.EndCheck(r.cur.span, res)
-		m := &r.members[0]
-		m.rec.Checks = append(m.rec.Checks, res)
+		// §3.3: a batch's checks run once against the chain tip's tree, but
+		// the result is duplicated onto every member's own RunRecord — each
+		// landed/skipped row stays self-contained ("did this land green?"
+		// needs no join), and BatchID/Position/BatchSize carry the "tested
+		// together" truth for anyone who needs it. Serial/speculate have
+		// exactly one member, so this is a one-element loop, unchanged in
+		// every observable respect.
+		for i := range r.members {
+			r.members[i].rec.Checks = append(r.members[i].rec.Checks, res)
+		}
 		// Check is the just-finished result itself (docs/plans/phase23.md
 		// F-a: "Event additionally carries the finished *CheckResult on
 		// check-finished events"), so channels can render a per-check
 		// verdict mid-run instead of waiting for the run's terminal event.
-		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: m.cand, RunID: r.runID, CheckName: res.Name, Check: &res})
+		// Candidate attribution is the run's head member (documented
+		// decision, docs/plans/phase5.md P5-E): one event per check per run,
+		// not one per member per check, matching startCheck's own choice
+		// below and keeping channel noise independent of batch size — the
+		// per-member terminal event (EventLanded/EventSkipped/EventRejected)
+		// carries each member's own duplicated Checks slice regardless.
+		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.members[0].cand, RunID: r.runID, CheckName: res.Name, Check: &res})
 		r.cur = nil
 
 		switch {
@@ -419,10 +483,10 @@ func (d *Daemon) cancelRun(r *run) {
 // chainLink is one candidate's link in the merge-commit chain
 // (docs/plans/phase5.md §1.2): the --no-ff merge commit itself, the tree it
 // was tested against, and the candidate it links in. len(lane.runs[*].members)
-// is still 1 everywhere in this chunk (serial), but buildChainLink itself is
-// chain-length-agnostic — chain_test.go proves it against real git for
-// multi-link chains (P5-D), ahead of P5-E/F actually growing a run's member
-// list past one.
+// is 1 for serial/speculate; batch (P5-E, landed) chains up to Target.MaxBatch
+// links via repeated buildChainLink calls (startBatchRun), each one's base
+// the previous call's mergeOID — chain_test.go proves the underlying
+// mechanics against real git independent of any caller.
 type chainLink struct {
 	mergeOID string
 	treeOID  string
@@ -453,8 +517,9 @@ type chainLink struct {
 // MergeTree and CommitTree resolve any commit-ish from the object store
 // regardless of refs, and MergeTree detects a conflict against a chained
 // base identically to one against a real ref). No change was needed in this
-// function itself to support that — only its callers building multi-link
-// chains (P5-E/F) are new.
+// function itself to support that — startBatchRun (P5-E, landed) is the
+// first caller that actually builds a multi-link chain; speculation (P5-F)
+// will be the second.
 func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
 	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
 	trial, err := d.git.MergeTree(ctx, base, cand.SHA)
@@ -539,11 +604,30 @@ func (d *Daemon) specChanged(ctx context.Context, prevTree, newTree string) bool
 // is enforced by the caller, exactly as tryStartTrial's implicit
 // precondition was pre-refactor.
 //
-// Serial only in this chunk: config.Target has no Mode field yet (P5-A),
-// so batch/speculate refill strategies (§2.5's other two switch cases)
-// aren't reachable and aren't implemented — this is exactly and only
-// tryStartTrial's pick-head step.
+// Dispatches on t.Mode: "batch" forms a chained multi-candidate run
+// (refillBatch) UNLESS this target is in batch-red serial fallback
+// (§2.6, overridden by §10 amendment 2 for the event vocabulary;
+// d.batchFallback), in which case — and for every other mode ("serial"/""
+// the default; "speculate", not yet implemented by this chunk, P5-F) —
+// refillSerialOne runs instead, exactly tryStartTrial's pick-head step.
 func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
+	if t.Mode == "batch" && !d.batchFallback[t.Name] {
+		d.refillBatch(ctx, t, targetTip, cands)
+		return
+	}
+	d.refillSerialOne(ctx, t, targetTip, cands)
+}
+
+// refillSerialOne is the one-candidate-at-a-time refill: serial mode's own
+// refill, AND — while d.batchFallback[t.Name] is set (§2.6, §10 amendment
+// 2) — batch mode's red-recovery fallback. It deliberately is NOT "a
+// size-1 batch": running through this exact path (not startBatchRun with a
+// single picked candidate) means a red verdict here takes the normal
+// single-culprit park + EventRejected treatment (finishRun's plain branch
+// in advanceLane's bubble step, since len(members)==1), not batch-red's
+// no-park EventSkipped treatment — the culprit's true rejection must come
+// from a genuine serial round, per §10 amendment 2's own reasoning.
+func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
 	cand, ok := d.pickHead(t.Name, cands)
 	if !ok {
 		return
@@ -560,6 +644,314 @@ func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip stri
 	}
 
 	d.startRun(ctx, t, targetTip, cand)
+}
+
+// refillBatch fills an idle lane in batch mode (docs/plans/phase5.md §2.5):
+// picks up to t.MaxBatch queued candidates FIFO (pickUpTo; nothing is ever
+// "in flight" to exclude here, since batch holds at most one run and
+// refillLane only runs when the lane is idle), then chains them via
+// startBatchRun. IsAncestor recovery (Invariant 4) is checked on the head
+// pick only, exactly as serial's own refill: a mid-chain member that's
+// somehow already landed is caught the same way once it becomes a future
+// refill's head (§8's per-member recovery walkthrough).
+func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
+	maxBatch := t.MaxBatch
+	if maxBatch < 1 {
+		// Defensive only: production config (config.LoadDaemon) always
+		// defaults/validates MaxBatch >= 1 for Mode=="batch". A hand-built
+		// queue.Config (as tests may construct) that leaves it zero still
+		// gets correct, if degenerate, one-at-a-time batch behavior rather
+		// than an empty pick every tick.
+		maxBatch = 1
+	}
+
+	picked := d.pickUpTo(t.Name, cands, maxBatch, nil)
+	if len(picked) == 0 {
+		return
+	}
+
+	head := picked[0]
+	landed, err := d.git.IsAncestor(ctx, head.SHA, targetTip)
+	if err != nil {
+		d.rejectPreMerge(ctx, t, head, core.OutcomeError, "is-ancestor: "+err.Error(), nil)
+		return
+	}
+	if landed {
+		d.recoverLanded(ctx, t, head)
+		return
+	}
+
+	d.startBatchRun(ctx, t, targetTip, picked)
+}
+
+// startBatchRun chains picked's candidates into one --no-ff merge chain
+// (§1.2's buildChainLink, advancing the base to each new link) and, if at
+// least the head candidate chains cleanly, starts one run testing the chain
+// tip's tree against every chained member (§2.4's one-check-suite-per-batch
+// shape).
+//
+// Chaining stops — without failing the whole batch — at the first member
+// that either conflicts against the chain built so far, or hits a
+// daemon-side infra failure building its link: that member parks via the
+// normal per-candidate machinery (rejectPreMerge, a conflict or infra error
+// before any run exists) and the batch forms from whatever chained cleanly
+// before it (decide-and-document: park-and-stop, not
+// park-and-skip-and-continue — simplest, and preserves FIFO, since the
+// members after the parked one are never touched and simply wait for the
+// next refill). If the very first candidate fails this way, no batch forms
+// at all — byte-for-byte serial's own rejectPreMerge path.
+//
+// A member whose link changes the check spec's content relative to the
+// chain built before it (specChanged) terminates the batch AFTER that
+// member (§10 amendment 3, overriding §9's "future refinement" framing):
+// the member is included, tested under its own change; later picks start
+// the next batch.
+func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip string, picked []core.Candidate) {
+	// F4 (docs/plans/phase23.md §10): the root span starts here, before any
+	// trial-merge, exactly as serial's startRun — one shared span for the
+	// batch's single run.
+	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, picked[0], "")
+
+	var (
+		runID  string
+		links  []chainLink
+		trials []core.TrialMerge
+	)
+	base := targetTip
+	specTree := targetTip // ReadFileFromTree accepts any commit-ish; the target tip itself is valid as member 0's "before" side
+
+chain:
+	for _, cand := range picked {
+		link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
+			if runID == "" {
+				// Minted from the FIRST member's trial tree, exactly as
+				// serial's startRun mints its single run ID — reused
+				// verbatim as the batch's BatchID (§3.2: "<runID> reuse is
+				// fine").
+				runID = newRunID(d.now(), trial.TreeOID)
+				rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
+			}
+			d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
+			return runID
+		})
+
+		switch {
+		case err != nil:
+			if len(links) == 0 {
+				d.rejectPreMerge(ctx, t, cand, core.OutcomeError, err.Error(), rootSpan)
+				return
+			}
+			d.rejectPreMerge(ctx, t, cand, core.OutcomeError, err.Error(), nil)
+			break chain
+		case !trial.Clean:
+			detail := "trial merge conflict: " + strings.Join(trial.Conflicts, ", ")
+			if len(links) == 0 {
+				d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, detail, rootSpan)
+				return
+			}
+			d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, detail, nil)
+			break chain
+		}
+
+		links = append(links, link)
+		trials = append(trials, trial)
+		base = link.mergeOID
+
+		changed := d.specChanged(ctx, specTree, trial.TreeOID)
+		specTree = trial.TreeOID
+		if changed {
+			break chain // §10 amendment 3: member included, batch ends here
+		}
+	}
+
+	if len(links) == 0 {
+		// Unreachable given the loop's own return statements above (the only
+		// way to fall through with no links is the head candidate failing,
+		// which already returned) — kept as a defensive guard against a
+		// future refactor of the loop above.
+		return
+	}
+
+	d.finishBatchStart(ctx, t, targetTip, runID, links, trials, rootCtx, rootSpan)
+}
+
+// finishBatchStart is startBatchRun's back half (§2.5, §3.3): once the
+// chain has at least one link, read and parse the check spec from the
+// chain TIP's tree (the batch's one-check-suite-over-the-combined-tree
+// shape — §9's documented "tested by the tip's own definition" caveat,
+// narrowed by §10 amendment 3's spec-change boundary above), export the
+// tip's tree, and produce one run whose members carry per-member
+// RunRecords sharing runID as BatchID (Position/BatchSize per §3.3).
+//
+// Every daemon-side infra failure here (missing/invalid check spec, export
+// failure) parks every already-chained member (rejectBatch) — there's no
+// single "guilty" member to blame when the combined tree they were all
+// chained onto can't even be read, mirroring rejectRun's per-candidate
+// treatment of the identical failures in the single-candidate case.
+func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, runID string, links []chainLink, trials []core.TrialMerge, rootCtx context.Context, rootSpan trace.Span) {
+	chainTip := links[len(links)-1].mergeOID
+	tipTree := trials[len(trials)-1].TreeOID
+	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, chainTip))
+
+	specData, err := d.git.ReadFileFromTree(ctx, tipTree, d.cfg.CheckSpec)
+	if err != nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
+		return
+	}
+	spec, err := config.ParseChecks(specData)
+	if err != nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
+		return
+	}
+
+	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
+	if err != nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
+		return
+	}
+	if err := d.git.ExportTree(ctx, tipTree, dir); err != nil {
+		_ = os.RemoveAll(dir)
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
+		return
+	}
+
+	now := d.now()
+	members := make([]runMember, len(links))
+	prevBase := base
+	for i, link := range links {
+		members[i] = runMember{
+			cand:     link.cand,
+			mergeOID: link.mergeOID,
+			rec: &core.RunRecord{
+				RunID:     runID,
+				Target:    t.Name,
+				Candidate: link.cand,
+				BaseOID:   prevBase,
+				MergeSHA:  link.mergeOID,
+				Trial:     trials[i],
+				StartedAt: now,
+				BatchID:   runID,
+				Position:  i,
+				BatchSize: len(links),
+			},
+		}
+		prevBase = link.mergeOID
+	}
+
+	r := &run{
+		target:   t.Name,
+		members:  members,
+		baseOID:  base,
+		chainTip: chainTip,
+		batchID:  runID,
+		runID:    runID,
+		dir:      dir,
+		checks:   spec.Checks,
+		idx:      0,
+		verdict:  verdictNone,
+		rootCtx:  rootCtx,
+		rootSpan: rootSpan,
+	}
+	l := d.lanes[t.Name]
+	if l == nil {
+		l = &lane{}
+		d.lanes[t.Name] = l
+	}
+	l.runs = append(l.runs, r)
+	d.startCheck(ctx, r)
+}
+
+// rejectBatch parks every member in links and emits its own terminal event
+// for a batch-wide pre-check failure discovered after the chain was fully
+// built (§3.3's per-member-record shape, applied to a failure path rather
+// than a verdict): unlike batch-red (§10 amendment 2, finishBatchRed), this
+// isn't "a check failed and we don't know who's guilty" — it's "the
+// combined tree these members were chained onto can't even be
+// read/parsed/exported", which is nobody's individual fault but blocks
+// every member equally, so — like rejectRun's single-candidate case — every
+// member parks, avoiding an unbounded retry-every-tick loop. rootSpan is
+// always non-nil here: finishBatchStart's own callers always have a real
+// run-in-progress span by this point.
+func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID string, links []chainLink, trials []core.TrialMerge, outcome core.Outcome, detail string, rootSpan trace.Span) {
+	now := d.now()
+	prevBase := base
+	var lastRec *core.RunRecord
+	for i, link := range links {
+		rec := &core.RunRecord{
+			RunID:     runID,
+			Target:    t.Name,
+			Candidate: link.cand,
+			BaseOID:   prevBase,
+			MergeSHA:  link.mergeOID,
+			Trial:     trials[i],
+			Outcome:   outcome,
+			Detail:    detail,
+			StartedAt: now,
+			EndedAt:   now,
+			BatchID:   runID,
+			Position:  i,
+			BatchSize: len(links),
+		}
+		prevBase = link.mergeOID
+		lastRec = rec
+		d.park(t.Name, link.cand, outcome, detail)
+		d.emit(ctx, core.Event{
+			Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
+			Candidate: link.cand, RunID: runID, Record: rec, Detail: detail,
+		})
+	}
+	obs.EndRun(rootSpan, lastRec)
+}
+
+// finishBatchRed handles a genuine multi-member batch run (len(r.members) >
+// 1) whose combined check suite went red (§2.6, overridden by §10 amendment
+// 2 for the event vocabulary): we don't know which member is guilty, so
+// nothing parks. Every member gets its own terminal record — Outcome
+// Skipped, the shared failing checks already duplicated onto it by
+// advanceChecks — and its own EventSkipped, in member order (constraint
+// 10's per-candidate event contract, generalized), with a Detail naming the
+// batch and the failing check. batchFallback[target] is then set so the
+// next refillLane for this target walks candidates one at a time
+// (refillSerialOne) until a landing clears it (landRun): the culprit's
+// genuine EventRejected + park comes from ITS serial round, keeping park
+// semantics honest (only a proven-red SHA ever parks) and channel rendering
+// (ghstatus/Slack) truthful — every status returns to pending on the serial
+// re-trial, exactly as a re-push would.
+//
+// A batch formed with BatchSize==1 is NOT routed here — advanceLane's
+// bubble step dispatches those through the plain finishRun/park path
+// instead (see its own doc comment).
+func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
+	checkName := "?"
+	if checks := r.members[0].rec.Checks; len(checks) > 0 {
+		checkName = checks[len(checks)-1].Name
+	}
+	detail := fmt.Sprintf("batch %s red on check %q; serializing", r.batchID, checkName)
+	now := d.now()
+
+	for i := range r.members {
+		m := &r.members[i]
+		m.rec.Outcome = core.OutcomeSkipped
+		m.rec.Detail = detail
+		m.rec.EndedAt = now
+	}
+
+	d.finalizeRun(r)
+
+	for i := range r.members {
+		m := &r.members[i]
+		d.emit(ctx, core.Event{
+			Kind:      core.EventSkipped,
+			At:        now,
+			Target:    t.Name,
+			Candidate: m.cand,
+			RunID:     r.runID,
+			Record:    m.rec,
+			Detail:    detail,
+		})
+	}
+
+	d.batchFallback[t.Name] = true
 }
 
 // startRun builds cand's chain link (via buildChainLink) and, on a clean
@@ -684,8 +1076,9 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 
 // landRun is the generalized land (docs/plans/phase5.md §2.4): one CAS push
 // lands the whole chain, then a per-member slot delete + terminal event,
-// FIFO. len(r.members)==1 in this chunk: exactly phase-1's land, one push
-// one delete one event.
+// FIFO. len(r.members)==1 for serial/speculate: exactly phase-1's land, one
+// push one delete one event. A batch run (P5-E, landed) has N members: one
+// push, N deletes, N EventLanded — one per candidate, in FIFO order.
 //
 // A stale target CAS means the target moved between trial and land — Skip,
 // keep every member's slot, retry next tick (Invariant 2). A stale
@@ -715,6 +1108,14 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		d.finishRun(ctx, t, r, core.OutcomeSkipped, detail, false)
 		return
 	}
+
+	// §2.6/§10 amendment 2: any successful landing for this target clears
+	// batch-red serial fallback, resuming batching on the next refill —
+	// whether this landing is an ordinary batch, or one round of the
+	// fallback's own one-at-a-time walk. delete is a no-op when the flag
+	// was never set (every non-batch mode, or a batch target that never
+	// went red).
+	delete(d.batchFallback, t.Name)
 
 	for i := range r.members {
 		m := &r.members[i]
@@ -750,42 +1151,50 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	d.finalizeRun(r)
 }
 
-// finishRun finalizes the head member's RunRecord (outcome/detail/end
-// time), optionally parks its (ref, SHA), finalizes the run (root span
-// end, dir removal — finalizeRun), and emits its terminal event.
-// len(r.members)==1 in this chunk, so this is exactly phase-1's finishRun
-// in every observable respect; a future batch chunk (P5-E) will need to
-// split the per-member fields/park/emit from the once-per-run finalizeRun
-// call so a batch's terminal loop doesn't end the shared root span once
-// per member.
+// finishRun finalizes every member's RunRecord (outcome/detail/end time),
+// optionally parks each (ref, SHA), finalizes the run once (root span end,
+// dir removal — finalizeRun), and emits one terminal event per member, in
+// member order (mirroring landRun's own per-member-then-once-per-run
+// shape). len(r.members)==1 for serial/speculate and for a batch-red run
+// (which advanceLane routes to finishBatchRed instead, never here) — so
+// this loop is a one-element loop in every case except a move/target
+// invalidation of a genuine multi-member batch (invalidateSuffix, park
+// always false there): every member of an invalidated batch must Skip and
+// re-queue, none of them singled out (§2.2).
 func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome core.Outcome, detail string, park bool) {
-	m := &r.members[0]
-	m.rec.Outcome = outcome
-	m.rec.Detail = detail
-	m.rec.EndedAt = d.now()
+	for i := range r.members {
+		m := &r.members[i]
+		m.rec.Outcome = outcome
+		m.rec.Detail = detail
+		m.rec.EndedAt = d.now()
 
-	if park {
-		d.park(t.Name, m.cand, outcome, detail)
+		if park {
+			d.park(t.Name, m.cand, outcome, detail)
+		}
 	}
 
 	d.finalizeRun(r)
 
-	d.emit(ctx, core.Event{
-		Kind:      eventKindForOutcome(outcome),
-		At:        d.now(),
-		Target:    t.Name,
-		Candidate: m.cand,
-		RunID:     r.runID,
-		Record:    m.rec,
-		Detail:    detail,
-	})
+	for i := range r.members {
+		m := &r.members[i]
+		d.emit(ctx, core.Event{
+			Kind:      eventKindForOutcome(outcome),
+			At:        d.now(),
+			Target:    t.Name,
+			Candidate: m.cand,
+			RunID:     r.runID,
+			Record:    m.rec,
+			Detail:    detail,
+		})
+	}
 }
 
 // finalizeRun performs the once-per-run cleanup that must happen exactly
 // once regardless of member count (docs/plans/phase5.md §3.2): ends the
 // root span (its summary attributes/status come from the head member's
-// RunRecord — len(members)==1 today, so this is exactly the record the run
-// produced) and removes the exported trial dir. Per-check log files
+// RunRecord — the representative summary for a batch's shared span; each
+// member's own full record is still what's emitted per terminal event) and
+// removes the exported trial dir. Per-check log files
 // (LogDir, if configured) are deliberately never touched here: they
 // outlive the run by design (DESIGN.md "Full per-check log files") —
 // retention is a separate, later prune mechanism, not this state machine's

@@ -139,6 +139,18 @@ func (f *fakeGitRepo) ReadFileFromTree(ctx context.Context, tree, path string) (
 	defer f.mu.Unlock()
 	files, ok := f.trees[tree]
 	if !ok {
+		// tree may be a commit-ish rather than a literal tree OID: real
+		// git's ReadFileFromTree accepts either (it shells out to
+		// "cat-file -p <commit-or-tree>:<path>"), a contract specChanged's
+		// batch callers rely on directly (docs/plans/phase5.md §10
+		// amendment 3 passes the target tip's own commit OID as the
+		// "before" side for a batch's first member) — resolve a commit OID
+		// to its tree before giving up.
+		if c, isCommit := f.commits[tree]; isCommit {
+			files, ok = f.trees[c.tree]
+		}
+	}
+	if !ok {
 		return nil, fmt.Errorf("fakeGitRepo: unknown tree %q", tree)
 	}
 	content, ok := files[path]

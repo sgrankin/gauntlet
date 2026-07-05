@@ -1,0 +1,62 @@
+# Batch red falls back to serial: 3 candidates batch together, the combined
+# check suite fails, nothing parks — every member gets its own EventSkipped
+# (§2.6, overridden by §10 amendment 2 for the event vocabulary: no
+# batch-level EventRejected). The target then walks its queue one candidate
+# at a time (batch-red serial fallback) until the true culprit (bob) is
+# found and genuinely parked with EventRejected; alice and carol land
+# individually. A landing clears the fallback flag, so once alice lands the
+# target re-batches its remaining members (bob+carol) before red-ing again
+# and continuing the one-at-a-time walk — self-healing either way (§2.6).
+
+set-mode main batch 8
+
+direct-push main files/spec       # see batch_green_lands_chain.txtar's comment: seed the spec once, up front
+
+push-candidate main alice a files/a-good
+push-candidate main bob b files/b-bad
+push-candidate main carol c files/c-good
+tick                               # one refill: batch of 3 (alice,bob,carol); "test" starts once
+
+await-started test
+release-check test failed          # batch red: all three Skipped, none parked; serial fallback engaged
+
+assert-event skipped
+! assert-event rejected
+! assert-slot-gone main alice a
+! assert-slot-gone main bob b
+! assert-slot-gone main carol c
+
+tick                                # serial fallback: alice alone
+await-started test
+release-check test passed           # alice lands individually; a landing clears the fallback flag
+assert-slot-gone main alice a
+
+tick                                 # fallback cleared: re-batches bob+carol together
+await-started test
+release-check test failed            # still red (bob): both Skipped again, fallback re-engaged
+! assert-slot-gone main bob b
+! assert-slot-gone main carol c
+
+tick                                  # serial fallback: bob alone
+await-started test
+release-check test failed             # bob is the true culprit: parks for real this time
+assert-event rejected
+assert-slot-parked main bob b
+
+tick                                   # serial fallback: carol alone
+await-started test
+release-check test passed              # carol lands individually
+assert-slot-gone main carol c
+
+assert-landed-order main a c
+
+-- files/spec/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/a-good/a.txt --
+a
+-- files/b-bad/b.txt --
+b
+-- files/c-good/c.txt --
+c
