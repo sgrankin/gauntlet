@@ -148,6 +148,19 @@ func TestSlack_TrialCleanPostsRootCheckThreadsAndTerminalEdit(t *testing.T) {
 			t.Errorf("root text = %q, want it to contain %q", root.text, want)
 		}
 	}
+	// Durable-ownership metadata: every root carries
+	// event_type gauntlet_run and a {target, ref} payload, so a reaction
+	// arriving after this run has terminated can still be traced back to
+	// its owner.
+	if !root.metadataSet || root.eventType != gauntletRunEventType {
+		t.Fatalf("root metadata = (set=%v, type=%q), want set with type %q", root.metadataSet, root.eventType, gauntletRunEventType)
+	}
+	if got := root.payload["target"]; got != "main" {
+		t.Errorf("root metadata payload[target] = %v, want %q", got, "main")
+	}
+	if got := root.payload["ref"]; got != cand.Ref {
+		t.Errorf("root metadata payload[ref] = %v, want %q", got, cand.Ref)
+	}
 	waitForStats(t, s, testTimeout, 1, 1)
 
 	mustEmit(t, s, ctx, core.Event{Kind: core.EventCheckStarted, Target: "main", Candidate: cand, RunID: runID, CheckName: "lint"})
@@ -178,6 +191,12 @@ func TestSlack_TrialCleanPostsRootCheckThreadsAndTerminalEdit(t *testing.T) {
 	}
 	if !strings.Contains(update.text, "✅") {
 		t.Errorf("terminal edit text = %q, want a ✅ verdict", update.text)
+	}
+	// The terminal edit re-attaches the same {target, ref} metadata,
+	// confirming the single-run shape as authoritative now that the run
+	// finished solo (postTerminal's doc comment).
+	if !update.metadataSet || update.eventType != gauntletRunEventType || update.payload["ref"] != cand.Ref {
+		t.Errorf("terminal edit metadata = (set=%v, type=%q, payload=%v), want type %q with ref %q", update.metadataSet, update.eventType, update.payload, gauntletRunEventType, cand.Ref)
 	}
 
 	summary := posts[4]
@@ -561,6 +580,19 @@ func TestSlack_BatchLandingPostsOneRootOneEditOneSummary(t *testing.T) {
 	if !strings.Contains(edit.text, "✅") {
 		t.Errorf("batch edit text = %q, want a ✅ verdict", edit.text)
 	}
+	// A genuine multi-member batch's final metadata omits ref:
+	// a reaction can't name which member it means, so handleForeignReaction
+	// must be able to tell this apart from a single-run root by payload
+	// shape alone.
+	if !edit.metadataSet || edit.eventType != gauntletRunEventType {
+		t.Fatalf("batch edit metadata = (set=%v, type=%q), want set with type %q", edit.metadataSet, edit.eventType, gauntletRunEventType)
+	}
+	if got := edit.payload["target"]; got != "main" {
+		t.Errorf("batch edit metadata payload[target] = %v, want %q", got, "main")
+	}
+	if _, hasRef := edit.payload["ref"]; hasRef {
+		t.Errorf("batch edit metadata payload = %v, must not carry ref for a multi-member batch", edit.payload)
+	}
 
 	summary := posts[2]
 	if summary.method != "chat.postMessage" || summary.threadTS != root.ts {
@@ -847,6 +879,13 @@ func TestSlack_SingleMemberBatchRendersLikeSerial(t *testing.T) {
 	if batchEdit.text != serialEdit.text {
 		t.Fatalf("batch-of-one root edit = %q, want byte-identical to serial's %q", batchEdit.text, serialEdit.text)
 	}
+	// The "degrades to serial byte for byte" invariant extends to metadata
+	// shape too (finishBatch's doc comment): a batch of exactly one member
+	// gets the single-run payload (ref included), not the batch-only shape
+	// — there's no ambiguity about which member a reaction on it means.
+	if batchEdit.payload["ref"] != cand.Ref {
+		t.Errorf("batch-of-one edit metadata payload[ref] = %v, want %q (must not omit ref like a genuine multi-member batch)", batchEdit.payload["ref"], cand.Ref)
+	}
 	if strings.Contains(batchEdit.text, "batch") || strings.Contains(batchEdit.text, "member") {
 		t.Errorf("batch-of-one root edit = %q, must not mention batch/members at all", batchEdit.text)
 	}
@@ -858,4 +897,325 @@ func TestSlack_SingleMemberBatchRendersLikeSerial(t *testing.T) {
 
 	waitForStatsZero(t, serialS, testTimeout)
 	waitForStatsZero(t, batchS, testTimeout)
+}
+
+// TestSlack_ReactionAfterTerminationMintsCommandViaMetadataFetchAndAcks is
+// the load-bearing proof of this whole redesign: live verification found
+// reaction-retry never worked end-to-end, because roots/runRoot are
+// (correctly) forgotten the instant a run terminates (§9.2's leak-bound
+// cleanup), while a human reacting to a terminal ❌ root does so AFTER that
+// point — never mid-run, the only case the in-memory map's fast path can
+// resolve. This drives a run all the way to a forgotten, rejected terminal
+// state, THEN reacts on its (now-untracked) root, and checks the command is
+// still minted — via the conversations.history metadata fetch, not the
+// roots map — and the reaction is acknowledged with a 👀 (eyes) reaction.
+func TestSlack_ReactionAfterTerminationMintsCommandViaMetadataFetchAndAcks(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/ivan/thing", Target: "main", User: "ivan", Topic: "thing", SHA: "0ddba11"}
+	runID := "run-post-terminal-reaction"
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	root := fake.waitForPosts(1, testTimeout)[0]
+
+	rec := &core.RunRecord{RunID: runID, Target: "main", Outcome: core.OutcomeRejected, Detail: "red"}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventRejected, Target: "main", Candidate: cand, RunID: runID, Record: rec})
+	fake.waitForPosts(3, testTimeout) // root, terminal edit, summary
+
+	// The run is now fully terminal: both run-tracking maps have forgotten
+	// it (§9.2) — exactly the shape a real, unattended ❌ root has by the
+	// time a human gets around to reacting to it.
+	waitForStatsZero(t, s, testTimeout)
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", root.ts)
+
+	select {
+	case cmd := <-s.Commands():
+		if cmd.Kind != core.CommandRetry || cmd.Target != "main" || cmd.Ref != cand.Ref {
+			t.Fatalf("Command = %+v, want retry for target=main ref=%s", cmd, cand.Ref)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for a retry Command minted via the metadata-fetch fallback")
+	}
+
+	acks := fake.waitForReactions(1, testTimeout)
+	if acks[0].name != ackEyes || acks[0].ts != root.ts || acks[0].channel != "C_TARGET" {
+		t.Fatalf("reactions.add = %+v, want a single %q ack on channel=C_TARGET ts=%q", acks[0], ackEyes, root.ts)
+	}
+}
+
+// TestSlack_RetryContinuityThreadsUnderOldRootAndReEditsIt proves retry continuity:
+// once a reaction-retry has been minted from root T for (target, ref), the
+// NEXT trial-clean for that same (target, ref) — the re-queued run the retry
+// itself produces — must thread under T rather than starting a fresh root:
+// a threaded "retesting" notice under T, T's own text re-edited to show the
+// retry in flight, and every subsequent event for the new run (checks, the
+// terminal edit) landing on T too, exactly as if T had been that run's own
+// root all along.
+func TestSlack_RetryContinuityThreadsUnderOldRootAndReEditsIt(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/judy/thing", Target: "main", User: "judy", Topic: "thing", SHA: "5ca1ab1e"}
+	runID := "run-retry-continuity-1"
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	root := fake.waitForPosts(1, testTimeout)[0]
+
+	rec := &core.RunRecord{RunID: runID, Target: "main", Outcome: core.OutcomeRejected, Detail: "red"}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventRejected, Target: "main", Candidate: cand, RunID: runID, Record: rec})
+	fake.waitForPosts(3, testTimeout)
+	waitForStatsZero(t, s, testTimeout)
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", root.ts)
+	// Receiving the Command is itself the fence: mintCommand records
+	// refRetry BEFORE the cmds-channel send (its doc comment — the write
+	// must be ordered before whatever the daemon does in response, exactly
+	// the ordering this receive relies on), so the entry is guaranteed
+	// visible from here on.
+	select {
+	case cmd := <-s.Commands():
+		if cmd.Kind != core.CommandRetry {
+			t.Fatalf("Command = %+v, want retry", cmd)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the retry Command")
+	}
+
+	// The re-queue's own trial-clean: same (target, ref), a fresh RunID
+	// (the queue mints a new run id per attempt).
+	retryRunID := "run-retry-continuity-2"
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: retryRunID})
+
+	posts := fake.waitForPosts(4, testTimeout) // root, edit, summary, + the retry-continuity threaded notice
+	notice := posts[3]
+	if notice.method != "chat.postMessage" || notice.threadTS != root.ts {
+		t.Fatalf("retry-continuity notice = %+v, want a threaded reply on %q", notice, root.ts)
+	}
+	if !strings.Contains(notice.text, "retry") {
+		t.Errorf("retry-continuity notice text = %q, want it to mention retry", notice.text)
+	}
+
+	posts = fake.waitForPosts(5, testTimeout)
+	reEdit := posts[4]
+	if reEdit.method != "chat.update" || reEdit.ts != root.ts {
+		t.Fatalf("retry-continuity re-edit = %+v, want a chat.update on %q", reEdit, root.ts)
+	}
+	for _, want := range []string{"retry", "thing", "judy", "main"} {
+		if !strings.Contains(reEdit.text, want) {
+			t.Errorf("retry-continuity re-edit text = %q, want it to contain %q", reEdit.text, want)
+		}
+	}
+
+	// No FRESH root was posted for the retried run: its tracking entry
+	// points at the very same ts as the original root.
+	waitForStats(t, s, testTimeout, 1, 1)
+	s.mu.Lock()
+	gotRoot := s.runRoot[retryRunID]
+	s.mu.Unlock()
+	if gotRoot != root.ts {
+		t.Fatalf("runRoot[%q] = %q, want the original root %q", retryRunID, gotRoot, root.ts)
+	}
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventCheckStarted, Target: "main", Candidate: cand, RunID: retryRunID, CheckName: "test"})
+	posts = fake.waitForPosts(6, testTimeout)
+	checkReply := posts[5]
+	if checkReply.threadTS != root.ts {
+		t.Fatalf("check-started reply for the retried run = %+v, want threaded on the original root %q", checkReply, root.ts)
+	}
+
+	rec2 := &core.RunRecord{RunID: retryRunID, Target: "main", Outcome: core.OutcomeLanded}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cand, RunID: retryRunID, Record: rec2})
+	posts = fake.waitForPosts(8, testTimeout)
+	finalEdit := posts[6]
+	if finalEdit.method != "chat.update" || finalEdit.ts != root.ts {
+		t.Fatalf("final edit for the retried run = %+v, want a chat.update on the original root %q", finalEdit, root.ts)
+	}
+	if !strings.Contains(finalEdit.text, "✅") {
+		t.Errorf("final edit text = %q, want a ✅ verdict", finalEdit.text)
+	}
+
+	waitForStatsZero(t, s, testTimeout)
+}
+
+// TestSlack_BatchRootReactionAfterTerminationGetsQuestionAckAndGuidance
+// proves the deliberate blunt-instrument refusal: a reaction on a
+// finished, multi-member batch's root can't name which member it means, so
+// rather than retrying/cancelling ALL members (rejected as "too blunt" by
+// the design) it mints NO command at all — just a ❓ (question) ack and a
+// threaded reply pointing at the API/CLI for member-level commands.
+func TestSlack_BatchRootReactionAfterTerminationGetsQuestionAckAndGuidance(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	batchID, cands, runIDs := batchMembers()
+
+	for _, cand := range cands {
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: batchID})
+	}
+	root := fake.waitForPosts(1, testTimeout)[0]
+	waitForStats(t, s, testTimeout, 1, 1)
+
+	checks := []core.CheckResult{{Name: "test", Status: core.CheckPassed, Duration: 42 * time.Millisecond}}
+	for i, cand := range cands {
+		rec := &core.RunRecord{
+			RunID: runIDs[i], Target: "main", Candidate: cand,
+			Outcome: core.OutcomeLanded, Checks: checks,
+			BatchID: batchID, Position: i, BatchSize: len(cands),
+		}
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cand, RunID: runIDs[i], Record: rec})
+	}
+	fake.waitForPosts(3, testTimeout) // root, batch edit, batch summary
+	waitForStatsZero(t, s, testTimeout)
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", root.ts)
+
+	// No command: a batch root reaction never mints one.
+	select {
+	case cmd, ok := <-s.Commands():
+		t.Fatalf("expected no Command for a batch-root reaction, got %v (ok=%v)", cmd, ok)
+	case <-time.After(300 * time.Millisecond):
+		// expected: nothing arrived
+	}
+
+	acks := fake.waitForReactions(1, testTimeout)
+	if acks[0].name != ackQuestion || acks[0].ts != root.ts {
+		t.Fatalf("reactions.add = %+v, want a single %q ack on %q", acks[0], ackQuestion, root.ts)
+	}
+
+	posts := fake.waitForPosts(4, testTimeout) // + the guidance reply
+	guidance := posts[3]
+	if guidance.method != "chat.postMessage" || guidance.threadTS != root.ts {
+		t.Fatalf("batch-guidance reply = %+v, want a threaded reply on %q", guidance, root.ts)
+	}
+	if !strings.Contains(guidance.text, "batch") {
+		t.Errorf("batch-guidance reply text = %q, want it to explain this is a batch root", guidance.text)
+	}
+}
+
+// TestSlack_ForeignMessageReactionAfterTerminationIgnored proves
+// handleForeignReaction's authorship check is load-bearing: a reaction on a
+// message this bot never posted (a human's message, or another app's) —
+// even one that happens to carry a gauntlet_run-shaped metadata payload,
+// simulating a spoofing attempt — must never be trusted into minting a
+// Command or acknowledged with a reaction.
+func TestSlack_ForeignMessageReactionAfterTerminationIgnored(t *testing.T) {
+	s, fake, _ := newTestSlack(t, nil)
+
+	ts := "1700000123.000001"
+	fake.injectForeignMessage(ts, "U_SOMEONE_ELSE", gauntletRunEventType, map[string]any{"target": "main", "ref": "refs/heads/for/main/mallory/spoof"})
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", ts)
+
+	select {
+	case cmd, ok := <-s.Commands():
+		t.Fatalf("expected no Command for a foreign message's reaction, got %v (ok=%v)", cmd, ok)
+	case <-time.After(300 * time.Millisecond):
+		// expected: nothing arrived
+	}
+
+	if got := fake.snapshotReactions(); len(got) != 0 {
+		t.Fatalf("expected no reactions.add for a foreign message, got %+v", got)
+	}
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no posts for a foreign message's reaction, got %+v", got)
+	}
+}
+
+// TestSlack_ForeignBotMessageReactionAfterTerminationIgnored is the other
+// half of the spoofing surface: another APP's message — bot_message shape,
+// bot_id set but not ours, no user field — stamped with gauntlet-lookalike
+// metadata. isOwnMessage accepts a bot_id match (real bot posts may omit
+// user), so this proves that acceptance compares the id, not merely "is a
+// bot message with the right event_type".
+func TestSlack_ForeignBotMessageReactionAfterTerminationIgnored(t *testing.T) {
+	s, fake, _ := newTestSlack(t, nil)
+
+	ts := "1700000123.000002"
+	fake.injectForeignBotMessage(ts, "B_EVIL_APP", gauntletRunEventType, map[string]any{"target": "main", "ref": "refs/heads/for/main/mallory/spoof"})
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", ts)
+
+	select {
+	case cmd, ok := <-s.Commands():
+		t.Fatalf("expected no Command for a foreign bot message's reaction, got %v (ok=%v)", cmd, ok)
+	case <-time.After(300 * time.Millisecond):
+		// expected: nothing arrived
+	}
+
+	if got := fake.snapshotReactions(); len(got) != 0 {
+		t.Fatalf("expected no reactions.add for a foreign bot message, got %+v", got)
+	}
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no posts for a foreign bot message's reaction, got %+v", got)
+	}
+}
+
+// TestSlack_ReactionResolvesOwnershipViaUserFieldToo pins the OTHER accepted
+// authorship shape: a message whose history form carries user == the bot's
+// own user id and no bot_id. Live Slack varies in which field it populates
+// for bot posts (workspace/app-config dependent), so isOwnMessage accepts
+// either; the fake's default is the bot_id shape, and this test keeps the
+// user-match path from silently rotting.
+func TestSlack_ReactionResolvesOwnershipViaUserFieldToo(t *testing.T) {
+	s, fake, _ := newTestSlack(t, nil)
+
+	ts := "1700000123.000003"
+	ref := "refs/heads/for/main/kim/userfield"
+	fake.injectForeignMessage(ts, fakeBotUserID, gauntletRunEventType, map[string]any{"target": "main", "ref": ref})
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", ts)
+
+	select {
+	case cmd := <-s.Commands():
+		if cmd.Kind != core.CommandRetry || cmd.Target != "main" || cmd.Ref != ref {
+			t.Fatalf("Command = %+v, want retry main %s", cmd, ref)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("expected a retry Command via the user-field ownership match, got none")
+	}
+}
+
+// TestSlack_ReactionOnOwnNonRootMessageAfterTerminationIgnored covers the
+// most likely real operator misfire: reacting `:recycle:` on the bot's OWN
+// threaded final summary (or any other bot message that isn't a root) after
+// the run has finished. Such a message passes the authorship check — the bot
+// really did post it — but carries no gauntlet_run metadata, so
+// handleForeignReaction's event_type check must reject it: no Command, no
+// ack, no extra posts.
+func TestSlack_ReactionOnOwnNonRootMessageAfterTerminationIgnored(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/kim/thing", Target: "main", User: "kim", Topic: "thing", SHA: "deadd00d"}
+	runID := "run-own-nonroot-reaction"
+
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	fake.waitForPosts(1, testTimeout)
+
+	rec := &core.RunRecord{RunID: runID, Target: "main", Outcome: core.OutcomeRejected, Detail: "red"}
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventRejected, Target: "main", Candidate: cand, RunID: runID, Record: rec})
+	posts := fake.waitForPosts(3, testTimeout) // root, terminal edit, threaded summary
+	waitForStatsZero(t, s, testTimeout)
+
+	summary := posts[2]
+	if summary.threadTS == "" || summary.metadataSet {
+		t.Fatalf("test setup: posts[2] = %+v, want the metadata-less threaded summary", summary)
+	}
+
+	conn := fake.waitForConn(testTimeout)
+	fake.sendReaction(conn, "U1", "recycle", summary.ts)
+
+	select {
+	case cmd, ok := <-s.Commands():
+		t.Fatalf("expected no Command for a reaction on the bot's own non-root message, got %v (ok=%v)", cmd, ok)
+	case <-time.After(300 * time.Millisecond):
+		// expected: nothing arrived
+	}
+
+	if got := fake.snapshotReactions(); len(got) != 0 {
+		t.Fatalf("expected no reactions.add for the bot's own non-root message, got %+v", got)
+	}
+	if got := fake.snapshotPosts(); len(got) != 3 {
+		t.Fatalf("expected no posts beyond the original 3, got %d: %+v", len(got), got)
+	}
 }

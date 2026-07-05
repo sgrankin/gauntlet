@@ -131,7 +131,11 @@ daemon won't re-test it again on its own. To retry: push a new SHA (amend
 and re-push the same ref name; the SHA change is what un-parks it), or, once
 the Slack channel is configured (see "Configuration reference" below), react
 `:recycle:` on the run's root message to re-queue the same SHA without a new
-push.
+push — this works whether the run is still in flight or has long since
+finished (the normal case for a ❌ root someone reacts to), and threads the
+re-queued run's own progress under the same root rather than posting a new
+one (see "Slack app" below). Not available on a batch root — see the
+batch-root exception there.
 
 **Operator cancellation.** An operator (not the author) can stop
 a candidate that's currently being tested, or pull one out of the queue
@@ -142,7 +146,9 @@ verdict (`Detail: "cancelled by operator"`) — the same retry semantics above
 clear it. Per queueing discipline: serial and speculate park the cancelled
 run itself (a speculation window's suffix behind it re-queues, unparked,
 same as a real bubble); batch parks only the named member and re-queues its
-batch-mates (unparked, "batch member cancelled"). See "API"/"MCP" below for
+batch-mates (unparked, "batch member cancelled") — but only when driven via
+the API/CLI: a Slack reaction can't name a single batch member (see
+"Slack app" below), so use those for a batch. See "API"/"MCP" below for
 the wire shape, and `docs/plans` for the full per-mode semantics.
 
 Post-land hooks (below) have their own, separate cancel surface —
@@ -243,12 +249,15 @@ summarize {
 - **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
   threaded run messages in the given channel ID, root edited to a
   pass/fail mark on landing, `:recycle:` on the root re-queues via retry,
-  `:x:` on the root cancels it (see "Operator cancellation" above).
-  `app-token-env`/`bot-token-env` name the environment variables holding the
-  app-level (socket mode) and bot tokens (defaults `SLACK_APP_TOKEN` /
-  `SLACK_BOT_TOKEN`). **Channel absent ⇒ disabled.** Once `channel` is set,
-  either token being empty/unset is a startup error, same rationale as
-  `github` above.
+  `:x:` on the root cancels it (see "Operator cancellation" above) — both
+  work whether the run is still in flight or has already finished (root
+  ownership is durable, carried in the message's own metadata, not just an
+  in-memory map), except on a batch root, which needs the API/CLI to name a
+  member (see "Slack app" below). `app-token-env`/`bot-token-env` name the
+  environment variables holding the app-level (socket mode) and bot tokens
+  (defaults `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN`). **Channel absent ⇒
+  disabled.** Once `channel` is set, either token being empty/unset is a
+  startup error, same rationale as `github` above.
 - **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter
   (`internal/obs`) pointed at `<endpoint>`; `insecure` skips TLS (typical for
   a local collector). The daemon already emits spans via the OTel API in
@@ -696,8 +705,24 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
 ### Slack app
 
 1. Create a Slack app from a manifest with: **socket mode** enabled; bot
-   scopes `chat:write` and `reactions:read`; app-level token scope
-   `connections:write`; subscribed bot event `reaction_added`.
+   scopes `chat:write`, `reactions:read`, `reactions:write`, and
+   `channels:history`; app-level token scope `connections:write`;
+   subscribed bot event `reaction_added`.
+   - **`channels:history`** is required, not optional: every root message
+     carries Slack message metadata identifying its (target, ref), and a
+     reaction on a root *after* its run has already terminated (the common
+     case — a human reacts to a finished ❌, not a still-running ⏳) can only
+     be resolved by fetching that message back via `conversations.history`
+     — the daemon's own in-memory run-tracking maps are deliberately
+     forgotten the instant a run terminates (bounded memory), so they can't
+     answer a reaction that arrives later. Without this scope, reacting on
+     anything but a still-in-flight run silently does nothing. (For a
+     **private** posting channel, that fetch needs `groups:history` instead —
+     `channels:history` covers public channels only.)
+   - `users:read` is optional/future — not required today (reactions are
+     resolved by message ownership, not by who reacted), but would let a
+     future version render the reacting human's display name instead of a
+     bare user id in acknowledgment/guidance replies.
 2. Install it to your workspace. You get two tokens: an app-level token
    (`xapp-…`, socket mode) and a bot token (`xoxb-…`). Export them as
    `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` (or whatever `app-token-env` /
@@ -708,9 +733,24 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
    the root is edited to a ✅/❌ (with a final thread reply) on landing or
    rejection; reacting `:recycle:` on the root re-queues that ref at its
    current SHA (a retry command), which you'll see as a fresh run starting
-   without pushing anything; reacting `:x:` on the root instead cancels it —
-   the in-flight check aborts and the ref parks (a cancel command), visible
-   as the root editing to ❌ with a "cancelled by operator" detail.
+   — threaded under the SAME root, which is re-edited to show the retry in
+   flight, rather than posting a new one — without pushing anything;
+   reacting `:x:` on the root instead cancels it — the in-flight check
+   aborts and the ref parks (a cancel command), visible as the root editing
+   to ❌ with a "cancelled by operator" detail. Both reactions work whether
+   the run is still in flight or has already finished (acknowledged with a
+   👀 on the reacted message either way) — reacting on a long-since-finished
+   ❌ is the normal case, not a corner case.
+   - **Batch roots are the one exception.** A batch's root message
+     represents every member of the batch at once, and a bare reaction
+     can't say which single member it means — retrying or cancelling ALL of
+     them from one reaction was considered and rejected as too blunt. A
+     `:recycle:`/`:x:` reaction on a batch root instead gets a ❓ ack and a
+     threaded reply pointing at the API/CLI (`POST /api/v1/retry`/`/cancel`
+     or `gauntlet retry`/`gauntlet cancel`, naming that member's ref
+     directly) to target one member. A batch of exactly one member is
+     unaffected by this — it degrades to serial behavior byte for byte
+     (see "Queue modes" below), reactions included.
 
 ### Container executor
 

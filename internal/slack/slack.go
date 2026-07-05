@@ -6,16 +6,32 @@
 // reaction into a core.Command{Kind: core.CommandCancel} (Feature 1, manual
 // operator cancellation).
 //
+// Ownership of a root message is durable across process restarts and across
+// the in-memory roots map's own cleanup (§9.2 forgets both run-tracking map
+// entries the instant a run terminates — and a human reacting to a ❌ root
+// overwhelmingly happens AFTER that point, not during the run, which is the
+// only case the in-memory map can answer). Every root post attaches Slack
+// message metadata (event_type "gauntlet_run") carrying {target, ref} for a
+// single-run root, or {target} only for a batch root — deliberately omitting
+// ref for a batch, since a reaction on a batch root cannot name which member
+// it means (see handleForeignReaction/ackBatchGuidance). handleSocketEvent's
+// reaction handling tries the in-memory roots map first (the still-running
+// case, unchanged), and on a miss falls back to fetching the reacted message
+// (conversations.history, with metadata) and verifying both bot authorship
+// (via the bot's own user id, fetched once from auth.test at Run start) and
+// the event_type before trusting its payload — never trusting a foreign
+// message's reaction, since anyone can react to anyone's message.
+//
 // It uses github.com/slack-go/slack + its socketmode subpackage: an
 // app-level token opens the socket-mode WebSocket (via
 // "apps.connections.open"), a bot token drives the Web API calls
-// (chat.postMessage / chat.update). Both routes go through the same
-// *slack.Client, so a single slack.OptionAPIURL(...) reroutes everything to
-// a fake server in tests (§1 Spike B; verified against the slack-go v0.27.0
-// source: apps.connections.open uses Client.endpoint exactly like every
-// other Web API call, and socketmode.Client embeds a copy of that Client,
-// so it inherits the same endpoint — no separate socket-mode URL override
-// exists or is needed).
+// (chat.postMessage / chat.update / conversations.history / reactions.add /
+// auth.test). Both routes go through the same *slack.Client, so a single
+// slack.OptionAPIURL(...) reroutes everything to a fake server in tests (§1
+// Spike B; verified against the slack-go v0.27.0 source: apps.connections.open
+// uses Client.endpoint exactly like every other Web API call, and
+// socketmode.Client embeds a copy of that Client, so it inherits the same
+// endpoint — no separate socket-mode URL override exists or is needed).
 package slack
 
 import (
@@ -76,11 +92,62 @@ const (
 )
 
 // rootInfo identifies the (target, ref) a posted root message belongs to,
-// so an owned reaction can be turned back into a retry Command.
+// so an owned reaction can be turned back into a retry Command. Populated
+// for both single-run and batch roots identically — the in-memory fast path
+// (handleSocketEvent's roots-map hit) is unchanged by durable ownership
+// (§4.4 doc comment): it always resolves to whatever candidate's ref
+// postRoot recorded when the root was first posted, batch or not. Only the
+// metadata-fetch fallback (used once this entry has been forgotten, at
+// terminal) distinguishes a batch root from a single-run one, by the
+// payload's shape.
 type rootInfo struct {
 	Target string
 	Ref    string
 }
+
+// gauntletRunEventType is the Slack message-metadata event_type attached to
+// every root post (single-run and batch alike), so a reaction arriving after
+// the in-memory roots map has forgotten the run can still be traced back to
+// its owning (target, ref) — the fix for reaction-retry never having worked
+// end-to-end: humans react to a terminal ❌ root, by which point §9.2's
+// cleanup has already deleted the roots/runRoot entries.
+const gauntletRunEventType = "gauntlet_run"
+
+// Reaction-add emoji used to acknowledge an inbound reaction:
+// ackEyes confirms a command was actually minted; ackQuestion instead marks
+// a reaction on a batch root, which never mints a command (a bare reaction
+// can't name which member it means).
+const (
+	ackEyes     = "eyes"
+	ackQuestion = "question"
+)
+
+// batchGuidanceText is the threaded reply posted alongside ackQuestion when
+// a reaction lands on a batch root: batch-member-level commands
+// via Slack are explicitly out of scope — retrying or cancelling one member
+// of a batch requires the API or CLI, which can name that member's ref.
+const batchGuidanceText = "this is a batch root; a reaction can't target one member of it. To retry or cancel a single member, use the API (`POST /api/v1/retry` or `/api/v1/cancel`) or the CLI (`gauntlet retry`/`gauntlet cancel`) naming that member's ref directly."
+
+// refRetryKey is the (target, ref) a reaction-minted retry was minted for —
+// the key refRetry tracks so the NEXT trial-clean for the same ref threads
+// under the old root instead of starting a fresh one (see postRetryRoot).
+type refRetryKey struct {
+	Target string
+	Ref    string
+}
+
+// refRetryEntry records which root ts a reaction-retry was minted from, and
+// when that record expires if never consumed by a matching trial-clean.
+type refRetryEntry struct {
+	rootTS    string
+	expiresAt time.Time
+}
+
+// refRetryTTL bounds how long a refRetry entry waits for the trial-clean it
+// anticipates before it's treated as stale. A retry that
+// never results in a new trial-clean (e.g. the ref was deleted, or the
+// operator abandoned it) must not pin its root's identity forever.
+const refRetryTTL = time.Hour
 
 // Slack is a duplex core.Channel implementing docs/plans/phase23.md §4.4.
 // Emit only ever enqueues to outbox; the actual Slack calls happen on the
@@ -102,10 +169,40 @@ type Slack struct {
 	// closed-and-replaced-on-every-processed-event channel tests use to
 	// synchronize without wall-clock sleeps, mirroring
 	// channel.RecordingChannel's notify (internal/channel/record.go).
+	// signalProcessed fires after both an outbound event (drainOutbox) AND
+	// an inbound socket event (handleSocketEvents) have been fully handled,
+	// so tests can synchronize on either direction's side effects.
 	mu      sync.Mutex
 	runRoot map[string]string   // root-tracking key -> root message ts (batch-aware: BatchID when set, else RunID)
 	roots   map[string]rootInfo // root message ts -> (target, ref)
 	notify  chan struct{}
+
+	// refRetry tracks reaction-minted retries so the next trial-clean for
+	// the same (target, ref) threads under the old root instead of starting
+	// a fresh one (see postRetryRoot). Bounded the same way batchRecs is: entries
+	// are deleted the instant they're consumed by a matching postRoot call,
+	// or lazily swept (recordRefRetryLocked) whenever a new one is recorded,
+	// so a retry that's never followed by a matching trial-clean doesn't pin
+	// its root identity forever — refRetryTTL bounds the wait.
+	refRetry map[refRetryKey]refRetryEntry
+
+	// botUserID is this app's own bot user id, fetched once from auth.test
+	// at Run start. It's the authorship check for a reaction
+	// that misses the in-memory roots map: only a message this bot itself
+	// posted can be trusted to carry a genuine gauntlet_run payload — anyone
+	// can react to anyone's message, so a foreign message's metadata (if it
+	// even has any) must never be treated as a command. Empty if auth.test
+	// failed or hasn't run yet, in which case isOwnMessage never matches
+	// (fail closed, not open).
+	//
+	// botID is the companion B… bot id from the same auth.test response.
+	// Both are checked because a bot-posted message read back through
+	// conversations.history is a subtype:"bot_message" object whose
+	// top-level user field Slack does not reliably populate — identity may
+	// be carried only in bot_id. Another app's messages carry a different
+	// bot_id, so accepting either match doesn't widen the trust boundary.
+	botUserID string
+	botID     string
 
 	// batchRecs buffers a batch's per-member terminal records, keyed by
 	// BatchID, until a flush is triggered (docs/plans/phase5.md §3.3
@@ -185,6 +282,7 @@ func New(p Params) *Slack {
 		roots:     make(map[string]rootInfo),
 		notify:    make(chan struct{}),
 		batchRecs: make(map[string]*batchEntry),
+		refRetry:  make(map[refRetryKey]refRetryEntry),
 		now:       time.Now,
 	}
 }
@@ -234,7 +332,23 @@ func (s *Slack) Stats() (runs, roots int) {
 // blocks until ctx is done. Both goroutines it starts observe ctx.Done()
 // directly, so they exit promptly regardless of what the socket-mode
 // client's own run loop is doing at the time.
+//
+// Before doing anything else, it calls auth.test once to learn this app's
+// own bot user id — the authorship check the metadata-fetch
+// reaction path needs to tell "our root, reacted to after we forgot it"
+// apart from "someone else's message with a coincidentally similar shape".
+// A failure here is logged, not fatal: the channel still posts/threads
+// normally, it just can't resolve a reaction that misses the in-memory
+// roots map (isOwnMessage never matches with an empty botUserID, so such
+// reactions are safely ignored rather than trusted).
 func (s *Slack) Run(ctx context.Context) error {
+	if resp, err := s.api.AuthTestContext(ctx); err != nil {
+		s.logf("slack: auth.test failed (reaction ownership fetch will be disabled): %v", err)
+	} else {
+		s.botUserID = resp.UserID
+		s.botID = resp.BotID
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -315,10 +429,43 @@ func (s *Slack) postRoot(ctx context.Context, ev core.Event) {
 		s.mu.Unlock()
 		return
 	}
+	s.sweepExpiredRefRetryLocked()
+	key := refRetryKey{Target: ev.Target, Ref: ev.Candidate.Ref}
+	entry, retrying := s.refRetry[key]
+	if retrying {
+		// Consumed on use regardless of freshness — a second trial-clean
+		// for the same ref must not thread under the same reaction-retry
+		// root twice.
+		delete(s.refRetry, key)
+		retrying = !s.now().After(entry.expiresAt)
+	}
 	s.mu.Unlock()
 
+	if retrying {
+		s.postRetryRoot(ctx, ev, entry.rootTS)
+		return
+	}
+	s.postFreshRoot(ctx, ev)
+}
+
+// postFreshRoot posts a brand-new root message for ev, attaching Slack
+// message metadata (event_type gauntlet_run, payload {target, ref}) so a
+// reaction arriving after this run has terminated — and its roots/runRoot
+// entries forgotten — can still be traced back to (ev.Target,
+// ev.Candidate.Ref) via handleForeignReaction. This is the provisional,
+// single-run shape of the payload: if ev turns out to be the first member of
+// a genuine multi-member batch (indistinguishable from a solo run at this
+// point — batch membership is only known once postBatchTerminal sees
+// rec.BatchSize > 1), finishBatch overwrites this metadata with the
+// authoritative batch shape (payload {target} only, no ref) in the same
+// chat.update call that edits the root to its final verdict — always before
+// any post-termination reaction fetch could observe it, since fetching only
+// ever happens after the in-memory roots-map entry (written below) has
+// already been forgotten.
+func (s *Slack) postFreshRoot(ctx context.Context, ev core.Event) {
 	text := fmt.Sprintf("⏳ testing %s (%s) → %s", ev.Candidate.Topic, displayUser(ev.Candidate.User), ev.Target)
-	_, ts, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false))
+	meta := goslack.SlackMetadata{EventType: gauntletRunEventType, EventPayload: map[string]any{"target": ev.Target, "ref": ev.Candidate.Ref}}
+	_, ts, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false), goslack.MsgOptionMetadata(meta))
 	if err != nil {
 		s.logf("slack: chat.postMessage failed run=%s: %v", ev.RunID, err)
 		return
@@ -327,6 +474,29 @@ func (s *Slack) postRoot(ctx context.Context, ev core.Event) {
 	s.mu.Lock()
 	s.runRoot[ev.RunID] = ts
 	s.roots[ts] = rootInfo{Target: ev.Target, Ref: ev.Candidate.Ref}
+	s.mu.Unlock()
+}
+
+// postRetryRoot handles ev's trial-clean when it matches a refRetry record:
+// rather than posting a fresh root, it threads continuity under
+// rootTS — the root a prior reaction-retry was minted from — posting a
+// threaded "retesting" notice, re-editing rootTS's own text to show the
+// retry is underway, and re-pointing this run's tracking entries at rootTS
+// so every subsequent event for ev.RunID (check replies, the terminal edit)
+// lands there too, exactly as if this had been the run's root all along.
+func (s *Slack) postRetryRoot(ctx context.Context, ev core.Event, rootTS string) {
+	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText("⏳ retesting (retry)", false), goslack.MsgOptionTS(rootTS)); err != nil {
+		s.logf("slack: retry-continuity threaded notice failed run=%s: %v", ev.RunID, err)
+	}
+
+	text := fmt.Sprintf("⏳ retrying %s (%s) → %s", ev.Candidate.Topic, displayUser(ev.Candidate.User), ev.Target)
+	if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(text, false)); err != nil {
+		s.logf("slack: retry-continuity root re-edit failed run=%s: %v", ev.RunID, err)
+	}
+
+	s.mu.Lock()
+	s.runRoot[ev.RunID] = rootTS
+	s.roots[rootTS] = rootInfo{Target: ev.Target, Ref: ev.Candidate.Ref}
 	s.mu.Unlock()
 }
 
@@ -395,7 +565,12 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 	}
 
 	headline := fmt.Sprintf("%s %s (%s) → %s", outcomeEmoji(rec.Outcome), ev.Candidate.Topic, displayUser(ev.Candidate.User), ev.Target)
-	if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false)); err != nil {
+	// Re-attach metadata here too (not just at postFreshRoot): this confirms
+	// the single-run shape ({target, ref}) as authoritative now that the run
+	// has actually finished as a solo run, not a batch — see postFreshRoot's
+	// doc comment on why the metadata posted at root time is provisional.
+	meta := goslack.SlackMetadata{EventType: gauntletRunEventType, EventPayload: map[string]any{"target": ev.Target, "ref": ev.Candidate.Ref}}
+	if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false), goslack.MsgOptionMetadata(meta)); err != nil {
 		s.logf("slack: chat.update failed run=%s: %v", ev.RunID, err)
 	}
 
@@ -504,7 +679,23 @@ func (s *Slack) collectStaleBatchesLocked(excludeBatchID string) []staleBatch {
 func (s *Slack) finishBatch(ctx context.Context, batchID, rootTS, target string, recs []*core.RunRecord) {
 	if rootTS != "" {
 		headline := batchHeadline(target, recs)
-		if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false)); err != nil {
+		// Authoritative batch metadata: payload carries {target}
+		// only, deliberately omitting ref — a reaction on a batch root can't
+		// name which member it means, so handleForeignReaction's payload
+		// shape check (ref present/absent) is what tells a fetched batch
+		// root apart from a single-run one after termination. A batch of
+		// exactly one member is the one exception (mirroring batchHeadline/
+		// summarizeBatch's own "degrades to serial behavior byte for byte",
+		// §4.1): there's no ambiguity about which member a reaction means,
+		// so it gets the single-run shape (ref included) too, same as a
+		// genuine serial run.
+		meta := goslack.SlackMetadata{EventType: gauntletRunEventType, EventPayload: map[string]any{"target": target}}
+		if len(recs) == 1 {
+			if head := firstBatchRec(recs); head != nil {
+				meta.EventPayload["ref"] = head.Candidate.Ref
+			}
+		}
+		if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false), goslack.MsgOptionMetadata(meta)); err != nil {
 			s.logf("slack: chat.update failed batch=%s: %v", batchID, err)
 		}
 
@@ -786,12 +977,13 @@ func (s *Slack) handleSocketEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			s.handleSocketEvent(evt)
+			s.handleSocketEvent(ctx, evt)
+			s.signalProcessed()
 		}
 	}
 }
 
-func (s *Slack) handleSocketEvent(evt socketmode.Event) {
+func (s *Slack) handleSocketEvent(ctx context.Context, evt socketmode.Event) {
 	if evt.Type != socketmode.EventTypeEventsAPI {
 		// Connecting/connected/hello/disconnect/error events, interactive
 		// callbacks, slash commands: none of them are this channel's
@@ -819,32 +1011,220 @@ func (s *Slack) handleSocketEvent(evt socketmode.Event) {
 	if !ok {
 		return
 	}
-	// ":recycle:" -> retry (re-queue the same SHA); ":x:" -> cancel (park it
-	// and stop whatever is currently in flight for it). Every other reaction
-	// (and every other inner event type) is ignored.
-	var kind string
-	switch reaction.Reaction {
-	case "recycle":
-		kind = core.CommandRetry
-	case "x":
-		kind = core.CommandCancel
-	default:
+	kind, ok := reactionCommandKind(reaction.Reaction)
+	if !ok {
+		// Every other reaction (and every other inner event type) is
+		// ignored.
+		return
+	}
+	if reaction.Item.Type != "message" {
+		// A reaction on a file or file comment has no message timestamp to
+		// resolve; skip it rather than issue a pointless history fetch.
 		return
 	}
 
+	ts := reaction.Item.Timestamp
 	s.mu.Lock()
-	info, owned := s.roots[reaction.Item.Timestamp]
+	info, owned := s.roots[ts]
 	s.mu.Unlock()
-	if !owned {
-		// Reaction on a timestamp we didn't post (someone else's message,
-		// or a root we've already forgotten): ignored.
+	if owned {
+		// The still-running (or not-yet-forgotten) case: unchanged by
+		// durable ownership (package doc comment) — always resolves via
+		// whatever rootInfo postRoot recorded, batch root or not.
+		s.mintCommand(ctx, kind, ts, info.Target, info.Ref)
 		return
 	}
 
-	cmd := core.Command{Kind: kind, Target: info.Target, Ref: info.Ref}
+	// Miss: either a reaction on someone else's message, or — the bug this
+	// design fixes — a reaction on OUR OWN root after its run has already
+	// terminated and §9.2's cleanup forgot it. Fetch the reacted message
+	// (with metadata) and verify ownership before trusting anything in it.
+	s.handleForeignReaction(ctx, reaction.Item.Channel, ts, kind)
+}
+
+// reactionCommandKind maps a reaction_added emoji name to the core.Command
+// kind it means: ":recycle:" -> retry (re-queue the same SHA); ":x:" ->
+// cancel (park it and stop whatever is currently in flight for it). ok is
+// false for every other reaction name, which callers must ignore.
+func reactionCommandKind(name string) (kind string, ok bool) {
+	switch name {
+	case "recycle":
+		return core.CommandRetry, true
+	case "x":
+		return core.CommandCancel, true
+	default:
+		return "", false
+	}
+}
+
+// mintCommand enqueues cmd (kind, target, ref) on s.cmds, and — only once
+// the enqueue actually succeeds — acknowledges the reaction with ackEyes
+// ("when a command is minted, immediately reactions.add"). For a retry it
+// also records refRetry, so the NEXT trial-clean for (target, ref) threads
+// continuity under ts instead of starting a fresh root. Shared by both the
+// in-memory roots-map hit and the metadata-fetch fallback: from here on,
+// minting a command looks identical regardless of which path found its
+// owner.
+//
+// Ordering is load-bearing (fresh-context review, F1): the refRetry record
+// is written BEFORE the channel send. The daemon consuming s.cmds can act on
+// a retry immediately — re-queue the ref, run its trial merge, and Emit the
+// resulting EventTrialClean — and Go's memory model only orders writes made
+// before a channel send against that receiver; recording after the send
+// would let postRoot occasionally miss the entry and post a fresh root
+// instead of threading under ts. A send that fails (cmds buffer full: the
+// command is dropped, nothing will ever consume it) rolls the record back.
+//
+// That rollback is the ONLY dead-entry cleanup besides the TTL. A retry
+// that reaches the daemon but turns out to be a no-op (the ref wasn't
+// parked — already landed, or already cleared) leaves its entry armed: if
+// the same ref name is genuinely re-pushed within refRetryTTL, that push's
+// trial-clean threads under the old root and re-edits it, rather than
+// starting a fresh root. The channel can't tell those apart — a trial-clean
+// carries no "was this my retry?" marker — so this is an accepted
+// presentation-only wrinkle (the queue itself lands the push correctly),
+// bounded by the TTL.
+func (s *Slack) mintCommand(ctx context.Context, kind, ts, target, ref string) {
+	if kind == core.CommandRetry {
+		s.mu.Lock()
+		s.recordRefRetryLocked(target, ref, ts)
+		s.mu.Unlock()
+	}
+
+	cmd := core.Command{Kind: kind, Target: target, Ref: ref}
 	select {
 	case s.cmds <- cmd:
 	default:
-		s.logf("slack: cmds buffer full (%d), dropping %s target=%s ref=%s", cmdsBuffer, kind, info.Target, info.Ref)
+		s.logf("slack: cmds buffer full (%d), dropping %s target=%s ref=%s", cmdsBuffer, kind, target, ref)
+		if kind == core.CommandRetry {
+			s.mu.Lock()
+			delete(s.refRetry, refRetryKey{Target: target, Ref: ref})
+			s.mu.Unlock()
+		}
+		return
+	}
+
+	s.ack(ctx, ts, ackEyes)
+}
+
+// recordRefRetryLocked records that a retry was just minted from root ts for
+// (target, ref), sweeping expired entries first. Must be called with s.mu
+// held.
+func (s *Slack) recordRefRetryLocked(target, ref, ts string) {
+	s.sweepExpiredRefRetryLocked()
+	s.refRetry[refRetryKey{Target: target, Ref: ref}] = refRetryEntry{rootTS: ts, expiresAt: s.now().Add(refRetryTTL)}
+}
+
+// sweepExpiredRefRetryLocked drops every expired refRetry entry. It
+// piggybacks on the two places that already hold s.mu and touch the map —
+// minting a retry, and every trial-clean's postRoot — the same pattern
+// collectStaleBatchesLocked uses for batchRecs, so a never-consumed record
+// is cleared by the next trial-clean on ANY ref after its TTL, not just by
+// the next minted retry. Must be called with s.mu held.
+func (s *Slack) sweepExpiredRefRetryLocked() {
+	now := s.now()
+	for k, e := range s.refRetry {
+		if now.After(e.expiresAt) {
+			delete(s.refRetry, k)
+		}
+	}
+}
+
+// handleForeignReaction resolves a reaction whose ts missed the in-memory
+// roots map: it fetches the reacted message — with metadata —
+// via conversations.history (latest=oldest=ts, inclusive, limit 1: the
+// documented way to fetch exactly one message by ts), and only trusts it if
+// both (a) this bot itself posted it (s.botUserID, from auth.test at Run
+// start) and (b) its metadata event_type is gauntlet_run. Anything else
+// (message not found, some other app's or user's message, a message with
+// unrelated or no metadata) is ignored silently — never minting a command
+// from a message we can't prove we own. A batch root (payload carrying
+// target but no ref — see finishBatch) mints no command at all; instead it's
+// acknowledged with ackQuestion plus a threaded reply explaining that a
+// single member can't be targeted via a bare reaction.
+func (s *Slack) handleForeignReaction(ctx context.Context, channel, ts, kind string) {
+	if channel == "" {
+		channel = s.channel
+	}
+	resp, err := s.api.GetConversationHistoryContext(ctx, &goslack.GetConversationHistoryParameters{
+		ChannelID:          channel,
+		Latest:             ts,
+		Oldest:             ts,
+		Inclusive:          true,
+		Limit:              1,
+		IncludeAllMetadata: true,
+	})
+	if err != nil {
+		s.logf("slack: conversations.history ts=%s failed: %v", ts, err)
+		return
+	}
+	if len(resp.Messages) == 0 {
+		// Not found (deleted, wrong channel, or outside retention): nothing
+		// to own.
+		return
+	}
+
+	msg := resp.Messages[0]
+	if !s.isOwnMessage(msg) || msg.Metadata.EventType != gauntletRunEventType {
+		// Foreign message: someone else's post, or ours but not a
+		// gauntlet_run root (e.g. a threaded reply or summary). Ignored
+		// silently — reacting to those was never meaningful.
+		return
+	}
+
+	target, _ := msg.Metadata.EventPayload["target"].(string)
+	if target == "" {
+		// Ours and the right event_type, but somehow missing the one field
+		// every payload always carries: too malformed to act on.
+		return
+	}
+	ref, hasRef := msg.Metadata.EventPayload["ref"].(string)
+	if !hasRef || ref == "" {
+		// Batch root (finishBatch's payload omits ref): out of scope for a
+		// bare reaction — see batchGuidanceText.
+		s.ackBatchGuidance(ctx, ts)
+		return
+	}
+
+	s.mintCommand(ctx, kind, ts, target, ref)
+}
+
+// isOwnMessage reports whether msg was posted by this bot, per the user id
+// and bot id fetched from auth.test at Run start. A bot-posted message read
+// back through conversations.history may carry its identity in either field
+// — user is not reliably populated on subtype:"bot_message" objects — so
+// either match suffices; a foreign app's message matches neither. Fails
+// closed: empty ids (auth.test never ran, or failed) never match anything,
+// rather than treating "unknown" as "ours".
+func (s *Slack) isOwnMessage(msg goslack.Message) bool {
+	if s.botUserID != "" && msg.User == s.botUserID {
+		return true
+	}
+	return s.botID != "" && msg.BotID == s.botID
+}
+
+// ack adds emoji as a reaction to the message at ts in this channel
+// (reactions.add). s.channel — not the reaction event's own channel — is
+// deliberately correct here, not an oversight: an ack only ever follows a
+// successful ownership resolution, and every message this bot posts (the
+// only messages that can pass isOwnMessage + the gauntlet_run event_type
+// check, or appear in the roots map) lives in s.channel by construction.
+// Errors are logged, not returned: like every other Slack call failure in
+// this package, losing an acknowledgment must never do anything worse than
+// lose an acknowledgment.
+func (s *Slack) ack(ctx context.Context, ts, emoji string) {
+	if err := s.api.AddReactionContext(ctx, emoji, goslack.NewRefToMessage(s.channel, ts)); err != nil {
+		s.logf("slack: reactions.add %s ts=%s failed: %v", emoji, ts, err)
+	}
+}
+
+// ackBatchGuidance acknowledges a reaction on a batch root: a
+// ackQuestion reaction plus a threaded reply pointing at the API/CLI for
+// member-level commands, since a bare Slack reaction can't name which
+// member it means.
+func (s *Slack) ackBatchGuidance(ctx context.Context, ts string) {
+	s.ack(ctx, ts, ackQuestion)
+	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(batchGuidanceText, false), goslack.MsgOptionTS(ts)); err != nil {
+		s.logf("slack: batch-guidance reply ts=%s failed: %v", ts, err)
 	}
 }
