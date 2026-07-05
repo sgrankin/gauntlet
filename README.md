@@ -332,16 +332,23 @@ retry, never a blocked or failed landing. A merge commit with no summary is
 exactly as valid as one with one; enabling `summarize` can never turn a
 green trial red.
 
-**Cost:** one small Messages API completion per landing (not per trial,
-not per check) — a single request against a handful of commit
+**Cost:** one small Messages API completion per **clean trial** — the
+merge commit must carry its body before checks run (landing the tested
+SHA forbids amending later), so a trial whose checks then fail has still
+spent its summary call, and a re-queued candidate spends another on its
+re-trial. Each call is a single request against a handful of commit
 subjects/bodies and a diffstat, capped at a few hundred output tokens.
+**Batch mode multiplies this:** forming a batch of N makes N sequential
+summary calls on the reconcile loop before checks start (bounded by
+N × `timeout`, stalling all targets); large `max-batch` plus summaries
+means accepting that stall or disabling summaries on that daemon.
 Plainly: at the defaults (`claude-sonnet-5`, `effort "medium"`), that call
 costs on the order of **10x** what the old default (`claude-haiku-4-5`,
 no effort/thinking) cost per landing — Sonnet's per-token price is several
 times Haiku's, and `medium` effort spends some thinking tokens a
 no-thinking Haiku call never did. In absolute terms this is still small —
-a few hundred output tokens on one short completion per landing, not per
-trial or per check — but it is a real, deliberate step up from the
+a few hundred output tokens on one short completion per clean trial —
+but it is a real, deliberate step up from the
 previous default, made because prompt quality for this task was validated
 live against `claude-sonnet-5`. Set `model "claude-haiku-4-5"` (see the
 `effort` caveat above) or a lower `effort` if the per-landing cost
