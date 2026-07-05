@@ -666,6 +666,22 @@ type chainLink struct {
 // builds one chain per window, each call's base the previous call's
 // mergeOID exactly the same way.
 func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
+	return d.buildChainLinkPrecomputed(ctx, rootCtx, targetName, base, cand, onClean, nil)
+}
+
+// buildChainLinkPrecomputed is buildChainLink, plus an optional precomputed
+// merge-body lookup (S6, phase-6 audit synthesis): precomputed, if non-nil,
+// is consulted instead of calling Config.MergeBody inline, keyed by cand.SHA
+// (precomputeMergeBodies' return) — a nil-map entry (found or not) is used
+// verbatim, "" included, matching MergeBody's own best-effort contract
+// exactly. precomputed == nil (every caller except startBatchRun's
+// precomputing call site — buildChainLink's plain wrapper above, used by
+// startRun and directly by chain_test.go) reproduces the original inline
+// call byte-for-byte, base included: the chained/unpushed base a multi-link
+// batch advances to is real, untouched, unaffected by precomputation, and
+// still passed to Config.MergeBody exactly as before when nothing was
+// precomputed for this candidate.
+func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string), precomputed map[string]string) (chainLink, core.TrialMerge, error) {
 	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
 	trial, err := d.git.MergeTree(ctx, base, cand.SHA)
 	if err != nil {
@@ -685,9 +701,15 @@ func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base s
 	// the merge commit) is built. No timeout is applied at this layer —
 	// that's cmd's job — and no error path exists to check: a nil or
 	// empty-string-returning hook behaves identically to no summarizer at
-	// all.
+	// all. When precomputed is non-nil, the call already happened
+	// (concurrently, ahead of this chain loop — see startBatchRun and
+	// precomputeMergeBodies); consuming its result here keeps this
+	// candidate's body identical to what a direct inline call would have
+	// returned, without paying its latency serially.
 	var body string
-	if d.cfg.MergeBody != nil {
+	if precomputed != nil {
+		body = precomputed[cand.SHA]
+	} else if d.cfg.MergeBody != nil {
 		body = d.cfg.MergeBody(ctx, cand, base)
 	}
 
@@ -873,6 +895,24 @@ func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip s
 	// batch's single run.
 	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, picked[0], "")
 
+	// S6 (phase-6 audit synthesis): precompute every picked member's
+	// merge-commit body concurrently, before the chain loop below runs any
+	// trial merge, so the reconcile loop's wall clock for minting an
+	// N-member batch drops from N*cfg.Summarize.Timeout (one MergeBody call
+	// per link, serially, inline in the loop) to roughly one timeout total.
+	// Every request uses targetTip, not each link's own chained base — see
+	// precomputeMergeBodies' doc for why that's equivalent for what
+	// Config.MergeBody actually reads, and required since a link's real
+	// base isn't known until this loop's own (inherently serial) trial
+	// merges build it. A member the spec-change boundary below drops before
+	// it ever chains simply leaves its entry in precomputedBodies unused —
+	// harmless.
+	reqs := make([]mergeBodyRequest, len(picked))
+	for i, cand := range picked {
+		reqs[i] = mergeBodyRequest{cand: cand, base: targetTip}
+	}
+	precomputedBodies := precomputeMergeBodies(ctx, d.cfg.MergeBody, reqs)
+
 	var (
 		runID  string
 		links  []chainLink
@@ -883,7 +923,7 @@ func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip s
 
 chain:
 	for _, cand := range picked {
-		link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
+		link, trial, err := d.buildChainLinkPrecomputed(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
 			if runID == "" {
 				// Minted from the FIRST member's trial tree, exactly as
 				// serial's startRun mints its single run ID — reused
@@ -894,7 +934,7 @@ chain:
 			}
 			d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
 			return runID
-		})
+		}, precomputedBodies)
 
 		switch {
 		case err != nil:
@@ -1520,6 +1560,28 @@ func (d *Daemon) finalizeRun(r *run) {
 // itself is NOT reconstructed: the dashboard/Slack will render these as
 // separate landings, not as one batch summary, for any batch that crashes in
 // this window.
+//
+// MergeSHA is deliberately left zero (phase-6 audit synthesis, flag #5:
+// "operator retries explicitly" needs the actual landed merge commit to
+// re-run recovery-skipped hooks against). Investigated and skipped rather
+// than forced: identifying it correctly would mean walking first-parent
+// history from the target tip for the merge commit whose second parent is
+// cand.SHA (or whose message carries this candidate's Gauntlet-Ref
+// trailer), but core.GitRepo exposes no such primitive — IsAncestor is
+// boolean-only, and Log (used elsewhere for Config.MergeBody's prompt) is
+// scoped to summarize.Git's job of returning commit Subject/Body text, not
+// SHAs or parent lists, over a base..tip range. Getting this right would
+// need a new core.GitRepo method (plus its gitx.Repo implementation and the
+// queue package's fake test double) — real plumbing outside this recovery
+// function's own file, not a same-file addition, so it's left for a
+// follow-up rather than done unsafely here (a wrong guess, e.g. "the
+// current target tip", is actively misleading for any but the single
+// head-of-chain member — see TestBatchCrashRecovery: bob/carol's own merge
+// commits are NOT the target tip at the moment their own recovery runs).
+// Net effect: a recovery-skipped hook chain (EventHookSkipped, chunk 1) stays
+// discoverable-but-manual — an operator can see it happened, but re-running
+// the hooks for that landing still requires manually locating the merge SHA
+// out of band, exactly as before this phase's work.
 func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.Candidate) {
 	if delErr := d.git.CASUpdate(ctx, cand.Ref, cand.SHA, ""); delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
 		return // transient; retry next tick

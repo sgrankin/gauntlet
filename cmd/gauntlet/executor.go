@@ -15,20 +15,27 @@ import (
 // default case is unreachable in practice — it still returns an error
 // rather than panicking, since this constructs from a caller-supplied
 // struct, not only from LoadDaemon.
-func buildExecutor(cfg *config.Daemon) (core.Executor, error) {
+//
+// scratchDir roots every check's ephemeral scratch dir (S16, phase-6 audit
+// synthesis): main.go sweeps it at startup exactly like trialsDir, now that
+// AcquireLock (S2) makes that sweep safe. Empty preserves each executor's
+// prior os.MkdirTemp("", ...) fallback verbatim — every existing caller
+// that built one of these executors directly (tests) is unaffected.
+func buildExecutor(cfg *config.Daemon, scratchDir string) (core.Executor, error) {
 	switch cfg.Executor.Kind {
 	case "", "local":
-		return executor.LocalExecutor{}, nil
+		return executor.LocalExecutor{BaseDir: scratchDir}, nil
 	case "container":
 		caches := make([]executor.Cache, len(cfg.Executor.Caches))
 		for i, c := range cfg.Executor.Caches {
 			caches[i] = executor.Cache{Name: c.Name, Path: c.Path}
 		}
 		ex, err := executor.New(executor.Params{
-			Runtime: cfg.Executor.Runtime,
-			Image:   cfg.Executor.Image,
-			Workdir: cfg.Executor.Workdir,
-			Caches:  caches,
+			Runtime:    cfg.Executor.Runtime,
+			Image:      cfg.Executor.Image,
+			Workdir:    cfg.Executor.Workdir,
+			Caches:     caches,
+			ScratchDir: scratchDir,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("container executor: %w", err)

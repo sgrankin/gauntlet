@@ -53,6 +53,20 @@ type Params struct {
 	// Caches are persistent named volumes mounted alongside the trial tree
 	// and result dir.
 	Caches []Cache
+
+	// ScratchDir is the directory each check's ephemeral host-side result
+	// dir (gauntlet-container-*, bind-mounted into the container at
+	// containerResultDir) is created under via os.MkdirTemp(ScratchDir,
+	// ...) — S16 (phase-6 audit synthesis), the same fix as LocalExecutor's
+	// BaseDir: rooting this under -state/scratch, swept at daemon startup,
+	// closes the gap where it used to escape every sweep by defaulting to
+	// the OS temp dir. Empty preserves the exact prior behavior
+	// (os.MkdirTemp's own "" -> os.TempDir() fallback). This only changes
+	// the mount's host-side source path — the in-container path
+	// (containerResultDir) and every other mount/flag in runArgs are
+	// unaffected, so the container run shape itself is unchanged, just
+	// rooted differently on the host.
+	ScratchDir string
 }
 
 // runtimeSpec captures the one CLI-shape difference between supported
@@ -131,7 +145,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		}
 	}
 
-	resultDir, err := os.MkdirTemp("", "gauntlet-container-")
+	resultDir, err := os.MkdirTemp(c.params.ScratchDir, "gauntlet-container-")
 	if err != nil {
 		return core.CheckResult{
 			Name:     job.Name,

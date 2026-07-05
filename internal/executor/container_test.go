@@ -317,6 +317,61 @@ func TestContainerExecutor_CtxAlreadyCancelled_Err(t *testing.T) {
 	}
 }
 
+// --- RunCheck: ScratchDir roots the host-side result-dir mount. ---
+// Uses a fake runtime script on PATH rather than a real container runtime
+// (S16, phase-6 audit synthesis: this only proves resultDir's location, not
+// anything about real container behavior — CAUTION per the plan: verify the
+// actual mount still works against the demo box's real `container` CLI).
+
+// TestContainerExecutor_ScratchDirRootsResultDirMount proves the host-side
+// half of S16's fix: a non-empty Params.ScratchDir roots the ephemeral
+// result-dir (bind-mounted at containerResultDir) under it instead of the
+// OS default temp dir, without changing anything else about the `run`
+// invocation — same mount count, same flags, same in-container path.
+func TestContainerExecutor_ScratchDirRootsResultDirMount(t *testing.T) {
+	scratch := t.TempDir()
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "captured-args")
+
+	// A fake "container" CLI: logs every invocation's argv (one line each)
+	// to capture and exits 0 unconditionally — satisfies both the preflight
+	// probe ("system status") and the actual "run" call.
+	script := "#!/bin/sh\necho \"$@\" >> " + capture + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "container"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake runtime: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	c, err := New(Params{Runtime: "container", Image: "img", ScratchDir: scratch})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	job := containerJob([]string{"true"})
+	job.Dir = t.TempDir()
+
+	res := c.RunCheck(context.Background(), job)
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	var runLine string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "run ") {
+			runLine = line
+		}
+	}
+	if runLine == "" {
+		t.Fatalf("no `run` invocation captured; log=%q", data)
+	}
+	if !strings.Contains(runLine, "-v "+scratch+string(os.PathSeparator)) {
+		t.Fatalf("run args = %q, want a -v mount whose host side is rooted under ScratchDir %q", runLine, scratch)
+	}
+}
+
 // --- integration tests against the real runtime, if usable. ---
 //
 // Per docs/plans/phase23.md §1 Spike C, this machine has only Apple

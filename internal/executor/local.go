@@ -25,13 +25,24 @@ const outputCap = 64 * 1024
 // LocalExecutor runs checks as local OS processes: job.Command as argv (no
 // shell), in job.Dir, with the check environment contract
 // (docs/plans/phase1.md §5A) exported alongside the inherited environment.
-type LocalExecutor struct{}
+type LocalExecutor struct {
+	// BaseDir is the directory each check's ephemeral scratch dir
+	// (gauntlet-check-*, holding only the result file) is created under via
+	// os.MkdirTemp(BaseDir, ...) — S16 (phase-6 audit synthesis): rooting
+	// this under -state/scratch, swept at daemon startup exactly like the
+	// trial-tree export dir, closes the gap where these dirs used to escape
+	// every sweep by defaulting to the OS temp dir. Empty preserves that
+	// exact prior behavior (os.MkdirTemp's own "" -> os.TempDir()
+	// fallback), which every existing caller/test that never sets this
+	// field still gets unchanged.
+	BaseDir string
+}
 
 // RunCheck implements core.Executor.
-func (LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.CheckResult {
+func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.CheckResult {
 	start := time.Now()
 
-	tmpDir, err := os.MkdirTemp("", "gauntlet-check-")
+	tmpDir, err := os.MkdirTemp(e.BaseDir, "gauntlet-check-")
 	if err != nil {
 		return core.CheckResult{
 			Name:     job.Name,

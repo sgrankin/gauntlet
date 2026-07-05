@@ -13,6 +13,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/history"
+	"github.com/sgrankin/gauntlet/internal/hooks"
 	gauntletmcp "github.com/sgrankin/gauntlet/internal/mcp"
 	"github.com/sgrankin/gauntlet/internal/queue"
 )
@@ -58,7 +59,7 @@ const dashboardShutdownTimeout = 5 * time.Second
 // nil-safely: nil here degrades both surfaces to their documented
 // "hooks disabled"/"hook cancel is disabled" responses, exactly as
 // store == nil already degrades every history-backed view.
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, wg *sync.WaitGroup) {
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -82,6 +83,18 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	opts = append(opts, dashboard.WithVersion(version))
 	opts = append(opts, dashboard.WithLogRoot(logDir))
 	opts = append(opts, dashboard.WithHookCancel(hookCancel))
+	// hookSnapshot (hooks.Runner.Snapshot, nil when hooks aren't configured
+	// — see main.go) feeds both surfaces' live hook-state views (S5).
+	// dashboard.LiveHook and gauntletmcp.LiveHook each mirror
+	// hooks.LiveState field-for-field precisely so that neither package
+	// imports internal/hooks; these adapters are where the identical-struct
+	// conversions happen.
+	if hookSnapshot != nil {
+		opts = append(opts, dashboard.WithHookSnapshot(func(target string) (dashboard.LiveHook, bool) {
+			ls, ok := hookSnapshot(target)
+			return dashboard.LiveHook(ls), ok
+		}))
+	}
 
 	// The MCP server (chunk E5) is mounted at /mcp on the same listener as
 	// the dashboard, since it's meant for agents that already know the
@@ -89,11 +102,18 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	// keeps the dashboard's own mux (HTML + JSON API), which registers
 	// "GET /{$}" for its index rather than a catch-all, so it doesn't
 	// shadow /mcp.
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", gauntletmcp.New(gauntletmcp.Params{
+	mcpParams := gauntletmcp.Params{
 		Snapshot: snapshot, Store: store, LogRoot: logDir,
 		Retry: retryOrCancel, Cancel: retryOrCancel, HookCancel: hookCancel,
-	}))
+	}
+	if hookSnapshot != nil {
+		mcpParams.HookSnapshot = func(target string) (gauntletmcp.LiveHook, bool) {
+			ls, ok := hookSnapshot(target)
+			return gauntletmcp.LiveHook(ls), ok
+		}
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", gauntletmcp.New(mcpParams))
 	mux.Handle("/", dashboard.New(snapshot, store, opts...))
 
 	srv := &http.Server{

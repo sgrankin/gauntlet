@@ -27,6 +27,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/gitx"
+	"github.com/sgrankin/gauntlet/internal/hooks"
 	"github.com/sgrankin/gauntlet/internal/obs"
 	"github.com/sgrankin/gauntlet/internal/queue"
 )
@@ -115,6 +116,22 @@ func run() error {
 		return fmt.Errorf("git version check: %w", err)
 	}
 
+	// S2 (phase-6 audit synthesis, lifecycle #1): acquire an exclusive
+	// advisory lock on -state before touching anything else in it — every
+	// sweep below (trials, hooks, and, as of S16, scratch) used to simply
+	// assert "always safe" in a comment with nothing enforcing the
+	// single-daemon-per-state-dir precondition that assertion depended on.
+	// AcquireLock turns that assumption into an actual, enforced
+	// precondition: a second gauntlet process started against this same
+	// -state now fails fast right here, before it can sweep the first,
+	// still-running process's in-flight trial/hook/scratch exports out from
+	// under it. Held for the rest of the process's life (deferred Close).
+	lock, err := AcquireLock(*statePath)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -143,13 +160,25 @@ func run() error {
 	// F2 (docs/plans/phase23.md §10): the trials dir only ever holds
 	// ephemeral trial-tree exports for the run currently in flight, never
 	// anything that needs to survive a restart, so sweeping it at startup
-	// is always safe and cleans up anything orphaned by a prior crash.
+	// cleans up anything orphaned by a prior crash. This is safe
+	// unconditionally now that AcquireLock (S2) above guarantees no other
+	// gauntlet daemon can be using -state concurrently — a claim this
+	// comment used to just assert.
 	trialsDir := filepath.Join(*statePath, "trials")
-	if err := os.RemoveAll(trialsDir); err != nil {
-		return fmt.Errorf("sweep trials dir %s: %w", trialsDir, err)
+	if err := sweepAndRecreate(trialsDir); err != nil {
+		return fmt.Errorf("sweep trials dir: %w", err)
 	}
-	if err := os.MkdirAll(trialsDir, 0o755); err != nil {
-		return fmt.Errorf("create trials dir %s: %w", trialsDir, err)
+
+	// S16 (phase-6 audit synthesis, lifecycle #5): executor scratch dirs
+	// (LocalExecutor's gauntlet-check-* and ContainerExecutor's
+	// gauntlet-container-* result dirs) used to default to the OS temp
+	// dir, escaping this sweep and every other one entirely. Rooting them
+	// under -state/scratch (threaded into buildExecutor below) and
+	// sweeping it here at startup — exactly like trialsDir above, and safe
+	// for the same reason (the lock above) — closes that gap.
+	scratchDir := filepath.Join(*statePath, "scratch")
+	if err := sweepAndRecreate(scratchDir); err != nil {
+		return fmt.Errorf("sweep scratch dir: %w", err)
 	}
 
 	// F-b (DESIGN.md "Full per-check log files"): unlike trials/, logsDir
@@ -165,9 +194,32 @@ func run() error {
 		return fmt.Errorf("sweep logs dir %s: %w", logsDir, err)
 	}
 
-	ex, err := buildExecutor(cfg)
+	ex, err := buildExecutor(cfg, scratchDir)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
+	}
+
+	// S16 (phase-6 audit synthesis): sweep containers orphaned by a prior
+	// gauntlet process that crashed mid-check, before its own --rm cleanup
+	// ran. Only attempted when a container executor is actually configured,
+	// and only safe now that AcquireLock (S2) above guarantees no live
+	// sibling daemon's own in-flight containers could be mistaken for
+	// orphans. Tolerant of the runtime binary being entirely absent (logs
+	// and continues — see sweepContainerOrphans' doc).
+	//
+	// CAUTION: this phase's own verification only ran sweepContainerOrphans
+	// against a fake runtime script (sweep_test.go), never a real
+	// container runtime — the demo box runs Apple `container` on macOS,
+	// where behavior against the actual CLI (in particular whether
+	// `container ps --filter name=... --format {{.Names}}` matches
+	// docker/podman's output shape) has not been live-verified. Verify on
+	// the demo box before relying on this in that environment.
+	if cfg.Executor.Kind == "container" {
+		runtime := cfg.Executor.Runtime
+		if runtime == "" {
+			runtime = "container"
+		}
+		sweepContainerOrphans(ctx, runtime, os.Stderr)
 	}
 
 	// Channels: log always first (it's the one output every deployment
@@ -254,12 +306,12 @@ func run() error {
 		// Mirrors trialsDir above (F2): hooksDir only ever holds
 		// ephemeral per-landing exports for whatever hook is currently
 		// running, never anything that needs to survive a restart, so
-		// sweeping it at startup is always safe.
-		if err := os.RemoveAll(hooksDir); err != nil {
-			return fmt.Errorf("sweep hooks dir %s: %w", hooksDir, err)
-		}
-		if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-			return fmt.Errorf("create hooks dir %s: %w", hooksDir, err)
+		// sweeping it at startup cleans up anything orphaned by a prior
+		// crash — safe unconditionally now that AcquireLock (S2) above
+		// guarantees no other gauntlet daemon can be using -state
+		// concurrently.
+		if err := sweepAndRecreate(hooksDir); err != nil {
+			return fmt.Errorf("sweep hooks dir: %w", err)
 		}
 		chans = append(chans, hr)
 		wg.Add(1)
@@ -269,6 +321,16 @@ func run() error {
 				fmt.Fprintf(os.Stderr, "gauntlet: hooks: %v\n", err)
 			}
 		}()
+	}
+
+	// hookSnapshot is the wiring half of S5 (phase-6 audit synthesis):
+	// threads hr's live-hook-state accessor into the dashboard/MCP
+	// surfaces, nil-safely, mirroring hookCancel above exactly — nil when
+	// hooks aren't configured, in which case both surfaces simply omit
+	// live hook state.
+	var hookSnapshot func(target string) (hooks.LiveState, bool)
+	if hr != nil {
+		hookSnapshot = hr.Snapshot
 	}
 
 	// The summarizer's own Params.Timeout already bounds each Messages API
@@ -320,7 +382,8 @@ func run() error {
 	// of them (cmd wiring review, docs/plans/phase23.md): Slack/hooks/
 	// sampler/pruner exit, the dashboard's graceful Shutdown completes,
 	// then — only then — the store closes.
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, &wg)
+	//
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}

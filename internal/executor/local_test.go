@@ -280,3 +280,70 @@ sleep 300
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestLocalExecutor_BaseDirRootsScratchDir proves S16's fix (phase-6 audit
+// synthesis): a non-empty BaseDir roots the check's ephemeral scratch dir
+// under it, rather than the OS default temp dir — the property that lets
+// cmd/gauntlet's startup sweep of -state/scratch actually catch it. The
+// scratch dir is removed (defer os.RemoveAll) before RunCheck returns, so
+// the check script itself captures its own $GAUNTLET_RESULT_FILE's
+// directory into a file outside the scratch dir for the test to inspect
+// afterward.
+func TestLocalExecutor_BaseDirRootsScratchDir(t *testing.T) {
+	base := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "captured-scratch-dir")
+	cmd := script(t, filepath.Dir(capture), "check.sh", fmt.Sprintf(
+		"#!/bin/sh\ndirname \"$GAUNTLET_RESULT_FILE\" > %q\nexit 0\n", capture,
+	))
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{BaseDir: base}.RunCheck(context.Background(), job)
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read captured scratch dir: %v", err)
+	}
+	scratchDir := strings.TrimSpace(string(got))
+	if !strings.HasPrefix(scratchDir, base+string(os.PathSeparator)) {
+		t.Fatalf("scratch dir = %q, want it rooted under BaseDir %q", scratchDir, base)
+	}
+}
+
+// TestLocalExecutor_EmptyBaseDirPreservesOSDefaultTempDir locks in the
+// empty-BaseDir fallback every pre-S16 test (and this file's every other
+// test) already relies on: os.MkdirTemp("", ...) behavior, unchanged.
+func TestLocalExecutor_EmptyBaseDirPreservesOSDefaultTempDir(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "captured-scratch-dir")
+	cmd := script(t, dir, "check.sh", fmt.Sprintf(
+		"#!/bin/sh\ndirname \"$GAUNTLET_RESULT_FILE\" > %q\nexit 0\n", capture,
+	))
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read captured scratch dir: %v", err)
+	}
+	scratchDir := strings.TrimSpace(string(got))
+
+	// Reference: os.MkdirTemp("", ...), called the same way an empty
+	// BaseDir resolves to, right here — both share the same parent dir
+	// (os.TempDir()) without needing any symlink resolution to compare.
+	refDir, err := os.MkdirTemp("", "reference-")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp reference: %v", err)
+	}
+	defer os.RemoveAll(refDir)
+
+	if filepath.Dir(scratchDir) != filepath.Dir(refDir) {
+		t.Fatalf("scratch dir = %q (parent %q), want parent %q (empty BaseDir must preserve os.MkdirTemp(\"\", ...) prior behavior)", scratchDir, filepath.Dir(scratchDir), filepath.Dir(refDir))
+	}
+}
