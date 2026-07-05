@@ -107,7 +107,7 @@ const (
 	EnvMergeSHA     = "GAUNTLET_MERGE_SHA"     // = job.MergeSHA
 	EnvCandidateSHA = "GAUNTLET_CANDIDATE_SHA" // = job.Candidate.SHA
 	EnvRef          = "GAUNTLET_REF"           // = job.Candidate.Ref
-	EnvResult       = "GAUNTLET_RESULT"        // path to a file the executor creates; a check writes "skipped" to skip
+	EnvResultFile   = "GAUNTLET_RESULT_FILE"   // path to a file the executor creates; a check writes "skipped" to skip
 )
 
 type Outcome int
@@ -257,7 +257,7 @@ type Check struct{ Name string `kdl:",arg"`; Command []string `kdl:"command,chil
 
 Conditional execution (monorepo "only web changed") is the **check script's** job, never config's — no path globs in gauntlet config, ever. A check has three outcomes (`passed`/`failed`/`skipped`), signalled via the result file, never exit-code conventions. Run verdict: green = every check `Passed` **or** `Skipped` and no `Err`; a single `Failed` → Rejected. `Skipped` is recorded distinctly in the `RunRecord` so history doesn't lie.
 
-`LocalExecutor.RunCheck`: create an empty result file in a temp dir, export the five env vars (inherited env + these), run `Command` in `job.Dir` (own process group, §9.5); then map — ctx cancelled or executor I/O failure → `Err`; exec-start failure → `CheckFailed` with explanatory Output (**§9.2**); exit non-zero → `CheckFailed`; exit 0 and result file contains `skipped` → `CheckSkipped`; exit 0 otherwise → `CheckPassed`. `Duration` always set. Output tail-capped (**§9.6**).
+`LocalExecutor.RunCheck`: create an empty result file in a temp dir, export the five env vars (inherited env + these), run `Command` in `job.Dir` (own process group, §9.5); then map, in precedence order — ctx cancelled or executor I/O failure → `Err`; exec-start failure → `CheckFailed` with explanatory Output (**§9.2**); exit non-zero → `CheckFailed` **regardless of the result file** (the file is ignored on failure — it is not an exit-code convention, it only splits the exit-0 case); exit 0 and result file contains `skipped` → `CheckSkipped`; exit 0 and file empty/absent → `CheckPassed`. `Duration` always set. Output tail-capped (**§9.6**).
 
 **Config-that-computes KILLED:** both config files are dumb data. (If CUE were ever adopted it is constrained to plain-data mode only — moot for phase 1, KDL chosen.)
 
@@ -277,7 +277,7 @@ Two tiers. **CAS semantics, merge-tree, read-file-from-tree, and crash recovery 
 |---|---|---|---|
 | Green multi-check land | checks `[lint,test]` both pass | target=tested mergeOID; `parent[1]`==candidate SHA verbatim; slot deleted; RunRecord 2 passed | 1, 6; d1,d2 |
 | Check spec from trial tree | candidate's `.gauntlet.kdl` adds a check vs target's | candidate's own spec used (extra check runs) | d1 |
-| Skipped check | check writes `skipped` to `$GAUNTLET_RESULT`, exit 0 | RunRecord shows Skipped (not Passed); run still lands | d3 |
+| Skipped check | check writes `skipped` to `$GAUNTLET_RESULT_FILE`, exit 0 | RunRecord shows Skipped (not Passed); run still lands | d3 |
 | Check env exported | check asserts the 4 SHA/REF env vars are set/correct | check passes only when env matches expected OIDs | d3 |
 | Missing/invalid check spec | candidate without `.gauntlet.kdl` | EventRejected (names the file); target & slot untouched; parked until re-push | d1 |
 | Short-circuit on fail | `lint` fails | `test` never starts; EventRejected; target untouched | d1 |
@@ -306,7 +306,7 @@ Ordered, sized for independent agents. Each: depends-on, acceptance.
 - **C0 Scaffold+core** (blocks all) — `go.mod`, `README` stub, `internal/core/{types,interfaces}.go` (incl. `CheckStatus`, env constants, `CheckJob.BaseSHA`). Accept: `go build ./...`, `go vet ./...` clean; core imports only stdlib.
 - **C1 config** (dep C0; adds kdl-go) — `internal/config/{daemon,checks,config_test}.go`, `gauntlet.kdl`, `.gauntlet.kdl`. Accept: `go test ./internal/config/` parses both examples; rejects each invalid variant with a node-named error.
 - **C2 gitx** (dep C0; highest risk — hand it §7 Spike 1) — `internal/gitx/{git,git_test}.go`, `internal/testutil/remote.go`. Accept: `go test ./internal/gitx/` against real bare repos — clean+conflict MergeTree (exit-code+paths), two-parent CommitTree with trailers, ReadFileFromTree (present+missing), IsAncestor both ways, ExportTree, CASUpdate **rejects wrong old-OID / accepts right** for set and delete (ErrCASStale on loss), Fetch --prune.
-- **C3 executor** (dep C0) — `internal/executor/{local,gate}.go`, `_test.go`. Accept: `go test ./internal/executor/` — passed/failed/skipped(via result file)/exec-start-failure→Failed/cancel→Err mapping; four env vars + `GAUNTLET_RESULT` set; process-group kill on cancel (§9.5); output cap (§9.6); `Duration` populated; `GatedExecutor` releases per `(RunID,Name)`.
+- **C3 executor** (dep C0) — `internal/executor/{local,gate}.go`, `_test.go`. Accept: `go test ./internal/executor/` — passed/failed/skipped(via result file)/exec-start-failure→Failed/cancel→Err mapping; four env vars + `GAUNTLET_RESULT_FILE` set; process-group kill on cancel (§9.5); output cap (§9.6); `Duration` populated; `GatedExecutor` releases per `(RunID,Name)`.
 - **C4 channel** (dep C0) — `internal/channel/{log,record}.go`, `_test.go`. Accept: structured event+RunRecord output; `Commands()` never yields.
 - **C5 obs** (dep C0; adds otel API) — `internal/obs/trace.go`, `_test.go`. Accept: no-op tracer yields no spans/no error; RunRecord→attributes covered.
 - **C6 queue core** (dep C0,C5; fakes) — `internal/queue/{daemon,reconcile,message,daemon_test}.go`. Accept: `go test ./internal/queue/` — full transition table (§3, incl. §9.1/§9.2 park semantics), FIFO, skip-parked-head, move detection, sequencing+short-circuit, skipped aggregation, run-record assembly, no-op spans, ref grammar (§9.3).
