@@ -25,20 +25,38 @@ import (
 	"github.com/sgrankin/gauntlet/internal/channel"
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/gitx"
 	"github.com/sgrankin/gauntlet/internal/obs"
 	"github.com/sgrankin/gauntlet/internal/queue"
 )
 
 func main() {
-	// "land" is client-side porcelain (cmd/gauntlet/land.go); everything
-	// else is the daemon itself.
-	if len(os.Args) > 1 && os.Args[1] == "land" {
-		if err := runLand(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "gauntlet land:", err)
-			os.Exit(1)
+	// "land", "status", and "retry" are client-side porcelain
+	// (cmd/gauntlet/land.go, cmd/gauntlet/status.go): thin HTTP/git clients
+	// that talk to an already-running daemon rather than running it.
+	// Everything else is the daemon itself.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "land":
+			if err := runLand(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet land:", err)
+				os.Exit(1)
+			}
+			return
+		case "status":
+			if err := runStatus(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet status:", err)
+				os.Exit(1)
+			}
+			return
+		case "retry":
+			if err := runRetry(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet retry:", err)
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "gauntlet:", err)
@@ -131,6 +149,17 @@ func run() error {
 		chans = append(chans, store)
 	}
 
+	// The dashboard's retry channel is constructed here, ahead of queue.New,
+	// even though the dashboard's http.Handler (built in startDashboard,
+	// below) needs d.Snapshot, which doesn't exist until queue.New returns.
+	// The channel itself doesn't need d — only the handler does — so it can
+	// be registered in chans now and wired into the handler once d exists.
+	var dashCh *dashboard.Channel
+	if cfg.Dashboard.Bind != "" {
+		dashCh = dashboard.NewChannel()
+		chans = append(chans, dashCh)
+	}
+
 	ghStatus, err := buildGHStatusChannel(cfg)
 	if err != nil {
 		return fmt.Errorf("build github status channel: %w", err)
@@ -170,7 +199,7 @@ func run() error {
 	// (cmd wiring review, docs/plans/phase23.md): sampler exits, dashboard's
 	// graceful Shutdown completes, then — only then — the store closes.
 	var wg sync.WaitGroup
-	startDashboard(ctx, cfg, d.Snapshot, store, &wg)
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}

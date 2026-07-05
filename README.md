@@ -204,6 +204,73 @@ executor "container" {
   mount `path`) so warm caches (`GOCACHE`, module caches, …) survive across
   runs. `image` is required when `kind` is `"container"`.
 
+## API
+
+The dashboard (`internal/dashboard`) exposes a small JSON API under
+`/api/v1`, mounted on the same handler/bind as the HTML pages (§4.2 above).
+It exists for agents, scripts, and a future `gauntlet mcp` that want
+machine-readable queue status and a way to trigger a retry without a
+browser. Every response is `Content-Type: application/json`, with stable
+lowerCamel field names; errors are always `{"error": "..."}`.
+
+- **`GET /api/v1/status`** — every target's live queue state: name, branch,
+  tip SHA, the in-flight run (ref/sha/runID/currentCheck/startedAt/
+  checksDone, or `null` if idle), the waiting queue (ref/sha/seq, FIFO
+  order), and parked refs (ref/sha/outcome/reason/at). `503
+  {"error":"no snapshot yet"}` before the first reconcile pass completes.
+
+  ```sh
+  curl -s http://localhost:8899/api/v1/status | jq .
+  ```
+
+- **`GET /api/v1/runs?target=<name>&limit=<n>`** — a target's recent runs
+  from history, newest first (`limit` defaults to 20). `target` is
+  required (`400` if missing). `503 {"error":"history disabled"}` if no
+  `history` store is configured.
+
+  ```sh
+  curl -s 'http://localhost:8899/api/v1/runs?target=main&limit=5' | jq .
+  ```
+
+- **`GET /api/v1/run/{id}`** — one run's full detail, including its
+  per-check results. `404 {"error":"not found"}` for an unknown run ID;
+  `503 {"error":"history disabled"}` if no `history` store is configured.
+
+  ```sh
+  curl -s http://localhost:8899/api/v1/run/<run-id> | jq .
+  ```
+
+- **`POST /api/v1/retry`** — re-queues a parked ref at its current SHA,
+  same effect as re-pushing it or reacting `:recycle:` in Slack (see
+  "Retry semantics" above). Body: `{"target": "main", "ref":
+  "refs/heads/for/main/alice/my-feature"}`. `202 {"status":"queued"}` on
+  success; `400` if `target` or `ref` is missing or the body isn't valid
+  JSON; `405` for any method but `POST`.
+
+  ```sh
+  curl -s -X POST http://localhost:8899/api/v1/retry \
+    -H 'content-type: application/json' \
+    -d '{"target":"main","ref":"refs/heads/for/main/alice/my-feature"}'
+  ```
+
+**`gauntlet status`** and **`gauntlet retry`** are thin CLI wrappers over
+the same API (client-side porcelain, like `gauntlet land`):
+
+```sh
+gauntlet status -url http://localhost:8899                  # compact per-target summary
+gauntlet status -url http://localhost:8899 -target main     # one target only
+gauntlet status -url http://localhost:8899 -json            # raw API response
+
+gauntlet retry -url http://localhost:8899 -target main -ref refs/heads/for/main/alice/my-feature
+```
+
+**Trust model.** Same as the dashboard itself: the API has no
+authentication of its own, so bind it to a trusted interface and put it
+behind your proxy/tailnet if you need one. `retry` is non-destructive — it
+only re-queues an already-parked ref for another trial-merge-and-check
+pass; it never touches the target branch, force-lands anything, or bypasses
+a check.
+
 ## Manual verification / setup guides
 
 These channels/executors have no fake to exercise in CI-style tests; verify

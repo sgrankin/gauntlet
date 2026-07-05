@@ -19,28 +19,36 @@ import (
 // daemon exit is never hung waiting on a slow client.
 const dashboardShutdownTimeout = 5 * time.Second
 
-// startDashboard starts the read-only web dashboard on cfg.Dashboard.Bind,
-// if configured, and returns immediately (the server runs in its own
-// goroutine). store may be nil (history disabled; dashboard.New already
-// degrades every history-backed view for that case). The server shuts down
-// gracefully when ctx is done; a ListenAndServe failure other than
-// http.ErrServerClosed is treated as fatal, matching main's "loud error,
-// exit 1" style, since a dashboard that silently failed to bind would
-// otherwise look "up" from the log alone.
+// startDashboard starts the read-only web dashboard (plus its JSON API, work
+// chunk E4) on cfg.Dashboard.Bind, if configured, and returns immediately
+// (the server runs in its own goroutine). store may be nil (history
+// disabled; dashboard.New already degrades every history-backed view for
+// that case). dashCh, if non-nil, is wired so POST /api/v1/retry feeds it —
+// it must already be registered in the channel list passed to queue.New
+// (main.go does this before queue.New runs, since dashCh doesn't depend on
+// anything queue.New produces, unlike the handler built here). The server
+// shuts down gracefully when ctx is done; a ListenAndServe failure other
+// than http.ErrServerClosed is treated as fatal, matching main's "loud
+// error, exit 1" style, since a dashboard that silently failed to bind
+// would otherwise look "up" from the log alone.
 //
 // wg gains one count per goroutine started here (zero if the dashboard is
 // disabled), released once each goroutine actually exits. main waits on wg
 // before closing the history store, so a query still in flight against store
 // (via the dashboard's history-backed views) can never race a Close (cmd
 // wiring review, docs/plans/phase23.md).
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, wg *sync.WaitGroup) {
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
 
+	var opts []dashboard.Option
+	if dashCh != nil {
+		opts = append(opts, dashboard.WithChannel(dashCh))
+	}
 	srv := &http.Server{
 		Addr:    cfg.Dashboard.Bind,
-		Handler: dashboard.New(snapshot, store),
+		Handler: dashboard.New(snapshot, store, opts...),
 	}
 
 	wg.Add(2)

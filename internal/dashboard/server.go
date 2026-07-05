@@ -6,8 +6,11 @@
 // store may be nil (history disabled); every route degrades to a friendly
 // message rather than panicking or 500ing in either case.
 //
-// There are no forms and no mutating routes — every handler here only
-// reads. Auth is out of scope (documented in DESIGN.md); bind to a trusted
+// Every HTML route in this file only reads. api.go (work chunk E4) adds a
+// JSON API beside it, mounted on the same handler, with one mutating route
+// (POST /api/v1/retry) that injects a core.Command the same way a Slack
+// ":recycle:" reaction does — see api.go's Channel doc for how that's
+// wired. Auth is out of scope (documented in DESIGN.md); bind to a trusted
 // interface.
 package dashboard
 
@@ -30,21 +33,35 @@ import (
 // New builds the dashboard's http.Handler. snapshot is called on every
 // request that needs live queue state (typically Daemon.Snapshot); store
 // may be nil, in which case every history-backed section renders "history
-// disabled" instead of querying it.
-func New(snapshot func() *queue.Snapshot, store *history.Store) http.Handler {
+// disabled" instead of querying it. opts configures the JSON API added in
+// api.go — see WithChannel.
+func New(snapshot func() *queue.Snapshot, store *history.Store, opts ...Option) http.Handler {
 	d := &dash{snapshot: snapshot, store: store}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d.mux()
+}
 
+// mux assembles every route: the HTML dashboard (this file) plus the JSON
+// API (api.go, mountAPIRoutes).
+func (d *dash) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", d.handleIndex)
 	mux.HandleFunc("GET /t/{target}", d.handleTarget)
 	mux.HandleFunc("GET /run/{runID}", d.handleRun)
 	mux.HandleFunc("GET /checks", d.handleChecks)
+	d.mountAPIRoutes(mux)
 	return mux
 }
 
 type dash struct {
 	snapshot func() *queue.Snapshot
 	store    *history.Store
+
+	// ch is nil unless New was called with WithChannel: POST /api/v1/retry
+	// only has somewhere to send a retry Command when it is set (api.go).
+	ch *Channel
 }
 
 // --- / --------------------------------------------------------------------
