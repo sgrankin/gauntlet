@@ -943,7 +943,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 			cand:     link.cand,
 			mergeOID: link.mergeOID,
 			rec: &core.RunRecord{
-				RunID:     runID,
+				RunID:     memberRunID(runID, i),
 				Target:    t.Name,
 				Candidate: link.cand,
 				BaseOID:   prevBase,
@@ -998,7 +998,7 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 	var lastRec *core.RunRecord
 	for i, link := range links {
 		rec := &core.RunRecord{
-			RunID:     runID,
+			RunID:     memberRunID(runID, i),
 			Target:    t.Name,
 			Candidate: link.cand,
 			BaseOID:   prevBase,
@@ -1017,7 +1017,7 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 		d.park(t.Name, link.cand, outcome, detail)
 		d.emit(ctx, core.Event{
 			Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
-			Candidate: link.cand, RunID: runID, Record: rec, Detail: detail,
+			Candidate: link.cand, RunID: rec.RunID, Record: rec, Detail: detail,
 		})
 	}
 	obs.EndRun(rootSpan, lastRec)
@@ -1065,7 +1065,7 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 			At:        now,
 			Target:    t.Name,
 			Candidate: m.cand,
-			RunID:     r.runID,
+			RunID:     m.rec.RunID,
 			Record:    m.rec,
 			Detail:    detail,
 		})
@@ -1381,7 +1381,7 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 			At:        d.now(),
 			Target:    t.Name,
 			Candidate: m.cand,
-			RunID:     r.runID,
+			RunID:     m.rec.RunID,
 			Record:    m.rec,
 			Detail:    detail,
 		})
@@ -1428,7 +1428,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 			At:        d.now(),
 			Target:    t.Name,
 			Candidate: m.cand,
-			RunID:     r.runID,
+			RunID:     m.rec.RunID,
 			Record:    m.rec,
 			Detail:    detail,
 		})
@@ -1610,4 +1610,29 @@ func newRunID(t time.Time, oid string) string {
 	}
 	seq := runIDCounter.Add(1)
 	return fmt.Sprintf("%s-%d-%s", t.UTC().Format(runIDTimeFormat), seq, oid)
+}
+
+// memberRunID derives a batch member's own RunRecord.RunID at position pos
+// within a batch whose bare (chain-mint-time) run ID is batchRunID.
+//
+// Bug fixed here: every member of a batch used to share batchRunID verbatim
+// as its RunRecord.RunID too (not just as BatchID) — and history's runs
+// table PRIMARY KEYs on run_id with INSERT OR REPLACE (internal/history/
+// schema.sql), so writing N members with the same RunID silently replaced
+// the first N-1 rows with the last, gutting the batch-members history/
+// dashboard feature for both green (N landed) and red (N skipped) batches.
+//
+// Fix: position 0 (the head member) keeps the bare batchRunID verbatim — the
+// mid-run EventCheckStarted/EventCheckFinished events (one per check, shared
+// across the whole batch, keyed on run.runID) and the Slack root's
+// trial-clean tracking key both stay anchored to a real, single-member
+// identity. Every later member (pos > 0) gets a distinct
+// "<batchRunID>-mN" suffix, so each lands its own history row.
+// BatchID stays batchRunID, unsuffixed, for every member (unchanged) — it's
+// the join key BatchMembers and Slack's batch-aware root lookup use.
+func memberRunID(batchRunID string, pos int) string {
+	if pos == 0 {
+		return batchRunID
+	}
+	return fmt.Sprintf("%s-m%d", batchRunID, pos)
 }

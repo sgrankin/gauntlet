@@ -3,6 +3,7 @@ package slack
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -86,10 +87,18 @@ func waitForStats(t *testing.T, s *Slack, timeout time.Duration, wantRuns, wantR
 	}
 }
 
-// waitForStatsZero is waitForStats(t, s, timeout, 0, 0).
+// waitForStatsZero is waitForStats(t, s, timeout, 0, 0), plus the same §9.2
+// leak-bound assertion for batchRecs — the third run-tracking map, which
+// must also be empty once every run/batch has fully resolved.
 func waitForStatsZero(t *testing.T, s *Slack, timeout time.Duration) {
 	t.Helper()
 	waitForStats(t, s, timeout, 0, 0)
+	s.mu.Lock()
+	n := len(s.batchRecs)
+	s.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("batchRecs has %d entries after all runs resolved, want 0 (§9.2 leak bound)", n)
+	}
 }
 
 func TestSlack_TrialCleanPostsRootCheckThreadsAndTerminalEdit(t *testing.T) {
@@ -455,5 +464,153 @@ func TestSlack_NilLogDefaultsToStderr(t *testing.T) {
 	s := New(Params{Channel: "C1", AppToken: "xapp", BotToken: "xoxb"})
 	if s.log != os.Stderr {
 		t.Fatalf("log = %v, want os.Stderr", s.log)
+	}
+}
+
+// batchMembers is the 3-candidate fixture both batch Slack tests below
+// share: a batch's chain-building fires one EventTrialClean per member, all
+// sharing the batch's bare run ID (== BatchID); its landing/red-skip fires
+// one terminal event per member, each carrying a distinct
+// "<batchID>"/"<batchID>-m1"/"<batchID>-m2" RunID (queue.memberRunID's
+// data-loss fix) but the same shared BatchID.
+func batchMembers() (batchID string, cands []core.Candidate, runIDs []string) {
+	batchID = "20260705T130000Z-1-abc123def456"
+	cands = []core.Candidate{
+		{Ref: "refs/heads/for/main/alice/a", Target: "main", User: "alice", Topic: "a", SHA: "aaaa"},
+		{Ref: "refs/heads/for/main/bob/b", Target: "main", User: "bob", Topic: "b", SHA: "bbbb"},
+		{Ref: "refs/heads/for/main/carol/c", Target: "main", User: "carol", Topic: "c", SHA: "cccc"},
+	}
+	runIDs = []string{batchID, batchID + "-m1", batchID + "-m2"}
+	return batchID, cands, runIDs
+}
+
+// TestSlack_BatchLandingPostsOneRootOneEditOneSummary covers §3.3 addendum's
+// batch-aware join for a green batch: 3 EventTrialClean events (chain
+// building, one per member, all sharing batchID) must post exactly ONE root
+// message — not one per member (postRoot's new idempotency guard) — then 3
+// EventLanded terminal events (one per member, each with its own distinct
+// RunID but the shared BatchID) must produce exactly one root edit (at the
+// FIRST member processed) and exactly ONE threaded summary reply (posted
+// once the LAST member, Position == BatchSize-1, arrives) that names every
+// member — not one noisy reply per member — with both run-tracking maps
+// back to zero afterward (§9.2).
+func TestSlack_BatchLandingPostsOneRootOneEditOneSummary(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	batchID, cands, runIDs := batchMembers()
+
+	for _, cand := range cands {
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: batchID})
+	}
+	posts := fake.waitForPosts(1, testTimeout)
+	root := posts[0]
+	if root.method != "chat.postMessage" || root.threadTS != "" {
+		t.Fatalf("root post = %+v, want a single top-level chat.postMessage despite 3 trial-clean events", root)
+	}
+	waitForStats(t, s, testTimeout, 1, 1)
+
+	checks := []core.CheckResult{{Name: "test", Status: core.CheckPassed, Duration: 42 * time.Millisecond}}
+	for i, cand := range cands {
+		rec := &core.RunRecord{
+			RunID:     runIDs[i],
+			Target:    "main",
+			Candidate: cand,
+			Outcome:   core.OutcomeLanded,
+			Checks:    checks,
+			BatchID:   batchID,
+			Position:  i,
+			BatchSize: len(cands),
+		}
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", Candidate: cand, RunID: runIDs[i], Record: rec})
+	}
+
+	posts = fake.waitForPosts(3, testTimeout) // root + one edit + ONE summary reply
+	edit := posts[1]
+	if edit.method != "chat.update" || edit.ts != root.ts {
+		t.Fatalf("batch edit = %+v, want a single chat.update on the root", edit)
+	}
+	if !strings.Contains(edit.text, "✅") {
+		t.Errorf("batch edit text = %q, want a ✅ verdict", edit.text)
+	}
+
+	summary := posts[2]
+	if summary.method != "chat.postMessage" || summary.threadTS != root.ts {
+		t.Fatalf("batch summary = %+v, want ONE threaded reply on the root", summary)
+	}
+	for _, want := range []string{"alice", "bob", "carol", batchID} {
+		if !strings.Contains(summary.text, want) {
+			t.Errorf("summary text = %q, want it to mention %q", summary.text, want)
+		}
+	}
+	for _, want := range runIDs {
+		if !strings.Contains(summary.text, want) {
+			t.Errorf("summary text = %q, want it to list member run id %q", summary.text, want)
+		}
+	}
+
+	waitForStatsZero(t, s, testTimeout)
+
+	// No further posts after the last member's terminal event — proves the
+	// summary really is posted once, not once per member.
+	if got := fake.snapshotPosts(); len(got) != 3 {
+		t.Fatalf("total posts = %d, want exactly 3 (root, edit, one summary)", len(got))
+	}
+}
+
+// TestSlack_BatchRedSkippedPostsOneRootOneEditOneSummary mirrors the green
+// case for a batch-red run (queue.finishBatchRed): every member's terminal
+// event is EventSkipped, not EventLanded, but each still carries a Record
+// with BatchID set (the join/forget logic doesn't branch on Outcome) — so
+// the same one-root/one-edit/one-summary shape must hold, with a ⚠️ verdict
+// instead of ✅.
+func TestSlack_BatchRedSkippedPostsOneRootOneEditOneSummary(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	batchID, cands, runIDs := batchMembers()
+
+	for _, cand := range cands {
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: batchID})
+	}
+	posts := fake.waitForPosts(1, testTimeout)
+	root := posts[0]
+	waitForStats(t, s, testTimeout, 1, 1)
+
+	checks := []core.CheckResult{{Name: "test", Status: core.CheckFailed, Duration: 42 * time.Millisecond}}
+	detail := fmt.Sprintf("batch %s red on check %q; serializing", batchID, "test")
+	for i, cand := range cands {
+		rec := &core.RunRecord{
+			RunID:     runIDs[i],
+			Target:    "main",
+			Candidate: cand,
+			Outcome:   core.OutcomeSkipped,
+			Checks:    checks,
+			Detail:    detail,
+			BatchID:   batchID,
+			Position:  i,
+			BatchSize: len(cands),
+		}
+		mustEmit(t, s, ctx, core.Event{Kind: core.EventSkipped, Target: "main", Candidate: cand, RunID: runIDs[i], Record: rec})
+	}
+
+	posts = fake.waitForPosts(3, testTimeout)
+	edit := posts[1]
+	if edit.method != "chat.update" || edit.ts != root.ts {
+		t.Fatalf("batch edit = %+v, want a single chat.update on the root", edit)
+	}
+	if !strings.Contains(edit.text, "⚠️") {
+		t.Errorf("batch edit text = %q, want a ⚠️ verdict", edit.text)
+	}
+
+	summary := posts[2]
+	if summary.method != "chat.postMessage" || summary.threadTS != root.ts {
+		t.Fatalf("batch summary = %+v, want ONE threaded reply on the root", summary)
+	}
+	for _, want := range []string{"alice", "bob", "carol", detail} {
+		if !strings.Contains(summary.text, want) {
+			t.Errorf("summary text = %q, want it to mention %q", summary.text, want)
+		}
+	}
+
+	waitForStatsZero(t, s, testTimeout)
+	if got := fake.snapshotPosts(); len(got) != 3 {
+		t.Fatalf("total posts = %d, want exactly 3 (root, edit, one summary)", len(got))
 	}
 }

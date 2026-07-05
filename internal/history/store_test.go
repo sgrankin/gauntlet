@@ -1213,6 +1213,68 @@ func TestStore_BatchMembers(t *testing.T) {
 	}
 }
 
+// TestStore_BatchMembers_RedSkipped is TestStore_BatchMembers's red-batch
+// counterpart (finishBatchRed's shape, internal/queue/reconcile.go): a
+// batch-red run emits EventSkipped (not EventLanded/EventRejected) per
+// member, Outcome Skipped on every one, the shared failing check duplicated
+// onto each record (§3.3) — proving the fixed data-loss bug (batch members
+// sharing one RunID, collapsed by history's run_id PRIMARY KEY under INSERT
+// OR REPLACE) is fixed for the red path too, not just the green one: 3
+// distinct RunIDs (the real "<batchID>"/"<batchID>-m1"/"<batchID>-m2" shape
+// queue.memberRunID mints) round-trip as 3 separate rows.
+func TestStore_BatchMembers_RedSkipped(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 5, 13, 0, 0, 0, time.UTC)
+	batchID := "20260705T130000Z-1-abc123def456"
+
+	runIDs := []string{batchID, batchID + "-m1", batchID + "-m2"}
+	for i, runID := range runIDs {
+		rec := &core.RunRecord{
+			RunID:  runID,
+			Target: "main",
+			Candidate: core.Candidate{
+				Ref: fmt.Sprintf("refs/heads/for/main/user%d/topic%d", i, i),
+			},
+			Checks: []core.CheckResult{
+				{Name: "test", Status: core.CheckFailed, Duration: time.Second, Output: "boom"},
+			},
+			Outcome:   core.OutcomeSkipped,
+			Detail:    fmt.Sprintf("batch %s red on check \"test\"; serializing", batchID),
+			BatchID:   batchID,
+			Position:  i,
+			BatchSize: 3,
+			StartedAt: base.Add(time.Duration(i) * time.Second),
+			EndedAt:   base.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.Emit(ctx, core.Event{Kind: core.EventSkipped, Target: "main", RunID: runID, Record: rec}); err != nil {
+			t.Fatalf("Emit(%s): %v", runID, err)
+		}
+	}
+
+	members, err := s.BatchMembers(batchID)
+	if err != nil {
+		t.Fatalf("BatchMembers: %v", err)
+	}
+	if len(members) != 3 {
+		t.Fatalf("BatchMembers = %d rows, want 3 (the data-loss bug would collapse these to 1)", len(members))
+	}
+	for i, m := range members {
+		if m.RunID != runIDs[i] {
+			t.Errorf("members[%d].RunID = %q, want %q", i, m.RunID, runIDs[i])
+		}
+		if m.Position != i {
+			t.Errorf("members[%d].Position = %d, want %d (position order)", i, m.Position, i)
+		}
+		if m.Outcome != "skipped" {
+			t.Errorf("members[%d].Outcome = %q, want skipped", i, m.Outcome)
+		}
+		if m.BatchID != batchID || m.BatchSize != 3 {
+			t.Errorf("members[%d] = %+v, want BatchID=%s BatchSize=3", i, m, batchID)
+		}
+	}
+}
+
 // TestStore_ConcurrentReadsDontBlockWrites is the sanity check for raising
 // SetMaxOpenConns from 1 to 4 (docs/plans/phase23.md review): Emit runs
 // inline on the reconcile goroutine in production, so a dashboard read must

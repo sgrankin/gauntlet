@@ -103,9 +103,17 @@ type Slack struct {
 	// synchronize without wall-clock sleeps, mirroring
 	// channel.RecordingChannel's notify (internal/channel/record.go).
 	mu      sync.Mutex
-	runRoot map[string]string   // core.Event.RunID -> root message ts
+	runRoot map[string]string   // root-tracking key -> root message ts (batch-aware: BatchID when set, else RunID)
 	roots   map[string]rootInfo // root message ts -> (target, ref)
 	notify  chan struct{}
+
+	// batchRecs buffers a batch's per-member terminal records, keyed by
+	// BatchID, indexed by Position, until the last member's terminal event
+	// arrives (docs/plans/phase5.md §3.3 addendum): a batch posts ONE final
+	// threaded summary listing every member, not one reply per member. Each
+	// entry is deleted once that summary is posted, so — like runRoot/roots
+	// — this never leaks an entry per finished batch (§9.2).
+	batchRecs map[string][]*core.RunRecord
 }
 
 // New returns a Slack channel configured by p. It performs no I/O; Run
@@ -124,15 +132,16 @@ func New(p Params) *Slack {
 	smc := socketmode.New(api)
 
 	return &Slack{
-		channel: p.Channel,
-		api:     api,
-		smc:     smc,
-		log:     logw,
-		outbox:  make(chan core.Event, outboxBuffer),
-		cmds:    make(chan core.Command, cmdsBuffer),
-		runRoot: make(map[string]string),
-		roots:   make(map[string]rootInfo),
-		notify:  make(chan struct{}),
+		channel:   p.Channel,
+		api:       api,
+		smc:       smc,
+		log:       logw,
+		outbox:    make(chan core.Event, outboxBuffer),
+		cmds:      make(chan core.Command, cmdsBuffer),
+		runRoot:   make(map[string]string),
+		roots:     make(map[string]rootInfo),
+		notify:    make(chan struct{}),
+		batchRecs: make(map[string][]*core.RunRecord),
 	}
 }
 
@@ -246,7 +255,24 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 // postRoot posts the root message for a newly clean trial and records
 // runID->rootTS and rootTS->(target,ref) so later events for this run
 // (check replies, the terminal edit) and an inbound reaction can find it.
+//
+// Idempotent per ev.RunID: a batch's chain-building fires one
+// EventTrialClean per member (startBatchRun's onClean callback runs once for
+// every candidate whose own trial-merge came back clean), all sharing the
+// batch's one bare RunID — so without this guard, a 3-member batch would
+// post 3 separate "⏳ testing..." root messages, each silently orphaning the
+// previous one's roots[] entry (never forgotten, since forget only ever
+// removes the CURRENT ts). One root per run, posted at the first
+// EventTrialClean, keeps both non-batch behavior and the map's §9.2 bound
+// unchanged.
 func (s *Slack) postRoot(ctx context.Context, ev core.Event) {
+	s.mu.Lock()
+	if _, exists := s.runRoot[ev.RunID]; exists {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
 	text := fmt.Sprintf("⏳ testing %s (%s) → %s", ev.Candidate.Topic, displayUser(ev.Candidate.User), ev.Target)
 	_, ts, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false))
 	if err != nil {
@@ -292,11 +318,26 @@ func (s *Slack) postCheckReply(ctx context.Context, ev core.Event) {
 }
 
 // postTerminal edits the root message to its final verdict, posts a final
-// threaded summary (outcome, one line per check, run ID), and then deletes
-// both map entries for this run (§9.2 — a long-running daemon must not
-// leak an entry per run).
+// threaded summary, and then deletes both map entries for this run (§9.2 —
+// a long-running daemon must not leak an entry per run).
+//
+// Batch-aware (docs/plans/phase5.md §3.3 addendum): a batch's per-member
+// records now carry distinct RunIDs (queue's memberRunID fix for the
+// history PRIMARY KEY collision), but the root was posted — and is tracked
+// in runRoot/roots — under the batch's shared BatchID (== the bare RunID
+// EventTrialClean carried at chain-build time, postRoot's tracking key).
+// So the root lookup here joins on rec.BatchID when it's set, falling back
+// to ev.RunID (== rec.RunID) otherwise — byte-identical to before for every
+// non-batch event, whose BatchID is always "". A batch's terminal events
+// then route to postBatchTerminal instead of editing/replying per member.
 func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
-	rootTS, ok := s.lookupRoot(ev.RunID)
+	rec := ev.Record
+	joinKey := ev.RunID
+	if rec.BatchID != "" {
+		joinKey = rec.BatchID
+	}
+
+	rootTS, ok := s.lookupRoot(joinKey)
 	if !ok {
 		// No known root: e.g. this channel started after the trial-clean
 		// event, or the root post itself was dropped (outbox overflow).
@@ -304,7 +345,11 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 		return
 	}
 
-	rec := ev.Record
+	if rec.BatchID != "" {
+		s.postBatchTerminal(ctx, ev, rec, rootTS)
+		return
+	}
+
 	headline := fmt.Sprintf("%s %s (%s) → %s", outcomeEmoji(rec.Outcome), ev.Candidate.Topic, displayUser(ev.Candidate.User), ev.Target)
 	if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false)); err != nil {
 		s.logf("slack: chat.update failed run=%s: %v", ev.RunID, err)
@@ -316,6 +361,54 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 	}
 
 	s.forget(ev.RunID, rootTS)
+}
+
+// postBatchTerminal handles one member's terminal event within a batch
+// (postTerminal's batch branch, docs/plans/phase5.md §3.3 addendum). Every
+// member of a batch shares the same Outcome by construction — landRun/
+// finishRun/finishBatchRed/rejectBatch all assign one outcome to the whole
+// batch, never singling out a member's own verdict (a genuine per-member
+// split doesn't exist: a batch either lands whole or Skips/parks whole) —
+// so the root's headline can be (and is) decided from the FIRST member
+// processed (Position 0), without waiting to see every member's record.
+//
+// Rather than one noisy threaded reply per member, each member's record is
+// buffered (keyed by BatchID, indexed by Position so processing order never
+// matters even though every emit site here happens to loop 0..BatchSize-1)
+// until the LAST member (Position == BatchSize-1) arrives, at which point
+// ONE summary reply lists every member and both run-tracking maps — plus
+// this batch's buffered records — are cleaned up (§9.2).
+func (s *Slack) postBatchTerminal(ctx context.Context, ev core.Event, rec *core.RunRecord, rootTS string) {
+	if rec.Position == 0 {
+		headline := fmt.Sprintf("%s batch %s (%d members) → %s", outcomeEmoji(rec.Outcome), rec.BatchID, rec.BatchSize, ev.Target)
+		if _, _, _, err := s.api.UpdateMessageContext(ctx, s.channel, rootTS, goslack.MsgOptionText(headline, false)); err != nil {
+			s.logf("slack: chat.update failed batch=%s: %v", rec.BatchID, err)
+		}
+	}
+
+	s.mu.Lock()
+	recs := s.batchRecs[rec.BatchID]
+	if recs == nil {
+		recs = make([]*core.RunRecord, rec.BatchSize)
+		s.batchRecs[rec.BatchID] = recs
+	}
+	recs[rec.Position] = rec
+	last := rec.Position == rec.BatchSize-1
+	s.mu.Unlock()
+
+	if !last {
+		return
+	}
+
+	summary := summarizeBatch(recs)
+	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(summary, false), goslack.MsgOptionTS(rootTS)); err != nil {
+		s.logf("slack: final batch summary failed batch=%s: %v", rec.BatchID, err)
+	}
+
+	s.mu.Lock()
+	delete(s.batchRecs, rec.BatchID)
+	s.mu.Unlock()
+	s.forget(rec.BatchID, rootTS)
 }
 
 // postHookFinished posts a standalone (non-threaded) channel message for a
@@ -395,6 +488,38 @@ func summarizeRun(rec *core.RunRecord) string {
 	if res := rec.FirstFailure(); res != nil {
 		if tail := core.FailureTail(res, failureTailMaxLines, failureTailMaxBytes); tail != "" {
 			fmt.Fprintf(&b, "\n```\n%s\n```", tail)
+		}
+	}
+	return b.String()
+}
+
+// summarizeBatch renders the ONE final threaded reply for a whole batch
+// (§3.3 addendum: "one reply per member is noisy"). recs is indexed by
+// Position (postBatchTerminal's invariant — every slot is filled by the
+// time this runs, since it's only called once Position == BatchSize-1 has
+// arrived). The checks are duplicated onto every member's record (§3.3's own
+// documented shape — the suite ran once, against the chain tip), so the
+// outcome label and check-verdict lines render once, from the head member;
+// each member then gets its own line naming it and its own (now-distinct,
+// post-fix) RunID, plus its own Detail when non-empty — landRun's per-member
+// slot-delete CAS can genuinely differ member to member (a stale delete vs.
+// a clean one), even though Outcome itself never does.
+func summarizeBatch(recs []*core.RunRecord) string {
+	head := recs[0]
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s — batch %s (%d members)", outcomeLabel(head.Outcome), head.BatchID, len(recs))
+	for _, c := range head.Checks {
+		fmt.Fprintf(&b, "\n%s %s (%s)", checkEmoji(c.Status), c.Name, c.Duration.Round(time.Millisecond))
+	}
+	if res := head.FirstFailure(); res != nil {
+		if tail := core.FailureTail(res, failureTailMaxLines, failureTailMaxBytes); tail != "" {
+			fmt.Fprintf(&b, "\n```\n%s\n```", tail)
+		}
+	}
+	for _, r := range recs {
+		fmt.Fprintf(&b, "\n%d. %s (%s) — run %s", r.Position, r.Candidate.Topic, displayUser(r.Candidate.User), r.RunID)
+		if r.Detail != "" {
+			fmt.Fprintf(&b, ": %s", r.Detail)
 		}
 	}
 	return b.String()

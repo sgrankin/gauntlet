@@ -126,12 +126,31 @@ func TestBatchMemberRecords_ShareBatchID(t *testing.T) {
 	if batchID == "" {
 		t.Fatal("BatchID is empty, want a shared non-empty batch id")
 	}
+	// Data-loss fix under test: history's runs table PRIMARY KEYs on run_id
+	// (INSERT OR REPLACE), so N members sharing one RunID would silently
+	// collapse to the last member's row. Member 0 keeps the bare batch run
+	// ID (BatchID) verbatim; members 1..N-1 get distinct "<batchID>-mN"
+	// suffixes — every member gets its own history row.
+	if last3[0].RunID != batchID {
+		t.Errorf("member 0 RunID = %q, want it to equal the bare batch id %q", last3[0].RunID, batchID)
+	}
+	seenRunID := map[string]bool{}
 	wantSHA := []string{shaA, shaB, shaC}
 	seenMerge := map[string]bool{}
 	for i, r := range last3 {
 		if r.BatchID != batchID {
 			t.Errorf("record %d BatchID = %q, want shared %q", i, r.BatchID, batchID)
 		}
+		if i > 0 {
+			wantRunID := fmt.Sprintf("%s-m%d", batchID, i)
+			if r.RunID != wantRunID {
+				t.Errorf("member %d RunID = %q, want %q", i, r.RunID, wantRunID)
+			}
+		}
+		if seenRunID[r.RunID] {
+			t.Errorf("member %d RunID %q collides with an earlier member's — this is the data-loss bug", i, r.RunID)
+		}
+		seenRunID[r.RunID] = true
 		if r.Position != i {
 			t.Errorf("record %d Position = %d, want %d", i, r.Position, i)
 		}
@@ -276,6 +295,79 @@ func TestBatchSpecChangeBoundary(t *testing.T) {
 	}
 }
 
+// TestBatchRejectedRecordsHaveDistinctRunIDs covers rejectBatch — the
+// batch-wide pre-check failure path (a chain forms, then the tip tree's
+// check spec can't be parsed): every chained member parks with its own
+// terminal EventRejected record, and — the data-loss fix again — those
+// records carry distinct RunIDs (member 0 bare, member 1 "<batchID>-m1")
+// sharing one BatchID, so history keeps a row per member here too.
+//
+// Trigger: bob's push corrupts the check spec. The §10 amendment 3
+// spec-change boundary ends the batch at bob (alice+bob chained, carol
+// untouched), then finishBatchStart's ParseChecks on the tip tree fails,
+// routing both chained members through rejectBatch.
+func TestBatchRejectedRecordsHaveDistinctRunIDs(t *testing.T) {
+	h := newHarness(t, batchTarget(8))
+	h.git.seed("main", checkSpecFile("test"))
+	refA := candidateRef("main", "alice", "a")
+	refB := candidateRef("main", "bob", "b")
+	refC := candidateRef("main", "carol", "c")
+	h.git.pushCandidate(refA, "", map[string]string{"a.txt": "a\n"})
+	h.git.pushCandidate(refB, "", map[string]string{testCheckSpecPath: "not a valid check spec {{{\n"})
+	h.git.pushCandidate(refC, "", map[string]string{"c.txt": "c\n"})
+
+	h.reconcile() // chain forms alice+bob (spec-change boundary), then the tip's spec fails to parse: rejectBatch
+
+	var rejected []*core.RunRecord
+	for _, e := range h.ch.Events() {
+		if e.Kind == core.EventRejected {
+			rejected = append(rejected, e.Record)
+			if e.RunID != e.Record.RunID {
+				t.Errorf("event RunID = %q, want the member's own record RunID %q", e.RunID, e.Record.RunID)
+			}
+		}
+	}
+	if len(rejected) != 2 {
+		t.Fatalf("EventRejected count = %d, want 2 (one per chained member; carol never chained)", len(rejected))
+	}
+
+	batchID := rejected[0].BatchID
+	if batchID == "" {
+		t.Fatal("BatchID is empty on the batch-rejected records")
+	}
+	if rejected[0].RunID != batchID {
+		t.Errorf("member 0 RunID = %q, want it to equal the bare batch id %q", rejected[0].RunID, batchID)
+	}
+	if want := fmt.Sprintf("%s-m1", batchID); rejected[1].RunID != want {
+		t.Errorf("member 1 RunID = %q, want %q", rejected[1].RunID, want)
+	}
+	for i, rec := range rejected {
+		if rec.BatchID != batchID {
+			t.Errorf("record %d BatchID = %q, want shared %q", i, rec.BatchID, batchID)
+		}
+		if rec.Position != i {
+			t.Errorf("record %d Position = %d, want %d", i, rec.Position, i)
+		}
+		if rec.BatchSize != 2 {
+			t.Errorf("record %d BatchSize = %d, want 2", i, rec.BatchSize)
+		}
+		if rec.Outcome != core.OutcomeRejected {
+			t.Errorf("record %d Outcome = %v, want Rejected", i, rec.Outcome)
+		}
+	}
+
+	// rejectBatch parks every chained member: neither slot is deleted, and
+	// the next refill skips both parked refs, forming carol's own batch.
+	if !h.git.hasRef(refA) || !h.git.hasRef(refB) {
+		t.Fatal("parked members' slots must survive (parked, not landed)")
+	}
+	h.reconcile()
+	r := h.d.headRun("main")
+	if r == nil || len(r.members) != 1 || r.members[0].cand.Topic != "c" {
+		t.Fatalf("next refill = %+v, want just carol (alice/bob parked)", r)
+	}
+}
+
 // TestBatchRedEmitsPerMemberSkipped covers §2.6, overridden by §10
 // amendment 2: a batch of 3 whose combined check suite fails must NOT park
 // anyone and must NOT emit EventRejected — every member gets its own
@@ -318,6 +410,26 @@ func TestBatchRedEmitsPerMemberSkipped(t *testing.T) {
 	batchID := skipped[0].BatchID
 	if batchID == "" {
 		t.Fatal("BatchID is empty on the batch-red records")
+	}
+	// Same data-loss fix as the green-batch case: red-skipped member records
+	// must land distinct RunIDs too (member 0 bare, members 1..N-1
+	// suffixed), or history's INSERT OR REPLACE would collapse them exactly
+	// the same way it did for a green batch.
+	if skipped[0].RunID != batchID {
+		t.Errorf("member 0 RunID = %q, want it to equal the bare batch id %q", skipped[0].RunID, batchID)
+	}
+	seenRunID := map[string]bool{}
+	for i, rec := range skipped {
+		if i > 0 {
+			wantRunID := fmt.Sprintf("%s-m%d", batchID, i)
+			if rec.RunID != wantRunID {
+				t.Errorf("member %d RunID = %q, want %q", i, rec.RunID, wantRunID)
+			}
+		}
+		if seenRunID[rec.RunID] {
+			t.Errorf("member %d RunID %q collides with an earlier member's — this is the data-loss bug", i, rec.RunID)
+		}
+		seenRunID[rec.RunID] = true
 	}
 	for i, rec := range skipped {
 		if rec.Outcome != core.OutcomeSkipped {

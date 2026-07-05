@@ -376,6 +376,78 @@ func TestChannel_NilLogDefaultsToStderr(t *testing.T) {
 	}
 }
 
+// TestChannel_BatchLandingPostsOneStatusPerMemberSHA covers a batch's 3
+// per-member EventLanded events (internal/queue/reconcile.go's landRun,
+// looping FIFO over r.members): ghstatus is driven purely by ev.RunID/
+// ev.Candidate.SHA/ev.Target/ev.Record, all already distinct per member
+// before and after the RunID data-loss fix (queue.memberRunID) — so no
+// ghstatus code change was needed, but this proves the batch shape
+// explicitly: 3 members must produce exactly 3 status POSTs, one per
+// member's own candidate SHA, each with its own record's target_url (now
+// pointing at that member's own, possibly-suffixed, run page).
+func TestChannel_BatchLandingPostsOneStatusPerMemberSHA(t *testing.T) {
+	var mu sync.Mutex
+	var posts []statusPayload
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		var payload statusPayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Errorf("unmarshal body: %v", err)
+		}
+		mu.Lock()
+		posts = append(posts, payload)
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	c := New(Params{
+		Owner: "acme", Repo: "widgets", Token: "tok123",
+		APIURL: srv.URL, DashboardURL: "https://dash.example", Log: io.Discard,
+	})
+
+	batchID := "20260705T130000Z-1-abc123def456"
+	shas := []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"}
+	wantRunIDs := []string{batchID, batchID + "-m1", batchID + "-m2"}
+
+	for i, sha := range shas {
+		ev := core.Event{
+			Kind:      core.EventLanded,
+			Target:    "main",
+			Candidate: core.Candidate{SHA: sha},
+			RunID:     wantRunIDs[i],
+			Record:    &core.RunRecord{RunID: wantRunIDs[i], BatchID: batchID, Position: i, BatchSize: 3, Outcome: core.OutcomeLanded},
+		}
+		if err := c.Emit(context.Background(), ev); err != nil {
+			t.Fatalf("Emit(member %d): %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(posts) != 3 {
+		t.Fatalf("got %d status POSTs, want 3 (one per batch member)", len(posts))
+	}
+	for i, sha := range shas {
+		wantPath := "/repos/acme/widgets/statuses/" + sha
+		if paths[i] != wantPath {
+			t.Errorf("post %d path = %q, want %q", i, paths[i], wantPath)
+		}
+		if posts[i].State != "success" {
+			t.Errorf("post %d state = %q, want success", i, posts[i].State)
+		}
+		wantURL := "https://dash.example/run/" + wantRunIDs[i]
+		if posts[i].TargetURL != wantURL {
+			t.Errorf("post %d target_url = %q, want %q (member %d's own run page)", i, posts[i].TargetURL, wantURL, i)
+		}
+	}
+}
+
 func TestChannel_DefaultAPIURL(t *testing.T) {
 	c := New(Params{Owner: "a", Repo: "b", Token: "t"})
 	if c.apiURL != "https://api.github.com" {

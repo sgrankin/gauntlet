@@ -706,6 +706,57 @@ func TestBatch_ListsMembersInPositionOrder(t *testing.T) {
 	}
 }
 
+// TestBatch_HandlesRealSuffixedMemberRunIDs uses the actual RunID shape
+// queue.memberRunID mints post-fix ("<batchID>" for member 0, "<batchID>-mN"
+// for members 1..N-1) rather than the other batch tests' synthetic
+// "batch-run-N" IDs — proving GET /run/{runID} and GET /batch/{batchID} both
+// treat a suffixed RunID as the plain opaque path-string it is (no
+// dashboard-side parsing assumes a particular RunID shape), and that the
+// head member's RunID doubling as BatchID resolves both routes correctly.
+func TestBatch_HandlesRealSuffixedMemberRunIDs(t *testing.T) {
+	store := openTestStore(t)
+	batchID := "20260705T130000Z-1-abc123def456"
+	runIDs := []string{batchID, batchID + "-m1", batchID + "-m2"}
+	for i, runID := range runIDs {
+		emitRun(t, store, batchMemberRecord(runID, "main", batchID, i))
+	}
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+
+	// The batch page, keyed on the bare batch id, lists all 3 suffixed
+	// members in position order.
+	resp, body := get(t, h, "/batch/"+batchID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /batch/%s status = %d, body:\n%s", batchID, resp.StatusCode, body)
+	}
+	var offsets []int
+	for _, runID := range runIDs {
+		i := strings.Index(body, runID)
+		if i == -1 {
+			t.Fatalf("expected member %q listed on the batch page, body:\n%s", runID, body)
+		}
+		offsets = append(offsets, i)
+	}
+	if !(offsets[0] < offsets[1] && offsets[1] < offsets[2]) {
+		t.Errorf("expected members in position order, got offsets %v:\n%s", offsets, body)
+	}
+
+	// Each member's own run page resolves too, including the two suffixed
+	// (non-head) RunIDs.
+	for i, runID := range runIDs {
+		resp, body := get(t, h, "/run/"+runID)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /run/%s status = %d, body:\n%s", runID, resp.StatusCode, body)
+		}
+		if !strings.Contains(body, "landed in batch") {
+			t.Errorf("member %d (%s): expected batch identity line, body:\n%s", i, runID, body)
+		}
+		if !strings.Contains(body, fmt.Sprintf(`href="/batch/%s"`, batchID)) {
+			t.Errorf("member %d (%s): expected a link back to /batch/%s, body:\n%s", i, runID, batchID, body)
+		}
+	}
+}
+
 func TestBatch_UnknownID404(t *testing.T) {
 	store := openTestStore(t)
 	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
