@@ -7,7 +7,15 @@ committer {
 }
 merge-message "Merge {{.Topic}} ({{.User}})"   // optional
 
-target "main"    branch="main"
+target "main" branch="main" {
+    // Post-land hooks (optional, ordered, multiple allowed): run against
+    // the landed tree once a candidate lands on this target. See README's
+    // "Hooks" section — gauntlet never grows a CD system here; a hook
+    // hands off to a real one when deployment needs grow.
+    // hook "deploy" {
+    //     command "make" "deploy"
+    // }
+}
 target "release" branch="release/v2"
 
 // --- phase 2/3 additions (all optional) ---

@@ -241,6 +241,13 @@ const (
 	// (this one included) rather than erroring — new kinds are always
 	// additive.
 	EventIgnoredRef
+
+	// EventHookFinished reports one post-land hook's outcome (internal/hooks,
+	// DESIGN.md's decision ledger "Deployments as post-land hooks"): Target,
+	// Candidate, and RunID identify the landing; CheckName is the hook's
+	// name; Check carries its CheckResult. It is additive like EventIgnoredRef
+	// — channels that don't render it simply ignore it.
+	EventHookFinished
 )
 
 // Event is one notification emitted to a Channel. Terminal events —
@@ -256,12 +263,13 @@ type Event struct {
 	RunID     string
 	CheckName string
 
-	// Check is populated with the just-finished result on EventCheckFinished
-	// only, so channels can show a per-check verdict (and duration) mid-run
-	// without waiting for the run's terminal RunRecord. nil on every other
-	// event kind. Channel implementations must nil-check before
-	// dereferencing: older events, and any future EventKind, may carry nil
-	// here even on what looks like a finished-check line.
+	// Check carries one finished result — the just-finished check on
+	// EventCheckFinished, or the just-finished hook on EventHookFinished —
+	// so channels can render per-check/per-hook verdicts (and durations)
+	// mid-run without waiting for the run's terminal RunRecord. nil on
+	// every other event kind. Channel implementations must nil-check
+	// before dereferencing: older events, and any future EventKind, may
+	// carry nil here even on what looks like a finished-check line.
 	Check *CheckResult
 
 	// Record is set on terminal events; nil otherwise.

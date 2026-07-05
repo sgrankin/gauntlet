@@ -244,6 +244,76 @@ func TestLogChannel_EmitOmitsFailureBlockWhenNoFailure(t *testing.T) {
 	}
 }
 
+func TestLogChannel_EmitHookFinished(t *testing.T) {
+	ev := core.Event{
+		Kind:      core.EventHookFinished,
+		Target:    "main",
+		RunID:     "run-1",
+		CheckName: "deploy",
+		Check: &core.CheckResult{
+			Name:     "deploy",
+			Status:   core.CheckPassed,
+			Duration: 800 * time.Millisecond,
+		},
+	}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"kind=hook_finished", "check=deploy", "hook=deploy", "status=passed", "duration=800ms"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
+func TestLogChannel_EmitHookFinishedFailure(t *testing.T) {
+	ev := core.Event{
+		Kind:      core.EventHookFinished,
+		Target:    "main",
+		RunID:     "run-1",
+		CheckName: "deploy",
+		Check: &core.CheckResult{
+			Name:     "deploy",
+			Status:   core.CheckFailed,
+			Duration: 400 * time.Millisecond,
+			Output:   "rsync: connection refused\n",
+		},
+	}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"status=failed", "    | rsync: connection refused"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
+func TestLogChannel_EmitHookFinishedNilCheckOmitsBlock(t *testing.T) {
+	ev := core.Event{Kind: core.EventHookFinished, Target: "main", RunID: "run-1", CheckName: "deploy", Check: nil}
+
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "kind=hook_finished") {
+		t.Errorf("output %q missing kind=hook_finished", out)
+	}
+	if strings.Contains(out, "hook=") {
+		t.Errorf("output %q should have no hook= line when Check is nil, got %q", out, out)
+	}
+}
+
 func TestLogChannel_EmitSwallowsWriteFailure(t *testing.T) {
 	c := NewLogChannel(failingWriter{})
 	err := c.Emit(context.Background(), core.Event{Kind: core.EventQueued, Target: "main"})

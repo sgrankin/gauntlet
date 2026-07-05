@@ -219,6 +219,50 @@ executor "container" {
   mount `path`) so warm caches (`GOCACHE`, module caches, …) survive across
   runs. `image` is required when `kind` is `"container"`.
 
+## Hooks
+
+A `target` may configure post-land hooks (`internal/hooks`): ordered
+commands run against the *landed* tree once a candidate merges onto that
+target — a deploy step, a notification, a cache warm, whatever your repo's
+scripts do. This is a hard scope boundary (DESIGN.md's decision ledger,
+"Deployments as post-land hooks"): **gauntlet never grows a CD system.** A
+hook is "run this command and tell me if it failed", full stop; when
+deployment needs grow past that (health checks, rollback, progressive
+delivery), the hook *hands off* to a real CD system (Argo CD on k8s, a
+terraform pipeline, whatever your environment runs) — gauntlet itself never
+does.
+
+```kdl
+target "main" branch="main" {
+    hook "deploy" {
+        command "make" "deploy"
+    }
+    hook "notify" {
+        command "curl" "-X" "POST" "https://example.com/notify"
+    }
+}
+```
+
+- Hooks are nested inside their `target` block, in the order they should
+  run. A target with no `hook` nodes has no post-land behavior — the
+  existing phase-1/2/3 behavior, unchanged.
+- Each hook runs on the daemon host via the configured executor (`local` or
+  `container`, same as checks), against an export of the landed merge
+  commit's tree. It gets the same `GAUNTLET_*` environment contract a check
+  does (see "Check environment reference" below) — `GAUNTLET_MERGE_SHA` is
+  the commit that just landed.
+- Hooks for one landing run **in order**, and **stop at the first
+  failure**: a deploy step shouldn't run if an earlier step (say, a
+  pre-deploy check) failed.
+- A hook failure is reported to the daemon's channels (log, Slack,
+  GitHub status if configured) exactly like a check failure — but it
+  **never** touches the landing itself, the target branch, or the queue.
+  The candidate already landed; a hook is something that happens *after*,
+  and gauntlet's own bookkeeping doesn't know or care whether it succeeded.
+- A slow hook only delays *later* hooks for the same landing (and, since
+  landings for one target are already serial, later landings on that
+  target) — it never blocks the reconcile loop itself.
+
 ## API
 
 The dashboard (`internal/dashboard`) exposes a small JSON API under

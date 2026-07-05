@@ -190,6 +190,38 @@ func run() error {
 		}()
 	}
 
+	// Post-land hooks (internal/hooks, DESIGN.md's decision ledger
+	// "Deployments as post-land hooks"): notifyChans is a snapshot of
+	// every channel built so far, so the hooks runner's own outbound
+	// events (EventHookFinished) fan out to the same channels a check's
+	// events do, minus the runner itself — no self-feedback. It is only
+	// appended to chans (so queue.Daemon's own fan-out reaches it) after
+	// the snapshot is taken.
+	notifyChans := append([]core.Channel(nil), chans...)
+	hooksDir := filepath.Join(*statePath, "hooks")
+	if hr := buildHooksRunner(cfg, repo, ex, hooksDir, func(ctx context.Context, ev core.Event) {
+		for _, ch := range notifyChans {
+			_ = ch.Emit(ctx, ev)
+		}
+	}); hr != nil {
+		// Mirrors trialsDir above (F2): hooksDir only ever holds
+		// ephemeral per-landing exports for whatever hook is currently
+		// running, never anything that needs to survive a restart, so
+		// sweeping it at startup is always safe.
+		if err := os.RemoveAll(hooksDir); err != nil {
+			return fmt.Errorf("sweep hooks dir %s: %w", hooksDir, err)
+		}
+		if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+			return fmt.Errorf("create hooks dir %s: %w", hooksDir, err)
+		}
+		chans = append(chans, hr)
+		go func() {
+			if err := hr.Run(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "gauntlet: hooks: %v\n", err)
+			}
+		}()
+	}
+
 	d, err := queue.New(repo, ex, chans, queue.Config{
 		Targets:      cfg.Targets,
 		CheckSpec:    cfg.CheckSpec,

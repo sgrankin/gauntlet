@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +44,9 @@ func TestLoadDaemon_Example(t *testing.T) {
 		t.Fatalf("Targets = %+v, want %+v", d.Targets, wantTargets)
 	}
 	for i, want := range wantTargets {
-		if d.Targets[i] != want {
+		// reflect.DeepEqual rather than != : Target now carries a Hooks
+		// slice (post-land hooks), which makes it non-comparable with ==.
+		if !reflect.DeepEqual(d.Targets[i], want) {
 			t.Errorf("Targets[%d] = %+v, want %+v", i, d.Targets[i], want)
 		}
 	}
@@ -197,6 +200,59 @@ target "main" branch="main"
 	}
 	if d.Executor.Runtime != "" {
 		t.Errorf("Executor.Runtime = %q, want empty (only defaulted for container executor)", d.Executor.Runtime)
+	}
+}
+
+func TestLoadDaemon_TargetHooks(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    hook "deploy" {
+        command "make" "deploy"
+    }
+    hook "notify" {
+        command "curl" "-X" "POST" "https://example.com/notify"
+    }
+}
+target "release" branch="release/v2"
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if len(d.Targets) != 2 {
+		t.Fatalf("Targets = %+v, want 2 targets", d.Targets)
+	}
+
+	main := d.Targets[0]
+	wantHooks := []Hook{
+		{Name: "deploy", Command: []string{"make", "deploy"}},
+		{Name: "notify", Command: []string{"curl", "-X", "POST", "https://example.com/notify"}},
+	}
+	if len(main.Hooks) != len(wantHooks) {
+		t.Fatalf("main.Hooks = %+v, want %+v", main.Hooks, wantHooks)
+	}
+	for i, want := range wantHooks {
+		got := main.Hooks[i]
+		if got.Name != want.Name || strings.Join(got.Command, " ") != strings.Join(want.Command, " ") {
+			t.Errorf("main.Hooks[%d] = %+v, want %+v", i, got, want)
+		}
+	}
+
+	// A target with no hook nodes at all must come back with a nil/empty
+	// Hooks slice, not an error — hooks are opt-in per target.
+	release := d.Targets[1]
+	if len(release.Hooks) != 0 {
+		t.Errorf("release.Hooks = %+v, want empty", release.Hooks)
 	}
 }
 
@@ -497,6 +553,42 @@ target "main" branch="main"
 executor "kubernetes"
 `,
 			wantErr: "executor",
+		},
+		{
+			// Semantic validation: a hook's command must not be empty.
+			name: "target hook missing command",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    hook "deploy" {
+    }
+}
+`,
+			wantErr: `target "main": hook "deploy"`,
+		},
+		{
+			// Semantic validation: duplicate hook names within one target.
+			name: "target duplicate hook names",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main" {
+    hook "deploy" {
+        command "make" "deploy"
+    }
+    hook "deploy" {
+        command "make" "redeploy"
+    }
+}
+`,
+			wantErr: `target "main": hook "deploy": duplicate`,
 		},
 		{
 			// Semantic validation: cache entry missing its required path.

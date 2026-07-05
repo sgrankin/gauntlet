@@ -135,6 +135,21 @@ type Cache struct {
 type Target struct {
 	Name   string `kdl:",arg"`
 	Branch string `kdl:"branch"`
+
+	// Hooks are this target's post-land hooks (DESIGN.md's decision
+	// ledger, "Deployments as post-land hooks"; internal/hooks), run in
+	// order against the landed tree once a candidate lands. Nil/empty
+	// means no hooks — the phase-1/2/3 behavior, unchanged.
+	Hooks []Hook `kdl:"hook,multiple"`
+}
+
+// Hook is one named command a target runs, in order, once a candidate
+// lands onto it. It carries only the command — internal/hooks defines what
+// running it means (executor, environment, stop-on-failure, notification),
+// same separation as config.Check vs. the queue's check execution.
+type Hook struct {
+	Name    string   `kdl:",arg"`
+	Command []string `kdl:"command,child"`
 }
 
 // LoadDaemon reads, parses, and validates the daemon config at path.
@@ -260,6 +275,20 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("target %q: branch %q already used by target %q", t.Name, t.Branch, owner)
 		}
 		seenBranch[t.Branch] = t.Name
+
+		seenHook := make(map[string]bool, len(t.Hooks))
+		for _, h := range t.Hooks {
+			if h.Name == "" {
+				return fmt.Errorf("target %q: hook: name must not be empty", t.Name)
+			}
+			if len(h.Command) == 0 {
+				return fmt.Errorf("target %q: hook %q: command must not be empty", t.Name, h.Name)
+			}
+			if seenHook[h.Name] {
+				return fmt.Errorf("target %q: hook %q: duplicate", t.Name, h.Name)
+			}
+			seenHook[h.Name] = true
+		}
 	}
 
 	if d.History.Path != "" && d.History.SampleEvery <= 0 {

@@ -52,9 +52,15 @@ func NewLogChannel(w io.Writer) *LogChannel {
 // the queue. The error return exists only to satisfy core.Channel.
 func (c *LogChannel) Emit(ctx context.Context, ev core.Event) error {
 	line := formatEvent(ev)
+	if ev.Kind == core.EventHookFinished && ev.Check != nil {
+		line += "\n" + formatHookResult(ev.Check)
+		if block := formatFailureBlock(ev.Check); block != "" {
+			line += "\n" + block
+		}
+	}
 	if ev.Record != nil {
 		line += "\n" + formatRunRecord(ev.Record)
-		if block := formatFailureBlock(ev.Record); block != "" {
+		if block := formatFailureBlock(ev.Record.FirstFailure()); block != "" {
 			line += "\n" + block
 		}
 	}
@@ -74,14 +80,17 @@ const (
 	failureTailMaxBytes = 1024
 )
 
-// formatFailureBlock renders the first failing check's output tail as an
-// indented, greppable block (each line prefixed with four spaces + "| "),
-// visually grouped under the summary line it follows. Returns "" when rec
-// has no failing check or the failing check's tail is empty (e.g. a
-// CheckSkipped-only rejection, or a check that failed with no output).
-func formatFailureBlock(rec *core.RunRecord) string {
-	res := rec.FirstFailure()
-	if res == nil {
+// formatFailureBlock renders res's output tail as an indented, greppable
+// block (each line prefixed with four spaces + "| "), visually grouped under
+// the summary line it follows. Returns "" when res is nil, isn't a failure
+// (Status != CheckFailed and Err == nil — mirrors RunRecord.FirstFailure's
+// own test), or its tail is empty (e.g. a check that failed with no output).
+//
+// Shared by both the terminal-RunRecord path (called with
+// rec.FirstFailure()) and the per-hook EventHookFinished path (called with
+// ev.Check directly), so both render failures identically.
+func formatFailureBlock(res *core.CheckResult) string {
+	if res == nil || (res.Status != core.CheckFailed && res.Err == nil) {
 		return ""
 	}
 	tail := core.FailureTail(res, failureTailMaxLines, failureTailMaxBytes)
@@ -93,6 +102,13 @@ func formatFailureBlock(rec *core.RunRecord) string {
 		lines[i] = "    | " + ln
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatHookResult renders one hook's finished CheckResult (EventHookFinished)
+// as a compact summary line, matching formatRunRecord's per-check rendering
+// (name, status, duration).
+func formatHookResult(cr *core.CheckResult) string {
+	return fmt.Sprintf("  hook=%s status=%s duration=%s", cr.Name, checkStatusString(cr.Status), cr.Duration)
 }
 
 // Commands returns a channel that never yields. It is a real channel value
@@ -186,6 +202,8 @@ func eventKindString(k core.EventKind) string {
 		return "error"
 	case core.EventIgnoredRef:
 		return "ignored_ref"
+	case core.EventHookFinished:
+		return "hook_finished"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(k))
 	}
