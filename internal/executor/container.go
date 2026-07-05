@@ -1,0 +1,299 @@
+package executor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/sgrankin/gauntlet/internal/core"
+)
+
+// containerResultDir and containerResultFile are the fixed in-container
+// paths the writable result-dir mount is bound to. Distinct from the trial
+// tree mount (job.Dir -> Workdir), which must stay separate: checks must not
+// be able to see or clobber the result-file mechanism from their own
+// working directory.
+const (
+	containerResultDir  = "/gauntlet"
+	containerResultFile = containerResultDir + "/result"
+)
+
+// Cache is a persistent named volume mounted into every check container, so
+// build caches (e.g. Go's module/build cache) survive across runs instead of
+// re-downloading/rebuilding from scratch in a fresh container each time.
+type Cache struct {
+	Name string // volume name (docker-compatible runtimes create it on first use)
+	Path string // mount path inside the container
+}
+
+// Params configures a ContainerExecutor. Package-local (§9.5 of
+// docs/plans/phase23.md): this package does not import internal/config;
+// cmd/gauntlet maps config.Executor fields into this struct.
+type Params struct {
+	// Runtime selects the CLI: "docker", "podman", or "container" (Apple's
+	// container CLI). Empty defaults to "container" per the config default
+	// (docs/plans/phase23.md §3) — this package doesn't require the caller
+	// to have resolved that default itself.
+	Runtime string
+
+	// Image is the OCI image every check runs in. Required.
+	Image string
+
+	// Workdir is where the trial tree is bind-mounted and the check's
+	// working directory. Empty defaults to "/workspace".
+	Workdir string
+
+	// Caches are persistent named volumes mounted alongside the trial tree
+	// and result dir.
+	Caches []Cache
+}
+
+// runtimeSpec captures the one CLI-shape difference between supported
+// runtimes: the binary name and how to probe whether its backing service is
+// reachable. Flags themselves are docker-compatible across all three
+// (docs/plans/phase23.md Spike C), so RunCheck builds one argv shape for all
+// of them.
+type runtimeSpec struct {
+	Bin       string
+	ProbeArgs []string
+}
+
+var runtimeSpecs = map[string]runtimeSpec{
+	"docker":    {Bin: "docker", ProbeArgs: []string{"ps"}},
+	"podman":    {Bin: "podman", ProbeArgs: []string{"ps"}},
+	"container": {Bin: "container", ProbeArgs: []string{"system", "status"}},
+}
+
+// ContainerExecutor runs checks inside a container via a docker-compatible
+// CLI (docker, podman, or Apple's container). It implements core.Executor
+// with the same contract as LocalExecutor: same verdict mapping, same
+// 64KiB tail-capped output, same process-group cancel discipline. The one
+// executor-specific addition is that a missing runtime binary or an
+// unreachable backing service reports CheckResult.Err (a daemon condition,
+// per docs/plans/phase1.md §9.2), never a verdict.
+type ContainerExecutor struct {
+	spec   runtimeSpec
+	params Params
+}
+
+// New validates params and returns a ready ContainerExecutor. It does not
+// touch the runtime itself — reachability is checked per-RunCheck, since
+// the service can come and go across the life of a long-running daemon.
+func New(params Params) (*ContainerExecutor, error) {
+	if params.Runtime == "" {
+		params.Runtime = "container"
+	}
+	spec, ok := runtimeSpecs[params.Runtime]
+	if !ok {
+		return nil, fmt.Errorf("executor: unknown container runtime %q (want docker, podman, or container)", params.Runtime)
+	}
+	if params.Image == "" {
+		return nil, errors.New("executor: container image is required")
+	}
+	if params.Workdir == "" {
+		params.Workdir = "/workspace"
+	}
+	return &ContainerExecutor{spec: spec, params: params}, nil
+}
+
+// RunCheck implements core.Executor.
+func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.CheckResult {
+	start := time.Now()
+
+	if err := ctx.Err(); err != nil {
+		return core.CheckResult{Name: job.Name, Err: err, Duration: time.Since(start)}
+	}
+
+	// Missing runtime binary or unreachable service is a daemon condition,
+	// not a verdict (docs/plans/phase23.md §4.5) — checked before we ever
+	// invoke `run`, so a nonzero exit from `run` itself can be trusted to
+	// mean "the containerized check command failed", same as LocalExecutor.
+	if err := probeRuntime(ctx, c.spec); err != nil {
+		return core.CheckResult{
+			Name:     job.Name,
+			Err:      fmt.Errorf("executor: %w", err),
+			Duration: time.Since(start),
+		}
+	}
+
+	resultDir, err := os.MkdirTemp("", "gauntlet-container-")
+	if err != nil {
+		return core.CheckResult{
+			Name:     job.Name,
+			Err:      fmt.Errorf("executor: create result dir: %w", err),
+			Duration: time.Since(start),
+		}
+	}
+	defer os.RemoveAll(resultDir)
+
+	resultFile := filepath.Join(resultDir, "result")
+	if err := os.WriteFile(resultFile, nil, 0o600); err != nil {
+		return core.CheckResult{
+			Name:     job.Name,
+			Err:      fmt.Errorf("executor: create result file: %w", err),
+			Duration: time.Since(start),
+		}
+	}
+
+	name := containerName(job.RunID, job.Name)
+	args := c.params.runArgs(job, name, resultDir)
+
+	cmd := exec.CommandContext(ctx, c.spec.Bin, args...)
+
+	out := &tailBuffer{cap: outputCap}
+	cmd.Stdout = out
+	cmd.Stderr = out
+
+	// Own process group so a cancel can kill the whole CLI-and-children
+	// tree (same discipline as LocalExecutor), plus a best-effort named
+	// kill: the CLI process may exit on SIGKILL before the runtime has torn
+	// down the container it started, so ask the runtime to kill it by name
+	// too.
+	bin := c.spec.Bin
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(killCtx, bin, "kill", name).Run()
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+
+	runErr := cmd.Run()
+	duration := time.Since(start)
+
+	// ctx cancellation takes precedence over any run error, same as
+	// LocalExecutor: the CLI may exit signalled/non-zero as a side effect
+	// of the cancel, but that is not a verdict.
+	if ctx.Err() != nil {
+		return core.CheckResult{
+			Name:     job.Name,
+			Err:      ctx.Err(),
+			Output:   out.String(),
+			Duration: duration,
+		}
+	}
+
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			// Nonzero exit is a verdict regardless of the result file
+			// (§5A / §9.2), same as LocalExecutor: the file only splits
+			// the exit-0 case.
+			return core.CheckResult{
+				Name:     job.Name,
+				Status:   core.CheckFailed,
+				Output:   out.String(),
+				Duration: duration,
+			}
+		}
+		// The CLI itself failed to start (e.g. it vanished between the
+		// preflight probe and this exec). Runtime reachability was already
+		// checked above, so this is treated the same as LocalExecutor's
+		// exec-start-failure branch: a verdict, not Err.
+		output := out.String()
+		if output != "" {
+			output += "\n"
+		}
+		output += "executor: failed to start container CLI: " + runErr.Error()
+		return core.CheckResult{
+			Name:     job.Name,
+			Status:   core.CheckFailed,
+			Output:   output,
+			Duration: duration,
+		}
+	}
+
+	status := core.CheckPassed
+	if data, err := os.ReadFile(resultFile); err == nil && strings.TrimSpace(string(data)) == "skipped" {
+		status = core.CheckSkipped
+	}
+	return core.CheckResult{
+		Name:     job.Name,
+		Status:   status,
+		Output:   out.String(),
+		Duration: duration,
+	}
+}
+
+// runArgs builds the full docker-compatible `run` argv (everything after the
+// binary name) for job, per docs/plans/phase23.md §4.5:
+//
+//	<bin> run --rm --name gauntlet-<runID>-<check> \
+//	  -w <workdir> \
+//	  -v <job.Dir>:<workdir>            # trial tree, read-write \
+//	  -v <resultDir>:/gauntlet          # writable result dir \
+//	  -e GAUNTLET_* (all five)          \
+//	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
+//	  <image> <job.Command...>
+//
+// Pure and exec-free: exhaustively unit-testable without any runtime.
+func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
+	args := []string{
+		"run", "--rm", "--name", name,
+		"-w", p.Workdir,
+		"-v", job.Dir + ":" + p.Workdir,
+		"-v", resultDir + ":" + containerResultDir,
+		"-e", core.EnvBaseSHA + "=" + job.BaseSHA,
+		"-e", core.EnvMergeSHA + "=" + job.MergeSHA,
+		"-e", core.EnvCandidateSHA + "=" + job.Candidate.SHA,
+		"-e", core.EnvRef + "=" + job.Candidate.Ref,
+		"-e", core.EnvResultFile + "=" + containerResultFile,
+	}
+	for _, c := range p.Caches {
+		args = append(args, "-v", c.Name+":"+c.Path)
+	}
+	args = append(args, p.Image)
+	args = append(args, job.Command...)
+	return args
+}
+
+// containerName derives a docker-compatible container name from a run ID
+// and check name (§2.4 / §4.5: run IDs are unique per-process, and now give
+// container names real collision-avoidance teeth). Both inputs are
+// sanitized since neither is guaranteed name-safe (check names are
+// free-form config; run IDs embed a trial-tree OID prefix).
+func containerName(runID, check string) string {
+	return "gauntlet-" + sanitizeName(runID) + "-" + sanitizeName(check)
+}
+
+// sanitizeName replaces every rune outside [A-Za-z0-9_.-] with '-', the
+// portable-name-safe subset shared by docker/podman/Apple container
+// container-ID syntax.
+func sanitizeName(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
+
+// probeRuntime reports whether spec's CLI is installed and its backing
+// service is reachable. Used both as RunCheck's preflight (missing binary
+// or unreachable service becomes CheckResult.Err, never a verdict — see
+// docs/plans/phase23.md §4.5) and by integration tests deciding whether to
+// skip (§1 Spike C: the runtime's service may simply be down).
+func probeRuntime(ctx context.Context, spec runtimeSpec) error {
+	if _, err := exec.LookPath(spec.Bin); err != nil {
+		return fmt.Errorf("container runtime binary %q not found: %w", spec.Bin, err)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(probeCtx, spec.Bin, spec.ProbeArgs...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("container runtime %q service unreachable: %w (%s)", spec.Bin, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
