@@ -100,10 +100,14 @@ func buildSummarizer(cfg *config.Daemon, git summarize.Git) (*summarize.Summariz
 	if key == "" {
 		return nil, fmt.Errorf("summarize: %s is empty or unset, but summarize is configured with model %s", cfg.Summarize.APIKeyEnv, cfg.Summarize.Model)
 	}
+	effort := cfg.Summarize.Effort
+	if effort == "none" {
+		effort = "" // omit output_config entirely (validated sentinel)
+	}
 	return summarize.New(summarize.Params{
 		Git:     git,
 		Model:   cfg.Summarize.Model,
-		Effort:  cfg.Summarize.Effort,
+		Effort:  effort,
 		APIKey:  key,
 		Timeout: cfg.Summarize.Timeout,
 		Log:     os.Stderr,

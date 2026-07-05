@@ -89,6 +89,9 @@ const (
 // this set; "" is impossible for a loaded config because applyDefaults
 // always fills it in first when the "summarize" section is present.
 var validSummarizeEfforts = map[string]bool{
+	// "none" omits the effort field from API requests entirely — the escape
+	// hatch for models that reject output_config.effort (e.g. claude-haiku-4-5).
+	"none":   true,
 	"low":    true,
 	"medium": true,
 	"high":   true,
