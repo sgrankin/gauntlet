@@ -100,7 +100,7 @@ type ParkedEntry struct {
 // buildSnapshot assembles a fresh Snapshot from the reconcile goroutine's
 // in-memory state and refs (this tick's ListRefs result). Called once, at
 // the end of a successful ReconcileOnce pass, on the reconcile goroutine —
-// the same goroutine that owns d.order/d.done/d.runs, so no locking is
+// the same goroutine that owns d.order/d.done/d.lanes, so no locking is
 // needed here; every value copied out is independent of what it was copied
 // from by the time this returns.
 func (d *Daemon) buildSnapshot(refs map[string]string) *Snapshot {
@@ -120,15 +120,18 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		TargetTip: refs[targetRefName(t)],
 	}
 
-	r := d.runs[t.Name]
-	if r != nil {
-		rs := buildRunSnapshot(r)
-		ts.InFlight = rs
-		// Serial-only today: the lane holds at most this one run, so
-		// Pipeline is a single-element mirror of InFlight. The lane
-		// refactor (docs/plans/phase5.md §3.4) swaps this for
-		// lane.runs, head first.
-		ts.Pipeline = []RunSnapshot{*rs}
+	// Pipeline is every in-flight run for this target, head first
+	// (docs/plans/phase5.md §3.4); InFlight mirrors its head element for
+	// back-compat. Serial (this chunk) holds at most one run, so Pipeline
+	// has at most one element.
+	if l := d.lanes[t.Name]; l != nil {
+		for _, r := range l.runs {
+			ts.Pipeline = append(ts.Pipeline, *buildRunSnapshot(r))
+		}
+		if len(ts.Pipeline) > 0 {
+			head := ts.Pipeline[0]
+			ts.InFlight = &head
+		}
 	}
 
 	order := d.order[t.Name]
@@ -136,7 +139,7 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 
 	var waitingRefs []string
 	for ref := range cands {
-		if r != nil && ref == r.cand.Ref {
+		if ts.InFlight != nil && ref == ts.InFlight.Candidate.Ref {
 			continue // in flight, not waiting
 		}
 		if _, parked := done[ref]; parked {
@@ -175,31 +178,35 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 }
 
 // buildRunSnapshot deep-copies r's observable state into a RunSnapshot: in
-// particular Done, which must be an independent slice since r.rec.Checks is
-// still live and grows via append on every future check completion this
-// same run goroutine processes.
+// particular Done, which must be an independent slice since the head
+// member's rec.Checks is still live and grows via append on every future
+// check completion this same run goroutine processes.
 func buildRunSnapshot(r *run) *RunSnapshot {
-	done := make([]core.CheckResult, len(r.rec.Checks))
-	copy(done, r.rec.Checks)
+	head := r.members[0]
+	done := make([]core.CheckResult, len(head.rec.Checks))
+	copy(done, head.rec.Checks)
 
 	var cur *CurrentCheck
 	if r.cur != nil {
 		cur = &CurrentCheck{Name: r.cur.name, StartedAt: r.cur.start}
 	}
 
+	members := make([]core.Candidate, len(r.members))
+	for i, m := range r.members {
+		members[i] = m.cand
+	}
+
 	return &RunSnapshot{
-		Candidate: r.cand,
-		// Degenerate today's single-candidate run as a one-element member
-		// list; the lane refactor sources this from runMember instead.
-		Members:   []core.Candidate{r.cand},
+		Candidate: head.cand,
+		Members:   members,
 		RunID:     r.runID,
 		BaseOID:   r.baseOID,
-		ChainTip:  r.mergeOID, // ChainTip == MergeSHA (back-compat, §3.4)
-		MergeSHA:  r.mergeOID,
-		Predicted: false,         // no speculation until the lane refactor lands
-		BatchID:   r.rec.BatchID, // always "" until batching sets it
+		ChainTip:  r.chainTip, // ChainTip == MergeSHA (back-compat, §3.4)
+		MergeSHA:  r.chainTip,
+		Predicted: r.predicted, // always false until speculation lands
+		BatchID:   r.batchID,   // always "" until batching lands
 		Done:      done,
 		Current:   cur,
-		StartedAt: r.rec.StartedAt,
+		StartedAt: head.rec.StartedAt,
 	}
 }

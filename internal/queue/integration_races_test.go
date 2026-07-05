@@ -155,22 +155,22 @@ func TestIntegration_RepushAtLandBoundary(t *testing.T) {
 	candSHA := remote.Ref(ref)
 
 	h.reconcile() // trial starts
-	r := h.d.runs["main"]
+	r := h.d.headRun("main")
 	if r == nil {
 		t.Fatal("no in-flight run after trial start")
 	}
-	if r.baseOID != base || r.cand.SHA != candSHA {
+	if r.baseOID != base || r.members[0].cand.SHA != candSHA {
 		t.Fatalf("run = %+v, want baseOID=%q cand.SHA=%q", r, base, candSHA)
 	}
 
 	ctx := context.Background()
-	if err := h.git.CASUpdate(ctx, "refs/heads/main", r.baseOID, r.mergeOID); err != nil {
+	if err := h.git.CASUpdate(ctx, "refs/heads/main", r.baseOID, r.chainTip); err != nil {
 		t.Fatalf("simulated target CAS (land's first call): %v", err)
 	}
 
 	newSHA := remote.MoveCandidate(ref, distinctFiles(checkSpecFile("test"))) // races the slot-delete CAS below
 
-	delErr := h.git.CASUpdate(ctx, ref, r.cand.SHA, "")
+	delErr := h.git.CASUpdate(ctx, ref, r.members[0].cand.SHA, "")
 	if !errors.Is(delErr, core.ErrCASStale) {
 		t.Fatalf("simulated slot-delete CAS error = %v, want ErrCASStale (a re-push raced it)", delErr)
 	}
@@ -181,8 +181,8 @@ func TestIntegration_RepushAtLandBoundary(t *testing.T) {
 	gated.Release(r.runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
 
 	landedOID := remote.Ref("refs/heads/main")
-	if landedOID != r.mergeOID {
-		t.Fatalf("target ref = %q, want the tested merge SHA %q", landedOID, r.mergeOID)
+	if landedOID != r.chainTip {
+		t.Fatalf("target ref = %q, want the tested merge SHA %q", landedOID, r.chainTip)
 	}
 	if landedOID == base {
 		t.Fatalf("target ref = %q, did not advance", landedOID)

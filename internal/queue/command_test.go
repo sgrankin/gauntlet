@@ -73,7 +73,7 @@ func TestCommand_RetryIdempotentWhenNotParked(t *testing.T) {
 			t.Fatal("retry emitted a park-cleared event for a ref that was never parked")
 		}
 	}
-	if h.d.runs["main"] == nil || h.d.runs["main"].runID != runID {
+	if h.d.headRun("main") == nil || h.d.headRun("main").runID != runID {
 		t.Fatal("the in-flight run was perturbed by a no-op retry")
 	}
 

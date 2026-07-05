@@ -105,27 +105,63 @@ type checkInFlight struct {
 	start  time.Time
 }
 
-// run is the daemon's entire in-flight state for one target (Invariant 4:
-// "in-flight state is (slot, tested SHA, executor run-id)"). It is
-// reconstructible from ground truth on every tick except for cur, which is
-// the one piece of state that can't be rederived without rerunning checks —
-// exactly why losing it (a crash) costs at most a rerun, never correctness.
-type run struct {
-	target   string
-	cand     core.Candidate
-	baseOID  string // target tip this run's trial merge was built onto
-	mergeOID string // the tested merge commit (Invariant 1)
-	runID    string
-	dir      string // exported trial tree; removed on every terminal transition
-	checks   []config.Check
-	idx      int // index into checks of the current (or next) check
+// runVerdict is a run's aggregate check-verdict-so-far, set by
+// advanceChecks and consumed by advanceLane's bubble (reject/error) and
+// prefix-land (green) steps (docs/plans/phase5.md §3.1). It replaces the
+// phase-1 reconcileInFlight switch's inline outcome decisions with state
+// advanceLane can read back after advanceChecks returns.
+type runVerdict int
 
-	rec *core.RunRecord
+const (
+	verdictNone     runVerdict = iota // still running, or advanced to the next check this tick
+	verdictGreen                      // every check Passed/Skipped; ready to land
+	verdictRejected                   // a check Failed
+	verdictErrored                    // a check reported CheckResult.Err
+)
+
+// runMember is one candidate within a run and its chain link
+// (docs/plans/phase5.md §3.1). len(run.members) is always 1 in this chunk
+// (serial); batch (P5-E) grows it to N, speculate (P5-F) keeps it at 1 but
+// grows lane.runs instead.
+type runMember struct {
+	cand     core.Candidate
+	mergeOID string          // this member's own --no-ff link (== run.chainTip for len(members)==1)
+	rec      *core.RunRecord // per-member terminal record
+}
+
+// run is the daemon's entire in-flight state for one run within a target's
+// lane (Invariant 4: "in-flight state is (slot, tested SHA, executor
+// run-id)"). It is reconstructible from ground truth on every tick except
+// for cur, which is the one piece of state that can't be rederived without
+// rerunning checks — exactly why losing it (a crash) costs at most a
+// rerun, never correctness.
+type run struct {
+	target    string
+	members   []runMember // len 1 today (serial); batch/speculate grow this later
+	baseOID   string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto
+	chainTip  string      // the tested merge commit == members[len-1].mergeOID (== members[0].mergeOID for len(members)==1)
+	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false today
+	batchID   string      // "" unless batch (P5-E); shared across member records
+	runID     string
+	dir       string // exported trial tree; removed on every terminal transition
+	checks    []config.Check
+	idx       int // index into checks of the current (or next) check
+
+	verdict runVerdict // set by advanceChecks, consumed by advanceLane
 
 	rootCtx  context.Context
 	rootSpan trace.Span
 
 	cur *checkInFlight // nil between checks (never observable mid-tick: land follows immediately)
+}
+
+// lane is a target's in-flight pipeline, FIFO: runs[0] is the head (next to
+// land). Serial (this chunk) holds ≤ 1 run; batch/speculate (later chunks)
+// grow it. A nil/absent lane, or one with an empty runs slice, is an idle
+// target — reconstructible from refs every tick, no durable state
+// (docs/plans/phase5.md §3.1).
+type lane struct {
+	runs []*run
 }
 
 // Daemon is the reconcile loop over N target branches on one core.GitRepo.
@@ -156,8 +192,10 @@ type Daemon struct {
 	// so it can't grow without bound over a long-running daemon's lifetime.
 	ignoredRefs map[string]string
 
-	// runs holds the single in-flight run per target, if any.
-	runs map[string]*run
+	// lanes holds each target's in-flight pipeline (docs/plans/phase5.md
+	// §3.1). A nil/absent entry, or one whose runs slice is empty, is an
+	// idle target — exactly as a nil run was pre-lane-refactor.
+	lanes map[string]*lane
 
 	// snap holds the most recently published Snapshot (docs/plans/phase23.md
 	// §2.1); nil until the first successful ReconcileOnce pass completes.
@@ -219,8 +257,21 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		order:       make(map[string]map[string]int64),
 		done:        make(map[string]map[string]parkEntry),
 		ignoredRefs: make(map[string]string),
-		runs:        make(map[string]*run),
+		lanes:       make(map[string]*lane),
 	}, nil
+}
+
+// headRun returns the head run of target's lane (lane.runs[0]) — the run a
+// single in-flight-run map lookup would have returned pre-lane-refactor —
+// or nil if the target is idle (lane nil/absent or empty). Serial/batch
+// hold at most one run, so this is the whole lane; speculate's window
+// makes it "next to land."
+func (d *Daemon) headRun(target string) *run {
+	l := d.lanes[target]
+	if l == nil || len(l.runs) == 0 {
+		return nil
+	}
+	return l.runs[0]
 }
 
 // Run drives the reconcile loop until ctx is done or tick is closed, calling

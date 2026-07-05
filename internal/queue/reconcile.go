@@ -114,29 +114,30 @@ func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
 }
 
 // reconcileTarget runs one tick's worth of the per-target state machine
-// (docs/plans/phase1.md §3): snapshot bookkeeping, then either advance the
-// in-flight run or (if there is none) try to start the next one.
+// (docs/plans/phase1.md §3, generalized to a pipeline by
+// docs/plans/phase5.md §2): snapshot bookkeeping, then either advance the
+// target's lane or (if it's idle) try to refill it.
 //
-// A run present at the start of the tick claims the whole tick — one lane —
-// even if it concludes (lands, parks, or skips) during this same call: a
-// concluding Land mutates both the target and slot refs out from under
-// targetTip/cands, which were snapshotted once at the top of this function,
-// so immediately reusing them to start a new trial would trial-merge
-// against stale ground truth (observed as re-testing the very candidate
-// that had just landed). Deferring the next pick to the following tick,
-// which re-Fetches/re-ListRefs, avoids that staleness entirely; the cost is
-// at most one idle tick of latency per landing, negligible next to the poll
-// interval already inherent to the loop.
+// A lane holding any run at the start of the tick claims the whole tick —
+// even if every run in it concludes (lands, parks, or skips) during this
+// same call: a concluding land mutates both the target and slot refs out
+// from under targetTip/cands, which were snapshotted once at the top of
+// this function, so immediately reusing them to start a new trial would
+// trial-merge against stale ground truth (observed as re-testing the very
+// candidate that had just landed). Deferring the next pick to the
+// following tick, which re-Fetches/re-ListRefs, avoids that staleness
+// entirely; the cost is at most one idle tick of latency per conclusion,
+// negligible next to the poll interval already inherent to the loop.
 func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[string]string) {
 	targetTip := refs[targetRefName(t)]
 	cands := discoverCandidates(t.Name, refs)
 	d.syncBookkeeping(ctx, t, cands)
 
-	if r := d.runs[t.Name]; r != nil {
-		d.reconcileInFlight(ctx, t, targetTip, cands, r)
+	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
+		d.advanceLane(ctx, t, targetTip, cands, l)
 		return
 	}
-	d.tryStartTrial(ctx, t, targetTip, cands)
+	d.refillLane(ctx, t, targetTip, cands)
 }
 
 // syncBookkeeping updates order and done against this tick's candidates
@@ -206,54 +207,147 @@ func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.
 	return cands[refs[0]], true
 }
 
-// reconcileInFlight advances r by one tick (§3 step 2): a moved/deleted
-// candidate or a moved target cancels and Skips; otherwise a non-blocking
-// read of the current check's result either finds nothing yet (r survives)
-// or records the verdict and either short-circuits (Err/Failed), advances to
-// the next check, or lands. The bool return (true iff r is still in flight
-// afterward) is informational only — reconcileTarget always returns after
-// calling this once per tick either way (see its doc).
-func (d *Daemon) reconcileInFlight(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, r *run) bool {
-	if cur, exists := cands[r.cand.Ref]; !exists || cur.SHA != r.cand.SHA {
-		d.cancelRun(r)
-		d.finishRun(ctx, t, r, core.OutcomeSkipped, fmt.Sprintf("candidate ref %s moved or vanished mid-run (Invariant 5)", r.cand.Ref), false)
-		return false
+// runInvalidated is the generalized Invariant-5 test (docs/plans/phase5.md
+// §2.2): true (with a human-readable reason) iff any member's candidate
+// ref moved or vanished, or — for the lane's head run (laneIndex==0) only —
+// the real target tip moved out from under baseOID. laneIndex is always 0
+// in this chunk (lane.runs has at most one element, matching phase-1's
+// unconditional baseOID==targetTip check); non-head runs in a future
+// speculation window have a *predicted* baseOID, whose validity is
+// transitive through the predecessor instead.
+func runInvalidated(r *run, laneIndex int, targetTip string, cands map[string]core.Candidate) (bool, string) {
+	for _, m := range r.members {
+		if cur, ok := cands[m.cand.Ref]; !ok || cur.SHA != m.cand.SHA {
+			return true, fmt.Sprintf("candidate ref %s moved or vanished mid-run (Invariant 5)", m.cand.Ref)
+		}
 	}
-	if targetTip != r.baseOID {
-		d.cancelRun(r)
-		d.finishRun(ctx, t, r, core.OutcomeSkipped, fmt.Sprintf("target %s moved mid-run (Invariant 5)", t.Name), false)
-		return false
+	if laneIndex == 0 && targetTip != r.baseOID {
+		return true, fmt.Sprintf("target %s moved mid-run (Invariant 5)", r.target)
+	}
+	return false, ""
+}
+
+// runRejectOutcome derives the terminal Outcome and Detail for a run whose
+// verdict just turned red (verdictRejected/verdictErrored) from the last
+// check result recorded against its head member — exactly the run whose
+// result set the verdict, since both terminal verdicts short-circuit
+// (docs/plans/phase5.md §2.3): no further check ever starts once one
+// fails or errors, so rec.Checks' last entry is always the culprit.
+func runRejectOutcome(r *run) (core.Outcome, string) {
+	checks := r.members[0].rec.Checks
+	last := checks[len(checks)-1]
+	if last.Err != nil {
+		return core.OutcomeError, fmt.Sprintf("check %q: %v", last.Name, last.Err)
+	}
+	return core.OutcomeRejected, fmt.Sprintf("check %q failed", last.Name)
+}
+
+// advanceLane walks lane's pipeline front to back for one tick
+// (docs/plans/phase5.md §2.1): a validity sweep first — a move must be
+// caught before a stale verdict is consumed, exactly reconcileInFlight's
+// move-then-result order — then each surviving run's checks advance once,
+// then a bubble check (a run that just went red parks; anything behind it
+// in the lane is invalidated unparked), then the contiguous green prefix
+// lands FIFO. Returns true iff this tick concluded something structural (a
+// suffix invalidation, a bubble, or at least one landing) —
+// reconcileTarget's signal to defer refill to the next tick's fresh Fetch.
+//
+// Degenerate in this chunk: lane.runs has at most one element (serial), so
+// the bubble step's "suffix behind the culprit" is always empty and the
+// prefix-land loop runs at most once per tick.
+func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, lane *lane) bool {
+	// (a) Validity sweep — before consuming any check result, exactly
+	// reconcileInFlight's move-then-result order.
+	for i, r := range lane.runs {
+		if bad, reason := runInvalidated(r, i, targetTip, cands); bad {
+			d.invalidateSuffix(ctx, t, lane, i, reason)
+			return true
+		}
 	}
 
+	// (b) Advance each surviving run's current check (non-blocking; each
+	// run steps its own checks sequentially, unchanged from phase 1).
+	for _, r := range lane.runs {
+		d.advanceChecks(ctx, t, r)
+	}
+
+	// (c) Bubble: a run that just went red. Only the culprit parks; a
+	// future speculation window's suffix Skips unparked and re-queues.
+	for i, r := range lane.runs {
+		if r.verdict == verdictRejected || r.verdict == verdictErrored {
+			outcome, detail := runRejectOutcome(r)
+			d.finishRun(ctx, t, r, outcome, detail, true)
+			d.invalidateSuffix(ctx, t, lane, i+1, "pipeline bubble")
+			lane.runs = lane.runs[:i]
+			return true
+		}
+	}
+
+	// (d) Land the contiguous green prefix, FIFO.
+	concluded := false
+	for len(lane.runs) > 0 && lane.runs[0].verdict == verdictGreen {
+		d.landRun(ctx, t, lane.runs[0])
+		lane.runs = lane.runs[1:]
+		concluded = true
+	}
+	return concluded
+}
+
+// invalidateSuffix cancels and Skips (unparked) every run in
+// lane.runs[i:] — the suffix invalidated by a validity-sweep failure
+// (§2.1a) or a pipeline bubble (§2.1c) — then truncates lane.runs to
+// lane.runs[:i]. Degenerate on today's ≤1-run lane: i is 0 from the
+// validity sweep (the lane's one run invalidates) or len(lane.runs) from
+// the bubble step (nothing behind index 0 to invalidate — a no-op slice).
+func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *lane, i int, reason string) {
+	for _, r := range lane.runs[i:] {
+		d.cancelRun(r)
+		d.finishRun(ctx, t, r, core.OutcomeSkipped, reason, false)
+	}
+	lane.runs = lane.runs[:i]
+}
+
+// advanceChecks is one run's check-advance step for one tick
+// (docs/plans/phase5.md §2.3): structurally identical to phase-1
+// reconcileInFlight's check-advance tail, minus the move/target checks
+// (hoisted into advanceLane's validity sweep) and minus the inline land
+// (now advanceLane's prefix-drain step). A non-blocking read of
+// r.cur.result that finds nothing yet leaves r.verdict at verdictNone (r
+// stays in flight). A result ends the check span, appends it to the head
+// member's run record, emits EventCheckFinished, then sets r.verdict:
+// Err -> errored, Failed -> rejected (both short-circuit — no further
+// check starts), Passed/Skipped either starts the next check (verdict
+// stays none) or, if it was the last check, sets verdict green. It never
+// itself lands, parks, or finishes the run — those stay centralized in
+// advanceLane's bubble/land steps.
+func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	select {
 	case res := <-r.cur.result:
 		obs.EndCheck(r.cur.span, res)
-		r.rec.Checks = append(r.rec.Checks, res)
+		m := &r.members[0]
+		m.rec.Checks = append(m.rec.Checks, res)
 		// Check is the just-finished result itself (docs/plans/phase23.md
 		// F-a: "Event additionally carries the finished *CheckResult on
 		// check-finished events"), so channels can render a per-check
 		// verdict mid-run instead of waiting for the run's terminal event.
-		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.cand, RunID: r.runID, CheckName: res.Name, Check: &res})
+		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: m.cand, RunID: r.runID, CheckName: res.Name, Check: &res})
 		r.cur = nil
 
 		switch {
 		case res.Err != nil:
-			d.finishRun(ctx, t, r, core.OutcomeError, fmt.Sprintf("check %q: %v", res.Name, res.Err), true)
-			return false
+			r.verdict = verdictErrored
 		case res.Status == core.CheckFailed:
-			d.finishRun(ctx, t, r, core.OutcomeRejected, fmt.Sprintf("check %q failed", res.Name), true)
-			return false
+			r.verdict = verdictRejected
 		default: // CheckPassed or CheckSkipped: both count as green (§5A)
 			if r.idx+1 < len(r.checks) {
 				r.idx++
 				d.startCheck(ctx, r)
-				return true
+			} else {
+				r.verdict = verdictGreen
 			}
-			d.land(ctx, t, r)
-			return false
 		}
 	default:
-		return true // current check still running
+		// current check still running; r.verdict stays verdictNone
 	}
 }
 
@@ -272,8 +366,8 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 		Command:   check.Command,
 		Dir:       r.dir,
 		BaseSHA:   r.baseOID,
-		MergeSHA:  r.mergeOID,
-		Candidate: r.cand,
+		MergeSHA:  r.chainTip,
+		Candidate: r.members[0].cand,
 		Clean:     false, // reserved for the phase-4 clean-build escape hatch
 	}
 	// F-a (DESIGN.md "Full per-check log files"): LogDir == "" preserves
@@ -305,7 +399,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	}()
 	r.cur = &checkInFlight{name: check.Name, cancel: cancel, result: result, span: span, start: start}
 
-	d.emit(ctx, core.Event{Kind: core.EventCheckStarted, At: d.now(), Target: r.target, Candidate: r.cand, RunID: r.runID, CheckName: check.Name})
+	d.emit(ctx, core.Event{Kind: core.EventCheckStarted, At: d.now(), Target: r.target, Candidate: r.members[0].cand, RunID: r.runID, CheckName: check.Name})
 }
 
 // cancelRun aborts r's current check, if any (Invariant 5): cancels its
@@ -321,17 +415,80 @@ func (d *Daemon) cancelRun(r *run) {
 	r.cur = nil
 }
 
-// tryStartTrial picks the queue head (if any) and starts its trial: recovery
-// via IsAncestor, else MergeTree, and on a clean merge, the CommitTree +
-// check-spec read + export that produces an in-flight run (§3 step 3).
+// chainLink is one candidate's link in the (length-1, in this chunk)
+// merge-commit chain (docs/plans/phase5.md §1.2): the --no-ff merge commit
+// itself, the tree it was tested against, and the candidate it links in.
+type chainLink struct {
+	mergeOID string
+	treeOID  string
+	cand     core.Candidate
+}
+
+// buildChainLink trial-merges cand onto base and, if the trial is clean,
+// builds cand's --no-ff merge commit (docs/plans/phase5.md §1.2): this is
+// tryStartTrial's merge+message+commit logic, factored out of the pick/
+// recovery logic that now lives in refillLane/startRun so later chunks
+// (P5-D/E/F) can call it once per chain link.
 //
-// Every daemon-side infra failure in this path (IsAncestor, MergeTree,
-// CommitTree, ExportTree, temp-dir creation) is handled uniformly:
-// OutcomeError + park + EventError. Parking prevents an unbounded
-// retry-every-tick loop (§9.2's explicit phase-1 ruling: backoff/auto-retry
-// is phase 2), and the distinct EventError lets operators tell infra from
-// red; a restart, a re-push, or a CommandRetry clears the park.
-func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
+// onClean, if trial.Clean, is invoked exactly once, immediately after the
+// clean trial is confirmed and before any message/commit work begins — the
+// same point tryStartTrial minted the run ID (from trial.TreeOID) and
+// emitted EventTrialClean, before MergeBody/CommitTree ran. Its return is
+// the run ID embedded in the merge message's Gauntlet-Run trailer.
+// MergeBody is invoked here, per candidate, exactly as tryStartTrial did
+// (constraint 9). err is any daemon-side infra failure (MergeTree,
+// merge-message template, CommitTree), pre-formatted with the same stage
+// prefix tryStartTrial used as its Detail string. A conflict is signalled
+// by trial.Clean == false with a zero link and nil err — the caller
+// distinguishes that case itself (a conflict is data, not an error).
+func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
+	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
+	trial, err := d.git.MergeTree(ctx, base, cand.SHA)
+	if err != nil {
+		obs.EndSpan(trialSpan, err)
+		return chainLink{}, trial, fmt.Errorf("merge-tree: %w", err)
+	}
+	if !trial.Clean {
+		obs.EndSpan(trialSpan, nil)
+		return chainLink{}, trial, nil
+	}
+	obs.EndSpan(trialSpan, nil)
+
+	runID := onClean(trial)
+
+	// Best-effort per Config.MergeBody's contract (daemon.go): called at
+	// most once per trial, right here, before the message (and therefore
+	// the merge commit) is built. No timeout is applied at this layer —
+	// that's cmd's job — and no error path exists to check: a nil or
+	// empty-string-returning hook behaves identically to no summarizer at
+	// all.
+	var body string
+	if d.cfg.MergeBody != nil {
+		body = d.cfg.MergeBody(ctx, cand, base)
+	}
+
+	msg, err := buildMergeMessage(d.cfg.MergeMessage, messageFields{Topic: cand.Topic, User: cand.User, Ref: cand.Ref, Target: targetName, RunID: runID}, body)
+	if err != nil {
+		return chainLink{}, trial, fmt.Errorf("merge-message template: %w", err)
+	}
+	mergeOID, err := d.git.CommitTree(ctx, trial.TreeOID, []string{base, cand.SHA}, msg, d.cfg.Committer)
+	if err != nil {
+		return chainLink{}, trial, fmt.Errorf("commit-tree: %w", err)
+	}
+	return chainLink{mergeOID: mergeOID, treeOID: trial.TreeOID, cand: cand}, trial, nil
+}
+
+// refillLane tries to fill an idle lane for one tick (docs/plans/phase5.md
+// §2.5): reconcileTarget only calls this when the lane started the tick
+// empty, so there's no separate "lane busy" check here — that precondition
+// is enforced by the caller, exactly as tryStartTrial's implicit
+// precondition was pre-refactor.
+//
+// Serial only in this chunk: config.Target has no Mode field yet (P5-A),
+// so batch/speculate refill strategies (§2.5's other two switch cases)
+// aren't reachable and aren't implemented — this is exactly and only
+// tryStartTrial's pick-head step.
+func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
 	cand, ok := d.pickHead(t.Name, cands)
 	if !ok {
 		return
@@ -347,6 +504,21 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 		return
 	}
 
+	d.startRun(ctx, t, targetTip, cand)
+}
+
+// startRun builds cand's chain link (via buildChainLink) and, on a clean
+// merge, reads and parses its check spec and exports its tree, producing a
+// new one-run, one-member lane entry (docs/plans/phase5.md §3.2) — the
+// rest of tryStartTrial's §3 step 3. Every daemon-side infra failure in
+// this path (MergeTree, message template, CommitTree, ReadFileFromTree,
+// ParseChecks, MkdirTemp, ExportTree) is handled uniformly: OutcomeError +
+// park + EventError (OutcomeRejected for a missing/invalid check spec).
+// Parking prevents an unbounded retry-every-tick loop (§9.2's explicit
+// phase-1 ruling: backoff/auto-retry is phase 2), and the distinct
+// EventError lets operators tell infra from red; a restart, a re-push, or
+// a CommandRetry clears the park.
+func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, cand core.Candidate) {
 	// F4 (docs/plans/phase23.md §10): the run's root span starts here,
 	// before MergeTree, so trial-merge is correctly parented as its child
 	// instead of being orphaned under ctx (phase 1's bug: the root span
@@ -357,75 +529,52 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 	// standard OTel behavior, so no obs API change is needed for this.
 	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, cand, "")
 
-	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
-	trial, err := d.git.MergeTree(ctx, targetTip, cand.SHA)
+	var runID string
+	link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
+		// Run ID from the trial *tree* OID, not the merge commit OID — a
+		// deliberate deviation from §9.4's letter. The merge commit's
+		// message must carry a Gauntlet-Run trailer containing the run ID
+		// (§3), and a commit's OID is a hash over its own message, so a
+		// run ID containing mergeOID[:12] is a genuine circular dependency
+		// — no commit can embed (a prefix of) its own hash. The trial
+		// tree's OID is known before any commit exists, is
+		// content-addressed to exactly what the checks test, and stays
+		// human-correlatable (`git log --format='%H %T'` on the target
+		// ties each merge commit to its tree). §9.4's other property —
+		// uniqueness across restarts with no persistence — comes from the
+		// timestamp, sharpened in phase 2/3 by a monotonic per-process
+		// counter (§2.4) since same-second identical-tree trials would
+		// otherwise mint identical IDs. Commit-to-run correlation is the
+		// trailer's job; run-to-commit is RunRecord.MergeSHA's.
+		//
+		// Minted here, before EventTrialClean, and reused verbatim for the
+		// rest of the run: channels join every event for a run by RunID
+		// (Slack threading, ghstatus's target_url), so an EventTrialClean
+		// emitted without one breaks that join for the run's entire
+		// lifetime.
+		runID = newRunID(d.now(), trial.TreeOID)
+		rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
+		d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
+		return runID
+	})
 	if err != nil {
-		obs.EndSpan(trialSpan, err)
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-tree: "+err.Error(), rootSpan)
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, err.Error(), rootSpan)
 		return
 	}
 	if !trial.Clean {
-		obs.EndSpan(trialSpan, nil)
 		d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, "trial merge conflict: "+strings.Join(trial.Conflicts, ", "), rootSpan)
 		return
 	}
-	obs.EndSpan(trialSpan, nil)
-
-	// Run ID from the trial *tree* OID, not the merge commit OID — a
-	// deliberate deviation from §9.4's letter. The merge commit's message
-	// must carry a Gauntlet-Run trailer containing the run ID (§3), and a
-	// commit's OID is a hash over its own message, so a run ID containing
-	// mergeOID[:12] is a genuine circular dependency — no commit can embed
-	// (a prefix of) its own hash. The trial tree's OID is known before any
-	// commit exists, is content-addressed to exactly what the checks test,
-	// and stays human-correlatable (`git log --format='%H %T'` on the
-	// target ties each merge commit to its tree). §9.4's other property —
-	// uniqueness across restarts with no persistence — comes from the
-	// timestamp, sharpened in phase 2/3 by a monotonic per-process counter
-	// (§2.4) since same-second identical-tree trials would otherwise mint
-	// identical IDs. Commit-to-run correlation is the trailer's job;
-	// run-to-commit is RunRecord.MergeSHA's.
-	//
-	// Minted here, before EventTrialClean, and reused verbatim for the rest
-	// of the run: channels join every event for a run by RunID (Slack
-	// threading, ghstatus's target_url), so an EventTrialClean emitted
-	// without one breaks that join for the run's entire lifetime.
-	runID := newRunID(d.now(), trial.TreeOID)
-	rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
-
-	d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
-
-	// Best-effort per Config.MergeBody's contract (daemon.go): called at
-	// most once per trial, right here, before the message (and therefore
-	// the merge commit) is built. No timeout is applied at this layer —
-	// that's cmd's job — and no error path exists to check: a nil or
-	// empty-string-returning hook behaves identically to no summarizer at
-	// all.
-	var body string
-	if d.cfg.MergeBody != nil {
-		body = d.cfg.MergeBody(ctx, cand, targetTip)
-	}
-
-	msg, err := buildMergeMessage(d.cfg.MergeMessage, messageFields{Topic: cand.Topic, User: cand.User, Ref: cand.Ref, Target: t.Name, RunID: runID}, body)
-	if err != nil {
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-message template: "+err.Error(), rootSpan)
-		return
-	}
-	mergeOID, err := d.git.CommitTree(ctx, trial.TreeOID, []string{targetTip, cand.SHA}, msg, d.cfg.Committer)
-	if err != nil {
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "commit-tree: "+err.Error(), rootSpan)
-		return
-	}
-	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, mergeOID))
+	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, link.mergeOID))
 
 	specData, err := d.git.ReadFileFromTree(ctx, trial.TreeOID, d.cfg.CheckSpec)
 	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
 	spec, err := config.ParseChecks(specData)
 	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
 
@@ -436,51 +585,63 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 	// other half of F2) is cmd's job, not the queue's (D7).
 	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
 	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
 		return
 	}
 	if err := d.git.ExportTree(ctx, trial.TreeOID, dir); err != nil {
 		_ = os.RemoveAll(dir)
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
 		return
 	}
 
-	r := &run{
-		target:   t.Name,
-		cand:     cand,
-		baseOID:  targetTip,
-		mergeOID: mergeOID,
-		runID:    runID,
-		dir:      dir,
-		checks:   spec.Checks,
-		idx:      0,
-		rec: &core.RunRecord{
-			RunID:     runID,
-			Target:    t.Name,
-			Candidate: cand,
-			BaseOID:   targetTip,
-			MergeSHA:  mergeOID,
-			Trial:     trial,
-			StartedAt: d.now(),
-		},
-		rootCtx:  rootCtx,
-		rootSpan: rootSpan,
+	rec := &core.RunRecord{
+		RunID:     runID,
+		Target:    t.Name,
+		Candidate: cand,
+		BaseOID:   base,
+		MergeSHA:  link.mergeOID,
+		Trial:     trial,
+		StartedAt: d.now(),
 	}
-	d.runs[t.Name] = r
+	r := &run{
+		target:    t.Name,
+		members:   []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
+		baseOID:   base,
+		chainTip:  link.mergeOID,
+		predicted: false,
+		batchID:   "",
+		runID:     runID,
+		dir:       dir,
+		checks:    spec.Checks,
+		idx:       0,
+		verdict:   verdictNone,
+		rootCtx:   rootCtx,
+		rootSpan:  rootSpan,
+	}
+	l := d.lanes[t.Name]
+	if l == nil {
+		l = &lane{}
+		d.lanes[t.Name] = l
+	}
+	l.runs = append(l.runs, r)
 	d.startCheck(ctx, r)
 }
 
-// land is §3 step 4: CAS-push the target to the tested merge commit, then
-// CAS-delete the candidate slot. A stale target CAS means the target moved
-// between trial and land — Skip, keep the slot, retry next tick (Invariant
-// 2). A stale slot-delete CAS means the author re-pushed between land and
-// delete — the landed commit still holds exactly the tested SHA (Invariant
-// 1), the slot simply survives at its new SHA and re-queues naturally
+// landRun is the generalized land (docs/plans/phase5.md §2.4): one CAS push
+// lands the whole chain, then a per-member slot delete + terminal event,
+// FIFO. len(r.members)==1 in this chunk: exactly phase-1's land, one push
+// one delete one event.
+//
+// A stale target CAS means the target moved between trial and land — Skip,
+// keep every member's slot, retry next tick (Invariant 2). A stale
+// slot-delete CAS means the author re-pushed between land and delete — the
+// landed commit still holds exactly the tested SHA (Invariant 1), that
+// member's slot simply survives at its new SHA and re-queues naturally
 // (Invariant 3); the run is still a Landed outcome.
-func (d *Daemon) land(ctx context.Context, t config.Target, r *run) {
+func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	_, landSpan := obs.StartLand(r.rootCtx, d.tr)
 
-	err := d.git.CASUpdate(ctx, targetRefName(t), r.baseOID, r.mergeOID)
+	err := d.git.CASUpdate(ctx, targetRefName(t), r.baseOID, r.chainTip)
 	if err != nil {
 		// Stale or not, a failed target push must Skip — never park
 		// (Invariant 2: "fail cleanly and trigger re-trial"). The non-stale
@@ -500,52 +661,88 @@ func (d *Daemon) land(ctx context.Context, t config.Target, r *run) {
 		return
 	}
 
-	delErr := d.git.CASUpdate(ctx, r.cand.Ref, r.cand.SHA, "")
-	detail := ""
-	switch {
-	case errors.Is(delErr, core.ErrCASStale):
-		detail = "candidate re-pushed before slot delete; slot survives at new SHA and re-queues"
-	case delErr != nil:
-		detail = "land: delete slot: " + delErr.Error()
+	for i := range r.members {
+		m := &r.members[i]
+		delErr := d.git.CASUpdate(ctx, m.cand.Ref, m.cand.SHA, "")
+		detail := ""
+		switch {
+		case errors.Is(delErr, core.ErrCASStale):
+			detail = "candidate re-pushed before slot delete; slot survives at new SHA and re-queues"
+		case delErr != nil:
+			detail = "land: delete slot: " + delErr.Error()
+		}
+		m.rec.Outcome = core.OutcomeLanded
+		m.rec.Detail = detail
+		m.rec.EndedAt = d.now()
+		d.emit(ctx, core.Event{
+			Kind:      core.EventLanded,
+			At:        d.now(),
+			Target:    t.Name,
+			Candidate: m.cand,
+			RunID:     r.runID,
+			Record:    m.rec,
+			Detail:    detail,
+		})
 	}
-	obs.EndSpan(landSpan, nil) // the land itself (target push) succeeded regardless of slot-delete outcome
-	d.finishRun(ctx, t, r, core.OutcomeLanded, detail, false)
+	// Deliberate ordering exception vs. the other terminal paths: finishRun
+	// finalizes (root-span end, export-dir removal) *before* emitting its
+	// terminal event, but here each member's EventLanded is emitted above,
+	// before finalizeRun runs — §2.4's delete-then-emit-per-member FIFO
+	// shape. Unobservable today (no event or record carries the dir path,
+	// and spans are no-op), but don't write a consumer — or a batch-chunk
+	// extension — that assumes the dir is gone by EventLanded time.
+	obs.EndSpan(landSpan, nil) // the land itself (target push) succeeded regardless of any slot-delete outcome
+	d.finalizeRun(r)
 }
 
-// finishRun finalizes r's RunRecord, optionally parks (ref, SHA), ends the
-// root span, removes the exported trial tree, emits the terminal event, and
-// drops r from the in-flight table.
+// finishRun finalizes the head member's RunRecord (outcome/detail/end
+// time), optionally parks its (ref, SHA), finalizes the run (root span
+// end, dir removal — finalizeRun), and emits its terminal event.
+// len(r.members)==1 in this chunk, so this is exactly phase-1's finishRun
+// in every observable respect; a future batch chunk (P5-E) will need to
+// split the per-member fields/park/emit from the once-per-run finalizeRun
+// call so a batch's terminal loop doesn't end the shared root span once
+// per member.
 func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome core.Outcome, detail string, park bool) {
-	r.rec.Outcome = outcome
-	r.rec.Detail = detail
-	r.rec.EndedAt = d.now()
+	m := &r.members[0]
+	m.rec.Outcome = outcome
+	m.rec.Detail = detail
+	m.rec.EndedAt = d.now()
 
 	if park {
-		d.park(t.Name, r.cand, outcome, detail)
+		d.park(t.Name, m.cand, outcome, detail)
 	}
 
-	obs.EndRun(r.rootSpan, r.rec)
-
-	// Only the trial export dir (WorkDir) is removed here. Per-check log
-	// files (LogDir, if configured) are deliberately never touched by run
-	// cleanup: they outlive the run by design (DESIGN.md "Full per-check
-	// log files") — retention is a separate, later prune mechanism, not
-	// this state machine's job.
-	if r.dir != "" {
-		_ = os.RemoveAll(r.dir)
-	}
+	d.finalizeRun(r)
 
 	d.emit(ctx, core.Event{
 		Kind:      eventKindForOutcome(outcome),
 		At:        d.now(),
 		Target:    t.Name,
-		Candidate: r.cand,
-		RunID:     r.rec.RunID,
-		Record:    r.rec,
+		Candidate: m.cand,
+		RunID:     r.runID,
+		Record:    m.rec,
 		Detail:    detail,
 	})
+}
 
-	delete(d.runs, t.Name)
+// finalizeRun performs the once-per-run cleanup that must happen exactly
+// once regardless of member count (docs/plans/phase5.md §3.2): ends the
+// root span (its summary attributes/status come from the head member's
+// RunRecord — len(members)==1 today, so this is exactly the record the run
+// produced) and removes the exported trial dir. Per-check log files
+// (LogDir, if configured) are deliberately never touched here: they
+// outlive the run by design (DESIGN.md "Full per-check log files") —
+// retention is a separate, later prune mechanism, not this state machine's
+// job. It does not touch the lane: lane.runs is truncated by
+// advanceLane/invalidateSuffix, the sole mutators of that slice, at the
+// same call sites that already know the removal boundary.
+func (d *Daemon) finalizeRun(r *run) {
+	obs.EndRun(r.rootSpan, r.members[0].rec)
+
+	if r.dir != "" {
+		_ = os.RemoveAll(r.dir)
+	}
 }
 
 // recoverLanded implements Invariant 4's crash-recovery branch: cand.SHA is

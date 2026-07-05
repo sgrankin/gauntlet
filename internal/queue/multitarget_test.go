@@ -29,8 +29,8 @@ func TestReconcile_TargetsIndependent(t *testing.T) {
 	// One tick starts both trials — one lane *per target*, not globally.
 	h.reconcile()
 
-	runMain := h.d.runs["main"]
-	runRel := h.d.runs["release"]
+	runMain := h.d.headRun("main")
+	runRel := h.d.headRun("release")
 	if runMain == nil || runRel == nil {
 		t.Fatal("expected an in-flight run on each target after one tick")
 	}
@@ -106,7 +106,7 @@ func TestReconcile_DuplicateDaemon(t *testing.T) {
 
 	h1.reconcile() // d1's trial starts
 	reconcile2()   // d2's trial starts on the same candidate, same base
-	run2 := d2.runs["main"]
+	run2 := d2.headRun("main")
 	if run2 == nil {
 		t.Fatal("d2 has no in-flight run")
 	}
@@ -139,7 +139,7 @@ func TestReconcile_DuplicateDaemon(t *testing.T) {
 			t.Fatal("d2 also reported Landed; both daemons landed the same candidate")
 		}
 	}
-	if d2.runs["main"] != nil {
+	if d2.headRun("main") != nil {
 		t.Fatal("d2 still has an in-flight run after the candidate vanished")
 	}
 }

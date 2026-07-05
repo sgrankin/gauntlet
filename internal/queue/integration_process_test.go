@@ -31,7 +31,7 @@ func TestIntegration_CancelledCheckKillsProcessGroup(t *testing.T) {
 	ref := remote.PushCandidate("main", "alice", "widget", files)
 
 	h.reconcile() // trial starts; LocalExecutor runs the check in the background
-	r := h.d.runs["main"]
+	r := h.d.headRun("main")
 	if r == nil {
 		t.Fatal("no in-flight run after trial start")
 	}

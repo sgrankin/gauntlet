@@ -30,11 +30,11 @@ func TestIntegration_CrashBetweenLandAndDelete(t *testing.T) {
 	candSHA := remote.Ref(ref)
 
 	h1.reconcile() // trial starts
-	r := h1.d.runs["main"]
+	r := h1.d.headRun("main")
 	if r == nil {
 		t.Fatal("no in-flight run after trial start")
 	}
-	mergeOID := r.mergeOID
+	mergeOID := r.chainTip
 
 	if err := h1.git.CASUpdate(context.Background(), "refs/heads/main", base, mergeOID); err != nil {
 		t.Fatalf("simulated target CAS (the first half of land): %v", err)
@@ -115,7 +115,7 @@ func TestIntegration_DuplicateDaemon(t *testing.T) {
 	h2.reconcile() // d2's trial starts on the same candidate, same base
 	run1ID := h1.currentRunID()
 	run2ID := h2.currentRunID()
-	if h2.d.runs["main"] == nil {
+	if h2.d.headRun("main") == nil {
 		t.Fatal("d2 has no in-flight run")
 	}
 
@@ -145,7 +145,7 @@ func TestIntegration_DuplicateDaemon(t *testing.T) {
 			t.Fatal("d2 also reported Landed; both daemons landed the same candidate")
 		}
 	}
-	if h2.d.runs["main"] != nil {
+	if h2.d.headRun("main") != nil {
 		t.Fatal("d2 still has an in-flight run after the candidate vanished")
 	}
 }
