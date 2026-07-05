@@ -7,7 +7,11 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -68,6 +72,46 @@ func discoverCandidates(target string, refs map[string]string) map[string]core.C
 // targetRefName is the git ref for a target's branch.
 func targetRefName(t config.Target) string { return "refs/heads/" + t.Branch }
 
+// checkIgnoredRefs scans refs for well-formed candidate refs (the for/...
+// grammar, §9.3) whose target segment names no configured target — a common
+// misconfiguration (a typo'd target name, or a target retired from config
+// while stale for/ refs linger) that phase 1 silently dropped
+// (docs/plans/phase23.md §10, O4). Emits core.EventIgnoredRef once per
+// (ref, SHA), not every tick, via d.ignoredRefs — pruned here of any ref no
+// longer present, so it can't grow unboundedly over a long-running
+// daemon's lifetime.
+func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
+	configured := make(map[string]bool, len(d.cfg.Targets))
+	for _, t := range d.cfg.Targets {
+		configured[t.Name] = true
+	}
+
+	seen := make(map[string]bool)
+	for ref, sha := range refs {
+		target, _, _, ok := parseCandidateRef(ref)
+		if !ok || configured[target] {
+			continue
+		}
+		seen[ref] = true
+		if d.ignoredRefs[ref] == sha {
+			continue // already reported for this SHA
+		}
+		d.ignoredRefs[ref] = sha
+		d.emit(ctx, core.Event{
+			Kind:      core.EventIgnoredRef,
+			At:        d.now(),
+			Target:    target,
+			Candidate: core.Candidate{Ref: ref, Target: target, SHA: sha},
+			Detail:    fmt.Sprintf("target %q is not configured", target),
+		})
+	}
+	for ref := range d.ignoredRefs {
+		if !seen[ref] {
+			delete(d.ignoredRefs, ref)
+		}
+	}
+}
+
 // reconcileTarget runs one tick's worth of the per-target state machine
 // (docs/plans/phase1.md §3): snapshot bookkeeping, then either advance the
 // in-flight run or (if there is none) try to start the next one.
@@ -106,7 +150,7 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 	}
 	done := d.done[t.Name]
 	if done == nil {
-		done = make(map[string]string)
+		done = make(map[string]parkEntry)
 		d.done[t.Name] = done
 	}
 
@@ -115,8 +159,8 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 			delete(order, ref)
 		}
 	}
-	for ref, sha := range done {
-		if c, ok := cands[ref]; !ok || c.SHA != sha {
+	for ref, entry := range done {
+		if c, ok := cands[ref]; !ok || c.SHA != entry.SHA {
 			delete(done, ref)
 		}
 	}
@@ -144,7 +188,7 @@ func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.
 
 	var refs []string
 	for ref, c := range cands {
-		if parked, ok := done[ref]; ok && parked == c.SHA {
+		if parked, ok := done[ref]; ok && parked.SHA == c.SHA {
 			continue
 		}
 		refs = append(refs, ref)
@@ -260,7 +304,7 @@ func (d *Daemon) cancelRun(r *run) {
 // OutcomeError + park + EventError. Parking prevents an unbounded
 // retry-every-tick loop (§9.2's explicit phase-1 ruling: backoff/auto-retry
 // is phase 2), and the distinct EventError lets operators tell infra from
-// red; a restart or a re-push clears the park.
+// red; a restart, a re-push, or a CommandRetry clears the park.
 func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
 	cand, ok := d.pickHead(t.Name, cands)
 	if !ok {
@@ -269,33 +313,34 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 
 	landed, err := d.git.IsAncestor(ctx, cand.SHA, targetTip)
 	if err != nil {
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "is-ancestor: "+err.Error())
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "is-ancestor: "+err.Error(), nil)
 		return
 	}
 	if landed {
-		// Invariant 4: a run already landed before a crash interrupted slot
-		// cleanup. No trial ran, so there is no RunRecord for this — it's a
-		// pure recovery action, not a run.
-		if delErr := d.git.CASUpdate(ctx, cand.Ref, cand.SHA, ""); delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
-			return // transient; retry next tick
-		}
-		d.emit(ctx, core.Event{
-			Kind: core.EventLanded, At: d.now(), Target: t.Name, Candidate: cand,
-			Detail: "recovered: candidate SHA already an ancestor of target",
-		})
+		d.recoverLanded(ctx, t, cand)
 		return
 	}
 
-	_, trialSpan := obs.StartTrialMerge(ctx, d.tr)
+	// F4 (docs/plans/phase23.md §10): the run's root span starts here,
+	// before MergeTree, so trial-merge is correctly parented as its child
+	// instead of being orphaned under ctx (phase 1's bug: the root span
+	// used to start only once a merge commit existed). run.id and
+	// merge.sha aren't known yet — StartRun gets empty placeholders — and
+	// are backfilled onto the very same span via SetAttributes once each is
+	// minted below; span.SetAttributes updating an already-set key is
+	// standard OTel behavior, so no obs API change is needed for this.
+	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, cand, "")
+
+	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
 	trial, err := d.git.MergeTree(ctx, targetTip, cand.SHA)
 	if err != nil {
 		obs.EndSpan(trialSpan, err)
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-tree: "+err.Error())
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-tree: "+err.Error(), rootSpan)
 		return
 	}
 	if !trial.Clean {
 		obs.EndSpan(trialSpan, nil)
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, "trial merge conflict: "+strings.Join(trial.Conflicts, ", "))
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, "trial merge conflict: "+strings.Join(trial.Conflicts, ", "), rootSpan)
 		return
 	}
 	obs.EndSpan(trialSpan, nil)
@@ -311,43 +356,52 @@ func (d *Daemon) tryStartTrial(ctx context.Context, t config.Target, targetTip s
 	// and stays human-correlatable (`git log --format='%H %T'` on the
 	// target ties each merge commit to its tree). §9.4's other property —
 	// uniqueness across restarts with no persistence — comes from the
-	// timestamp, exactly as specified. Commit-to-run correlation is the
-	// trailer's job; run-to-commit is RunRecord.MergeSHA's.
+	// timestamp, sharpened in phase 2/3 by a monotonic per-process counter
+	// (§2.4) since same-second identical-tree trials would otherwise mint
+	// identical IDs. Commit-to-run correlation is the trailer's job;
+	// run-to-commit is RunRecord.MergeSHA's.
 	runID := newRunID(d.now(), trial.TreeOID)
+	rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
+
 	msg, err := buildMergeMessage(d.cfg.MergeMessage, messageFields{Topic: cand.Topic, User: cand.User, Ref: cand.Ref, Target: t.Name, RunID: runID})
 	if err != nil {
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-message template: "+err.Error())
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "merge-message template: "+err.Error(), rootSpan)
 		return
 	}
 	mergeOID, err := d.git.CommitTree(ctx, trial.TreeOID, []string{targetTip, cand.SHA}, msg, d.cfg.Committer)
 	if err != nil {
-		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "commit-tree: "+err.Error())
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "commit-tree: "+err.Error(), rootSpan)
 		return
 	}
+	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, mergeOID))
 
 	specData, err := d.git.ReadFileFromTree(ctx, trial.TreeOID, d.cfg.CheckSpec)
 	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err))
+		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
 	spec, err := config.ParseChecks(specData)
 	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err))
+		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
 
-	dir, err := os.MkdirTemp("", "gauntlet-trial-")
+	// F2 (docs/plans/phase23.md §10): trial-tree export dirs are created
+	// under cfg.WorkDir when it's set. os.MkdirTemp treats an empty dir
+	// argument as "use the OS default temp dir" already, so this is a strict
+	// superset of the phase-1 behavior; sweeping WorkDir at startup (the
+	// other half of F2) is cmd's job, not the queue's (D7).
+	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
 	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error())
+		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
 		return
 	}
 	if err := d.git.ExportTree(ctx, trial.TreeOID, dir); err != nil {
 		_ = os.RemoveAll(dir)
-		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeError, "export tree: "+err.Error())
+		d.rejectRun(ctx, t, cand, runID, targetTip, mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
 		return
 	}
 
-	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, runID, t.Name, cand, mergeOID)
 	r := &run{
 		target:   t.Name,
 		cand:     cand,
@@ -424,7 +478,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 	r.rec.EndedAt = d.now()
 
 	if park {
-		d.park(t.Name, r.cand)
+		d.park(t.Name, r.cand, outcome, detail)
 	}
 
 	obs.EndRun(r.rootSpan, r.rec)
@@ -446,11 +500,49 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 	d.runs[t.Name] = nil
 }
 
+// recoverLanded implements Invariant 4's crash-recovery branch: cand.SHA is
+// already an ancestor of the target tip, meaning some earlier run landed it
+// before a crash (or this daemon's own previous pass) interrupted slot
+// cleanup. No trial ran and no check ran, but F1 (docs/plans/phase23.md
+// §10) requires every terminal event to still carry a complete, non-nil
+// RunRecord, so one is synthesized here: a run-ID stand-in derived from the
+// candidate SHA (phase1 §9.4's stand-in rule, minted through the same
+// counter as a real run ID so it can never collide with one), zero checks,
+// OutcomeLanded, and a Detail explaining that checks were not re-run. As
+// before, this is a pure recovery action, not a run: no merge ever happens,
+// so BaseOID/MergeSHA/Trial stay zero-valued, matching the other
+// pre-merge synthesized records (rejectPreMerge).
+func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.Candidate) {
+	if delErr := d.git.CASUpdate(ctx, cand.Ref, cand.SHA, ""); delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
+		return // transient; retry next tick
+	}
+	now := d.now()
+	runID := newRunID(now, cand.SHA)
+	const detail = "candidate already ancestor of target; checks not re-run"
+	rec := &core.RunRecord{
+		RunID:     runID,
+		Target:    t.Name,
+		Candidate: cand,
+		Outcome:   core.OutcomeLanded,
+		Detail:    detail,
+		StartedAt: now,
+		EndedAt:   now,
+	}
+	d.emit(ctx, core.Event{
+		Kind: core.EventLanded, At: now, Target: t.Name, Candidate: cand,
+		RunID: runID, Record: rec, Detail: detail,
+	})
+}
+
 // rejectPreMerge parks cand and emits its terminal event for an outcome
 // decided before any merge commit exists (a trial-merge conflict, or an
 // infra error before CommitTree succeeds): no check ever ran and no run
-// object was ever created, so there's nothing to cancel.
-func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.Candidate, outcome core.Outcome, detail string) {
+// object was ever created, so there's nothing to cancel. rootSpan is the
+// run's root span if one was already started (F4 starts it before
+// MergeTree) — nil for the one outcome that precedes even that (an
+// IsAncestor infra error, before tryStartTrial knows a trial will even be
+// attempted).
+func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.Candidate, outcome core.Outcome, detail string, rootSpan trace.Span) {
 	now := d.now()
 	// These outcomes precede a clean trial, so no merge commit — and for a
 	// conflict or MergeTree failure not even a trial tree — exists to name
@@ -462,7 +554,10 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 		Outcome: outcome, Detail: detail,
 		StartedAt: now, EndedAt: now,
 	}
-	d.park(t.Name, cand)
+	d.park(t.Name, cand, outcome, detail)
+	if rootSpan != nil {
+		obs.EndRun(rootSpan, rec)
+	}
 	d.emit(ctx, core.Event{
 		Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
@@ -471,8 +566,9 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 
 // rejectRun parks cand and emits its terminal event for an outcome decided
 // after the merge commit exists but before any check ran (a missing/invalid
-// check spec, or an export failure).
-func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candidate, runID, baseOID, mergeOID string, trial core.TrialMerge, outcome core.Outcome, detail string) {
+// check spec, or an export failure). rootSpan is always non-nil here: every
+// call site follows a successful StartRun.
+func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candidate, runID, baseOID, mergeOID string, trial core.TrialMerge, outcome core.Outcome, detail string, rootSpan trace.Span) {
 	now := d.now()
 	rec := &core.RunRecord{
 		RunID: runID, Target: t.Name, Candidate: cand,
@@ -480,22 +576,39 @@ func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candi
 		Outcome: outcome, Detail: detail,
 		StartedAt: now, EndedAt: now,
 	}
-	d.park(t.Name, cand)
+	d.park(t.Name, cand, outcome, detail)
+	if rootSpan != nil {
+		obs.EndRun(rootSpan, rec)
+	}
 	d.emit(ctx, core.Event{
 		Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
 	})
 }
 
-// park marks cand's (ref, SHA) as parked for target: it will not be
-// re-tested until the ref's SHA changes or the ref vanishes (§9.1).
-func (d *Daemon) park(target string, cand core.Candidate) {
+// parkEntry records why a (ref, SHA) is parked — its terminal outcome, a
+// human-readable reason, and when — feeding the dashboard snapshot's
+// ParkedEntry (docs/plans/phase23.md §2.1, §2.3). Semantics are unchanged
+// from phase1 §9.1: sticky per (ref, SHA), cleared only when the ref's SHA
+// changes, the ref vanishes, or a CommandRetry clears it explicitly
+// (command.go) — never when some other candidate lands.
+type parkEntry struct {
+	SHA     string
+	Outcome core.Outcome
+	Reason  string
+	At      time.Time
+}
+
+// park marks cand's (ref, SHA) as parked for target, recording outcome and
+// detail as the park's reason: it will not be re-tested until the ref's SHA
+// changes, the ref vanishes, or a CommandRetry clears it (§9.1).
+func (d *Daemon) park(target string, cand core.Candidate, outcome core.Outcome, detail string) {
 	m := d.done[target]
 	if m == nil {
-		m = make(map[string]string)
+		m = make(map[string]parkEntry)
 		d.done[target] = m
 	}
-	m[cand.Ref] = cand.SHA
+	m[cand.Ref] = parkEntry{SHA: cand.SHA, Outcome: outcome, Reason: detail, At: d.now()}
 }
 
 func eventKindForOutcome(o core.Outcome) core.EventKind {
@@ -517,13 +630,29 @@ func eventKindForOutcome(o core.Outcome) core.EventKind {
 // yyyymmddThhmmssZ.
 const runIDTimeFormat = "20060102T150405Z"
 
-// newRunID builds a run ID (§9.4): a UTC timestamp plus the first 12
-// characters of oid, unique across restarts (no persistence means the same
-// merge re-tested after a restart gets a new timestamp) and
-// human-correlatable to oid.
+// runIDCounter is a monotonic per-process counter folded into every run ID
+// (docs/plans/phase23.md §2.4). The phase-1 review (C7) found that two
+// trials sharing an identical trial tree and started within the same UTC
+// second — a re-push that restores previously-tested content, or two
+// daemon instances racing the same candidate — mint identical run IDs
+// under the timestamp+OID-prefix scheme alone. The container executor
+// (phase 2/3) derives container names from run IDs, so such a collision
+// would also break `--name`; the counter closes the gap regardless of
+// clock resolution or tree content. Package-level (not per-Daemon) because
+// the uniqueness this protects is process-wide: two Daemon instances in one
+// process (as the duplicate-daemon tests construct) must not mint
+// colliding IDs either.
+var runIDCounter atomic.Int64
+
+// newRunID builds a run ID: a UTC timestamp, a monotonic per-process
+// sequence number, and the first 12 characters of oid — unique across
+// restarts (no persistence means the same merge re-tested after a restart
+// gets a new timestamp), unique within one process even for same-second
+// identical-tree trials (the counter), and human-correlatable to oid.
 func newRunID(t time.Time, oid string) string {
 	if len(oid) > 12 {
 		oid = oid[:12]
 	}
-	return t.UTC().Format(runIDTimeFormat) + "-" + oid
+	seq := runIDCounter.Add(1)
+	return fmt.Sprintf("%s-%d-%s", t.UTC().Format(runIDTimeFormat), seq, oid)
 }

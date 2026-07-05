@@ -212,6 +212,16 @@ const (
 	EventRejected
 	EventSkipped
 	EventError
+
+	// EventIgnoredRef reports a well-formed candidate ref (the for/...
+	// grammar) whose target segment names no configured target — a
+	// misconfiguration phase 1 silently dropped (docs/plans/phase23.md §10,
+	// O4). Emitted once per (ref, SHA), not every tick. Not terminal: it
+	// carries no RunRecord, since no run was ever attempted. Channel
+	// implementations must ignore EventKind values they don't recognize
+	// (this one included) rather than erroring — new kinds are always
+	// additive.
+	EventIgnoredRef
 )
 
 // Event is one notification emitted to a Channel. Terminal events —

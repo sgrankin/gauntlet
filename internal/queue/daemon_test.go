@@ -19,11 +19,14 @@ const testCheckSpecPath = ".gauntlet.kdl"
 
 var testCommitter = core.Identity{Name: "Gauntlet", Email: "gauntlet@example.com"}
 
-// runIDPattern matches the §9.4-shaped run-ID scheme: a UTC timestamp, a
-// hyphen, and 12 hex characters taken from an OID (the trial tree's for a
-// run that got one; the candidate's own SHA for pre-trial outcomes — see
-// tryStartTrial's and rejectPreMerge's run-ID comments in reconcile.go).
-var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}Z-[0-9a-f]{12}$`)
+// runIDPattern matches the §9.4-shaped run-ID scheme, sharpened by
+// docs/plans/phase23.md §2.4's monotonic counter: a UTC timestamp, a
+// hyphen, the per-process sequence number, a hyphen, and 12 hex characters
+// taken from an OID (the trial tree's for a run that got one; the
+// candidate's own SHA for pre-trial outcomes and for the IsAncestor
+// recovery stand-in — see tryStartTrial's, rejectPreMerge's, and
+// recoverLanded's run-ID comments in reconcile.go).
+var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}Z-\d+-[0-9a-f]{12}$`)
 
 // testHarness wires a Daemon to a fakeGitRepo, a GatedExecutor, and a
 // RecordingChannel, with an injectable clock — everything queue's tests
@@ -61,7 +64,37 @@ func newHarness(t *testing.T, targets ...config.Target) *testHarness {
 		t.Fatalf("New: %v", err)
 	}
 	h.d = d
+	// F1 (docs/plans/phase23.md §10): every terminal event must carry a
+	// non-nil RunRecord. Enforced across every test built on this harness,
+	// for free, rather than repeating the assertion per test.
+	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })
 	return h
+}
+
+// assertAllTerminalEventsHaveRecords fails t if any terminal-kind event in
+// events carries a nil Record (F1, docs/plans/phase23.md §10): a property
+// every emit site — present and future — must uphold.
+func assertAllTerminalEventsHaveRecords(t *testing.T, events []core.Event) {
+	t.Helper()
+	for _, e := range events {
+		if !isTerminalEventKind(e.Kind) {
+			continue
+		}
+		if e.Record == nil {
+			t.Errorf("terminal event kind=%v target=%s ref=%s carries a nil Record", e.Kind, e.Target, e.Candidate.Ref)
+		}
+	}
+}
+
+// isTerminalEventKind reports whether k is one of the terminal event kinds
+// documented on core.Event: the ones that must carry a *RunRecord.
+func isTerminalEventKind(k core.EventKind) bool {
+	switch k {
+	case core.EventLanded, core.EventRejected, core.EventTrialConflict, core.EventSkipped, core.EventError:
+		return true
+	default:
+		return false
+	}
 }
 
 // now is the Daemon's injected clock: deterministic (no wall time) but

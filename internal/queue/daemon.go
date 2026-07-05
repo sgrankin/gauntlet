@@ -17,6 +17,7 @@ package queue
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -49,6 +50,14 @@ type Config struct {
 	// Empty selects the built-in default (message.go), which degrades to
 	// omit an empty user rather than being used as-is.
 	MergeMessage string
+
+	// WorkDir is the directory trial-tree export dirs are created under
+	// (docs/plans/phase23.md §10, F2): os.MkdirTemp(WorkDir, ...). Empty
+	// selects the OS default temp dir, exactly the phase-1 behavior — this
+	// field only lets an operator (or a test) pin exports to a known,
+	// sweepable location; the queue itself never sweeps WorkDir (that's
+	// cmd's job, D7).
+	WorkDir string
 }
 
 // checkInFlight is the currently-running check within an in-flight run: its
@@ -99,17 +108,32 @@ type Daemon struct {
 	// increasing sequence number the first time it's observed — the FIFO
 	// key, tie-broken lexically by ref. done is a park list, sticky per
 	// (ref, SHA) (docs/plans/phase1.md §9.1): entries clear only when the
-	// ref's SHA changes or the ref vanishes, never when some other
-	// candidate lands. Both are keyed by target name, then by ref, and are
-	// fully reconstructible from ground truth — losing them (a restart)
-	// costs at most some re-tests, never correctness.
+	// ref's SHA changes, the ref vanishes, or a CommandRetry clears it
+	// explicitly (command.go), never when some other candidate lands. Both
+	// are keyed by target name, then by ref, and are fully reconstructible
+	// from ground truth — losing them (a restart) costs at most some
+	// re-tests, never correctness.
 	order map[string]map[string]int64
-	done  map[string]map[string]string
+	done  map[string]map[string]parkEntry
 	seq   int64
+
+	// ignoredRefs dedupes core.EventIgnoredRef (docs/plans/phase23.md §10,
+	// O4): ref -> last-emitted-for SHA, pruned of vanished refs every tick
+	// so it can't grow without bound over a long-running daemon's lifetime.
+	ignoredRefs map[string]string
 
 	// runs holds the single in-flight run per target, if any.
 	runs map[string]*run
+
+	// snap holds the most recently published Snapshot (docs/plans/phase23.md
+	// §2.1); nil until the first successful ReconcileOnce pass completes.
+	snap atomic.Pointer[Snapshot]
 }
+
+// Snapshot returns the most recently published Snapshot, or nil if no
+// ReconcileOnce pass has completed yet. Safe for concurrent use from any
+// goroutine — the dashboard and history depth-sampler's intended callers.
+func (d *Daemon) Snapshot() *Snapshot { return d.snap.Load() }
 
 // New constructs a Daemon. now is injected so tests can control run-ID
 // timestamps deterministically; a nil now defaults to time.Now.
@@ -152,15 +176,16 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 	}
 
 	return &Daemon{
-		git:   git,
-		exec:  exec,
-		chans: chans,
-		tr:    obs.Tracer(),
-		cfg:   cfg,
-		now:   now,
-		order: make(map[string]map[string]int64),
-		done:  make(map[string]map[string]string),
-		runs:  make(map[string]*run),
+		git:         git,
+		exec:        exec,
+		chans:       chans,
+		tr:          obs.Tracer(),
+		cfg:         cfg,
+		now:         now,
+		order:       make(map[string]map[string]int64),
+		done:        make(map[string]map[string]parkEntry),
+		ignoredRefs: make(map[string]string),
+		runs:        make(map[string]*run),
 	}, nil
 }
 
@@ -186,7 +211,15 @@ func (d *Daemon) Run(ctx context.Context, tick <-chan time.Time) error {
 
 // ReconcileOnce runs one full, non-blocking reconcile pass over every
 // target: Fetch, ListRefs (the tick's snapshot of ground truth, per §3 step
-// 1), then per-target state-machine advancement (reconcile.go).
+// 1), drain inbound commands (docs/plans/phase23.md §2.2), flag any
+// candidate ref naming an unconfigured target (§10, O4), then per-target
+// state-machine advancement (reconcile.go), and finally publish a Snapshot
+// of the resulting state (§2.1).
+//
+// On an early error (Fetch or ListRefs failing) ReconcileOnce returns before
+// draining commands, checking ignored refs, reconciling any target, or
+// publishing a snapshot — the previously published Snapshot (if any) stays
+// current, its staleness visible via Snapshot().At.
 //
 // ctx is also the parent for any run's root span and, transitively (via
 // context.WithCancel), for the context each check goroutine runs under —
@@ -204,9 +237,15 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("queue: list refs: %w", err)
 	}
+
+	d.drainCommands(ctx)
+	d.checkIgnoredRefs(ctx, refs)
+
 	for _, t := range d.cfg.Targets {
 		d.reconcileTarget(ctx, t, refs)
 	}
+
+	d.snap.Store(d.buildSnapshot(refs))
 	return nil
 }
 

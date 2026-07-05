@@ -21,6 +21,12 @@ var _ core.Channel = (*LogChannel)(nil)
 // Event as one structured, greppable line (key=value pairs), and for
 // terminal events additionally renders the carried RunRecord as a compact
 // summary line. It is output-only: Commands never yields.
+//
+// New core.EventKind values are additive (e.g. core.EventIgnoredRef, phase
+// 2): eventKindString's default case renders any kind it doesn't recognize
+// as "unknown(N)" rather than panicking or dropping the line, and every
+// core.Channel implementation is expected to hold the same contract —
+// ignore event kinds it doesn't understand, never fail Emit over one.
 type LogChannel struct {
 	mu   sync.Mutex
 	w    io.Writer
@@ -138,6 +144,8 @@ func eventKindString(k core.EventKind) string {
 		return "skipped"
 	case core.EventError:
 		return "error"
+	case core.EventIgnoredRef:
+		return "ignored_ref"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(k))
 	}

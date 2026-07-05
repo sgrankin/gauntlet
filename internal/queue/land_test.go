@@ -125,4 +125,29 @@ func TestReconcile_IsAncestorRecovery(t *testing.T) {
 	if !sawLanded {
 		t.Fatal("no EventLanded emitted for the recovered candidate")
 	}
+
+	// F1 (docs/plans/phase23.md §10): the recovery path must synthesize a
+	// complete RunRecord rather than emit EventLanded with Record==nil —
+	// the terminal-event contract every channel (and D1's SQLite writer)
+	// relies on.
+	recs := h.ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v, want Landed", last.Outcome)
+	}
+	if len(last.Checks) != 0 {
+		t.Fatalf("Checks = %+v, want none (recovery never re-runs checks)", last.Checks)
+	}
+	if want := "candidate already ancestor of target; checks not re-run"; last.Detail != want {
+		t.Fatalf("Detail = %q, want %q", last.Detail, want)
+	}
+	if !runIDPattern.MatchString(last.RunID) {
+		t.Fatalf("RunID %q does not match the §9.4+§2.4 format", last.RunID)
+	}
+	if last.Candidate.SHA != candOID {
+		t.Fatalf("Candidate.SHA = %q, want %q", last.Candidate.SHA, candOID)
+	}
+	if last.StartedAt.IsZero() || last.EndedAt.IsZero() {
+		t.Fatalf("StartedAt/EndedAt not set: %+v", last)
+	}
 }

@@ -118,3 +118,18 @@ func TestRecordingChannel_CommandsNeverYields(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 }
+
+func TestRecordingChannel_SendCommandDeliversOnCommands(t *testing.T) {
+	c := NewRecordingChannel()
+	want := core.Command{Kind: core.CommandRetry, Target: "main", Ref: "refs/heads/for/main/alice/feat"}
+	c.SendCommand(want)
+
+	select {
+	case got := <-c.Commands():
+		if got != want {
+			t.Fatalf("Commands() delivered %+v, want %+v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendCommand'd command never arrived on Commands()")
+	}
+}

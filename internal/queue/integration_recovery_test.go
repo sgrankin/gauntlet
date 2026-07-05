@@ -72,6 +72,25 @@ func TestIntegration_CrashBetweenLandAndDelete(t *testing.T) {
 	if !sawLanded {
 		t.Fatal("no EventLanded emitted for the recovered candidate")
 	}
+
+	// O5 (docs/plans/phase23.md §10): a real-git integration test driving
+	// the daemon's recovery path end to end. F1's fix (a synthesized
+	// RunRecord, not a nil one) must hold here exactly as it does against
+	// the fake git in TestReconcile_IsAncestorRecovery.
+	recs := h2.ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v, want Landed", last.Outcome)
+	}
+	if len(last.Checks) != 0 {
+		t.Fatalf("Checks = %+v, want none (recovery never re-runs checks)", last.Checks)
+	}
+	if want := "candidate already ancestor of target; checks not re-run"; last.Detail != want {
+		t.Fatalf("Detail = %q, want %q", last.Detail, want)
+	}
+	if last.Candidate.SHA != candSHA {
+		t.Fatalf("Candidate.SHA = %q, want %q", last.Candidate.SHA, candSHA)
+	}
 }
 
 // TestIntegration_DuplicateDaemon is §5's "Duplicate daemon" row

@@ -80,6 +80,19 @@ func TestLogChannel_EmitEventKinds(t *testing.T) {
 			ev:   core.Event{Kind: core.EventError, Target: "main", Detail: "tempdir failed"},
 			want: []string{"kind=error", `detail="tempdir failed"`},
 		},
+		{
+			name: "ignored ref",
+			ev: core.Event{
+				Kind:   core.EventIgnoredRef,
+				Target: "staging",
+				Candidate: core.Candidate{
+					Ref: "refs/heads/for/staging/alice/feat",
+					SHA: "deadbeefcafef00d",
+				},
+				Detail: `target "staging" is not configured`,
+			},
+			want: []string{"kind=ignored_ref", "ref=refs/heads/for/staging/alice/feat", `detail="target \"staging\" is not configured"`},
+		},
 	}
 
 	for _, tc := range cases {

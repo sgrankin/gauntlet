@@ -52,7 +52,7 @@ func TestPickHead_LexicalTieBreak(t *testing.T) {
 		"refs/heads/for/main/zeta/z":  5,
 		"refs/heads/for/main/alpha/a": 5,
 	}
-	d.done["main"] = map[string]string{}
+	d.done["main"] = map[string]parkEntry{}
 	cands := map[string]core.Candidate{
 		"refs/heads/for/main/zeta/z":  {Ref: "refs/heads/for/main/zeta/z", SHA: "sha-z"},
 		"refs/heads/for/main/alpha/a": {Ref: "refs/heads/for/main/alpha/a", SHA: "sha-a"},
