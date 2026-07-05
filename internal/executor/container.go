@@ -62,12 +62,20 @@ type Params struct {
 type runtimeSpec struct {
 	Bin       string
 	ProbeArgs []string
+
+	// ExtraRunArgs are runtime-specific flags inserted right after "run".
+	// Apple's container CLI emits "[N/6] ..." progress lines on stderr even
+	// without a TTY, which pollutes the captured check output (observed
+	// live: a GitHub status description quoting "[0/6] [0s]"); --progress
+	// none suppresses them at the source. docker/podman emit no progress
+	// on run.
+	ExtraRunArgs []string
 }
 
 var runtimeSpecs = map[string]runtimeSpec{
 	"docker":    {Bin: "docker", ProbeArgs: []string{"ps"}},
 	"podman":    {Bin: "podman", ProbeArgs: []string{"ps"}},
-	"container": {Bin: "container", ProbeArgs: []string{"system", "status"}},
+	"container": {Bin: "container", ProbeArgs: []string{"system", "status"}, ExtraRunArgs: []string{"--progress", "none"}},
 }
 
 // ContainerExecutor runs checks inside a container via a docker-compatible
@@ -235,17 +243,22 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //
 // Pure and exec-free: exhaustively unit-testable without any runtime.
 func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
-	args := []string{
-		"run", "--rm", "--name", name,
-		"-w", p.Workdir,
-		"-v", job.Dir + ":" + p.Workdir,
-		"-v", resultDir + ":" + containerResultDir,
-		"-e", core.EnvBaseSHA + "=" + job.BaseSHA,
-		"-e", core.EnvMergeSHA + "=" + job.MergeSHA,
-		"-e", core.EnvCandidateSHA + "=" + job.Candidate.SHA,
-		"-e", core.EnvRef + "=" + job.Candidate.Ref,
-		"-e", core.EnvResultFile + "=" + containerResultFile,
+	runtime := p.Runtime
+	if runtime == "" {
+		runtime = "container"
 	}
+	args := append([]string{"run"}, runtimeSpecs[runtime].ExtraRunArgs...)
+	args = append(args,
+		"--rm", "--name", name,
+		"-w", p.Workdir,
+		"-v", job.Dir+":"+p.Workdir,
+		"-v", resultDir+":"+containerResultDir,
+		"-e", core.EnvBaseSHA+"="+job.BaseSHA,
+		"-e", core.EnvMergeSHA+"="+job.MergeSHA,
+		"-e", core.EnvCandidateSHA+"="+job.Candidate.SHA,
+		"-e", core.EnvRef+"="+job.Candidate.Ref,
+		"-e", core.EnvResultFile+"="+containerResultFile,
+	)
 	for _, c := range p.Caches {
 		args = append(args, "-v", c.Name+":"+c.Path)
 	}

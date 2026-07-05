@@ -175,7 +175,10 @@ func TestChannel_EventKindsPostExpectedStatus(t *testing.T) {
 	}
 }
 
-func TestChannel_RejectedDescriptionUsesFirstLineOfFailingOutput(t *testing.T) {
+// The description is deliberately the record's Detail, never check output:
+// live-run experience showed output first-lines quoting runtime/progress
+// noise rather than the failing assertion. See detailOf.
+func TestChannel_RejectedDescriptionIsRecordDetailNotOutput(t *testing.T) {
 	srv, rec := newRecordingServer(t, http.StatusCreated)
 
 	c := New(Params{Owner: "acme", Repo: "widgets", Token: "tok", APIURL: srv.URL, Log: io.Discard})
@@ -198,7 +201,7 @@ func TestChannel_RejectedDescriptionUsesFirstLineOfFailingOutput(t *testing.T) {
 	}
 
 	got := rec.snapshot()
-	want := "airbag_test.go:18: deploy at 148ms, want <= 25ms"
+	want := `check "test" failed`
 	if got.body.Description != want {
 		t.Errorf("description = %q, want %q", got.body.Description, want)
 	}

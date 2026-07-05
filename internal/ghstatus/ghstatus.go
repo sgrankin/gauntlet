@@ -155,45 +155,20 @@ func statusFor(ev core.Event) (s state, description string, ok bool) {
 	}
 }
 
-// detailOf extracts the human-readable detail for a terminal event.
-// Preferred, in order: the first line of the failing check's output
-// (DESIGN.md Watch: "Red pings need the failing output" — a bare
-// `check "test" failed` detail is far less useful than the actual failing
-// line, e.g. "airbag_test.go:18: deploy at 148ms, want <= 25ms"). A commit
-// status's description is a single line, so the first line is used rather
-// than the tail LogChannel/Slack render — GitHub's UI truncates long
-// descriptions anyway, and the first line is usually where a test framework
-// prints what failed. Falls back to the carried RunRecord's Detail (the
-// §4.3 table's named source), then Event.Detail so a hand-built Event
+// detailOf extracts the human-readable detail for a terminal event: the
+// RunRecord's Detail, falling back to Event.Detail so a hand-built Event
 // without a Record still produces a description instead of an empty one.
+//
+// Deliberately NOT the failing check's output: a live run showed the "first
+// line of failing output" heuristic quoting runtime noise and go test's
+// package-status lines instead of the assertion. A 140-rune status
+// description says WHAT failed; the log/Slack tails, the dashboard run page,
+// and the MCP run tool say WHY.
 func detailOf(ev core.Event) string {
-	if ev.Record != nil {
-		if res := ev.Record.FirstFailure(); res != nil {
-			if line := firstFailureLine(res); line != "" {
-				return line
-			}
-		}
-		if ev.Record.Detail != "" {
-			return ev.Record.Detail
-		}
+	if ev.Record != nil && ev.Record.Detail != "" {
+		return ev.Record.Detail
 	}
 	return ev.Detail
-}
-
-// firstFailureLine returns the first non-empty line of res.Output, or
-// res.Err's message when Output has none (Err-only failures, e.g. a
-// canceled context, never populate Output). Returns "" when neither yields
-// anything.
-func firstFailureLine(res *core.CheckResult) string {
-	for _, ln := range strings.Split(res.Output, "\n") {
-		if t := strings.TrimSpace(ln); t != "" {
-			return t
-		}
-	}
-	if res.Err != nil {
-		return res.Err.Error()
-	}
-	return ""
 }
 
 // capDescription truncates s to at most descriptionCap runes.

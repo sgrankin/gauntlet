@@ -49,7 +49,7 @@ func TestParams_RunArgs_Shape(t *testing.T) {
 	got := p.runArgs(job, name, "/host/result-dir")
 
 	want := []string{
-		"run", "--rm", "--name", "gauntlet-run1-check1",
+		"run", "--progress", "none", "--rm", "--name", "gauntlet-run1-check1",
 		"-w", "/workspace",
 		"-v", "/host/trial-tree:/workspace",
 		"-v", "/host/result-dir:/gauntlet",
