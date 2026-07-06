@@ -73,6 +73,31 @@ func mustEmit(t *testing.T, s *Slack, ctx context.Context, ev core.Event) {
 	}
 }
 
+// emitAndDrain emits ev and blocks until the drainer has fully processed
+// it — the synchronization the posts-nothing tests need before asserting
+// absence. The wake channel MUST be grabbed before the emit: signalProcessed
+// closes-and-replaces s.notify, so grabbing after the emit races the drainer
+// — on a loaded machine (CI runners, not laptops) the drainer can process
+// the event first, leaving the test waiting testTimeout on a replacement
+// channel that only a second, never-sent event would close. That exact lost
+// wakeup flaked TestSlack_HookStartedPostsNothing on the v0.1.0-era CI run.
+// Grabbing first makes it impossible: processing our event necessarily
+// closes the channel we hold. (The waitFor* helpers don't need this — they
+// re-check their condition under the same lock that grabs the channel, so a
+// missed signal is caught by the next iteration's check.)
+func emitAndDrain(t *testing.T, s *Slack, ctx context.Context, ev core.Event) {
+	t.Helper()
+	s.mu.Lock()
+	wake := s.notify
+	s.mu.Unlock()
+	mustEmit(t, s, ctx, ev)
+	select {
+	case <-wake:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the event to be processed")
+	}
+}
+
 // waitForStats blocks until Stats() reports (wantRuns, wantRoots),
 // synchronizing on s.notify (closed and replaced every time the drainer
 // finishes handling one outbound event, including any map mutation)
@@ -350,18 +375,8 @@ func TestSlack_HookPassedPostsNothing(t *testing.T) {
 	cand := core.Candidate{Ref: "refs/heads/for/main/henry/deploy", Target: "main", User: "henry", Topic: "deploy", SHA: "0ff1ce"}
 
 	check := &core.CheckResult{Name: "deploy", Status: core.CheckPassed, Duration: time.Second}
-	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-pass", CheckName: "deploy", Check: check})
-
-	// Synchronize on notify (fires once the drainer has fully handled the
-	// event) rather than a wall-clock sleep before asserting absence.
-	s.mu.Lock()
-	wake := s.notify
-	s.mu.Unlock()
-	select {
-	case <-wake:
-	case <-time.After(testTimeout):
-		t.Fatal("timed out waiting for the event to be processed")
-	}
+	// emitAndDrain (not a wall-clock sleep) before asserting absence.
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-pass", CheckName: "deploy", Check: check})
 
 	if got := fake.snapshotPosts(); len(got) != 0 {
 		t.Fatalf("expected no Slack post for a passed hook, got %+v", got)
@@ -381,19 +396,7 @@ func TestSlack_HookFinishedNilCheckPostsNothing(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	cand := core.Candidate{Ref: "refs/heads/for/main/ivy/deploy", Target: "main", User: "ivy", Topic: "deploy", SHA: "0bad0bad"}
 
-	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-nil-check", CheckName: "deploy", Check: nil})
-
-	// Synchronize on notify (fires once the drainer has fully handled the
-	// event), matching TestSlack_HookPassedPostsNothing's rationale for not
-	// asserting absence against a wall-clock sleep.
-	s.mu.Lock()
-	wake := s.notify
-	s.mu.Unlock()
-	select {
-	case <-wake:
-	case <-time.After(testTimeout):
-		t.Fatal("timed out waiting for the event to be processed")
-	}
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventHookFinished, Target: "main", Candidate: cand, RunID: "run-hook-nil-check", CheckName: "deploy", Check: nil})
 
 	if got := fake.snapshotPosts(); len(got) != 0 {
 		t.Fatalf("expected no Slack post for a nil-Check hook-finished event, got %+v", got)
@@ -410,16 +413,7 @@ func TestSlack_HookStartedPostsNothing(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	cand := core.Candidate{Ref: "refs/heads/for/main/jill/deploy", Target: "main", User: "jill", Topic: "deploy", SHA: "cafefeed"}
 
-	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookStarted, Target: "main", Candidate: cand, RunID: "run-hook-started", CheckName: "deploy"})
-
-	s.mu.Lock()
-	wake := s.notify
-	s.mu.Unlock()
-	select {
-	case <-wake:
-	case <-time.After(testTimeout):
-		t.Fatal("timed out waiting for the event to be processed")
-	}
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventHookStarted, Target: "main", Candidate: cand, RunID: "run-hook-started", CheckName: "deploy"})
 
 	if got := fake.snapshotPosts(); len(got) != 0 {
 		t.Fatalf("expected no Slack post for EventHookStarted, got %+v", got)
@@ -455,16 +449,7 @@ func TestSlack_RetryRequestedPostsNothing(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	cand := core.Candidate{Ref: "refs/heads/for/main/kim/topic", Target: "main", SHA: "abc123"}
 
-	mustEmit(t, s, ctx, core.Event{Kind: core.EventRetryRequested, Target: "main", Candidate: cand})
-
-	s.mu.Lock()
-	wake := s.notify
-	s.mu.Unlock()
-	select {
-	case <-wake:
-	case <-time.After(testTimeout):
-		t.Fatal("timed out waiting for the event to be processed")
-	}
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventRetryRequested, Target: "main", Candidate: cand})
 
 	if got := fake.snapshotPosts(); len(got) != 0 {
 		t.Fatalf("expected no Slack post for EventRetryRequested, got %+v", got)
@@ -479,16 +464,7 @@ func TestSlack_RetryRequestedPostsNothing(t *testing.T) {
 // exactly like EventQueued/EventCheckStarted-without-thread today.
 func TestSlack_UnknownEventKindPostsNothing(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
-	mustEmit(t, s, ctx, core.Event{Kind: core.EventKind(999), Target: "main"})
-
-	s.mu.Lock()
-	wake := s.notify
-	s.mu.Unlock()
-	select {
-	case <-wake:
-	case <-time.After(testTimeout):
-		t.Fatal("timed out waiting for the event to be processed")
-	}
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventKind(999), Target: "main"})
 
 	if got := fake.snapshotPosts(); len(got) != 0 {
 		t.Fatalf("expected no Slack post for an unrecognized EventKind, got %+v", got)
@@ -499,19 +475,9 @@ func TestSlack_TerminalWithoutKnownRootIsANoOp(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 
 	rec := &core.RunRecord{RunID: "unknown-run", Target: "main", Outcome: core.OutcomeLanded}
-	mustEmit(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "unknown-run", Record: rec})
-
-	// Give the drainer a chance to process the event, synchronizing on
-	// notify rather than a sleep: signalProcessed fires once per handled
-	// event regardless of whether it did anything.
-	s.mu.Lock()
-	wake := s.notify
-	s.mu.Unlock()
-	select {
-	case <-wake:
-	case <-time.After(testTimeout):
-		t.Fatal("timed out waiting for the event to be processed")
-	}
+	// signalProcessed fires once per handled event regardless of whether it
+	// did anything, so emitAndDrain synchronizes even for this no-op path.
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "unknown-run", Record: rec})
 
 	if got := fake.snapshotPosts(); len(got) != 0 {
 		t.Fatalf("expected no Slack calls for an unknown run, got %+v", got)
