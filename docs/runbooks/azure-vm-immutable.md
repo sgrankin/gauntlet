@@ -159,8 +159,11 @@ resource "azurerm_linux_virtual_machine" "gauntlet" {
   }
 
   os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"
+    caching = "ReadWrite"
+    # StandardSSD, not Standard_LRS (spinning HDD): this disk is recreated
+    # on EVERY upgrade (custom_data change ⇒ VM replace), so its boot/apt
+    # speed is your upgrade downtime. Pennies/month buys minutes per apply.
+    storage_account_type = "StandardSSD_LRS"
   }
 
   source_image_reference {
@@ -205,7 +208,14 @@ resource "azurerm_virtual_machine_data_disk_attachment" "gauntlet_state" {
   managed_disk_id    = azurerm_managed_disk.gauntlet_state.id
   virtual_machine_id = azurerm_linux_virtual_machine.gauntlet.id
   lun                = "0"   # cloud-init's fs_setup below targets this exact LUN via /dev/disk/azure/scsi1/lun0
-  caching            = "ReadWrite"
+  # ReadWrite host caching favors throughput (git objects, docker layers,
+  # build caches — the bulk of this disk). The database-conservative choice
+  # is ReadOnly: a HOST failure can lose write-cached data, and history.db
+  # is the one file here that isn't derivable. Accepted under gauntlet's
+  # state doctrine (parks re-derive from history at boot; a lost tail of
+  # history rows costs bookkeeping, not correctness) — flip to ReadOnly if
+  # that trade reads differently for your deployment.
+  caching = "ReadWrite"
 }
 ```
 

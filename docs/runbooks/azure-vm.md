@@ -341,8 +341,12 @@ resource "azurerm_linux_virtual_machine" "gauntlet" {
   }
 
   os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"   # OS disk stays disposable/cheap — the data disk below is the durable one
+    caching = "ReadWrite"
+    # StandardSSD, not Standard_LRS: Standard_LRS is spinning HDD, and this
+    # disk is what boot + apt run from — recreated on every recovery, so its
+    # speed is your recovery time. Still disposable; the data disk below is
+    # the durable one.
+    storage_account_type = "StandardSSD_LRS"
   }
 
   # Stock Ubuntu LTS marketplace image — Terraform has no alias shorthand
@@ -387,7 +391,12 @@ resource "azurerm_virtual_machine_data_disk_attachment" "gauntlet_state" {
   managed_disk_id    = azurerm_managed_disk.gauntlet_state.id
   virtual_machine_id = azurerm_linux_virtual_machine.gauntlet.id
   lun                = "0"
-  caching            = "ReadWrite"
+  # ReadWrite host caching favors the disk's bulk workload (git objects,
+  # docker layers, build caches); the database-conservative choice is
+  # ReadOnly, since a HOST failure can lose write-cached data and
+  # history.db is the one non-derivable file. Accepted trade — see the
+  # immutable runbook's attachment block for the full reasoning.
+  caching = "ReadWrite"
 }
 ```
 
