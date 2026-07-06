@@ -9,6 +9,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # "|direct" (pipe, not comma) falls back to origin on ANY proxy
+      # error — proxy.golang.org intermittently kills zip downloads with
+      # stream INTERNAL_ERROR, which failed 2 of this workflow's first 3
+      # runs. Comma-fallback only covers 404/410, so it wouldn't help.
+      GOPROXY: https://proxy.golang.org|direct
     steps:
       - uses: actions/checkout@v7
 
@@ -17,7 +23,12 @@ jobs:
           go-version-file: go.mod
 
       - name: Tidy drift
-        run: go mod tidy -diff
+        # tidy walks the FULL module graph (goreleaser is a go.mod tool
+        # dependency, so that graph is large) — the widest network surface
+        # in this job. One retry on top of the GOPROXY fallback: the module
+        # cache keeps whatever the failed attempt already fetched, so a
+        # second pass only re-requests the stragglers.
+        run: go mod tidy -diff || { sleep 10; go mod tidy -diff; }
 
       - name: Build
         run: go build ./...
