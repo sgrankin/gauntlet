@@ -721,6 +721,13 @@ with no matching entry in `svcs` returns an error (mapped to
 unreachable — the pool must not panic on a contract violation by a future
 caller. One unit test in chunk 2's matrix.
 
+**A6 — ServiceKey encoding: Env gains a count prefix.** The §2.5 pinned
+encoding count-prefixed ReadyCommand but not Env, leaving the env region's
+boundary implied by field order alone. Amended during chunk-1 landing (cheap
+now, a full pool recycle if changed after release): `Env: count, then sorted
+by Name, each (Name,Value) length-prefixed`. Chunk 2 consumes keys opaquely,
+so nothing else changes.
+
 **A5 — Livetest step 6 needs a long-running red.** A `nc -z` check is too
 fast to `docker kill` a service mid-run. The M1 livetest uses a dedicated
 branch whose check is `sh -c 'sleep 30; exit 1'` with `needs "pg"` — kill

@@ -560,6 +560,78 @@ target "speculate-target" branch="s" {
 	}
 }
 
+// TestLoadDaemon_Services covers the §2.6 chunk-1 daemon test-matrix row:
+// `services { allow "container" }` parses, and MaxInstances/Runtime default
+// as documented (docs/plans/services-impl.md §2.3, §Amendments A3).
+func TestLoadDaemon_Services(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+services {
+    allow "container"
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if want := []string{"container"}; !reflect.DeepEqual(d.Services.Allow, want) {
+		t.Errorf("Services.Allow = %v, want %v", d.Services.Allow, want)
+	}
+	if d.Services.MaxInstances != defaultMaxInstances {
+		t.Errorf("Services.MaxInstances = %d, want default %d", d.Services.MaxInstances, defaultMaxInstances)
+	}
+	// Executor kind defaults to "local" when absent, so Runtime should
+	// default too (A3).
+	if d.Services.Runtime != defaultServicesRuntime {
+		t.Errorf("Services.Runtime = %q, want default %q", d.Services.Runtime, defaultServicesRuntime)
+	}
+}
+
+// TestLoadDaemon_Services_ContainerExecutorRuntimeWins covers A3's "no
+// services.runtime written ⇒ no defaulting, no conflict" path when the
+// executor is "container": Services.Runtime stays "" (never defaulted),
+// and load succeeds — chunk 3's cmd wiring is what actually resolves the
+// effective runtime from the executor block in that case.
+func TestLoadDaemon_Services_ContainerExecutorRuntimeWins(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    runtime "podman"
+    image "ghcr.io/acme/ci:latest"
+}
+services {
+    allow "container"
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if d.Services.Runtime != "" {
+		t.Errorf("Services.Runtime = %q, want \"\" (executor runtime wins, A3)", d.Services.Runtime)
+	}
+}
+
 func TestLoadDaemon_DurationParsing(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/gauntlet.kdl"
@@ -1391,6 +1463,93 @@ target "main" branch="main" {
 `,
 			wantErr: "reserved for a future adaptive-window governor",
 		},
+		{
+			name: "services allow artifact rejected",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+services {
+    allow "artifact"
+}
+`,
+			wantErr: "reserved for a future release",
+		},
+		{
+			name: "services allow unknown value rejected",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+services {
+    allow "bogus"
+}
+`,
+			wantErr: `services: allow must be "container"`,
+		},
+		{
+			// A literal 0 is indistinguishable from "absent" (applyDefaults
+			// would fill it back in to defaultMaxInstances, same
+			// zero-vs-absent ambiguity as Daemon.Poll) — a negative value
+			// is unambiguous either way, same convention as the
+			// poll-interval<=0 case above.
+			name: "services max-instances negative rejected",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+services {
+    allow "container"
+    max-instances -1
+}
+`,
+			wantErr: "max-instances must be at least 1",
+		},
+		{
+			name: "services runtime invalid under local executor",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+services {
+    allow "container"
+    runtime "bogus"
+}
+`,
+			wantErr: `runtime must be "docker" or "podman"`,
+		},
+		{
+			name: "services runtime conflicts with container executor runtime",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    runtime "podman"
+    image "ghcr.io/acme/ci:latest"
+}
+services {
+    allow "container"
+    runtime "docker"
+}
+`,
+			wantErr: `runtime "docker" conflicts with executor runtime "podman"`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1446,6 +1605,100 @@ check "test" {
 }
 `,
 			wantErr: `check "test"`,
+		},
+		{
+			name: "undeclared need",
+			kdl: `
+check "test" {
+    command "go" "test" "./..."
+    needs "mssql"
+}
+`,
+			wantErr: `needs "mssql": no such service declared`,
+		},
+		{
+			name: "duplicate need within a check",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+}
+check "test" {
+    command "go" "test" "./..."
+    needs "mssql" "mssql"
+}
+`,
+			wantErr: `needs "mssql": duplicate`,
+		},
+		{
+			name: "duplicate service name",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+}
+service "mssql" {
+    image "img2"
+    port 1434
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": duplicate`,
+		},
+		{
+			name: "service missing image",
+			kdl: `
+service "mssql" {
+    port 1433
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": image must not be empty`,
+		},
+		{
+			name: "service port zero",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 0
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": port must be between 1 and 65535`,
+		},
+		{
+			name: "service non-positive ready-timeout",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+    ready-timeout "-5s"
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": ready-timeout must be positive`,
+		},
+		{
+			name: "service non-positive idle-ttl",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+    idle-ttl "-5m"
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": idle-ttl must be positive`,
 		},
 	}
 	for _, tc := range cases {
