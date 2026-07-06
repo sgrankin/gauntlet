@@ -843,6 +843,24 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
      your client library) sidestep this because they stream bytes over the
      API instead of naming a host path.
 
+6. **docker-on-macOS footguns** (both found by live testing, both silent):
+   - **The daemon's `-state` dir must live under a path the docker VM
+     shares from the host.** colima shares only `$HOME` and `/tmp/colima`
+     by default (Docker Desktop has its own file-sharing list). Trial
+     trees are exported under `-state`, and `docker run -v` against an
+     unshared host path does not error — it bind-mounts an *empty*
+     directory, so every check fails with a confusing
+     module/file-not-found red instead of an infra error. Either keep
+     `-state` under `$HOME` or share it explicitly (e.g.
+     `colima start --mount /path/to/state:w`).
+   - **The `osxkeychain` credential helper blocks headless pulls.** If an
+     image isn't present locally, `docker run` pulls implicitly, the
+     credential helper may pop a Keychain prompt — even for anonymous
+     pulls of public images — and the check wedges until a human clicks.
+     Pre-pull images used by checks (`docker pull` once, interactively),
+     or drop `credsStore` from `~/.docker/config.json` on a headless
+     builder.
+
 ### OTLP export
 
 1. Point `otlp` at any OTLP/HTTP collector endpoint (e.g. a local
