@@ -16,7 +16,7 @@ LDFLAGS := -X main.version=$(VERSION)
 # Override on the command line (`make image RUNTIME=podman`) to force one.
 RUNTIME := $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null || command -v container 2>/dev/null)
 
-.PHONY: build test image clean release-snapshot
+.PHONY: build test image clean release-snapshot release
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/gauntlet
@@ -41,3 +41,26 @@ clean:
 # module records — same binary CI uses. See docs/deploy.md "Releases".
 release-snapshot:
 	go tool goreleaser release --snapshot --clean --skip=publish,docker
+
+# Cut a real tagged release: `make release VERSION=v0.1.0`. Operator-run
+# only — never invoked by CI or any other automation. Validates VERSION,
+# refuses if the working copy has uncommitted changes or has diverged from
+# origin/main, then tags and pushes; pushing a `v*` tag is what triggers
+# .github/workflows/release.yml (goreleaser does the rest).
+release:
+	@if [ "$(origin VERSION)" != "command line" ]; then \
+		echo "make release: VERSION must be given explicitly on the command line, e.g. make release VERSION=v0.1.0 (the top-of-file VERSION default is for build/image, not this)" >&2; \
+		exit 1; \
+	fi
+	@case "$(VERSION)" in \
+		v[0-9]*) ;; \
+		*) echo "make release: VERSION must match ^v[0-9] (got '$(VERSION)')" >&2; exit 1 ;; \
+	esac
+	@git diff --quiet || { echo "make release: working copy has uncommitted changes" >&2; exit 1; }
+	@git fetch origin
+	@[ "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" ] || { \
+		echo "make release: HEAD does not match origin/main — push/pull first" >&2; \
+		exit 1; \
+	}
+	git tag $(VERSION)
+	git push origin $(VERSION)

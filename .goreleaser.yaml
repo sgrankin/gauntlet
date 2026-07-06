@@ -21,16 +21,24 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
+# Raw binary assets, not tarballs: the release page serves
+# `gauntlet_<os>_<arch>` directly, no extraction step. Note this
+# name_template carries NO version — the release (tag) that owns each
+# asset is what distinguishes versions; see docs/deploy.md "Releases" and
+# docs/runbooks/azure-vm-immutable.md's URL-construction comment for the
+# consequence (the "v" prefix lives only in the release tag / URL path
+# segment, never in the filename).
 archives:
   - id: gauntlet
     ids: [gauntlet]
-    formats: [tar.gz]
-    files:
-      - README.md
-      - LICENSE
+    formats: [binary]
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
   name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
@@ -39,12 +47,15 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
+      - '^chore:'
+      - 'typo'
 
 release:
   github:
     owner: sgrankin
     name: gauntlet
   draft: false
+  prerelease: auto
 
 # Classic per-arch docker blocks + a manifest, not the newer dockers_v2
 # schema: dockers_v2 wasn't stable enough as of writing to commit to

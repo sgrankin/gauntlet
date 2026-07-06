@@ -220,20 +220,41 @@ docker run -d --name gauntlet \
 ## Releases
 
 Both topologies above can be fed from tagged releases instead of a local
-`make build`/`make image`: pushing a tag matching `v*` (e.g. `v1.4.0`) runs
-`.github/workflows/release.yml`, which drives `goreleaser` (`.goreleaser.yaml`)
-to publish, on the GitHub release page, `linux_amd64`/`linux_arm64`/
-`darwin_arm64` binary tarballs (each with a checksum file) plus, to
-`ghcr.io/sgrankin/gauntlet`, a multi-arch (`linux/amd64`+`linux/arm64`) image
-tagged both `<version>` and `latest`. Every push to `main` and every pull
-request separately runs `.github/workflows/ci.yml` (`go build`, `go vet`,
-`go test -race`) — the release workflow only runs on a tag push, and does not
-re-run the test suite itself.
+`make build`/`make image`. Cutting one is one command:
 
-- **Topology (a)** (warm builder VM): `curl -L` the release tarball for your
-  arch from the GitHub release page instead of `scp`-ing a locally built
-  binary; everything else in that topology's setup/upgrade steps is
-  unchanged.
+```sh
+make release VERSION=v1.4.0
+```
+
+This validates `VERSION` (must match `v[0-9]...`), refuses if the working
+copy has uncommitted changes or has diverged from `origin/main`, then tags
+and pushes — pushing a `v*` tag is what triggers
+`.github/workflows/release.yml`, which drives `goreleaser`
+(`.goreleaser.yaml`) to publish, on the GitHub release page, raw
+`gauntlet_linux_amd64` / `gauntlet_linux_arm64` / `gauntlet_darwin_arm64`
+binaries (no archive/extraction step — just the executable) plus a
+`checksums.txt`, and, to `ghcr.io/sgrankin/gauntlet`, a multi-arch
+(`linux/amd64`+`linux/arm64`) image tagged both `<version>` and `latest`.
+Every push to `main` and every pull request separately runs
+`.github/workflows/ci.yml` (`go mod tidy` drift check, `go build`, `go vet`,
+`go test -race`) — the release workflow only runs on a tag push, and does not
+re-run the test suite itself. `make release-snapshot` (see the Makefile) is
+the local dry-run of the goreleaser pipeline, skipping publish and docker.
+
+**Asset naming, read carefully before scripting against it:** the binary
+name_template is `{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}` — it carries
+**no version**. What distinguishes one release's assets from another's is
+which GitHub release (tag) they're attached to, not the filename itself; the
+version only ever appears in the release tag / download URL path segment
+(`.../releases/download/v1.4.0/gauntlet_linux_amd64`), never in the asset
+name. Getting this backwards (expecting a versioned filename) produces a
+404, not a wrong-version download.
+
+- **Topology (a)** (warm builder VM): `curl -fsSL -o /usr/local/bin/gauntlet`
+  the release binary for your arch from the GitHub release page and `chmod
+  +x` it, instead of `scp`-ing a locally built one; everything else in that
+  topology's setup/upgrade steps is unchanged. See
+  [azure-vm.md](runbooks/azure-vm.md) for the exact fetch commands.
 - **Topology (b)** (container): `docker pull ghcr.io/sgrankin/gauntlet:<version>`
   (or `:latest`) instead of `make image`; the `docker run` invocation and
   volume/state layout above are identical either way.

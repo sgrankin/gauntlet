@@ -44,11 +44,12 @@ variable "admin_cidr" {
 
 # The whole upgrade mechanism: bump this, `terraform apply`, done. Bare
 # semver, no leading "v" — the "v" is added where the GitHub release tag
-# needs it (see local.gauntlet_download_url in main.tf), since goreleaser's
-# archive filenames use the v-stripped {{ .Version }} while the release
-# *tag*/URL path segment is the raw {{ .Tag }} ("v0.2.0"). Mixing these up
-# produces a URL that 404s — get the "v" exactly where main.tf puts it,
-# nowhere else.
+# needs it (see local.gauntlet_download_url in main.tf). goreleaser's binary
+# asset name_template (`{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}` — see
+# .goreleaser.yaml) carries NO version at all; only the release *tag*/URL
+# path segment does ("v0.2.0"). Don't be tempted to add a version segment
+# to the filename anywhere below — the asset genuinely isn't named that
+# way, and doing so just produces a URL that 404s.
 variable "gauntlet_version" {
   type = string
 }
@@ -71,9 +72,12 @@ provider "azurerm" {
 }
 
 locals {
-  # See variables.tf's gauntlet_version comment for why the "v" appears
-  # only in the tag path segment, never in the filename.
-  gauntlet_download_url = "https://github.com/sgrankin/gauntlet/releases/download/v${var.gauntlet_version}/gauntlet_${var.gauntlet_version}_linux_amd64.tar.gz"
+  # See variables.tf's gauntlet_version comment: the "v" appears only in
+  # the tag path segment, and the filename itself carries no version at
+  # all (goreleaser's binary asset name_template is
+  # `{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}`) — no archive extension
+  # either, since releases publish the raw binary now, not a tarball.
+  gauntlet_download_url = "https://github.com/sgrankin/gauntlet/releases/download/v${var.gauntlet_version}/gauntlet_linux_amd64"
 }
 
 resource "azurerm_resource_group" "gauntlet" {
@@ -342,9 +346,11 @@ runcmd:
   # Fetch the pinned gauntlet release — no "latest" lookup here, on
   # purpose: immutable-replace means every apply is reproducible from
   # var.gauntlet_version, not from whatever tag happened to be newest when
-  # cloud-init ran.
+  # cloud-init ran. The release asset is the raw binary, not a tarball —
+  # no extraction step, just download-and-chmod.
   - mkdir -p /usr/local/bin
-  - curl -fsSL "${gauntlet_download_url}" | tar -xz -C /usr/local/bin gauntlet
+  - curl -fsSL -o /usr/local/bin/gauntlet "${gauntlet_download_url}"
+  - chmod +x /usr/local/bin/gauntlet
   - mkdir -p /mnt/gauntlet-state/state
 
   # gauntlet.kdl and gauntlet.env are NOT written here — they live on

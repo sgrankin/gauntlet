@@ -182,13 +182,15 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io git unattended-upg
 sudo dpkg-reconfigure -f noninteractive unattended-upgrades
 
 # Fetch the gauntlet binary from the latest tagged GitHub release
-# (goreleaser-built linux_amd64 tarball — see .goreleaser.yaml). Match by
-# pattern rather than a hardcoded filename so this survives version bumps
-# and any archive-naming tweak without edits here.
+# (goreleaser-built raw binary asset, not a tarball — see .goreleaser.yaml;
+# the asset name carries no version, docs/deploy.md's "Releases" section
+# explains why). Match by pattern rather than a hardcoded filename so this
+# survives version bumps without edits here.
 URL=$(curl -fsSL https://api.github.com/repos/sgrankin/gauntlet/releases/latest \
-  | grep -o '"browser_download_url": *"[^"]*linux_amd64\.tar\.gz"' \
+  | grep -o '"browser_download_url": *"[^"]*gauntlet_linux_amd64"' \
   | cut -d'"' -f4)
-curl -fsSL "$URL" | sudo tar -xz -C /usr/local/bin gauntlet
+sudo curl -fsSL -o /usr/local/bin/gauntlet "$URL"
+sudo chmod +x /usr/local/bin/gauntlet
 
 sudo mkdir -p /etc/gauntlet
 sudo mkdir -p /mnt/gauntlet-state/state
@@ -582,9 +584,9 @@ az vm get-instance-view -g <RESOURCE_GROUP> -n <VM_NAME> --query instanceView.st
 
 ```sh
 URL=$(curl -fsSL https://api.github.com/repos/sgrankin/gauntlet/releases/latest \
-  | grep -o '"browser_download_url": *"[^"]*linux_amd64\.tar\.gz"' \
+  | grep -o '"browser_download_url": *"[^"]*gauntlet_linux_amd64"' \
   | cut -d'"' -f4)
-ssh <ADMIN_USER>@<VM_IP> "curl -fsSL '$URL' | sudo tar -xz -C /usr/local/bin gauntlet && sudo systemctl restart gauntlet"
+ssh <ADMIN_USER>@<VM_IP> "sudo curl -fsSL -o /usr/local/bin/gauntlet '$URL' && sudo chmod +x /usr/local/bin/gauntlet && sudo systemctl restart gauntlet"
 ```
 
 Safe at any time, same "no durable in-flight state" argument as
