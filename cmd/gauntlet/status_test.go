@@ -572,3 +572,35 @@ func TestRenderStatus_ServicesSectionEmptyPool(t *testing.T) {
 		t.Errorf("output missing \"none live\" placeholder:\n%s", out)
 	}
 }
+
+// --- idle signal (docs/plans/scale.md §2) ------------------------------------
+
+// TestRenderStatus_IdleSinceRendered confirms renderStatus prints a trailing
+// "idle since ..." line when the API response carries a non-empty
+// idleSince, regardless of any -target filter (a daemon-level fact, same
+// convention as ignored refs/services).
+func TestRenderStatus_IdleSinceRendered(t *testing.T) {
+	resp := decodeCanned(t)
+	resp.IdleSince = "2026-07-05T11:55:00Z"
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "release", nil); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	if want := "idle since 2026-07-05T11:55:00Z\n"; !strings.HasSuffix(buf.String(), want) {
+		t.Errorf("output missing trailing %q:\n%s", want, buf.String())
+	}
+}
+
+// TestRenderStatus_IdleSinceOmittedWhenBusy confirms the line is absent
+// entirely (not printed empty) when the API response's idleSince is "" —
+// the daemon is busy right now.
+func TestRenderStatus_IdleSinceOmittedWhenBusy(t *testing.T) {
+	resp := decodeCanned(t) // idleSince left at its zero value ("")
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "", nil); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	if strings.Contains(buf.String(), "idle since") {
+		t.Errorf("output has an idle-since line while the daemon is busy:\n%s", buf.String())
+	}
+}

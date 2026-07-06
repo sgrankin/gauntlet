@@ -440,6 +440,84 @@ func TestFetchPrunesDeletedRefs(t *testing.T) {
 	}
 }
 
+// land drives repo's own MergeTree/CommitTree/CASUpdate exactly as the
+// daemon's real land path does, producing a --no-ff merge of cand onto base
+// and CAS-pushing it to ref — the real-git shape FindLandingMerge searches
+// for.
+func land(t *testing.T, ctx context.Context, repo *gitx.Repo, ref, base, cand string) string {
+	t.Helper()
+	tm, err := repo.MergeTree(ctx, base, cand)
+	if err != nil || !tm.Clean {
+		t.Fatalf("land: MergeTree(%s, %s): tm=%+v err=%v", base, cand, tm, err)
+	}
+	who := core.Identity{Name: "Gauntlet", Email: "gauntlet@ci.example"}
+	commit, err := repo.CommitTree(ctx, tm.TreeOID, []string{base, cand}, "land\n", who)
+	if err != nil {
+		t.Fatalf("land: CommitTree: %v", err)
+	}
+	if err := repo.CASUpdate(ctx, ref, base, commit); err != nil {
+		t.Fatalf("land: CASUpdate: %v", err)
+	}
+	return commit
+}
+
+func TestFindLandingMergeFindsEachCandidatesOwnMerge(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	aliceRef := remote.PushCandidate("main", "alice", "feat-a", map[string]string{"a.txt": "a\n"})
+	bobRef := remote.PushCandidate("main", "bob", "feat-b", map[string]string{"b.txt": "b\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	refs, err := repo.ListRefs(ctx)
+	if err != nil {
+		t.Fatalf("ListRefs: %v", err)
+	}
+	base, aliceSHA, bobSHA := refs["refs/heads/main"], refs[aliceRef], refs[bobRef]
+
+	aliceMerge := land(t, ctx, repo, "refs/heads/main", base, aliceSHA)
+	bobMerge := land(t, ctx, repo, "refs/heads/main", aliceMerge, bobSHA)
+	tip := bobMerge
+
+	// bobMerge is branchTip itself: a direct parent-2 match, no walk needed.
+	got, err := repo.FindLandingMerge(ctx, tip, bobSHA)
+	if err != nil || got != bobMerge {
+		t.Fatalf("FindLandingMerge(tip, bobSHA) = %q, %v, want %q, nil", got, err, bobMerge)
+	}
+
+	// aliceMerge is NOT branchTip — the walk must step past bob's link to
+	// find it (this is the shape TestBatchCrashRecovery's non-head members
+	// need: their own merge is behind the current tip).
+	got, err = repo.FindLandingMerge(ctx, tip, aliceSHA)
+	if err != nil || got != aliceMerge {
+		t.Fatalf("FindLandingMerge(tip, aliceSHA) = %q, %v, want %q, nil", got, err, aliceMerge)
+	}
+}
+
+func TestFindLandingMergeUnlandedReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	aliceRef := remote.PushCandidate("main", "alice", "feat-a", map[string]string{"a.txt": "a\n"})
+	carolRef := remote.PushCandidate("main", "carol", "feat-c", map[string]string{"c.txt": "c\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	refs, err := repo.ListRefs(ctx)
+	if err != nil {
+		t.Fatalf("ListRefs: %v", err)
+	}
+	base, aliceSHA, carolSHA := refs["refs/heads/main"], refs[aliceRef], refs[carolRef]
+
+	tip := land(t, ctx, repo, "refs/heads/main", base, aliceSHA)
+
+	got, err := repo.FindLandingMerge(ctx, tip, carolSHA)
+	if err != nil || got != "" {
+		t.Fatalf("FindLandingMerge(tip, unlanded carolSHA) = %q, %v, want \"\", nil", got, err)
+	}
+}
+
 // catFile and revParse inspect objects directly (bypassing the GitRepo
 // interface, which has no generic object-inspection method) to verify what
 // CommitTree actually produced.

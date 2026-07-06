@@ -590,14 +590,20 @@ func TestSpeculateCrashRecovery(t *testing.T) {
 		t.Fatalf("recovery re-tested instead of recovering: mergeTreeCalls=%d commitTreeCalls=%d", h.git.mergeTreeCalls, h.git.commitTreeCalls)
 	}
 
-	var landedCount int
+	var landed []*core.RunRecord
 	for _, e := range h.ch.Events() {
 		if e.Kind == core.EventLanded {
-			landedCount++
+			landed = append(landed, e.Record)
 		}
 	}
-	if landedCount != 2 {
-		t.Fatalf("EventLanded count = %d, want 2 (alice + bob recovered)", landedCount)
+	if len(landed) != 2 {
+		t.Fatalf("EventLanded count = %d, want 2 (alice + bob recovered)", len(landed))
+	}
+	wantMergeSHA := map[string]string{"alice": linkA, "bob": linkB}
+	for _, rec := range landed {
+		if want := wantMergeSHA[rec.Candidate.User]; rec.MergeSHA != want {
+			t.Errorf("%s: MergeSHA = %q, want its own landing merge %q", rec.Candidate.User, rec.MergeSHA, want)
+		}
 	}
 
 	// carol's ref is NOT an ancestor of the new tip (linkB has no trace of

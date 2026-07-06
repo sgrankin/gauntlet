@@ -864,7 +864,7 @@ func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip
 		return
 	}
 	if landed {
-		d.recoverLanded(ctx, t, cand)
+		d.recoverLanded(ctx, t, cand, targetTip)
 		return
 	}
 
@@ -902,7 +902,7 @@ func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip str
 		return
 	}
 	if landed {
-		d.recoverLanded(ctx, t, head)
+		d.recoverLanded(ctx, t, head, targetTip)
 		return
 	}
 
@@ -1282,7 +1282,7 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 				return
 			}
 			if landed {
-				d.recoverLanded(ctx, t, cand)
+				d.recoverLanded(ctx, t, cand, targetTip)
 				return
 			}
 		}
@@ -1615,9 +1615,11 @@ func (d *Daemon) finalizeRun(r *run) {
 // candidate SHA (phase1 §9.4's stand-in rule, minted through the same
 // counter as a real run ID so it can never collide with one), zero checks,
 // OutcomeLanded, and a Detail explaining that checks were not re-run. As
-// before, this is a pure recovery action, not a run: no merge ever happens,
-// so BaseOID/MergeSHA/Trial stay zero-valued, matching the other
-// pre-merge synthesized records (rejectPreMerge).
+// before, this is a pure recovery action, not a run: no merge ever happens
+// here, so BaseOID/Trial stay zero-valued, matching the other pre-merge
+// synthesized records (rejectPreMerge). MergeSHA, however, IS filled in
+// (below) — the landing merge already exists, it's simply looked up rather
+// than created.
 //
 // O2 (docs/plans/phase5.md §8): called per member (refillBatch/refillSpeculate
 // each check their own head pick with it, same as refillSerialOne), so a
@@ -1631,42 +1633,36 @@ func (d *Daemon) finalizeRun(r *run) {
 // separate landings, not as one batch summary, for any batch that crashes in
 // this window.
 //
-// MergeSHA is deliberately left zero (phase-6 audit synthesis, flag #5:
-// "operator retries explicitly" needs the actual landed merge commit to
-// re-run recovery-skipped hooks against). Investigated and skipped rather
-// than forced: identifying it correctly would mean walking first-parent
-// history from the target tip for the merge commit whose second parent is
-// cand.SHA (or whose message carries this candidate's Gauntlet-Ref
-// trailer), but core.GitRepo exposes no such primitive — IsAncestor is
-// boolean-only, and Log (used elsewhere for Config.MergeBody's prompt) is
-// scoped to summarize.Git's job of returning commit Subject/Body text, not
-// SHAs or parent lists, over a base..tip range. Getting this right would
-// need a new core.GitRepo method (plus its gitx.Repo implementation and the
-// queue package's fake test double) — real plumbing outside this recovery
-// function's own file, not a same-file addition, so it's left for a
-// follow-up rather than done unsafely here (a wrong guess, e.g. "the
-// current target tip", is actively misleading for any but the single
-// head-of-chain member — see TestBatchCrashRecovery: bob/carol's own merge
-// commits are NOT the target tip at the moment their own recovery runs).
-// Net effect: a recovery-skipped hook chain (EventHookSkipped, chunk 1) stays
-// discoverable-but-manual — an operator can see it happened, but re-running
-// the hooks for that landing still requires manually locating the merge SHA
-// out of band, exactly as before this phase's work.
-func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.Candidate) {
+// MergeSHA is looked up via core.GitRepo.FindLandingMerge (phase-6 audit
+// synthesis, flag #5: "operator retries explicitly" needs the actual landed
+// merge commit to re-run recovery-skipped hooks against) — per-candidate,
+// since a wrong guess (e.g. "the current target tip", targetTip itself) is
+// actively misleading for any but the single head-of-chain member: see
+// TestBatchCrashRecovery, where bob/carol's own merge commits are NOT the
+// target tip at the moment their own recovery runs. FindLandingMerge's
+// lookup can come back "" (not found within its bound) or hard-fail (a
+// plumbing error); either way this is best-effort enrichment, not something
+// recovery itself depends on — cand.SHA is already known to be landed
+// (that's why we're here), so a failed or empty lookup just leaves MergeSHA
+// zero rather than aborting the recovery.
+func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.Candidate, targetTip string) {
 	if delErr := d.git.CASUpdate(ctx, cand.Ref, cand.SHA, ""); delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
 		return // transient; retry next tick
 	}
 	now := d.now()
 	runID := newRunID(now, cand.SHA)
 	const detail = "candidate already ancestor of target; checks not re-run"
+	mergeSHA, _ := d.git.FindLandingMerge(ctx, targetTip, cand.SHA) // best-effort; "" (found or not) either way
 	rec := &core.RunRecord{
 		RunID:     runID,
 		Target:    t.Name,
 		Candidate: cand,
+		MergeSHA:  mergeSHA,
 		Outcome:   core.OutcomeLanded,
 		Detail:    detail,
 		StartedAt: now,
 		EndedAt:   now,
+		Recovered: true,
 	}
 	d.emit(ctx, core.Event{
 		Kind: core.EventLanded, At: now, Target: t.Name, Candidate: cand,

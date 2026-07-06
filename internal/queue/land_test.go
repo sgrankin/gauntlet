@@ -150,4 +150,7 @@ func TestReconcile_IsAncestorRecovery(t *testing.T) {
 	if last.StartedAt.IsZero() || last.EndedAt.IsZero() {
 		t.Fatalf("StartedAt/EndedAt not set: %+v", last)
 	}
+	if last.MergeSHA != mergeOID {
+		t.Fatalf("MergeSHA = %q, want the recovered landing's own merge commit %q", last.MergeSHA, mergeOID)
+	}
 }

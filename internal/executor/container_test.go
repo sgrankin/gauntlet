@@ -522,6 +522,215 @@ func TestContainerExecutor_ScratchDirRootsResultDirMount(t *testing.T) {
 	}
 }
 
+// --- diagnoseMount: pure decision function. ---
+
+func TestDiagnoseMount(t *testing.T) {
+	cases := []struct {
+		name       string
+		diagOutput string
+		diagErr    error
+		want       mountDiagnosis
+	}{
+		{"errored diagnostic is inconclusive regardless of output", "some output", errors.New("exit status 127"), diagInconclusive},
+		{"empty output with no error means the mount arrived empty", "", nil, diagMountEmpty},
+		{"whitespace-only output still counts as empty", "  \n\t \n", nil, diagMountEmpty},
+		{"non-empty output means the mount had real content", "main.go\n", nil, diagMountHasContent},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := diagnoseMount(c.diagOutput, c.diagErr)
+			if got != c.want {
+				t.Errorf("diagnoseMount(%q, %v) = %v, want %v", c.diagOutput, c.diagErr, got, c.want)
+			}
+		})
+	}
+}
+
+// --- emptyMountDiagArgs: pure argv builder, no runtime required. ---
+
+func TestParams_EmptyMountDiagArgs_Shape(t *testing.T) {
+	p := Params{Workdir: "/workspace", Image: "ghcr.io/acme/ci:latest"}
+	job := containerJob([]string{"go", "test", "./..."})
+
+	got := p.emptyMountDiagArgs(job)
+
+	want := []string{
+		// Empty Runtime defaults to "container" (New's default, mirrored
+		// here since emptyMountDiagArgs is a Params method called before
+		// New's normalization would apply), so --progress none is present
+		// same as runArgs.
+		"run", "--progress", "none", "--rm",
+		"-v", "/host/trial-tree:/workspace:ro",
+		"--entrypoint", "/bin/sh",
+		"ghcr.io/acme/ci:latest",
+		"-c", "ls -A /workspace | head -1",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("emptyMountDiagArgs length = %d, want %d\n got=%v\nwant=%v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("emptyMountDiagArgs[%d] = %q, want %q\n got=%v\nwant=%v", i, got[i], want[i], got, want)
+		}
+	}
+}
+
+func TestParams_EmptyMountDiagArgs_ContainerRuntimeGetsProgressFlag(t *testing.T) {
+	// Same --progress none suppression as runArgs (Apple's container CLI
+	// pollutes stderr otherwise) — the diagnostic run is still a `run`.
+	p := Params{Runtime: "container", Workdir: "/w", Image: "img"}
+	job := containerJob([]string{"true"})
+
+	got := p.emptyMountDiagArgs(job)
+
+	if !containsPair(got, "--progress", "none") {
+		t.Fatalf("expected --progress none for the container runtime; argv=%v", got)
+	}
+}
+
+func TestParams_EmptyMountDiagArgs_MountReadOnly(t *testing.T) {
+	// :ro, unlike the trial-tree mount in the real run — the diagnostic
+	// never needs to write, and read-only avoids any risk of the listing
+	// container mutating the trial tree out from under the real run (moot
+	// in practice since it only runs after the real container has exited,
+	// but cheap to assert).
+	p := Params{Workdir: "/workspace", Image: "img"}
+	job := containerJob([]string{"true"})
+
+	got := p.emptyMountDiagArgs(job)
+
+	if !containsPair(got, "-v", "/host/trial-tree:/workspace:ro") {
+		t.Fatalf("expected read-only trial-tree mount; argv=%v", got)
+	}
+}
+
+// --- RunCheck: empty-mount reclassification, via the fake-CLI harness. ---
+//
+// Same technique as TestContainerExecutor_ScratchDirRootsResultDirMount: a
+// fake "container" CLI on PATH stands in for the real runtime so this proves
+// RunCheck's wiring (which argv triggers which behavior) without needing a
+// real container runtime. The fake distinguishes the diagnostic invocation
+// from the probe and the real `run` by the presence of "--entrypoint" in its
+// argv (emptyMountDiagArgs is the only caller that ever passes it).
+
+// writeFakeRuntime installs a fake "container" CLI on PATH that: always
+// succeeds the probe ("system status"), always fails the real check run
+// (nonzero exit, so RunCheck's CheckFailed/diagnostic path is reached), and
+// for the diagnostic run (argv containing "--entrypoint") prints
+// diagOutput's content iff the sentinel file at contentMarker exists,
+// mimicking a listing that finds content vs. an empty directory.
+func writeFakeRuntime(t *testing.T, contentMarker string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--entrypoint" ]; then
+    if [ -f "` + contentMarker + `" ]; then
+      echo "somefile"
+    fi
+    exit 0
+  fi
+done
+case "$1 $2" in
+  "system status") exit 0 ;;
+esac
+echo boom
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "container"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake runtime: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
+func TestContainerExecutor_EmptyMount_ReclassifiesToErr(t *testing.T) {
+	writeFakeRuntime(t, filepath.Join(t.TempDir(), "never-created"))
+
+	c, err := New(Params{Runtime: "container", Image: "img"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	job := containerJob([]string{"true"})
+	job.Dir = t.TempDir()
+
+	res := c.RunCheck(context.Background(), job)
+
+	if res.Err == nil {
+		t.Fatalf("expected Err (empty-mount reclassification), got Status=%v Output=%q", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Err.Error(), job.Dir) {
+		t.Errorf("Err = %v, want it to mention job.Dir %q", res.Err, job.Dir)
+	}
+	if res.Output != "boom\n" {
+		t.Errorf("Output = %q, want the original captured output preserved", res.Output)
+	}
+}
+
+func TestContainerExecutor_NonEmptyMount_KeepsRedUnconverted(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "has-content")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	writeFakeRuntime(t, marker)
+
+	c, err := New(Params{Runtime: "container", Image: "img"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	job := containerJob([]string{"true"})
+	job.Dir = t.TempDir()
+
+	res := c.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("expected no reclassification when the mount has content, got Err: %v", res.Err)
+	}
+	if res.Status != core.CheckFailed {
+		t.Errorf("Status = %v, want CheckFailed", res.Status)
+	}
+}
+
+func TestContainerExecutor_InconclusiveDiagnostic_KeepsRedUnconverted(t *testing.T) {
+	// The check image has no /bin/sh (or the diagnostic errors for any
+	// other reason): the fake CLI fails whenever --entrypoint is present,
+	// simulating that. Reclassification must not happen — an unprovable
+	// guess about an empty mount must never override a real check-side red.
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--entrypoint" ]; then
+    echo "no such file or directory: /bin/sh" >&2
+    exit 127
+  fi
+done
+case "$1 $2" in
+  "system status") exit 0 ;;
+esac
+echo boom
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "container"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake runtime: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	c, err := New(Params{Runtime: "container", Image: "img"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	job := containerJob([]string{"true"})
+	job.Dir = t.TempDir()
+
+	res := c.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("expected no reclassification when the diagnostic itself errors, got Err: %v", res.Err)
+	}
+	if res.Status != core.CheckFailed {
+		t.Errorf("Status = %v, want CheckFailed", res.Status)
+	}
+}
+
 // --- integration tests against the real runtime, if usable. ---
 //
 // Per docs/plans/phase23.md §1 Spike C, this machine has only Apple

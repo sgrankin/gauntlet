@@ -157,7 +157,9 @@ func New(p Params) http.Handler {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "status",
 		Description: "Live merge-queue status: per-target in-flight run, waiting queue (FIFO order), " +
-			"and parked candidates. Mirrors GET /api/v1/status. Pass target to filter to one target.",
+			"and parked candidates, plus idleSince when the whole daemon (queue and hooks, every " +
+			"target) has been idle since some instant. Mirrors GET /api/v1/status. Pass target to " +
+			"filter which targets are displayed (idleSince always covers every target regardless).",
 	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in statusIn) (*sdkmcp.CallToolResult, statusOut, error) {
 		return nil, handleStatus(p, in), nil
 	})
@@ -256,6 +258,17 @@ type statusOut struct {
 	// Each entry's target field carries the unconfigured name for display.
 	// Omitted when history is disabled.
 	IgnoredRefs []ignoredRefStatus `json:"ignoredRefs,omitempty"`
+
+	// IdleSince mirrors dashboard/api.go's statusResponse.IdleSince
+	// field-for-field: the RFC3339 instant since which the WHOLE daemon has
+	// been idle — every target's queue AND every target's post-land hooks —
+	// per docs/plans/scale.md §2. Always computed over EVERY target
+	// regardless of in.Target's filter, since the signal is daemon-wide by
+	// definition (an agent asking about one target still gets the whole
+	// daemon's idle state, same as dashboard.statusResponse.IdleSince isn't
+	// scoped by any target filter either — this endpoint has none). Omitted
+	// whenever the daemon isn't idle right now.
+	IdleSince string `json:"idleSince,omitempty"`
 }
 
 // targetStatus, inFlightStatus, waitingStatus, and parkedStatus mirror
@@ -381,7 +394,31 @@ func handleStatus(p Params, in statusIn) statusOut {
 			}
 		}
 	}
+	if since := idleSince(p, snap); !since.IsZero() {
+		out.IdleSince = formatRFC3339(since)
+	}
 	return out
+}
+
+// idleSince mirrors dashboard/api.go's dash.idleSince: composes queue
+// idleness (snap.IdleSince, docs/plans/scale.md §2) with hook idleness
+// (p.HookSnapshot) into the one daemon-wide idle instant. Always evaluated
+// over every target in snap, never a caller-filtered subset — handleStatus's
+// in.Target only narrows what's DISPLAYED in out.Targets, not what decides
+// daemon-wide idleness. p.HookSnapshot nil (hooks not configured) means
+// queue idleness alone decides.
+func idleSince(p Params, snap *queue.Snapshot) time.Time {
+	if snap.IdleSince.IsZero() {
+		return time.Time{}
+	}
+	if p.HookSnapshot != nil {
+		for _, ts := range snap.Targets {
+			if lh, ok := p.HookSnapshot(ts.Name); ok && (lh.Running || lh.BacklogDepth > 0) {
+				return time.Time{}
+			}
+		}
+	}
+	return snap.IdleSince
 }
 
 // hookRunsLimit/ignoredRefsLimit mirror dashboard/api.go's own limits: a

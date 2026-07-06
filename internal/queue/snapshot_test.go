@@ -237,3 +237,48 @@ func TestSnapshot_WaitingExcludesBatchMembers(t *testing.T) {
 		t.Fatalf("Waiting = %+v, want none (F3: a batch's non-head members must not double-count as waiting)", ts.Waiting)
 	}
 }
+
+// TestSnapshot_IdleSince covers the queue-idleness signal (docs/plans/
+// scale.md §2): an idle repo stamps IdleSince on its very first pass, holds
+// that instant steady across further idle passes, zeroes it the instant a
+// candidate arrives, and stamps a FRESH instant (not the original) once the
+// queue drains back to idle.
+func TestSnapshot_IdleSince(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+
+	h.reconcile() // nothing pushed yet: idle from the first pass
+	snap := h.d.Snapshot()
+	if snap.IdleSince.IsZero() {
+		t.Fatal("IdleSince is zero on an idle daemon's first pass")
+	}
+	firstIdle := snap.IdleSince
+
+	h.reconcile() // still idle: IdleSince must not move
+	if got := h.d.Snapshot().IdleSince; got != firstIdle {
+		t.Fatalf("IdleSince = %v after a second idle pass, want unchanged %v", got, firstIdle)
+	}
+
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", checkSpecFile("test"))
+	h.reconcile() // candidate claims the lane: busy
+	if got := h.d.Snapshot().IdleSince; !got.IsZero() {
+		t.Fatalf("IdleSince = %v while a candidate is in flight, want zero", got)
+	}
+
+	runID := h.currentRunID()
+	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // lands
+	// buildSnapshot uses the SAME refs map ReconcileOnce fetched at the top of
+	// this tick (captured before this tick's own CAS-delete of the candidate
+	// slot ref), so the just-landed candidate still shows up as Waiting in
+	// THIS tick's snapshot — one more tick re-fetches refs and sees it truly
+	// gone.
+	h.reconcile()
+	snap2 := h.d.Snapshot()
+	if snap2.IdleSince.IsZero() {
+		t.Fatal("IdleSince is zero after the queue drained back to idle")
+	}
+	if !snap2.IdleSince.After(firstIdle) {
+		t.Fatalf("IdleSince = %v after re-idling, want a fresh instant after %v, not the original", snap2.IdleSince, firstIdle)
+	}
+}

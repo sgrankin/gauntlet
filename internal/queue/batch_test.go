@@ -232,14 +232,23 @@ func TestBatchCrashRecovery(t *testing.T) {
 		t.Fatalf("recovery re-tested instead of recovering: mergeTreeCalls=%d commitTreeCalls=%d", h.git.mergeTreeCalls, h.git.commitTreeCalls)
 	}
 
-	var landedCount int
+	var landed []*core.RunRecord
 	for _, e := range h.ch.Events() {
 		if e.Kind == core.EventLanded {
-			landedCount++
+			landed = append(landed, e.Record)
 		}
 	}
-	if landedCount != 3 {
-		t.Fatalf("EventLanded count = %d, want 3 (one recovered landing per member)", landedCount)
+	if len(landed) != 3 {
+		t.Fatalf("EventLanded count = %d, want 3 (one recovered landing per member)", len(landed))
+	}
+	// Each member's synthesized record must carry ITS OWN landing merge, not
+	// the target tip (linkC) — the exact false guess this deferral used to
+	// warn against (bob/carol's own merges are not the tip at recovery time).
+	wantMergeSHA := map[string]string{"alice": linkA, "bob": linkB, "carol": linkC}
+	for _, rec := range landed {
+		if want := wantMergeSHA[rec.Candidate.User]; rec.MergeSHA != want {
+			t.Errorf("%s: MergeSHA = %q, want its own landing merge %q", rec.Candidate.User, rec.MergeSHA, want)
+		}
 	}
 }
 

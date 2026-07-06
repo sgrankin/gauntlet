@@ -91,6 +91,9 @@ func TestIntegration_CrashBetweenLandAndDelete(t *testing.T) {
 	if last.Candidate.SHA != candSHA {
 		t.Fatalf("Candidate.SHA = %q, want %q", last.Candidate.SHA, candSHA)
 	}
+	if last.MergeSHA != mergeOID {
+		t.Fatalf("MergeSHA = %q, want the recovered landing's own merge commit %q (FindLandingMerge over real git)", last.MergeSHA, mergeOID)
+	}
 }
 
 // TestIntegration_DuplicateDaemon is §5's "Duplicate daemon" row

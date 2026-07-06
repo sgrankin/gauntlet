@@ -1227,3 +1227,103 @@ func TestAPIServices_EmptyPool(t *testing.T) {
 		t.Errorf("instances = %v, want an empty array", m["instances"])
 	}
 }
+
+// --- GET /api/v1/status: idleSince (docs/plans/scale.md §2) -----------------
+
+// TestAPIStatus_IdleSinceAbsentWhenQueueBusy confirms idleSince is omitted
+// (not just empty) whenever queue.Snapshot.IdleSince is zero — testSnapshot's
+// "main" target has an in-flight run, so the queue is busy and IdleSince is
+// left at its zero value.
+func TestAPIStatus_IdleSinceAbsentWhenQueueBusy(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	if _, ok := m["idleSince"]; ok {
+		t.Errorf("idleSince = %v, want absent while the queue is busy", m["idleSince"])
+	}
+}
+
+// TestAPIStatus_IdleSincePresentWhenQueueIdleNoHooksConfigured confirms
+// idleSince surfaces snap.IdleSince verbatim (RFC3339) when the queue is
+// idle and no hook snapshot is wired up at all — queue idleness alone
+// decides in that case.
+func TestAPIStatus_IdleSincePresentWhenQueueIdleNoHooksConfigured(t *testing.T) {
+	snap := testSnapshot()
+	idleAt := snap.At.Add(-5 * time.Minute)
+	snap.IdleSince = idleAt
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	got, ok := m["idleSince"].(string)
+	if !ok {
+		t.Fatalf("idleSince = %v, want a string instant", m["idleSince"])
+	}
+	if want := idleAt.UTC().Format(time.RFC3339); got != want {
+		t.Errorf("idleSince = %q, want %q", got, want)
+	}
+}
+
+// TestAPIStatus_IdleSinceSuppressedByRunningHook confirms a queue-idle
+// snapshot still omits idleSince when ANY target's hook is currently
+// running — the daemon isn't fully idle until hooks settle too.
+func TestAPIStatus_IdleSinceSuppressedByRunningHook(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	hookSnapshot := func(target string) (dashboard.LiveHook, bool) {
+		if target != "main" {
+			return dashboard.LiveHook{}, false
+		}
+		return dashboard.LiveHook{Target: "main", Running: true}, true
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithHookSnapshot(hookSnapshot))
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	if _, ok := m["idleSince"]; ok {
+		t.Errorf("idleSince = %v, want absent while a target's hook is running", m["idleSince"])
+	}
+}
+
+// TestAPIStatus_IdleSinceSuppressedByHookBacklog is the same suppression,
+// via BacklogDepth rather than Running — a queued-but-not-yet-started hook
+// chain is exactly as "not idle" as one mid-execution.
+func TestAPIStatus_IdleSinceSuppressedByHookBacklog(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	hookSnapshot := func(target string) (dashboard.LiveHook, bool) {
+		if target != "main" {
+			return dashboard.LiveHook{}, false
+		}
+		return dashboard.LiveHook{Target: "main", BacklogDepth: 1}, true
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithHookSnapshot(hookSnapshot))
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	if _, ok := m["idleSince"]; ok {
+		t.Errorf("idleSince = %v, want absent while a target has a hook backlog", m["idleSince"])
+	}
+}
+
+// TestAPIStatus_IdleSincePresentWithHooksConfiguredButQuiet confirms hooks
+// being CONFIGURED doesn't by itself suppress idleSince — only an actually
+// running or backlogged hook does; a wired-up hookSnapshot reporting
+// ok=false (or running=false, backlog=0) for every target leaves idleSince
+// exactly as queue idleness alone would.
+func TestAPIStatus_IdleSincePresentWithHooksConfiguredButQuiet(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	hookSnapshot := func(target string) (dashboard.LiveHook, bool) {
+		return dashboard.LiveHook{}, false
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithHookSnapshot(hookSnapshot))
+
+	_, body := get(t, h, "/api/v1/status")
+	m := decodeJSON(t, body)
+	if _, ok := m["idleSince"]; !ok {
+		t.Error("idleSince absent, want present: hooks configured but none running/backlogged anywhere")
+	}
+}

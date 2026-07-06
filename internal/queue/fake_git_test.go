@@ -190,6 +190,46 @@ func (f *fakeGitRepo) IsAncestor(ctx context.Context, maybeAncestor, ref string)
 	return walk(ref), nil
 }
 
+// FindLandingMerge mirrors gitx.Repo's own logic (a real implementation, not
+// a script, per this fake's own convention): walk branchTip's first-parent
+// chain, newest first, and return the first 2-parent commit whose second
+// parent equals candidateSHA exactly (see core.GitRepo.FindLandingMerge and
+// gitx's own doc comment for why exact equality, not ancestry, is correct).
+func (f *fakeGitRepo) FindLandingMerge(ctx context.Context, branchTip, candidateSHA string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	merges := 0
+	for oid := branchTip; oid != ""; {
+		c, ok := f.commits[oid]
+		if !ok {
+			return "", nil
+		}
+		if len(c.parents) >= 2 {
+			if c.parents[1] == candidateSHA {
+				return oid, nil
+			}
+			// Mirrors gitx.Repo's real `--max-count` behavior (verified
+			// against real git): the bound counts merge commits found
+			// along the first-parent walk, not every commit stepped over.
+			merges++
+			if merges >= maxLandingMergeSearchTest {
+				return "", nil
+			}
+		}
+		if len(c.parents) == 0 {
+			return "", nil
+		}
+		oid = c.parents[0] // first-parent walk
+	}
+	return "", nil
+}
+
+// maxLandingMergeSearchTest bounds fakeGitRepo.FindLandingMerge's walk,
+// mirroring gitx.Repo's own maxLandingMergeSearch bound so tests exercise
+// the same "give up eventually" contract without needing a real, unexported
+// constant shared across packages.
+const maxLandingMergeSearchTest = 1000
+
 func (f *fakeGitRepo) ExportTree(ctx context.Context, tree, dir string) error {
 	f.mu.Lock()
 	if f.exportErr != nil {

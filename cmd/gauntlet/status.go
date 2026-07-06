@@ -22,7 +22,7 @@ import (
 	"strings"
 )
 
-const defaultDashboardURL = "http://localhost:8899"
+const defaultDashboardURL = "http://localhost:8080"
 
 // --- gauntlet status -----------------------------------------------------
 
@@ -38,6 +38,12 @@ type statusAPIResponse struct {
 	// refs whose target segment names NO configured target — which is why
 	// they can't be scoped to any target object.
 	IgnoredRefs []statusAPIIgnoredRef `json:"ignoredRefs"`
+
+	// IdleSince mirrors dashboard.statusResponse's own TOP-LEVEL field
+	// (docs/plans/scale.md §2): the RFC3339 instant since which the whole
+	// daemon — every target's queue and post-land hooks — has been idle, ""
+	// when the daemon is busy right now.
+	IdleSince string `json:"idleSince"`
 }
 
 type statusAPITarget struct {
@@ -338,6 +344,14 @@ func renderStatus(w io.Writer, resp statusAPIResponse, target string, svc *statu
 			fmt.Fprintf(w, "  %s [%s] %s:%s refs=%d hits=%d (created=%s last-used=%s)\n",
 				inst.Service, inst.KeyHash12, inst.Host, inst.Port, inst.Refcount, inst.Hits, inst.CreatedAt, inst.LastUsed)
 		}
+	}
+
+	// Idle signal (docs/plans/scale.md §2): a DAEMON-level line, printed once
+	// at the very end regardless of any -target filter, same convention as
+	// ignored refs/services above — omitted entirely when the daemon isn't
+	// idle right now (resp.IdleSince == "").
+	if resp.IdleSince != "" {
+		fmt.Fprintf(w, "idle since %s\n", resp.IdleSince)
 	}
 	return nil
 }

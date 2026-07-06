@@ -46,6 +46,9 @@ func (f *fakeGitRepo) ReadFileFromTree(ctx context.Context, tree, path string) (
 func (f *fakeGitRepo) IsAncestor(ctx context.Context, maybeAncestor, ref string) (bool, error) {
 	return false, nil
 }
+func (f *fakeGitRepo) FindLandingMerge(ctx context.Context, branchTip, candidateSHA string) (string, error) {
+	return "", nil
+}
 
 func (f *fakeGitRepo) ExportTree(ctx context.Context, tree, dir string) error {
 	f.mu.Lock()
@@ -293,10 +296,10 @@ func TestRunner_EmitsHookStartedBeforeEachHook(t *testing.T) {
 	}
 }
 
-// TestRunner_RecoveredLandingEmitsHookSkipped confirms the
-// MergeSHA=="" recovery branch emits EventHookSkipped (S1-C's durable
-// marker) carrying Detail and HookCount, in addition to (not instead of)
-// the existing stderr log line, and never calls RunCheck.
+// TestRunner_RecoveredLandingEmitsHookSkipped confirms the Recovered
+// recovery branch emits EventHookSkipped (S1-C's durable marker) carrying
+// Detail and HookCount, in addition to (not instead of) the existing
+// stderr log line, and never calls RunCheck.
 func TestRunner_RecoveredLandingEmitsHookSkipped(t *testing.T) {
 	git := &fakeGitRepo{}
 	exec := &fakeExecutor{}
@@ -315,7 +318,7 @@ func TestRunner_RecoveredLandingEmitsHookSkipped(t *testing.T) {
 		Log:     &logBuf,
 	})
 
-	rec := &core.RunRecord{RunID: "run-skip", Target: "main"} // MergeSHA == ""
+	rec := &core.RunRecord{RunID: "run-skip", Target: "main", Recovered: true}
 	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	if exec.callCount() != 0 {
@@ -505,9 +508,10 @@ func TestRunner_RecoveredLandingWithoutMergeSHASkipped(t *testing.T) {
 		Log:     &logBuf,
 	})
 
-	// Mirrors queue/reconcile.go's recoverLanded: a synthesized landing
-	// with no MergeSHA (the merge already happened in an earlier pass).
-	rec := &core.RunRecord{RunID: "run-4", Target: "main"}
+	// Mirrors queue/reconcile.go's recoverLanded when FindLandingMerge
+	// couldn't identify the landing merge: a synthesized landing with
+	// neither MergeSHA nor a tree to export.
+	rec := &core.RunRecord{RunID: "run-4", Target: "main", Recovered: true}
 	r.runLanding(context.Background(), landedEvent("main", rec), nil)
 
 	if exec.callCount() != 0 {
@@ -515,6 +519,44 @@ func TestRunner_RecoveredLandingWithoutMergeSHASkipped(t *testing.T) {
 	}
 	if len(git.exported) != 0 {
 		t.Fatalf("ExportTree called %d times, want 0", len(git.exported))
+	}
+}
+
+// TestRunner_RecoveredLandingWithMergeSHAStillSkipped is the regression case
+// for the gap this MergeSHA-capture phase actually opened: recoverLanded now
+// often CAN populate MergeSHA on a Recovered record (FindLandingMerge, for
+// history/manual-re-run purposes). Gating runLanding's skip-vs-run decision
+// on MergeSHA emptiness would have made a recovered landing with a found
+// merge silently auto-run its hooks again — e.g. re-triggering a deploy the
+// daemon has no way to know already ran (or is running) from before the
+// crash. The gate must be Recovered, not MergeSHA=="", so this must still
+// skip.
+func TestRunner_RecoveredLandingWithMergeSHAStillSkipped(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	emit := &recordingEmit{}
+	var logBuf boundedLogBuf
+	r := New(Params{
+		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Git:     git,
+		Exec:    exec,
+		Emit:    emit.fn,
+		WorkDir: t.TempDir(),
+		Log:     &logBuf,
+	})
+
+	rec := &core.RunRecord{RunID: "run-6", Target: "main", MergeSHA: "found-merge-sha", Recovered: true}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	if exec.callCount() != 0 {
+		t.Fatalf("exec called %d times, want 0 (recovered landing must never auto-run hooks, even with a known MergeSHA)", exec.callCount())
+	}
+	if len(git.exported) != 0 {
+		t.Fatalf("ExportTree called %d times, want 0", len(git.exported))
+	}
+	events := emit.snapshot()
+	if len(events) != 1 || events[0].Kind != core.EventHookSkipped {
+		t.Fatalf("events = %+v, want exactly one EventHookSkipped", events)
 	}
 }
 

@@ -628,13 +628,19 @@ func (r *Runner) hookLogPath(runID string, seq int, name string) string {
 // back into the landing or the queue — only the notification fan-out
 // (Params.Emit) and the log.
 //
-// S1-C/S5: a real landing (MergeSHA != "") sets the in-memory live-state
+// S1-C/S5: a real landing (!rec.Recovered) sets the in-memory live-state
 // gauge (setLive/clearLive) for the whole call and emits EventHookStarted
 // immediately before each hook's RunCheck — history.Store durably upserts
 // the "owed" row from the first one; a recovery-synthesized landing
-// (MergeSHA == "") instead emits one EventHookSkipped and returns before any
+// (rec.Recovered) instead emits one EventHookSkipped and returns before any
 // of that, never touching live state at all (there is nothing running to
-// report).
+// report). This gates on Recovered specifically, not on MergeSHA being
+// empty: queue/reconcile.go's recoverLanded may still populate MergeSHA on
+// a Recovered record (a best-effort lookup of the merge that already
+// landed, for history/tooling), and that must never be mistaken here for
+// "safe to run hooks" — hooks (e.g. a deploy step) must never auto-run a
+// second time for a landing whose hooks may already have run, or be
+// running, before the crash.
 //
 // supersede is PolicyCancel's channel from execLanding: non-nil only when
 // ev.Target is configured for PolicyCancel, in which case a hook whose
@@ -650,14 +656,16 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 	}
 	rec := ev.Record
 
-	if rec.MergeSHA == "" {
+	if rec.Recovered {
 		// A synthesized crash-recovery landing (queue/reconcile.go's
 		// recoverLanded doc: "no merge ever happens" on that path, so
-		// BaseOID/MergeSHA/Trial stay zero-valued): the merge commit
-		// already landed in an earlier pass and its SHA was never
-		// captured here, so there is no tree to export hooks against.
+		// BaseOID/Trial stay zero-valued): the merge commit already landed
+		// in an earlier pass, and even when recoverLanded's best-effort
+		// FindLandingMerge lookup did identify it (MergeSHA may be
+		// non-empty here), hooks are never auto-run against it — see this
+		// function's own doc comment above for why.
 		const detail = "recovered landing; hooks not run"
-		fmt.Fprintf(r.log, "hooks: %s: landing has no merge SHA (recovered landing), skipping hooks run=%s\n", ev.Target, rec.RunID)
+		fmt.Fprintf(r.log, "hooks: %s: recovered landing, skipping hooks run=%s\n", ev.Target, rec.RunID)
 		// S1-C: a durable marker (history.Store upserts hook_runs with
 		// skipped=1) so this landing's hooks read as "skipped (recovery)"
 		// on every surface, rather than only reaching the log line above —

@@ -23,6 +23,23 @@ import (
 type Snapshot struct {
 	At      time.Time
 	Targets []TargetSnapshot
+
+	// IdleSince is the instant the QUEUE (every target, this package's own
+	// view) most recently became idle — no waiting candidates and no
+	// in-flight pipeline runs, anywhere — or the zero time if the queue is
+	// busy right now (docs/plans/scale.md §2, the parked-builder autoscaling
+	// signal). Parked candidates don't count: they're dormant, not being
+	// worked on.
+	//
+	// This is QUEUE idleness only. The daemon's post-land hooks
+	// (internal/hooks) live outside this package by design (Invariant 8: the
+	// queue stays ignorant of channels), so whether a hook is still running
+	// or backlogged can't be folded in here — the dashboard/MCP layer, which
+	// already holds both this Snapshot and a hook-state snapshot func,
+	// composes the two into the actual "daemon is fully idle" signal it
+	// surfaces (internal/dashboard/api.go's idleSince, internal/mcp/
+	// server.go's idleSince).
+	IdleSince time.Time
 }
 
 // TargetSnapshot is one target's live queue state.
@@ -113,7 +130,36 @@ func (d *Daemon) buildSnapshot(refs map[string]string) *Snapshot {
 	for _, t := range d.cfg.Targets {
 		snap.Targets = append(snap.Targets, d.buildTargetSnapshot(t, refs))
 	}
+
+	// d.idleSince tracks the queue-idle transition across ticks (reconcile
+	// goroutine only, like every other Daemon field here): the first tick
+	// that finds every target idle stamps it, and it holds steady across
+	// however many idle ticks follow, so Snapshot.IdleSince reports how long
+	// the queue has been idle rather than just "is it idle this instant".
+	// Any non-idle tick zeroes it, so the next idle stretch gets its own
+	// fresh instant, never a stale one.
+	if queueIdle(snap.Targets) {
+		if d.idleSince.IsZero() {
+			d.idleSince = snap.At
+		}
+		snap.IdleSince = d.idleSince
+	} else {
+		d.idleSince = time.Time{}
+	}
 	return snap
+}
+
+// queueIdle reports whether every target has no waiting candidates and no
+// in-flight pipeline runs — the queue half of the daemon idleness signal
+// (Snapshot.IdleSince's doc; docs/plans/scale.md §2). Parked candidates
+// don't count: they're dormant, not being worked on.
+func queueIdle(targets []TargetSnapshot) bool {
+	for _, ts := range targets {
+		if len(ts.Waiting) > 0 || len(ts.Pipeline) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // buildTargetSnapshot builds one target's TargetSnapshot.

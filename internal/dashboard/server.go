@@ -196,6 +196,14 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if d.servicesSnapshot != nil {
 		data.Services = buildServicesView(d.servicesSnapshot(), snap.At)
 	}
+
+	// Idle signal (docs/plans/scale.md §2): a DAEMON-level line near the
+	// footer, like Services/IgnoredRefs above, present only while the whole
+	// daemon (queue + hooks) is idle right now — see d.idleSince (api.go)
+	// for the composition.
+	if since := d.idleSince(snap); !since.IsZero() {
+		data.IdleSince = &idleSinceView{Since: formatTime(since), Elapsed: formatDuration(snap.At.Sub(since))}
+	}
 	render(w, indexTmpl, data)
 }
 
@@ -1181,6 +1189,22 @@ type indexData struct {
 	// to any one target either. Nil when WithServicesSnapshot was never
 	// wired up (no services configured for this daemon).
 	Services *servicesView
+
+	// IdleSince is the parked-builder autoscaling signal (docs/plans/
+	// scale.md §2, d.idleSince's doc): nil whenever the daemon isn't idle
+	// right now, in which case the template renders nothing — there is no
+	// "recently busy" line, only "idle since T" or absent.
+	IdleSince *idleSinceView
+}
+
+// idleSinceView is index.html's view of d.idleSince's result: the instant
+// itself (formatTime's <time> treatment, same as every other timestamp on
+// this dashboard) plus how long ago that was (formatDuration, same
+// treatment a check's own duration gets) so the line reads "idle since
+// 12:34:56 UTC · 5m" without the viewer doing the subtraction themselves.
+type idleSinceView struct {
+	Since   template.HTML
+	Elapsed string
 }
 
 // servicesView is index.html's view of the shared-services pool

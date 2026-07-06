@@ -71,7 +71,10 @@ container-based alternative, plus git-version/remote-auth requirements,
 GitHub PAT permissions, dashboard/API/MCP exposure guidance, and backup
 notes. `make build` (version stamped from `git describe`), `make test`, and
 `make image` (docker/podman/`container`) are the build entry points; see
-the [`Makefile`](Makefile) and [`Dockerfile`](Dockerfile).
+the [`Makefile`](Makefile) and [`Dockerfile`](Dockerfile). Tagged releases
+(binaries and a `ghcr.io/sgrankin/gauntlet` image, built via GitHub Actions
+and goreleaser) are also available — see docs/deploy.md's ["Releases"](docs/deploy.md#releases)
+section.
 
 ## Landing changes
 
@@ -466,6 +469,11 @@ target "main" branch="main" {
 - A slow hook only delays *later* hooks for the same landing (and, since
   landings for one target are already serial, later landings on that
   target) — it never blocks the reconcile loop itself.
+- A landing recovered after a daemon crash (before its hooks could run)
+  still skips hooks entirely — no automatic re-run — but its history row
+  now records the actual merge commit that landed, so an operator can
+  locate it and re-run its hooks manually, rather than hunting for the
+  commit out of band.
 - Hooks get the same log/history treatment as checks (full parity):
   each hook's full combined-output log is written to
   `<state>/logs/<runID>/hook-<n>-<sanitized name>.log.zst` — the *same*
@@ -600,6 +608,9 @@ lowerCamel field names; errors are always `{"error": "..."}`.
   checksDone, or `null` if idle), the waiting queue (ref/sha/seq, FIFO
   order), and parked refs (ref/sha/outcome/reason/at). `503
   {"error":"no snapshot yet"}` before the first reconcile pass completes.
+  Also carries a top-level `"idleSince"` (RFC3339 instant, omitted while
+  busy) once the WHOLE daemon — every target's queue and post-land hooks —
+  has been idle: see "Idle signal" below.
 
   ```sh
   curl -s http://localhost:8080/api/v1/status | jq .
@@ -681,6 +692,17 @@ gauntlet retry -url http://localhost:8080 -target main -ref refs/heads/for/main/
 gauntlet cancel -url http://localhost:8080 -target main -ref refs/heads/for/main/alice/my-feature
 gauntlet hooks-cancel -url http://localhost:8080 -target main
 ```
+
+**Idle signal.** `idleSince` (also on the MCP `status` tool and
+`gauntlet status`, plus a muted line on the dashboard index page) exists for
+external park/wake automation — e.g. an Azure Function that deallocates a
+parked-builder VM once the daemon has been idle long enough, and re-wakes it
+when refs arrive (see `docs/plans/scale.md` §2). It's the whole daemon's
+idleness, not just the queue's: no waiting candidates and no in-flight runs
+across every target, AND no target's post-land hook currently running or
+backlogged. Absent (not `null` or `""`) whenever the daemon is busy right
+now — there's no "was idle a moment ago" value, only "idle since T" or
+nothing.
 
 **Trust model.** Same as the dashboard itself: the API has no
 authentication of its own, so bind it to a trusted interface and put it
@@ -892,7 +914,9 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
      directory, so every check fails with a confusing
      module/file-not-found red instead of an infra error. Either keep
      `-state` under `$HOME` or share it explicitly (e.g.
-     `colima start --mount /path/to/state:w`).
+     `colima start --mount /path/to/state:w`). Gauntlet now detects this on
+     a failed check (a quick post-mortem listing of the mount) and reports
+     it as an infra error instead of a rejected red.
    - **The `osxkeychain` credential helper blocks headless pulls.** If an
      image isn't present locally, `docker run` pulls implicitly, the
      credential helper may pop a Keychain prompt — even for anonymous

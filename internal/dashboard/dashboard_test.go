@@ -1088,3 +1088,55 @@ func TestNonRefreshPages_NoPolling(t *testing.T) {
 		t.Error("/run/whatever missing applyTimeTooltips (should be present on every page, refresh or not)")
 	}
 }
+
+// --- index: idle signal (docs/plans/scale.md §2) ----------------------------
+
+// TestIndex_RendersIdleSinceLine confirms the index page shows the muted
+// "idle since ..." line near the footer when the daemon (queue and hooks) is
+// idle: the formatTime <time> element (the same treatment every other
+// timestamp gets) plus an elapsed duration.
+func TestIndex_RendersIdleSinceLine(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/")
+	if !strings.Contains(body, "idle since") {
+		t.Fatalf("index body missing the idle-since line:\n%s", body)
+	}
+	if !strings.Contains(body, "5m") {
+		t.Errorf("index body missing the 5m elapsed duration:\n%s", body)
+	}
+}
+
+// TestIndex_OmitsIdleSinceLineWhenBusy confirms the line is absent entirely
+// (not rendered empty) when queue.Snapshot.IdleSince is zero.
+func TestIndex_OmitsIdleSinceLineWhenBusy(t *testing.T) {
+	snap := testSnapshot() // IdleSince left at its zero value
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/")
+	if strings.Contains(body, "idle since") {
+		t.Errorf("index body has an idle-since line while the queue is busy:\n%s", body)
+	}
+}
+
+// TestIndex_OmitsIdleSinceLineWhenHookRunning confirms a queue-idle snapshot
+// still omits the line when a target's hook is running — mirroring the API's
+// own suppression (TestAPIStatus_IdleSinceSuppressedByRunningHook).
+func TestIndex_OmitsIdleSinceLineWhenHookRunning(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	hookSnapshot := func(target string) (dashboard.LiveHook, bool) {
+		if target != "main" {
+			return dashboard.LiveHook{}, false
+		}
+		return dashboard.LiveHook{Target: "main", Running: true}, true
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithHookSnapshot(hookSnapshot))
+
+	_, body := get(t, h, "/")
+	if strings.Contains(body, "idle since") {
+		t.Errorf("index body has an idle-since line while a target's hook is running:\n%s", body)
+	}
+}

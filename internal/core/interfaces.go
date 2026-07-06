@@ -44,6 +44,27 @@ type GitRepo interface {
 	// crash interrupted slot cleanup (Invariant 4).
 	IsAncestor(ctx context.Context, maybeAncestor, ref string) (bool, error)
 
+	// FindLandingMerge identifies the merge commit that landed candidateSHA
+	// onto the target branch, for a candidate crash-recovery already found
+	// to be an ancestor of branchTip (Invariant 4's recoverLanded). Every
+	// gauntlet land is a --no-ff merge whose second parent is the landed
+	// candidate's own SHA verbatim (Invariant 6: candidate commits are
+	// never rewritten), so this walks branchTip's first-parent chain,
+	// newest first, and returns the first merge commit whose second parent
+	// equals candidateSHA exactly. (Ancestry, not exact equality, would be
+	// the wrong test: candidateSHA is trivially an ancestor of any later
+	// candidate rebased onto main after candidateSHA's own landing, which
+	// would wrongly match that later, unrelated merge instead.)
+	//
+	// Returns ("", nil) — never an error — if no such merge commit is found
+	// within the walk's bound: callers must treat "" as "unknown", the same
+	// as a genuinely unlanded candidate, not as a failure. A non-nil error
+	// means the underlying plumbing itself failed (e.g. branchTip does not
+	// resolve), which callers may treat as a soft failure too — the merge
+	// SHA is enrichment for recovered landings, not something recovery
+	// itself depends on.
+	FindLandingMerge(ctx context.Context, branchTip, candidateSHA string) (mergeSHA string, err error)
+
 	// ExportTree materializes tree's contents into dir for checks to run
 	// against.
 	ExportTree(ctx context.Context, tree, dir string) error

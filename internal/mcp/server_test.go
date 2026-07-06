@@ -737,6 +737,85 @@ func TestStatus_NoHookSnapshotOmitsLiveHook(t *testing.T) {
 	}
 }
 
+// --- status: idleSince (docs/plans/scale.md §2) ------------------------------
+//
+// Mirrors internal/dashboard/api_test.go's own idleSince coverage — the two
+// packages compose the exact same signal from the exact same inputs
+// (queue.Snapshot.IdleSince + a per-target hook-snapshot closure), just
+// exposed over a different transport.
+
+// TestStatus_IdleSinceAbsentWhenQueueBusy confirms idleSince is omitted
+// whenever queue.Snapshot.IdleSince is zero (testSnapshot's "main" target has
+// an in-flight run, so the queue is busy).
+func TestStatus_IdleSinceAbsentWhenQueueBusy(t *testing.T) {
+	snap := testSnapshot()
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }})
+
+	res := callTool(t, session, "status", nil)
+	text := textOf(t, res)
+	if strings.Contains(text, `"idleSince"`) {
+		t.Errorf("status content includes idleSince while the queue is busy:\n%s", text)
+	}
+}
+
+// TestStatus_IdleSincePresentWhenQueueIdleNoHooksConfigured confirms
+// idleSince surfaces snap.IdleSince verbatim when the queue is idle and no
+// HookSnapshot is wired up — queue idleness alone decides.
+func TestStatus_IdleSincePresentWhenQueueIdleNoHooksConfigured(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }})
+
+	res := callTool(t, session, "status", nil)
+	text := textOf(t, res)
+	want := `"idleSince":"` + snap.IdleSince.UTC().Format(time.RFC3339) + `"`
+	if !strings.Contains(text, want) {
+		t.Errorf("status content missing %q:\n%s", want, text)
+	}
+}
+
+// TestStatus_IdleSinceSuppressedByRunningHook confirms a queue-idle snapshot
+// still omits idleSince when any target's hook is running right now.
+func TestStatus_IdleSinceSuppressedByRunningHook(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	hookSnapshot := func(target string) (mcpsrv.LiveHook, bool) {
+		if target != "main" {
+			return mcpsrv.LiveHook{}, false
+		}
+		return mcpsrv.LiveHook{Target: "main", Running: true}, true
+	}
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }, HookSnapshot: hookSnapshot})
+
+	res := callTool(t, session, "status", nil)
+	text := textOf(t, res)
+	if strings.Contains(text, `"idleSince"`) {
+		t.Errorf("status content includes idleSince while a target's hook is running:\n%s", text)
+	}
+}
+
+// TestStatus_IdleSinceCoversEveryTargetDespiteFilter confirms idleSince is
+// computed over every target regardless of the "target" filter argument —
+// filtering out.Targets to "release" must not hide "main"'s running hook
+// from the idleness decision, since the signal is daemon-wide by design.
+func TestStatus_IdleSinceCoversEveryTargetDespiteFilter(t *testing.T) {
+	snap := testSnapshot()
+	snap.IdleSince = snap.At.Add(-5 * time.Minute)
+	hookSnapshot := func(target string) (mcpsrv.LiveHook, bool) {
+		if target != "main" {
+			return mcpsrv.LiveHook{}, false
+		}
+		return mcpsrv.LiveHook{Target: "main", Running: true}, true
+	}
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }, HookSnapshot: hookSnapshot})
+
+	res := callTool(t, session, "status", map[string]any{"target": "release"})
+	text := textOf(t, res)
+	if strings.Contains(text, `"idleSince"`) {
+		t.Errorf("status content (target=release) includes idleSince despite main's running hook:\n%s", text)
+	}
+}
+
 // TestStatus_HookRunsAndIgnoredRefsFromStore confirms the status tool
 // surfaces the durable hook-run ledger per target (S1-C/S5) and
 // recently-ignored refs at the TOP level (S7c, daemon-wide — an ignored

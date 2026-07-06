@@ -261,6 +261,19 @@ type RunRecord struct {
 	// tip. Purely informational for the dashboard; the landed commit is the
 	// tested commit either way (Invariant 1).
 	Speculated bool
+
+	// Recovered is true iff this record was synthesized by crash recovery
+	// (queue/reconcile.go's recoverLanded) rather than produced by an
+	// actual trial+check run: cand.SHA was found already landed, so no
+	// merge happened and no checks ran here. MergeSHA may still be
+	// populated on a Recovered record (recoverLanded best-effort looks up
+	// the landing merge that already exists), but that must NOT be read as
+	// "checks ran, safe to treat like a normal landing" — internal/hooks's
+	// Runner gates its "run hooks vs. emit EventHookSkipped" decision on
+	// this field specifically, not on MergeSHA's presence, precisely so a
+	// recovered landing never auto-runs hooks (e.g. re-triggering a deploy)
+	// merely because its merge SHA happened to be identifiable.
+	Recovered bool
 }
 
 // Identity is a git commit identity: a name and an email address.

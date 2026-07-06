@@ -271,13 +271,30 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 			// Nonzero exit is a verdict regardless of the result file
 			// (§5A / §9.2), same as LocalExecutor: the file only splits
 			// the exit-0 case.
-			return core.CheckResult{
+			res := core.CheckResult{
 				Name:     job.Name,
 				Status:   core.CheckFailed,
 				Output:   out.String(),
 				LogPath:  logPath,
 				Duration: duration,
 			}
+			// README "docker-on-macOS footguns": when the runtime VM
+			// doesn't share the host path the trial tree lives under
+			// (e.g. colima's default share list), `-v job.Dir:workdir`
+			// silently bind-mounts an empty directory instead of
+			// erroring, and the check fails against nothing — a daemon
+			// misconfiguration masquerading as a genuine red. Only a
+			// failed check pays for the extra probe; a passing check
+			// never touches this.
+			if c.checkEmptyMount(ctx, job) == diagMountEmpty {
+				// Same conversion shape as the queue's M1 service-death
+				// rewrite (internal/queue/reconcile.go: res.Err = ...,
+				// Output/Duration left exactly as RunCheck set them) —
+				// a verdict manufactured by daemon-side plumbing gets
+				// reclassified to Err rather than standing as a red.
+				res.Err = fmt.Errorf("executor: trial tree mounted empty in the container — the runtime VM likely does not share %s; see README 'docker-on-macOS footguns'", job.Dir)
+			}
+			return res
 		}
 		// The CLI itself failed to start (e.g. it vanished between the
 		// preflight probe and this exec). Runtime reachability was already
@@ -364,6 +381,71 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 	args = append(args, p.Image)
 	args = append(args, job.Command...)
 	return args
+}
+
+// mountDiagnosis is checkEmptyMount's verdict on why a check just failed:
+// whether the trial-tree mount arrived empty in the container (the
+// docker-on-macOS footgun this preflight exists for), genuinely had content
+// (an ordinary check-side red), or the diagnostic itself couldn't run (e.g.
+// the check image has no /bin/sh) and so proves nothing either way.
+type mountDiagnosis int
+
+const (
+	diagInconclusive    mountDiagnosis = iota // diagnostic errored; leave the red alone
+	diagMountEmpty                            // listing succeeded and found nothing
+	diagMountHasContent                       // listing succeeded and found something
+)
+
+// diagnoseMount classifies a diagnostic listing's outcome. Pure: no exec, no
+// I/O, exhaustively unit-testable.
+func diagnoseMount(diagOutput string, diagErr error) mountDiagnosis {
+	if diagErr != nil {
+		return diagInconclusive
+	}
+	if strings.TrimSpace(diagOutput) == "" {
+		return diagMountEmpty
+	}
+	return diagMountHasContent
+}
+
+// emptyMountDiagArgs builds the argv for the post-failure diagnostic listing:
+// a throwaway container of the SAME check image (no new image dependency,
+// unlike reaching for e.g. alpine) that re-mounts job.Dir read-only at
+// Workdir and lists it. --entrypoint /bin/sh bypasses whatever ENTRYPOINT
+// the image ships so the check's own command never runs a second time; this
+// does assume the image has a shell, which is not guaranteed for an
+// arbitrary check image — see diagnoseMount's diagInconclusive case for what
+// happens when it doesn't (the red stands untouched rather than risking a
+// false reclassification).
+//
+// Pure and exec-free, same shape as runArgs.
+func (p Params) emptyMountDiagArgs(job core.CheckJob) []string {
+	runtime := p.Runtime
+	if runtime == "" {
+		runtime = "container"
+	}
+	args := append([]string{"run"}, runtimeSpecs[runtime].ExtraRunArgs...)
+	args = append(args,
+		"--rm",
+		"-v", job.Dir+":"+p.Workdir+":ro",
+		"--entrypoint", "/bin/sh",
+		p.Image,
+		"-c", "ls -A "+p.Workdir+" | head -1",
+	)
+	return args
+}
+
+// checkEmptyMount runs the diagnostic listing and classifies its outcome.
+// Only called from RunCheck's CheckFailed path (a passing check never pays
+// for this). ctx is expected non-cancelled at the call site (RunCheck
+// already returns early on ctx.Err() before reaching here); a short timeout
+// of its own bounds the extra container run regardless.
+func (c *ContainerExecutor) checkEmptyMount(ctx context.Context, job core.CheckJob) mountDiagnosis {
+	diagCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	args := c.params.emptyMountDiagArgs(job)
+	out, err := exec.CommandContext(diagCtx, c.spec.Bin, args...).CombinedOutput()
+	return diagnoseMount(string(out), err)
 }
 
 // maxContainerNameLen conservatively caps the assembled container name well

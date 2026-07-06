@@ -221,6 +221,55 @@ func (r *Repo) IsAncestor(ctx context.Context, maybeAncestor, ref string) (bool,
 	return false, fmt.Errorf("gitx: is-ancestor %s %s: %w", maybeAncestor, ref, err)
 }
 
+// maxLandingMergeSearch bounds how many first-parent merge commits
+// FindLandingMerge walks back through branchTip before giving up. Landings
+// being recovered from a crash are recent by construction (Invariant 4 fires
+// on the daemon's very next tick after the crash), so a search this deep
+// only fails to terminate promptly for a candidate that was never landed at
+// all — which is exactly the "" ("unknown") case FindLandingMerge already
+// returns for that scenario.
+const maxLandingMergeSearch = 1000
+
+// FindLandingMerge identifies the merge commit that landed candidateSHA onto
+// branchTip's history. See core.GitRepo.FindLandingMerge for the contract.
+//
+// Plumbing: `git rev-list --first-parent --merges --parents` lists, newest
+// first, exactly the merge commits along branchTip's first-parent chain
+// (gauntlet never touches any other lineage), each line already carrying its
+// parent OIDs — no separate rev-parse per candidate merge is needed. Each
+// merge's second parent is compared against candidateSHA by exact equality,
+// not ancestry: buildChainLinkPrecomputed (reconcile.go) always calls
+// CommitTree with the candidate's own raw SHA as the second parent, and
+// Invariant 6 (candidate commits are never rewritten) guarantees that SHA
+// never changes underneath it, so equality alone always finds a landed
+// candidate's own merge. Ancestry would be the WRONG generalization here:
+// candidateSHA is trivially an ancestor of any later candidate whose author
+// rebased onto main after candidateSHA's own landing (an ordinary
+// occurrence), which would make the walk match that unrelated later merge
+// instead of candidateSHA's actual one — equality is what Invariant 6
+// promises, and it is both necessary and sufficient.
+func (r *Repo) FindLandingMerge(ctx context.Context, branchTip, candidateSHA string) (string, error) {
+	return r.findLandingMerge(ctx, branchTip, candidateSHA, maxLandingMergeSearch)
+}
+
+func (r *Repo) findLandingMerge(ctx context.Context, branchTip, candidateSHA string, maxCount int) (string, error) {
+	out, err := r.run(ctx, "rev-list", "--first-parent", "--merges", "--parents",
+		fmt.Sprintf("--max-count=%d", maxCount), branchTip)
+	if err != nil {
+		return "", fmt.Errorf("gitx: find-landing-merge %s: %w", branchTip, err)
+	}
+	for _, ln := range splitLines(out) {
+		fields := strings.Fields(ln)
+		if len(fields) < 3 {
+			continue // defensive: --merges guarantees >=2 parents, so >=3 fields
+		}
+		if mergeOID, parent2 := fields[0], fields[2]; parent2 == candidateSHA {
+			return mergeOID, nil
+		}
+	}
+	return "", nil
+}
+
 // ExportTree materializes tree's contents into dir (created if necessary)
 // via git archive, extracted with the standard library's tar reader to
 // avoid BSD/GNU tar drift.

@@ -338,6 +338,14 @@ type Daemon struct {
 	// so refcount) whatever it still needs.
 	reaperArmed bool
 
+	// idleSince is buildSnapshot's own tracked idle-transition instant
+	// (docs/plans/scale.md §2, Snapshot.IdleSince's doc): zero while the
+	// queue is busy, stamped with the tick's snap.At the moment every target
+	// goes idle, and held steady across however many idle ticks follow.
+	// Reconcile-goroutine-only, like order/done/lanes above — buildSnapshot
+	// is the sole reader and writer, and it only ever runs there.
+	idleSince time.Time
+
 	// snap holds the most recently published Snapshot (docs/plans/phase23.md
 	// §2.1); nil until the first successful ReconcileOnce pass completes.
 	snap atomic.Pointer[Snapshot]

@@ -51,8 +51,12 @@ instead of compute dollars. The shape:
 - **Sleep:** wants one small feature — an idle signal. The snapshot already
   knows the answer (no waiting, no in-flight, no hook backlog, across all
   targets); surface it as a `"idleSince"` field on `/api/v1/status` and the
-  same Function (or a post-idle hook) deallocates. Recorded as the one
-  cheap feature this axis needs; not built.
+  same Function (or a post-idle hook) deallocates. Landed: `idleSince`
+  (RFC3339, omitted while busy) on `GET /api/v1/status`, the MCP `status`
+  tool, `gauntlet status`, and a muted line on the dashboard index page —
+  queue idleness (`queue.Snapshot.IdleSince`) composed with hook idleness
+  (no target's post-land hook running or backlogged) at the
+  dashboard/MCP layer, since hooks live outside the queue package.
 
 Caveat named now so nobody trips on it: deallocation mid-run is a crash
 (fine — Invariant 4's recovery already handles it; hooks may be

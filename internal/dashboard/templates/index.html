@@ -59,5 +59,8 @@
 {{end}}
 </div>
 {{end}}
+{{if .IdleSince}}
+<p class="muted"><small>idle since {{.IdleSince.Since}} &middot; {{.IdleSince.Elapsed}}</small></p>
+{{end}}
 {{end}}
 {{end}}

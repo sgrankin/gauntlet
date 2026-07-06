@@ -249,6 +249,18 @@ type statusResponse struct {
 	// unconfigured name for display. Omitted (not just empty) when history
 	// is disabled.
 	IgnoredRefs []ignoredRefStatus `json:"ignoredRefs,omitempty"`
+
+	// IdleSince is the RFC3339 instant since which the WHOLE daemon has been
+	// idle — every target's queue is idle (queue.Snapshot.IdleSince) AND no
+	// target has a post-land hook running or backlogged right now
+	// (docs/plans/scale.md §2: the signal an external Azure Function polls
+	// to know when it's safe to deallocate the parked builder VM). Omitted
+	// whenever the daemon isn't idle at this instant — there is no "was
+	// idle, no longer" value here, only "idle since T" or absent. See
+	// dash.idleSince for the composition (queue idleness lives in
+	// internal/queue; hook idleness lives outside it entirely, Invariant 8,
+	// so only this layer — which holds both — can combine them).
+	IdleSince string `json:"idleSince,omitempty"`
 }
 
 type targetStatus struct {
@@ -381,7 +393,34 @@ func (d *dash) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if since := d.idleSince(snap); !since.IsZero() {
+		resp.IdleSince = formatRFC3339(since)
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// idleSince composes queue idleness (snap.IdleSince, docs/plans/scale.md §2)
+// with hook idleness into the one daemon-wide idle instant GET
+// /api/v1/status, the MCP status tool (internal/mcp/server.go's own
+// idleSince), and the index page's footer line all surface identically:
+// zero (not idle) unless the queue has been idle since some instant AND no
+// target's post-land hook is running or backlogged right now. Hooks live
+// outside the queue package (Invariant 8), so this composition can only
+// happen at this layer, which is the one place both a queue.Snapshot and
+// d.hookSnapshot are both in hand. d.hookSnapshot nil (hooks not configured
+// for this daemon) means queue idleness alone decides.
+func (d *dash) idleSince(snap *queue.Snapshot) time.Time {
+	if snap.IdleSince.IsZero() {
+		return time.Time{}
+	}
+	if d.hookSnapshot != nil {
+		for _, ts := range snap.Targets {
+			if lh, ok := d.hookSnapshot(ts.Name); ok && (lh.Running || lh.BacklogDepth > 0) {
+				return time.Time{}
+			}
+		}
+	}
+	return snap.IdleSince
 }
 
 // buildTargetStatus is a method (rather than a free function) so it can
