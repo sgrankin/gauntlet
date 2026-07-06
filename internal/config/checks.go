@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	kdl "github.com/sblinch/kdl-go"
@@ -112,6 +113,29 @@ func applyServiceDefaults(svc *Service) {
 	}
 }
 
+// envSafeName upcases name and replaces every non-alphanumeric rune with '_'
+// (docs/plans/services.md §4's GAUNTLET_SVC_<NAME>_HOST/PORT contract) —
+// duplicated from internal/services' function of the same name (pool.go)
+// because config must stay import-free of services; see reservedResultDir
+// in daemon.go for the identical duplication pattern against
+// internal/executor. Keep the two copies in sync: this one exists solely so
+// validate() below can catch two distinct service names that collide once
+// mangled into an env var name (adversarial review BUG 3) — an out-of-sync
+// copy would silently stop catching exactly that.
+func envSafeName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range strings.ToUpper(name) {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
 // ParseChecks parses and validates a check spec's raw content, as read from
 // a git tree via GitRepo.ReadFileFromTree — this does not take a file path.
 func ParseChecks(data []byte) (*CheckSpec, error) {
@@ -137,6 +161,7 @@ func (cs *CheckSpec) validate() error {
 	}
 
 	svcNames := make(map[string]bool, len(cs.Services))
+	envNames := make(map[string]string, len(cs.Services)) // derived env name -> owning service name
 	for _, s := range cs.Services {
 		if s.Name == "" {
 			return fmt.Errorf("service: name must not be empty")
@@ -145,6 +170,17 @@ func (cs *CheckSpec) validate() error {
 			return fmt.Errorf("service %q: duplicate", s.Name)
 		}
 		svcNames[s.Name] = true
+		// Two exact-string-distinct names (e.g. "my-db" and "my_db") can
+		// still mangle to the same GAUNTLET_SVC_<NAME>_* pair (envSafeName
+		// above) — the executor's env is a last-wins slice, so one service
+		// would silently shadow the other's endpoint (adversarial review
+		// BUG 3). Caught here, at spec-load time, rather than left for a
+		// check to discover it can only ever reach one of its two needs.
+		envName := envSafeName(s.Name)
+		if owner, ok := envNames[envName]; ok {
+			return fmt.Errorf("service %q: collides with service %q under env var name GAUNTLET_SVC_%s_* — rename one", s.Name, owner, envName)
+		}
+		envNames[envName] = s.Name
 		if s.Image == "" {
 			return fmt.Errorf("service %q: image must not be empty", s.Name)
 		}

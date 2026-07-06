@@ -62,6 +62,7 @@ type Pool struct {
 	lastUsed    map[string]time.Time     // key -> M3 idle clock
 	inflight    map[string]*inflightCall // key -> in-progress ensure, single-flight
 	reaperArmed bool
+	pending     int // in-flight creates that reserved a slot but haven't landed in instances yet (review BUG 2)
 }
 
 // inflightCall is one in-progress ensure, shared by every concurrent caller
@@ -131,6 +132,15 @@ func (p *Pool) networkName() string {
 // structurally disjoint (services.md §3 "Adoption at boot, not reaping").
 func (p *Pool) namePrefix() string {
 	return "gauntlet-svc-" + p.cfg.Token + "-"
+}
+
+// instanceName derives the one naming scheme every service instance uses:
+// gauntlet-svc-<token>-<keyhash12> (services.md §2 "key material vs name
+// material"). A single helper (review NIT 3) so create's naming and
+// namePrefix's independent reconstruction of the same prefix can't drift
+// apart on a future rename.
+func (p *Pool) instanceName(key string) string {
+	return p.namePrefix() + key[:12]
 }
 
 // EnsureAll resolves every name in needs against svcs to a ready instance
@@ -243,15 +253,17 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 		p.evict(ctx, key, inst)
 	}
 
-	p.mu.Lock()
-	atCap := len(p.instances) >= p.cfg.MaxInstances
-	p.mu.Unlock()
-	if atCap {
-		// Reuse (the `ok` branch above) never counts against the cap —
-		// only a miss that would grow the live set does
-		// (services-impl.md §3.6).
+	// Reuse (the `ok` branch above) never counts against the cap — only a
+	// miss that would grow the live set does (services-impl.md §3.6).
+	// reserveSlot/releaseSlot count in-flight creates too, not just
+	// p.instances, so two concurrent misses on DIFFERENT keys can't both
+	// pass the gate before either lands (review BUG 2: a plain
+	// check-then-create on p.instances alone is a TOCTOU race that lets
+	// the "hard" cap overshoot under concurrent distinct-key misses).
+	if !p.reserveSlot() {
 		return Instance{}, fmt.Errorf("max-instances (%d) reached", p.cfg.MaxInstances)
 	}
+	defer p.releaseSlot()
 
 	inst, err := p.create(ctx, key, svc)
 	if err != nil {
@@ -281,6 +293,28 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 	return inst, nil
 }
 
+// reserveSlot atomically reserves one instance slot against MaxInstances,
+// counting both already-live instances and other creates currently in
+// flight (review BUG 2). Returns false, reserving nothing, if the cap is
+// already reached. Paired with releaseSlot, which every reserveSlot caller
+// must defer regardless of outcome — pending is bookkeeping only, never a
+// substitute for the authoritative p.instances count once a create lands.
+func (p *Pool) reserveSlot() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.instances)+p.pending >= p.cfg.MaxInstances {
+		return false
+	}
+	p.pending++
+	return true
+}
+
+func (p *Pool) releaseSlot() {
+	p.mu.Lock()
+	p.pending--
+	p.mu.Unlock()
+}
+
 // create runs one driver Create + ready-poll for key/svc, tearing the
 // instance back down (log tail then destroy — review m5) if it never
 // becomes ready within svc.ReadyTimeout.
@@ -288,7 +322,7 @@ func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Inst
 	is := InstanceSpec{
 		Key:   key,
 		Spec:  svc,
-		Name:  "gauntlet-svc-" + p.cfg.Token + "-" + key[:12],
+		Name:  p.instanceName(key),
 		Alias: key[:12],
 		Mode:  p.cfg.Mode,
 	}
@@ -303,11 +337,31 @@ func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Inst
 	inst.Spec = svc // A1: reasserted defensively even though Create should already set it
 
 	if err := p.pollReady(ctx, inst, svc.ReadyTimeout); err != nil {
-		logs := p.driver.TailLogs(ctx, inst) // review m5: capture before destroy
-		p.driver.Destroy(ctx, inst)
+		// review BUG 1: cleanup MUST NOT run on ctx — if ctx is what just
+		// got canceled (e.g. a superseded run canceling mid-poll),
+		// exec.CommandContext on an already-canceled context never starts
+		// the subprocess at all, so Destroy would silently no-op, leaking
+		// the half-created container under its deterministic name AND
+		// leaving it untracked (this create never reached doEnsure's
+		// instances-map insert or record write) — every future ensure of
+		// this key then fails "name already in use" until the next
+		// restart's Adopt cleans it up. cleanupContext detaches so the
+		// teardown itself still actually runs.
+		cctx, cancel := cleanupContext(ctx)
+		logs := p.driver.TailLogs(cctx, inst) // review m5: capture before destroy
+		p.driver.Destroy(cctx, inst)
+		cancel()
 		return Instance{}, fmt.Errorf("%s not ready within %s: %w\nlast output:\n%s", svc.Name, svc.ReadyTimeout, err, logs)
 	}
 	return inst, nil
+}
+
+// cleanupContext returns a context detached from ctx's own cancellation
+// (context.WithoutCancel) but still time-bounded, for driver calls that
+// must run to completion even when ctx is exactly what just got canceled
+// (review BUG 1) — teardown after a canceled ensure, not the ensure itself.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }
 
 // pollReady polls ProbeReady until it succeeds, svc's ReadyTimeout elapses,
@@ -357,7 +411,15 @@ func (p *Pool) releaseKeys(keys []string) {
 		if p.refcount[key] > 0 {
 			p.refcount[key]--
 		}
-		p.lastUsed[key] = now
+		// Guard on the instance still being tracked (review NIT 1): a key
+		// AnyDead already evicted (mid-run death, M1) has no instances
+		// entry, and this unconditional write used to re-add a lastUsed
+		// entry for it anyway — Reap only ever ranges p.instances, so that
+		// entry was permanently unreachable, a slow leak keyed by every
+		// service that ever died mid-run.
+		if _, ok := p.instances[key]; ok {
+			p.lastUsed[key] = now
+		}
 	}
 	p.mu.Unlock()
 
@@ -395,15 +457,23 @@ func (p *Pool) AnyDead(ctx context.Context, e Ensured) bool {
 // evict removes key from the in-memory registry and destroys inst (via the
 // driver) and its on-disk record. Called on a failed liveness/ready probe
 // (doEnsure step 3, AnyDead) and during Adopt for anything unmatchable.
+//
+// Destroy runs on a detached cleanup context, not ctx (review BUG 1, same
+// reasoning as create's doc): AnyDead and the doEnsure reuse-probe-failure
+// path both call evict with the live ensure/check ctx, which can be exactly
+// what's canceling right now — an already-canceled ctx would make
+// exec.CommandContext silently skip starting `rm` at all.
 func (p *Pool) evict(ctx context.Context, key string, inst Instance) {
 	p.mu.Lock()
 	delete(p.instances, key)
 	delete(p.refcount, key)
 	delete(p.lastUsed, key)
 	p.mu.Unlock()
+	cctx, cancel := cleanupContext(ctx)
+	defer cancel()
 	// Best-effort: a failed rm just leaks a container for a human to clean
 	// up (the pool's own accounting is already consistent regardless).
-	_ = p.driver.Destroy(ctx, inst)
+	_ = p.driver.Destroy(cctx, inst)
 	removeRecord(p.cfg.StateDir, key)
 }
 
@@ -529,6 +599,11 @@ func (p *Pool) Reap(ctx context.Context) {
 
 // envSafeName upcases name and replaces every non-alphanumeric rune with
 // '_' (services.md §4's GAUNTLET_SVC_<NAME>_HOST/PORT contract).
+// internal/config/checks.go duplicates this exact transform (also named
+// envSafeName) so CheckSpec.validate() can reject two service names that
+// collide once mangled (adversarial review BUG 3) — config can't import
+// this package, same reservedResultDir-style split as daemon.go/
+// internal/executor. Keep both copies byte-for-byte identical.
 func envSafeName(name string) string {
 	var b strings.Builder
 	b.Grow(len(name))

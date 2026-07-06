@@ -81,6 +81,28 @@ check "t" {
 	}
 }
 
+// TestParseChecks_ServiceNameWithHyphenStaysLegal is the positive
+// counterpart to the "service names collide under env-var name transform"
+// case in TestParseChecks_Invalid (config_test.go): a hyphenated name with
+// no other service colliding under envSafeName must parse cleanly — the new
+// check rejects a COLLISION, not hyphens (or any other punctuation) in a
+// service name per se.
+func TestParseChecks_ServiceNameWithHyphenStaysLegal(t *testing.T) {
+	data := []byte(`
+service "my-db" {
+    image "img"
+    port 1433
+}
+check "t" {
+    command "true"
+    needs "my-db"
+}
+`)
+	if _, err := ParseChecks(data); err != nil {
+		t.Fatalf("ParseChecks: %v", err)
+	}
+}
+
 func TestCheckSpec_RequiresServices(t *testing.T) {
 	cases := []struct {
 		name string

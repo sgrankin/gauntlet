@@ -32,6 +32,18 @@ type fakeDriver struct {
 
 	notReady map[string]bool // key -> ProbeReady always fails
 	notAlive map[string]bool // key -> ProbeAlive always reports false
+
+	// blockReadyUntilDone makes ProbeReady block on ctx.Done() and then
+	// return ctx.Err() — review BUG 1's repro: an ensure whose ctx gets
+	// canceled mid-ready-poll, never a real not-ready response.
+	blockReadyUntilDone bool
+
+	// destroyCtxDone records, for every Destroy call in order, whether the
+	// ctx it received was already done (canceled/expired) at call time
+	// (review BUG 1: before the fix, cleanup ran on the ensure's own ctx,
+	// so a canceled ensure meant Destroy's context was already done and
+	// exec.CommandContext would never actually start the subprocess).
+	destroyCtxDone []bool
 }
 
 func newFakeDriver() *fakeDriver {
@@ -72,8 +84,14 @@ func (f *fakeDriver) ProbeAlive(ctx context.Context, in Instance) (bool, error) 
 
 func (f *fakeDriver) ProbeReady(ctx context.Context, in Instance) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.notReady[in.Key] {
+	block := f.blockReadyUntilDone
+	notReady := f.notReady[in.Key]
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if notReady {
 		return errNotReady(in.Name)
 	}
 	return nil
@@ -82,6 +100,7 @@ func (f *fakeDriver) ProbeReady(ctx context.Context, in Instance) error {
 func (f *fakeDriver) Destroy(ctx context.Context, in Instance) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.destroyCtxDone = append(f.destroyCtxDone, ctx.Err() != nil)
 	delete(f.byName, in.Name)
 	f.destroyed = append(f.destroyed, in.Name)
 	return nil
@@ -135,6 +154,18 @@ func (f *fakeDriver) setNotAlive(key string, v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.notAlive[key] = v
+}
+
+func (f *fakeDriver) setBlockReadyUntilDone(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blockReadyUntilDone = v
+}
+
+func (f *fakeDriver) destroyCtxDoneCalls() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.destroyCtxDone...)
 }
 
 func (f *fakeDriver) createsFor(key string) int {
@@ -375,6 +406,56 @@ func TestMaxInstances(t *testing.T) {
 	p.Release(eA)
 }
 
+// TestMaxInstancesHardCapUnderConcurrentDistinctKeyMisses is review BUG 2's
+// repro: with MaxInstances=1 and the pool empty (one remaining slot), two
+// concurrent EnsureAll calls on two DIFFERENT keys race for that slot.
+// Before the fix, doEnsure's cap check (len(p.instances) >= cap) and the
+// eventual p.instances[key]=inst insert were separated by the blocking
+// create() call, so both goroutines could read "under cap" before either
+// had inserted, overshooting it. reserveSlot/releaseSlot close that window
+// by reserving the slot atomically under p.mu before create runs, so this
+// must hold deterministically regardless of scheduling — not just usually.
+func TestMaxInstancesHardCapUnderConcurrentDistinctKeyMisses(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	fd := newFakeDriver()
+	cfg := testConfig(clock.now, t.TempDir())
+	cfg.MaxInstances = 1
+	p := newPool(cfg, fd)
+
+	svcA := config.Service{Name: "a", Image: "img", Port: 1, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+	svcB := config.Service{Name: "b", Image: "img", Port: 2, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = p.EnsureAll(context.Background(), []config.Service{svcA}, []string{"a"})
+	}()
+	go func() {
+		defer wg.Done()
+		_, errs[1] = p.EnsureAll(context.Background(), []config.Service{svcB}, []string{"b"})
+	}()
+	wg.Wait()
+
+	successes := 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent distinct-key misses at cap: %d succeeded (errs=%v), want exactly 1 (review BUG 2: max-instances must be a hard cap)", successes, errs)
+	}
+
+	p.mu.Lock()
+	liveCount := len(p.instances)
+	p.mu.Unlock()
+	if liveCount != 1 {
+		t.Errorf("live instances = %d, want exactly 1 (MaxInstances=1)", liveCount)
+	}
+}
+
 // --- ensure failure (review m5: TailLogs then Destroy) ---
 
 func TestEnsureFailureTailsLogsAndDestroys(t *testing.T) {
@@ -400,6 +481,43 @@ func TestEnsureFailureTailsLogsAndDestroys(t *testing.T) {
 	}
 	if !fd.wasDestroyed(name) {
 		t.Error("not-ready instance was not destroyed")
+	}
+}
+
+// TestCreateCleanupUsesDetachedContext is review BUG 1's repro: an ensure
+// whose ctx is canceled while blocked in the ready-poll (the "supersede
+// lands during ready-poll" scenario) must still actually run its
+// TailLogs/Destroy cleanup. Before the fix, cleanup ran on the same
+// (now-canceled) ctx, and exec.CommandContext on an already-canceled
+// context never starts the subprocess — Destroy would silently no-op,
+// leaking the container under its deterministic name and leaving it
+// untracked (poisoning every future ensure of that key with "name already
+// in use" until the next restart's Adopt).
+func TestCreateCleanupUsesDetachedContext(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	fd := newFakeDriver()
+	fd.setBlockReadyUntilDone(true) // ProbeReady blocks on ctx.Done(), then returns ctx.Err()
+	cfg := testConfig(clock.now, t.TempDir())
+	p := newPool(cfg, fd)
+
+	svc := config.Service{Name: "db", Image: "img", Port: 1, ReadyTimeout: 30 * time.Second, IdleTTL: time.Hour}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	if _, err := p.EnsureAll(ctx, []config.Service{svc}, []string{"db"}); err == nil {
+		t.Fatal("EnsureAll: want an error when ctx is canceled mid-ready-poll, got nil")
+	}
+
+	calls := fd.destroyCtxDoneCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Destroy called %d times, want exactly 1", len(calls))
+	}
+	if calls[0] {
+		t.Error("Destroy was called with an already-done context — cleanup must run on a detached context (review BUG 1), or exec.CommandContext never actually starts `rm`")
 	}
 }
 
@@ -494,6 +612,20 @@ func TestAnyDead(t *testing.T) {
 	p.mu.Unlock()
 	if stillTracked {
 		t.Error("dead instance was not evicted by AnyDead")
+	}
+
+	// review NIT 1: the wrapper's `defer Release(ens)` still runs after
+	// AnyDead's eviction (reconcile.go's M1 path calls both on the same
+	// Ensured). Release must not resurrect a lastUsed entry for a key
+	// AnyDead already dropped from p.instances — Reap only ever ranges
+	// p.instances, so such an entry would be permanently unreachable, a
+	// slow leak keyed by every service that ever died mid-run.
+	p.Release(e)
+	p.mu.Lock()
+	_, lastUsedLeaked := p.lastUsed[key]
+	p.mu.Unlock()
+	if lastUsedLeaked {
+		t.Error("Release re-added a lastUsed entry for a key AnyDead already evicted")
 	}
 }
 

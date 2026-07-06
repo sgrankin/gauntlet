@@ -1648,6 +1648,28 @@ check "test" {
 			wantErr: `service "mssql": duplicate`,
 		},
 		{
+			// "my-db" and "my_db" are exact-string-distinct (legal under the
+			// duplicate-name check above) but both mangle to
+			// GAUNTLET_SVC_MY_DB_* via envSafeName — the executor's env is a
+			// last-wins slice, so one would silently shadow the other's
+			// endpoint (adversarial review BUG 3) without this check.
+			name: "service names collide under env-var name transform",
+			kdl: `
+service "my-db" {
+    image "img"
+    port 1433
+}
+service "my_db" {
+    image "img2"
+    port 1434
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "my_db": collides with service "my-db" under env var name GAUNTLET_SVC_MY_DB_*`,
+		},
+		{
 			name: "service missing image",
 			kdl: `
 service "mssql" {
