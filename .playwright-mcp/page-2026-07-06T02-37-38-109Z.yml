@@ -1,0 +1,285 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - navigation [ref=e3]:
+      - link "targets" [ref=e4] [cursor=pointer]:
+        - /url: /
+      - link "checks" [ref=e5] [cursor=pointer]:
+        - /url: /checks
+    - heading "main" [level=1] [ref=e6]
+  - main [ref=e7]:
+    - paragraph [ref=e8]:
+      - text: branch
+      - code [ref=e9]: main
+      - text: "@"
+      - code [ref=e10]: 708a0e44ef18
+    - generic [ref=e11]:
+      - heading "In flight" [level=2] [ref=e12]
+      - paragraph [ref=e13]: idle
+    - generic [ref=e14]:
+      - heading "Waiting (0)" [level=2] [ref=e15]
+      - paragraph [ref=e16]: none
+    - generic [ref=e17]:
+      - heading "Parked (2)" [level=2] [ref=e18]
+      - table [ref=e19]:
+        - rowgroup [ref=e20]:
+          - row "user/topic sha outcome reason at" [ref=e21]:
+            - columnheader "user/topic" [ref=e22]
+            - columnheader "sha" [ref=e23]
+            - columnheader "outcome" [ref=e24]
+            - columnheader "reason" [ref=e25]
+            - columnheader "at" [ref=e26]
+          - row "claude/airbag-regression 7ff725bb071d rejected check \"test\" failed 2026-07-05 17:55:42 UTC" [ref=e27]:
+            - cell "claude/airbag-regression" [ref=e28]
+            - cell "7ff725bb071d" [ref=e29]:
+              - code [ref=e30]: 7ff725bb071d
+            - cell "rejected" [ref=e31]:
+              - link "rejected" [ref=e32] [cursor=pointer]:
+                - /url: /run/20260705T175532Z-2-1cac19c67889
+            - cell "check \"test\" failed" [ref=e33]
+            - cell "2026-07-05 17:55:42 UTC" [ref=e34]:
+              - time [ref=e35]: 2026-07-05 17:55:42 UTC
+          - row "claude/rollover e36b666e73a4 rejected check \"test\" failed 2026-07-05 22:47:41 UTC" [ref=e36]:
+            - cell "claude/rollover" [ref=e37]
+            - cell "e36b666e73a4" [ref=e38]:
+              - code [ref=e39]: e36b666e73a4
+            - cell "rejected" [ref=e40]:
+              - link "rejected" [ref=e41] [cursor=pointer]:
+                - /url: /run/20260705T224731Z-5-bb12231a0a65
+            - cell "check \"test\" failed" [ref=e42]
+            - cell "2026-07-05 22:47:41 UTC" [ref=e43]:
+              - time [ref=e44]: 2026-07-05 22:47:41 UTC
+    - generic [ref=e45]:
+      - heading "Post-land hooks" [level=2] [ref=e46]
+      - paragraph [ref=e47]: none
+    - generic [ref=e48]:
+      - heading "Recent runs" [level=2] [ref=e49]
+      - table [ref=e50]:
+        - rowgroup [ref=e51]:
+          - row "run user/topic outcome detail started duration" [ref=e52]:
+            - columnheader "run" [ref=e53]
+            - columnheader "user/topic" [ref=e54]
+            - columnheader "outcome" [ref=e55]
+            - columnheader "detail" [ref=e56]
+            - columnheader "started" [ref=e57]
+            - columnheader "duration" [ref=e58]
+          - row "20260705T224731Z-5-bb12231a0a65 claude/rollover rejected · rollover · 3h ago check \"test\" failed 2026-07-05 22:47:32 UTC 9.61s" [ref=e59]:
+            - cell "20260705T224731Z-5-bb12231a0a65" [ref=e60]:
+              - link "20260705T224731Z-5-bb12231a0a65" [ref=e61] [cursor=pointer]:
+                - /url: /run/20260705T224731Z-5-bb12231a0a65
+            - cell "claude/rollover" [ref=e62]
+            - cell "rejected · rollover · 3h ago" [ref=e63]:
+              - link "rejected · rollover · 3h ago" [ref=e64] [cursor=pointer]:
+                - /url: /run/20260705T224731Z-5-bb12231a0a65
+            - cell "check \"test\" failed" [ref=e65]
+            - cell "2026-07-05 22:47:32 UTC" [ref=e66]:
+              - time [ref=e67]: 2026-07-05 22:47:32 UTC
+            - cell "9.61s" [ref=e68]
+          - row "20260705T224607Z-1-bb12231a0a65 claude/rollover rejected · rollover · 3h ago check \"test\" failed 2026-07-05 22:46:07 UTC 9.54s" [ref=e69]:
+            - cell "20260705T224607Z-1-bb12231a0a65" [ref=e70]:
+              - link "20260705T224607Z-1-bb12231a0a65" [ref=e71] [cursor=pointer]:
+                - /url: /run/20260705T224607Z-1-bb12231a0a65
+            - cell "claude/rollover" [ref=e72]
+            - cell "rejected · rollover · 3h ago" [ref=e73]:
+              - link "rejected · rollover · 3h ago" [ref=e74] [cursor=pointer]:
+                - /url: /run/20260705T224607Z-1-bb12231a0a65
+            - cell "check \"test\" failed" [ref=e75]
+            - cell "2026-07-05 22:46:07 UTC" [ref=e76]:
+              - time [ref=e77]: 2026-07-05 22:46:07 UTC
+            - cell "9.54s" [ref=e78]
+          - row "20260705T201133Z-1-c8cf9f8b1512 claude/rollover rejected · rollover · 6h ago check \"test\" failed 2026-07-05 20:11:33 UTC 9.6s" [ref=e79]:
+            - cell "20260705T201133Z-1-c8cf9f8b1512" [ref=e80]:
+              - link "20260705T201133Z-1-c8cf9f8b1512" [ref=e81] [cursor=pointer]:
+                - /url: /run/20260705T201133Z-1-c8cf9f8b1512
+            - cell "claude/rollover" [ref=e82]
+            - cell "rejected · rollover · 6h ago" [ref=e83]:
+              - link "rejected · rollover · 6h ago" [ref=e84] [cursor=pointer]:
+                - /url: /run/20260705T201133Z-1-c8cf9f8b1512
+            - cell "check \"test\" failed" [ref=e85]
+            - cell "2026-07-05 20:11:33 UTC" [ref=e86]:
+              - time [ref=e87]: 2026-07-05 20:11:33 UTC
+            - cell "9.6s" [ref=e88]
+          - row "20260705T175607Z-4-7cc5fe2ee82c claude/seatbelt landed · seatbelt · 8h ago 2026-07-05 17:56:07 UTC 16.38s" [ref=e89]:
+            - cell "20260705T175607Z-4-7cc5fe2ee82c" [ref=e90]:
+              - link "20260705T175607Z-4-7cc5fe2ee82c" [ref=e91] [cursor=pointer]:
+                - /url: /run/20260705T175607Z-4-7cc5fe2ee82c
+            - cell "claude/seatbelt" [ref=e92]
+            - cell "landed · seatbelt · 8h ago" [ref=e93]:
+              - link "landed · seatbelt · 8h ago" [ref=e94] [cursor=pointer]:
+                - /url: /run/20260705T175607Z-4-7cc5fe2ee82c
+            - cell [ref=e95]
+            - cell "2026-07-05 17:56:07 UTC" [ref=e96]:
+              - time [ref=e97]: 2026-07-05 17:56:07 UTC
+            - cell "16.38s" [ref=e98]
+          - row "20260705T175547Z-3-24b0c2ab3817 claude/brakes landed · brakes · 8h ago 2026-07-05 17:55:47 UTC 15.79s" [ref=e99]:
+            - cell "20260705T175547Z-3-24b0c2ab3817" [ref=e100]:
+              - link "20260705T175547Z-3-24b0c2ab3817" [ref=e101] [cursor=pointer]:
+                - /url: /run/20260705T175547Z-3-24b0c2ab3817
+            - cell "claude/brakes" [ref=e102]
+            - cell "landed · brakes · 8h ago" [ref=e103]:
+              - link "landed · brakes · 8h ago" [ref=e104] [cursor=pointer]:
+                - /url: /run/20260705T175547Z-3-24b0c2ab3817
+            - cell [ref=e105]
+            - cell "2026-07-05 17:55:47 UTC" [ref=e106]:
+              - time [ref=e107]: 2026-07-05 17:55:47 UTC
+            - cell "15.79s" [ref=e108]
+          - row "20260705T175532Z-2-1cac19c67889 claude/airbag-regression rejected · airbag-regression · 8h ago check \"test\" failed 2026-07-05 17:55:32 UTC 9.74s" [ref=e109]:
+            - cell "20260705T175532Z-2-1cac19c67889" [ref=e110]:
+              - link "20260705T175532Z-2-1cac19c67889" [ref=e111] [cursor=pointer]:
+                - /url: /run/20260705T175532Z-2-1cac19c67889
+            - cell "claude/airbag-regression" [ref=e112]
+            - cell "rejected · airbag-regression · 8h ago" [ref=e113]:
+              - link "rejected · airbag-regression · 8h ago" [ref=e114] [cursor=pointer]:
+                - /url: /run/20260705T175532Z-2-1cac19c67889
+            - cell "check \"test\" failed" [ref=e115]
+            - cell "2026-07-05 17:55:32 UTC" [ref=e116]:
+              - time [ref=e117]: 2026-07-05 17:55:32 UTC
+            - cell "9.74s" [ref=e118]
+          - row "20260705T175517Z-1-1cac19c67889 claude/seatbelt skipped · seatbelt · 8h ago batch 20260705T175517Z-1-1cac19c67889 red on check \"test\"; serializing 2026-07-05 17:55:18 UTC 8.89s" [ref=e119]:
+            - cell "20260705T175517Z-1-1cac19c67889" [ref=e120]:
+              - link "20260705T175517Z-1-1cac19c67889" [ref=e121] [cursor=pointer]:
+                - /url: /run/20260705T175517Z-1-1cac19c67889
+            - cell "claude/seatbelt" [ref=e122]
+            - cell "skipped · seatbelt · 8h ago" [ref=e123]:
+              - link "skipped · seatbelt · 8h ago" [ref=e124] [cursor=pointer]:
+                - /url: /run/20260705T175517Z-1-1cac19c67889
+            - cell "batch 20260705T175517Z-1-1cac19c67889 red on check \"test\"; serializing" [ref=e125]
+            - cell "2026-07-05 17:55:18 UTC" [ref=e126]:
+              - time [ref=e127]: 2026-07-05 17:55:18 UTC
+            - cell "8.89s" [ref=e128]
+          - row "20260705T154045Z-1-1cac19c67889 claude/airbag-regression rejected · airbag-regression · 10h ago check \"test\" failed 2026-07-05 15:40:45 UTC 9.71s" [ref=e129]:
+            - cell "20260705T154045Z-1-1cac19c67889" [ref=e130]:
+              - link "20260705T154045Z-1-1cac19c67889" [ref=e131] [cursor=pointer]:
+                - /url: /run/20260705T154045Z-1-1cac19c67889
+            - cell "claude/airbag-regression" [ref=e132]
+            - cell "rejected · airbag-regression · 10h ago" [ref=e133]:
+              - link "rejected · airbag-regression · 10h ago" [ref=e134] [cursor=pointer]:
+                - /url: /run/20260705T154045Z-1-1cac19c67889
+            - cell "check \"test\" failed" [ref=e135]
+            - cell "2026-07-05 15:40:45 UTC" [ref=e136]:
+              - time [ref=e137]: 2026-07-05 15:40:45 UTC
+            - cell "9.71s" [ref=e138]
+          - row "20260705T152106Z-2-51d7bd6d0815 claude/grades landed · grades · 11h ago 2026-07-05 15:21:07 UTC 15.65s" [ref=e139]:
+            - cell "20260705T152106Z-2-51d7bd6d0815" [ref=e140]:
+              - link "20260705T152106Z-2-51d7bd6d0815" [ref=e141] [cursor=pointer]:
+                - /url: /run/20260705T152106Z-2-51d7bd6d0815
+            - cell "claude/grades" [ref=e142]
+            - cell "landed · grades · 11h ago" [ref=e143]:
+              - link "landed · grades · 11h ago" [ref=e144] [cursor=pointer]:
+                - /url: /run/20260705T152106Z-2-51d7bd6d0815
+            - cell [ref=e145]
+            - cell "2026-07-05 15:21:07 UTC" [ref=e146]:
+              - time [ref=e147]: 2026-07-05 15:21:07 UTC
+            - cell "15.65s" [ref=e148]
+          - row "20260705T152051Z-1-5b1636d4d343 claude/airbag-regression rejected · airbag-regression · 11h ago check \"test\" failed 2026-07-05 15:20:51 UTC 9.7s" [ref=e149]:
+            - cell "20260705T152051Z-1-5b1636d4d343" [ref=e150]:
+              - link "20260705T152051Z-1-5b1636d4d343" [ref=e151] [cursor=pointer]:
+                - /url: /run/20260705T152051Z-1-5b1636d4d343
+            - cell "claude/airbag-regression" [ref=e152]
+            - cell "rejected · airbag-regression · 11h ago" [ref=e153]:
+              - link "rejected · airbag-regression · 11h ago" [ref=e154] [cursor=pointer]:
+                - /url: /run/20260705T152051Z-1-5b1636d4d343
+            - cell "check \"test\" failed" [ref=e155]
+            - cell "2026-07-05 15:20:51 UTC" [ref=e156]:
+              - time [ref=e157]: 2026-07-05 15:20:51 UTC
+            - cell "9.7s" [ref=e158]
+          - row "20260705T152019Z-1-5b1636d4d343 claude/airbag-regression rejected · airbag-regression · 11h ago check \"test\" failed 2026-07-05 15:20:20 UTC 9.7s" [ref=e159]:
+            - cell "20260705T152019Z-1-5b1636d4d343" [ref=e160]:
+              - link "20260705T152019Z-1-5b1636d4d343" [ref=e161] [cursor=pointer]:
+                - /url: /run/20260705T152019Z-1-5b1636d4d343
+            - cell "claude/airbag-regression" [ref=e162]
+            - cell "rejected · airbag-regression · 11h ago" [ref=e163]:
+              - link "rejected · airbag-regression · 11h ago" [ref=e164] [cursor=pointer]:
+                - /url: /run/20260705T152019Z-1-5b1636d4d343
+            - cell "check \"test\" failed" [ref=e165]
+            - cell "2026-07-05 15:20:20 UTC" [ref=e166]:
+              - time [ref=e167]: 2026-07-05 15:20:20 UTC
+            - cell "9.7s" [ref=e168]
+          - row "20260705T142958Z-1-5b1636d4d343 claude/airbag-regression rejected · airbag-regression · 12h ago check \"test\" failed 2026-07-05 14:29:59 UTC 9.69s" [ref=e169]:
+            - cell "20260705T142958Z-1-5b1636d4d343" [ref=e170]:
+              - link "20260705T142958Z-1-5b1636d4d343" [ref=e171] [cursor=pointer]:
+                - /url: /run/20260705T142958Z-1-5b1636d4d343
+            - cell "claude/airbag-regression" [ref=e172]
+            - cell "rejected · airbag-regression · 12h ago" [ref=e173]:
+              - link "rejected · airbag-regression · 12h ago" [ref=e174] [cursor=pointer]:
+                - /url: /run/20260705T142958Z-1-5b1636d4d343
+            - cell "check \"test\" failed" [ref=e175]
+            - cell "2026-07-05 14:29:59 UTC" [ref=e176]:
+              - time [ref=e177]: 2026-07-05 14:29:59 UTC
+            - cell "9.69s" [ref=e178]
+          - row "20260705T141935Z-1-5b1636d4d343 claude/airbag-regression rejected · airbag-regression · 12h ago check \"test\" failed 2026-07-05 14:19:36 UTC 9.63s" [ref=e179]:
+            - cell "20260705T141935Z-1-5b1636d4d343" [ref=e180]:
+              - link "20260705T141935Z-1-5b1636d4d343" [ref=e181] [cursor=pointer]:
+                - /url: /run/20260705T141935Z-1-5b1636d4d343
+            - cell "claude/airbag-regression" [ref=e182]
+            - cell "rejected · airbag-regression · 12h ago" [ref=e183]:
+              - link "rejected · airbag-regression · 12h ago" [ref=e184] [cursor=pointer]:
+                - /url: /run/20260705T141935Z-1-5b1636d4d343
+            - cell "check \"test\" failed" [ref=e185]
+            - cell "2026-07-05 14:19:36 UTC" [ref=e186]:
+              - time [ref=e187]: 2026-07-05 14:19:36 UTC
+            - cell "9.63s" [ref=e188]
+          - row "20260705T132254Z-1-b4cda1245123 claude/readme-disclaimer landed · readme-disclaimer · 13h ago 2026-07-05 13:22:54 UTC 16.01s" [ref=e189]:
+            - cell "20260705T132254Z-1-b4cda1245123" [ref=e190]:
+              - link "20260705T132254Z-1-b4cda1245123" [ref=e191] [cursor=pointer]:
+                - /url: /run/20260705T132254Z-1-b4cda1245123
+            - cell "claude/readme-disclaimer" [ref=e192]
+            - cell "landed · readme-disclaimer · 13h ago" [ref=e193]:
+              - link "landed · readme-disclaimer · 13h ago" [ref=e194] [cursor=pointer]:
+                - /url: /run/20260705T132254Z-1-b4cda1245123
+            - cell [ref=e195]
+            - cell "2026-07-05 13:22:54 UTC" [ref=e196]:
+              - time [ref=e197]: 2026-07-05 13:22:54 UTC
+            - cell "16.01s" [ref=e198]
+          - row "20260705T132058Z-4-cc36dabaa2c4 claude/airbag landed · airbag · 13h ago 2026-07-05 13:20:58 UTC 15.99s" [ref=e199]:
+            - cell "20260705T132058Z-4-cc36dabaa2c4" [ref=e200]:
+              - link "20260705T132058Z-4-cc36dabaa2c4" [ref=e201] [cursor=pointer]:
+                - /url: /run/20260705T132058Z-4-cc36dabaa2c4
+            - cell "claude/airbag" [ref=e202]
+            - cell "landed · airbag · 13h ago" [ref=e203]:
+              - link "landed · airbag · 13h ago" [ref=e204] [cursor=pointer]:
+                - /url: /run/20260705T132058Z-4-cc36dabaa2c4
+            - cell [ref=e205]
+            - cell "2026-07-05 13:20:58 UTC" [ref=e206]:
+              - time [ref=e207]: 2026-07-05 13:20:58 UTC
+            - cell "15.99s" [ref=e208]
+          - row "20260705T132003Z-3-04d9723c16ae claude/airbag rejected · airbag · 13h ago check \"test\" failed 2026-07-05 13:20:03 UTC 9.91s" [ref=e209]:
+            - cell "20260705T132003Z-3-04d9723c16ae" [ref=e210]:
+              - link "20260705T132003Z-3-04d9723c16ae" [ref=e211] [cursor=pointer]:
+                - /url: /run/20260705T132003Z-3-04d9723c16ae
+            - cell "claude/airbag" [ref=e212]
+            - cell "rejected · airbag · 13h ago" [ref=e213]:
+              - link "rejected · airbag · 13h ago" [ref=e214] [cursor=pointer]:
+                - /url: /run/20260705T132003Z-3-04d9723c16ae
+            - cell "check \"test\" failed" [ref=e215]
+            - cell "2026-07-05 13:20:03 UTC" [ref=e216]:
+              - time [ref=e217]: 2026-07-05 13:20:03 UTC
+            - cell "9.91s" [ref=e218]
+          - row "20260705T131858Z-2-8b8aa3a45a34 claude/safety-rating landed · safety-rating · 13h ago 2026-07-05 13:18:58 UTC 16.09s" [ref=e219]:
+            - cell "20260705T131858Z-2-8b8aa3a45a34" [ref=e220]:
+              - link "20260705T131858Z-2-8b8aa3a45a34" [ref=e221] [cursor=pointer]:
+                - /url: /run/20260705T131858Z-2-8b8aa3a45a34
+            - cell "claude/safety-rating" [ref=e222]
+            - cell "landed · safety-rating · 13h ago" [ref=e223]:
+              - link "landed · safety-rating · 13h ago" [ref=e224] [cursor=pointer]:
+                - /url: /run/20260705T131858Z-2-8b8aa3a45a34
+            - cell [ref=e225]
+            - cell "2026-07-05 13:18:58 UTC" [ref=e226]:
+              - time [ref=e227]: 2026-07-05 13:18:58 UTC
+            - cell "16.09s" [ref=e228]
+          - 'row "20260705T131753Z-1-02e69a8b32ca claude/safety-rating rejected · safety-rating · 13h ago check spec \".gauntlet.kdl\": config: check spec: parse failed: unexpected BraceClose in state stateNodeParams at line 0, column 43: ...\"vet\" \"./...\" }... ^ 2026-07-05 13:17:53 UTC 0s" [ref=e229]':
+            - cell "20260705T131753Z-1-02e69a8b32ca" [ref=e230]:
+              - link "20260705T131753Z-1-02e69a8b32ca" [ref=e231] [cursor=pointer]:
+                - /url: /run/20260705T131753Z-1-02e69a8b32ca
+            - cell "claude/safety-rating" [ref=e232]
+            - cell "rejected · safety-rating · 13h ago" [ref=e233]:
+              - link "rejected · safety-rating · 13h ago" [ref=e234] [cursor=pointer]:
+                - /url: /run/20260705T131753Z-1-02e69a8b32ca
+            - 'cell "check spec \".gauntlet.kdl\": config: check spec: parse failed: unexpected BraceClose in state stateNodeParams at line 0, column 43: ...\"vet\" \"./...\" }... ^" [ref=e235]'
+            - cell "2026-07-05 13:17:53 UTC" [ref=e236]:
+              - time [ref=e237]: 2026-07-05 13:17:53 UTC
+            - cell "0s" [ref=e238]
+  - contentinfo [ref=e239]:
+    - generic [ref=e240]:
+      - text: generated
+      - time [ref=e241]: 2026-07-06 02:37:34 UTC
+      - text: · gauntlet devel

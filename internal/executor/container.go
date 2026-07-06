@@ -20,6 +20,11 @@ import (
 // tree mount (job.Dir -> Workdir), which must stay separate: checks must not
 // be able to see or clobber the result-file mechanism from their own
 // working directory.
+//
+// internal/config's validate() duplicates containerResultDir as
+// reservedResultDir (that package deliberately doesn't import this one — see
+// Params.Caches's doc below) to reject an operator Mount at or under this
+// path. Renaming this constant means updating that copy too.
 const (
 	containerResultDir  = "/gauntlet"
 	containerResultFile = containerResultDir + "/result"
@@ -31,6 +36,20 @@ const (
 type Cache struct {
 	Name string // volume name (docker-compatible runtimes create it on first use)
 	Path string // mount path inside the container
+}
+
+// Mount is a host bind mount into every check container — a generic
+// primitive alongside Cache's named volumes (DESIGN.md decision ledger,
+// "Generic container mounts"), config.Mount's package-local mirror (this
+// package doesn't import internal/config, same reason Params.Caches exists
+// as its own type rather than aliasing config.Cache). The motivating case is
+// the host docker socket for testcontainers-based checks, but nothing here
+// is docker-specific: Host and Path are just bound with a docker-compatible
+// `-v` flag, `:ro` appended when ReadOnly.
+type Mount struct {
+	Host     string // absolute host path (file or dir)
+	Path     string // absolute mount path inside the container
+	ReadOnly bool   // when true, mounted read-only (:ro)
 }
 
 // Params configures a ContainerExecutor. Package-local (§9.5 of
@@ -53,6 +72,11 @@ type Params struct {
 	// Caches are persistent named volumes mounted alongside the trial tree
 	// and result dir.
 	Caches []Cache
+
+	// Mounts are operator-configured host bind mounts, applied after Caches
+	// (see runArgs) — e.g. the host docker socket, for repos whose checks
+	// run testcontainers against the host daemon.
+	Mounts []Mount
 
 	// ScratchDir is the directory each check's ephemeral host-side result
 	// dir (gauntlet-container-*, bind-mounted into the container at
@@ -295,6 +319,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //	  -v <resultDir>:/gauntlet          # writable result dir \
 //	  -e GAUNTLET_* (all five)          \
 //	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
+//	  -v <mountHost>:<mountPath>[:ro] ... # operator-configured host bind mounts \
 //	  <image> <job.Command...>
 //
 // Pure and exec-free: exhaustively unit-testable without any runtime.
@@ -317,6 +342,13 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 	)
 	for _, c := range p.Caches {
 		args = append(args, "-v", c.Name+":"+c.Path)
+	}
+	for _, m := range p.Mounts {
+		v := m.Host + ":" + m.Path
+		if m.ReadOnly {
+			v += ":ro"
+		}
+		args = append(args, "-v", v)
 	}
 	args = append(args, p.Image)
 	args = append(args, job.Command...)

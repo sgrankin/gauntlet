@@ -164,6 +164,97 @@ func TestParams_RunArgs_MultipleCachesPreserveOrder(t *testing.T) {
 	}
 }
 
+func TestParams_RunArgs_MountsAfterCachesBeforeImage(t *testing.T) {
+	p := Params{
+		Workdir: "/w",
+		Image:   "img",
+		Caches: []Cache{
+			{Name: "gocache", Path: "/root/.cache/go-build"},
+		},
+		Mounts: []Mount{
+			{Host: "/var/run/docker.sock", Path: "/var/run/docker.sock"},
+		},
+	}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	cacheIdx := indexOfPair(got, "-v", "gocache:/root/.cache/go-build")
+	mountIdx := indexOfPair(got, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+	imageIdx := indexOf(got, "img")
+	if cacheIdx == -1 || mountIdx == -1 || imageIdx == -1 {
+		t.Fatalf("missing expected entries; argv=%v", got)
+	}
+	if !(cacheIdx < mountIdx && mountIdx < imageIdx) {
+		t.Fatalf("want cache mount, then bind mount, then image, in that order; argv=%v", got)
+	}
+}
+
+func TestParams_RunArgs_MountReadOnlySuffix(t *testing.T) {
+	p := Params{
+		Workdir: "/w",
+		Image:   "img",
+		Mounts: []Mount{
+			{Host: "/host/rw", Path: "/rw"},
+			{Host: "/host/ro", Path: "/ro", ReadOnly: true},
+		},
+	}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	if !containsPair(got, "-v", "/host/rw:/rw") {
+		t.Fatalf("expected read-write mount with no :ro suffix; argv=%v", got)
+	}
+	if !containsPair(got, "-v", "/host/ro:/ro:ro") {
+		t.Fatalf("expected read-only mount with :ro suffix; argv=%v", got)
+	}
+}
+
+func TestParams_RunArgs_MultipleMountsPreserveOrder(t *testing.T) {
+	p := Params{
+		Workdir: "/w",
+		Image:   "img",
+		Mounts: []Mount{
+			{Host: "/a", Path: "/a"},
+			{Host: "/b", Path: "/b"},
+			{Host: "/c", Path: "/c"},
+		},
+	}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	prevIdx := -1
+	for _, m := range p.Mounts {
+		idx := indexOfPair(got, "-v", m.Host+":"+m.Path)
+		if idx == -1 {
+			t.Fatalf("missing mount %s:%s; argv=%v", m.Host, m.Path, got)
+		}
+		if idx < prevIdx {
+			t.Fatalf("mounts out of order; argv=%v", got)
+		}
+		prevIdx = idx
+	}
+}
+
+func TestParams_RunArgs_NoMounts(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img"}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	// No mounts configured ⇒ no extra -v pairs beyond the fixed mounts (and
+	// any caches); image immediately follows whatever came before it.
+	idx := indexOf(got, "img")
+	if idx == -1 {
+		t.Fatalf("image not found in argv: %v", got)
+	}
+	if got[idx-1] != "GAUNTLET_RESULT_FILE=/gauntlet/result" {
+		t.Fatalf("expected image immediately after result-file env when no caches/mounts, got argv: %v", got)
+	}
+}
+
 func TestParams_RunArgs_CommandArgvPassedThrough(t *testing.T) {
 	p := Params{Workdir: "/w", Image: "img"}
 	job := containerJob([]string{"go", "vet", "./..."})

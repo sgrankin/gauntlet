@@ -94,6 +94,13 @@ executor "container" {
     workdir "/workspace"
     cache "gocache"    path="/root/.cache/go-build"
     cache "gomodcache" path="/go/pkg/mod"
+
+    // mount (optional, multiple allowed): host bind mounts, e.g. the docker
+    // socket so testcontainers-based checks can reach the host daemon. See
+    // README's "Container executor" section for the trust implication
+    // before uncommenting this — mounting the socket hands every check full
+    // control of the host docker daemon.
+    // mount "/var/run/docker.sock" path="/var/run/docker.sock"
 }
 
 // summarize {

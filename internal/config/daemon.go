@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -228,6 +229,7 @@ type Executor struct {
 	Image   string  `kdl:"image"`   // required when Kind=="container"
 	Workdir string  `kdl:"workdir"` // default "/workspace"
 	Caches  []Cache `kdl:"cache,multiple"`
+	Mounts  []Mount `kdl:"mount,multiple"`
 }
 
 // Cache is one persistent named cache volume mounted into the container
@@ -235,6 +237,40 @@ type Executor struct {
 type Cache struct {
 	Name string `kdl:",arg"`
 	Path string `kdl:"path"`
+}
+
+// reservedResultDir is the fixed in-container path the writable result-dir
+// mount is bound to — keep in sync with
+// internal/executor/container.go's containerResultDir. Duplicated rather
+// than imported: this package deliberately doesn't depend on
+// internal/executor (see Params.Caches's doc there for the reverse of this
+// same boundary).
+const reservedResultDir = "/gauntlet"
+
+// Mount is one host bind mount into the container executor, alongside the
+// trial tree and the named cache volumes above (DESIGN.md decision ledger,
+// "Generic container mounts"). The motivating case is the host docker
+// socket, for repos whose checks run testcontainers — but this is a plain,
+// unopinionated bind mount, not a docker-socket-specific knob: whatever else
+// a repo's checks need visible from the host filesystem goes here too.
+//
+// Both Host and Path are required, must be absolute, and must not contain
+// ':' (validate() below — the container runtime's "-v host:path[:ro]" argv
+// syntax has no escape for it). Path may not be at or under the executor's
+// own Workdir or reservedResultDir, the fixed in-container result-dir mount
+// (internal/executor/container.go's containerResultDir) — both are the
+// executor's own contract with every check and must not be silently
+// shadowed, even partially, by an operator-configured mount.
+//
+// README's "Container executor" section spells out the trust implication of
+// mounting the docker socket specifically: it hands every check — i.e.
+// anyone who can push a for/ ref — full control of the host docker daemon,
+// which is root-equivalent on most setups. That's an operator choice this
+// type merely enables; it isn't gated here.
+type Mount struct {
+	Host     string `kdl:",arg"`     // absolute host path (file or dir)
+	Path     string `kdl:"path"`     // absolute in-container path
+	ReadOnly bool   `kdl:"readonly"` // default false (read-write)
 }
 
 // Summarize configures the optional Claude-written merge-commit body
@@ -509,6 +545,22 @@ func (d *Daemon) applyDefaults() {
 	}
 }
 
+// pathAtOrUnder reports whether path is exactly reserved or a path
+// underneath it, after cleaning both operands (so a trailing slash, a
+// repeated separator, or a "/." spelling of the same path can't dodge the
+// comparison). An empty reserved never matches — Executor.Workdir is only
+// ever "" for kind "local", where mounts have no effect at all (see
+// cmd/gauntlet's buildExecutor), and a "" root would otherwise wrongly
+// match every absolute path via the separator-prefix check below.
+func pathAtOrUnder(path, reserved string) bool {
+	if reserved == "" {
+		return false
+	}
+	path = filepath.Clean(path)
+	reserved = filepath.Clean(reserved)
+	return path == reserved || strings.HasPrefix(path, reserved+string(filepath.Separator))
+}
+
 func (d *Daemon) validate() error {
 	if d.Remote == "" {
 		return fmt.Errorf("remote: must not be empty")
@@ -670,6 +722,48 @@ func (d *Daemon) validate() error {
 		}
 		if c.Path == "" {
 			return fmt.Errorf("executor: cache %q: path must not be empty", c.Name)
+		}
+	}
+	for _, m := range d.Executor.Mounts {
+		if m.Host == "" {
+			return fmt.Errorf("executor: mount: host must not be empty")
+		}
+		if !filepath.IsAbs(m.Host) {
+			return fmt.Errorf("executor: mount %q: host must be an absolute path", m.Host)
+		}
+		if m.Path == "" {
+			return fmt.Errorf("executor: mount %q: path must not be empty", m.Host)
+		}
+		if !filepath.IsAbs(m.Path) {
+			return fmt.Errorf("executor: mount %q: path must be an absolute path, got %q", m.Host, m.Path)
+		}
+		// ':' in either half silently corrupts the container runtime's
+		// "-v host:path[:ro]" argv syntax (internal/executor/container.go's
+		// runArgs just concatenates with ":") — the worst failure shape,
+		// since it misparses rather than erroring. Absolute Linux paths
+		// essentially never legitimately contain one.
+		if strings.Contains(m.Host, ":") {
+			return fmt.Errorf("executor: mount %q: host must not contain ':'", m.Host)
+		}
+		if strings.Contains(m.Path, ":") {
+			return fmt.Errorf("executor: mount %q: path must not contain ':', got %q", m.Host, m.Path)
+		}
+		// Reserved in-container paths are the executor's own contract with
+		// every check (the trial tree at Workdir, the result dir at
+		// reservedResultDir — keep in sync with
+		// internal/executor/container.go's containerResultDir) and must
+		// never be silently shadowed by an operator mount, including by a
+		// mount at some path UNDER one of them: a nested bind is legal to
+		// docker/podman/container and would partially, silently shadow the
+		// trial tree or result dir exactly as much as an exact-path
+		// collision would. pathAtOrUnder compares cleaned paths so a
+		// trailing slash, "//", or "/." spelling of the same path can't
+		// bypass the guard.
+		if pathAtOrUnder(m.Path, d.Executor.Workdir) {
+			return fmt.Errorf("executor: mount %q: path %q is at or under executor workdir %q", m.Host, m.Path, d.Executor.Workdir)
+		}
+		if pathAtOrUnder(m.Path, reservedResultDir) {
+			return fmt.Errorf("executor: mount %q: path %q is at or under the reserved result-dir mount %q", m.Host, m.Path, reservedResultDir)
 		}
 	}
 

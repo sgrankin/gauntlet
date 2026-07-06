@@ -298,7 +298,10 @@ summarize {
   `image`, mounting the trial tree read-write at `workdir` (default
   `/workspace`) plus one named, persistent volume per `cache` entry (`name` +
   mount `path`) so warm caches (`GOCACHE`, module caches, …) survive across
-  runs. `image` is required when `kind` is `"container"`.
+  runs. `image` is required when `kind` is `"container"`. `mount` entries
+  (host path + `path` + optional `readonly`) add plain host bind mounts —
+  see "Container executor" below for the docker-socket/testcontainers case
+  and its trust implications.
 - **`summarize`** — enables a Claude-written merge-commit body
   (`internal/summarize`); see [Summaries](#summaries) below. **Node absent
   ⇒ disabled**: merge commits get exactly the phase-1/2/3 subject +
@@ -796,6 +799,49 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
 4. Push a candidate; you should see a container start and stop per check
    (`container list` while a run is in flight), and a second run reusing
    the same image show faster build steps once caches are warm.
+5. Need a check to reach the host docker daemon (the concrete driver: a
+   repo whose test suite uses testcontainers) — add a `mount`:
+
+   ```kdl
+   executor "container" {
+       runtime "docker"
+       image "ghcr.io/acme/ci:latest"
+       mount "/var/run/docker.sock" path="/var/run/docker.sock"
+   }
+   ```
+
+   This is docker-out-of-docker: the check container talks to the *host's*
+   docker daemon over the mounted socket and spawns sibling containers
+   against it, rather than nesting a second daemon inside the check
+   container. A few things to know before reaching for it:
+
+   - **Testcontainers already works today, with zero config, under the
+     `local` executor** — checks there are just host subprocesses with
+     direct access to the host socket already. This `mount` knob is only
+     for repos that want *both* the container executor's isolation *and*
+     testcontainers.
+   - **Mounting the docker socket hands every check full control of the
+     host docker daemon.** Any ref anyone can push to `for/…` gets a check
+     run against that mount, and the docker socket API is root-equivalent
+     on most setups (a container run with `-v /:/host` is a sandbox
+     escape). Only do this if every pusher is as trusted as an operator
+     with shell on the builder host.
+   - **`readonly` does not restrict the socket API.** `readonly` affects
+     filesystem metadata (the check can't unlink/replace the socket file)
+     — it has no effect on what the check can *say* to the daemon over
+     that socket. Don't rely on it as a safety boundary here.
+   - **Apple's `container` CLI has no host daemon socket to mount** — each
+     container is its own lightweight VM with no shared daemon. On macOS,
+     use `runtime "docker"` (Docker Desktop or colima) for this, or fall
+     back to the `local` executor.
+   - **Sibling-container paths are host paths, not check-container
+     paths.** A path you hand to testcontainers for a bind mount (e.g.
+     `Testcontainers.WithBindMount(...)`) is resolved by the *host* docker
+     daemon against the *host* filesystem — a path inside the check
+     container's own bind-mounted trial tree means nothing to it.
+     Testcontainers' file-copy APIs (`CopyToContainer`/`WithFiles`, per
+     your client library) sidestep this because they stream bytes over the
+     API instead of naming a host path.
 
 ### OTLP export
 

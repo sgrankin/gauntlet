@@ -177,6 +177,12 @@ toolchain, this image cannot run them; either point the `executor
 "Container executor" section, README), or don't containerize the daemon
 itself — use topology (a).
 
+If checks need the host docker socket (testcontainers-based suites), that's
+a separate `mount` entry on `executor "container"` — see README's "Container
+executor" section for the config and, more importantly, the trust
+implication: mounting the socket hands every check full control of whatever
+docker daemon it points at.
+
 ```sh
 make image                          # docker/podman/container, whichever is on PATH
 # or directly:

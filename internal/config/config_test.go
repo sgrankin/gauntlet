@@ -121,6 +121,13 @@ func TestLoadDaemon_Example(t *testing.T) {
 			t.Errorf("Executor.Caches[%d] = %+v, want %+v", i, d.Executor.Caches[i], want)
 		}
 	}
+	// gauntlet.kdl's example "mount" line is deliberately commented out (a
+	// trust-changing, default-off knob — see its own comment there); assert
+	// it stays that way so an accidental de-comment can't silently start
+	// parsing without this test noticing.
+	if len(d.Executor.Mounts) != 0 {
+		t.Errorf("Executor.Mounts = %+v, want empty (example mount is commented out)", d.Executor.Mounts)
+	}
 }
 
 func TestParseChecks_Example(t *testing.T) {
@@ -215,6 +222,46 @@ target "main" branch="main"
 	}
 	if d.Summarize != nil {
 		t.Errorf("Summarize = %+v, want nil (disabled, node absent)", d.Summarize)
+	}
+}
+
+// TestLoadDaemon_ExecutorMounts covers the three shapes a "mount" node can
+// take: bare (arg + path, read-write by default), and with an explicit
+// "readonly" property. It also proves the reserved-path guard's
+// pathAtOrUnder check is a real path-component comparison, not a
+// strings.HasPrefix footgun: "/workspace2" merely shares "/workspace" as a
+// string prefix and must load cleanly alongside the workdir default.
+func TestLoadDaemon_ExecutorMounts(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/var/run/docker.sock" path="/var/run/docker.sock"
+    mount "/etc/foo" path="/foo" readonly=true
+    mount "/host/sibling" path="/workspace2"
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	want := []Mount{
+		{Host: "/var/run/docker.sock", Path: "/var/run/docker.sock"},
+		{Host: "/etc/foo", Path: "/foo", ReadOnly: true},
+		{Host: "/host/sibling", Path: "/workspace2"},
+	}
+	if !reflect.DeepEqual(d.Executor.Mounts, want) {
+		t.Errorf("Executor.Mounts = %+v, want %+v", d.Executor.Mounts, want)
 	}
 }
 
@@ -912,6 +959,197 @@ target "main" branch="main"
 executor "container" {
     image "ghcr.io/acme/ci:latest"
     cache "gocache"
+}
+`,
+			wantErr: "executor",
+		},
+		{
+			name: "executor mount missing path",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/var/run/docker.sock"
+}
+`,
+			wantErr: "executor",
+		},
+		{
+			name: "executor mount relative host path",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "var/run/docker.sock" path="/var/run/docker.sock"
+}
+`,
+			wantErr: "executor",
+		},
+		{
+			name: "executor mount relative container path",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/var/run/docker.sock" path="var/run/docker.sock"
+}
+`,
+			wantErr: "executor",
+		},
+		{
+			// Reserved-path guard: a mount must not shadow the trial-tree
+			// mount at the executor's own workdir.
+			name: "executor mount collides with workdir",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    workdir "/workspace"
+    mount "/host/dir" path="/workspace"
+}
+`,
+			wantErr: "workdir",
+		},
+		{
+			// Reserved-path guard: a mount must not shadow the fixed
+			// result-dir mount at /gauntlet (containerResultDir).
+			name: "executor mount collides with result dir",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/dir" path="/gauntlet"
+}
+`,
+			wantErr: "result-dir",
+		},
+		{
+			// Reserved-path guard, canonicalization: a trailing slash on the
+			// mount path must not bypass the workdir collision check.
+			name: "executor mount collides with workdir via trailing slash",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    workdir "/workspace"
+    mount "/host/dir" path="/workspace/"
+}
+`,
+			wantErr: "workdir",
+		},
+		{
+			// Reserved-path guard, canonicalization: a doubled separator on
+			// the mount path must not bypass the result-dir collision check.
+			name: "executor mount collides with result dir via doubled separator",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/dir" path="//gauntlet"
+}
+`,
+			wantErr: "result-dir",
+		},
+		{
+			// Reserved-path guard now also rejects a mount at a subpath
+			// UNDER the workdir, not just an exact match: a nested bind
+			// still silently, partially shadows the trial tree.
+			name: "executor mount is a subpath under workdir",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    workdir "/workspace"
+    mount "/host/dir" path="/workspace/src"
+}
+`,
+			wantErr: "workdir",
+		},
+		{
+			// Same as above, for the result-dir mount.
+			name: "executor mount is a subpath under result dir",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/dir" path="/gauntlet/sub"
+}
+`,
+			wantErr: "result-dir",
+		},
+		{
+			name: "executor mount host contains colon",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/a:b" path="/foo"
+}
+`,
+			wantErr: "executor",
+		},
+		{
+			name: "executor mount path contains colon",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/dir" path="/foo:bar"
 }
 `,
 			wantErr: "executor",

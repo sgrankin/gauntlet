@@ -34,11 +34,16 @@ func buildExecutor(cfg *config.Daemon, scratchDir, token string) (core.Executor,
 		for i, c := range cfg.Executor.Caches {
 			caches[i] = executor.Cache{Name: c.Name, Path: c.Path}
 		}
+		mounts := make([]executor.Mount, len(cfg.Executor.Mounts))
+		for i, m := range cfg.Executor.Mounts {
+			mounts[i] = executor.Mount{Host: m.Host, Path: m.Path, ReadOnly: m.ReadOnly}
+		}
 		ex, err := executor.New(executor.Params{
 			Runtime:    cfg.Executor.Runtime,
 			Image:      cfg.Executor.Image,
 			Workdir:    cfg.Executor.Workdir,
 			Caches:     caches,
+			Mounts:     mounts,
 			ScratchDir: scratchDir,
 			Token:      token,
 		})
