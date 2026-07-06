@@ -728,6 +728,21 @@ now, a full pool recycle if changed after release): `Env: count, then sorted
 by Name, each (Name,Value) length-prefixed`. Chunk 2 consumes keys opaquely,
 so nothing else changes.
 
+**A7 — Driver gains InspectKey; default probe in ModeNetwork reads
+/proc/net/tcp (chunk-2 landing).** Two §3.4 contract deltas from
+implementation contact: (1) `InspectKey(ctx, name) (key string, ok bool,
+err error)` — adoption matches by full key from the container label, but
+the seven listed methods gave no label readback; the label is
+`dev.gauntlet.service-key`, set at Create. (2) The no-ready-command default
+probe cannot be "a TCP dial by the daemon" in ModeNetwork (the daemon is
+not on the service network): it execs into the instance and checks
+/proc/net/tcp[6] for a LISTEN on the declared port. Consequence, for the
+README (chunk 3): a distroless/shell-less service image needs an explicit
+`ready-command` (in-container exec needs *some* binary); ModePublish keeps
+the true host-side TCP dial. Also: pollReady's ReadyTimeout deadline is
+wall-clock (time.Now), deliberately NOT the injectable Config.Now, which
+only drives idle/reap bookkeeping.
+
 **A5 — Livetest step 6 needs a long-running red.** A `nc -z` check is too
 fast to `docker kill` a service mid-run. The M1 livetest uses a dedicated
 branch whose check is `sh -c 'sleep 30; exit 1'` with `needs "pg"` — kill
