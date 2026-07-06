@@ -169,6 +169,7 @@ test "$%s" = "merge-sha" || { echo "bad merge sha: $%s"; exit 1; }
 test "$%s" = "cand-sha" || { echo "bad candidate sha: $%s"; exit 1; }
 test "$%s" = "refs/heads/for/main/alice/topic" || { echo "bad ref: $%s"; exit 1; }
 test -n "$%s" || { echo "result file var unset"; exit 1; }
+test "$%s" = "run1" || { echo "bad run id: $%s"; exit 1; }
 exit 0
 `,
 		core.EnvBaseSHA, core.EnvBaseSHA,
@@ -176,6 +177,7 @@ exit 0
 		core.EnvCandidateSHA, core.EnvCandidateSHA,
 		core.EnvRef, core.EnvRef,
 		core.EnvResultFile,
+		core.EnvRunID, core.EnvRunID,
 	)
 	cmd := script(t, dir, "check.sh", body)
 	job := baseJob(t, cmd)

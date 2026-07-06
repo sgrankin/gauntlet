@@ -69,6 +69,7 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		core.EnvCandidateSHA+"="+job.Candidate.SHA,
 		core.EnvRef+"="+job.Candidate.Ref,
 		core.EnvResultFile+"="+resultFile,
+		core.EnvRunID+"="+job.RunID,
 	)
 
 	out := &tailBuffer{cap: outputCap}

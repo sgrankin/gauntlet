@@ -149,6 +149,16 @@ const (
 	// ignored on failure); on exit 0, the file containing "skipped" is
 	// CheckSkipped, and an empty or absent file is CheckPassed.
 	EnvResultFile = "GAUNTLET_RESULT_FILE"
+
+	// EnvRunID is the run's ID (= CheckJob.RunID), exported so a check's
+	// own test harness can namespace shared external services (e.g. a
+	// scratch database on a shared SQL Server) per run. This is groundwork
+	// for a future shared-services design: concurrent runs — the
+	// speculate window, or a batch's members, each of which runs its own
+	// checks over the same shared external services — need a token that
+	// distinguishes them, and the run ID is the one identity already
+	// unique per run that a check couldn't otherwise see.
+	EnvRunID = "GAUNTLET_RUN_ID"
 )
 
 // Outcome is a run's final disposition.

@@ -317,7 +317,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //	  -w <workdir> \
 //	  -v <job.Dir>:<workdir>            # trial tree, read-write \
 //	  -v <resultDir>:/gauntlet          # writable result dir \
-//	  -e GAUNTLET_* (all five)          \
+//	  -e GAUNTLET_* (all six)           \
 //	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
 //	  -v <mountHost>:<mountPath>[:ro] ... # operator-configured host bind mounts \
 //	  <image> <job.Command...>
@@ -339,6 +339,7 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		"-e", core.EnvCandidateSHA+"="+job.Candidate.SHA,
 		"-e", core.EnvRef+"="+job.Candidate.Ref,
 		"-e", core.EnvResultFile+"="+containerResultFile,
+		"-e", core.EnvRunID+"="+job.RunID,
 	)
 	for _, c := range p.Caches {
 		args = append(args, "-v", c.Name+":"+c.Path)

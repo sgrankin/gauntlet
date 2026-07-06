@@ -58,6 +58,7 @@ func TestParams_RunArgs_Shape(t *testing.T) {
 		"-e", "GAUNTLET_CANDIDATE_SHA=cand-sha",
 		"-e", "GAUNTLET_REF=refs/heads/for/main/alice/topic",
 		"-e", "GAUNTLET_RESULT_FILE=/gauntlet/result",
+		"-e", "GAUNTLET_RUN_ID=20260704T120000Z-1-abc123def456",
 		"-v", "gocache:/root/.cache/go-build",
 		"-v", "gomodcache:/go/pkg/mod",
 		"ghcr.io/acme/ci:latest",
@@ -80,20 +81,20 @@ func TestParams_RunArgs_NoCaches(t *testing.T) {
 	got := p.runArgs(job, "gauntlet-run1-check1", "/rd")
 
 	// No cache volumes ⇒ no extra -v pairs beyond the two fixed mounts;
-	// image immediately follows the GAUNTLET_RESULT_FILE env pair.
+	// image immediately follows the GAUNTLET_RUN_ID env pair.
 	idx := indexOf(got, "img")
 	if idx == -1 {
 		t.Fatalf("image not found in argv: %v", got)
 	}
-	if got[idx-1] != "GAUNTLET_RESULT_FILE=/gauntlet/result" {
-		t.Fatalf("expected image immediately after result-file env when no caches, got argv: %v", got)
+	if got[idx-1] != "GAUNTLET_RUN_ID="+job.RunID {
+		t.Fatalf("expected image immediately after run-id env when no caches, got argv: %v", got)
 	}
 	if got[idx+1] != "true" {
 		t.Fatalf("command must follow image: %v", got)
 	}
 }
 
-func TestParams_RunArgs_EnvVarsAllFive(t *testing.T) {
+func TestParams_RunArgs_EnvVarsAllSix(t *testing.T) {
 	p := Params{Workdir: "/w", Image: "img"}
 	job := containerJob([]string{"true"})
 
@@ -105,6 +106,7 @@ func TestParams_RunArgs_EnvVarsAllFive(t *testing.T) {
 		core.EnvCandidateSHA + "=" + job.Candidate.SHA,
 		core.EnvRef + "=" + job.Candidate.Ref,
 		core.EnvResultFile + "=/gauntlet/result",
+		core.EnvRunID + "=" + job.RunID,
 	}
 	for _, e := range wantEnv {
 		if !containsPair(got, "-e", e) {
@@ -250,8 +252,8 @@ func TestParams_RunArgs_NoMounts(t *testing.T) {
 	if idx == -1 {
 		t.Fatalf("image not found in argv: %v", got)
 	}
-	if got[idx-1] != "GAUNTLET_RESULT_FILE=/gauntlet/result" {
-		t.Fatalf("expected image immediately after result-file env when no caches/mounts, got argv: %v", got)
+	if got[idx-1] != "GAUNTLET_RUN_ID="+job.RunID {
+		t.Fatalf("expected image immediately after run-id env when no caches/mounts, got argv: %v", got)
 	}
 }
 

@@ -856,7 +856,7 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
 
 ## Check environment reference
 
-Every executor (local or container) sets five environment variables before
+Every executor (local or container) sets six environment variables before
 running a check's command, and provides a result file for reporting
 `skipped`:
 
@@ -867,6 +867,12 @@ running a check's command, and provides a result file for reporting
   (`refs/heads/for/<target>/<user>/<topic>`).
 - `GAUNTLET_RESULT_FILE` — path to a file the check may write to report a
   verdict other than pass/fail.
+- `GAUNTLET_RUN_ID` — this run's ID, stable across every check (and, for a
+  batch, shared by every member) in it. A check's own test harness can use
+  this to namespace shared external services per run — e.g. creating
+  `testdb_$GAUNTLET_RUN_ID` on a shared SQL Server — so concurrent runs
+  (the speculate window, or a batch's members) can't collide on the same
+  external resource.
 
 **Result-file protocol.** A non-zero exit is always a failure, full stop —
 the result file is ignored on failure. On exit 0: a result file containing
