@@ -259,6 +259,33 @@ Per-(executor, runtime) resolution otherwise lives entirely inside the
 driver's `Endpoint()` — checks only ever see host+port env vars, so a
 networking-shape change never touches the spec, the key, or the harness.
 
+**Ports: who allocates, who cares** (operator question, 2026-07-06). The
+spec's `port 1433` is the *container-side* listening port and nothing else:
+the service always listens on its natural port and never learns anything
+about host mapping — `GAUNTLET_SVC_*` env vars go to *checks*, never into
+the service's own environment. Conflict avoidance therefore needs no
+allocator in gauntlet at all:
+
+- **Network mode** (container executor, docker/podman): no host ports
+  exist. Every instance is its own alias on the shared network, all
+  listening on their own 1433s; N SQL Servers coexist with zero
+  coordination.
+- **Publish mode** (local executor; Apple pending §9): instances are
+  created with `-p 127.0.0.1:0:1433` — port **0**, so the *kernel* assigns
+  a free ephemeral port, which the driver reads back (`docker port`) and
+  records in the pool record. Two instances get two kernel-assigned ports;
+  a daemon restart adopts instances with their already-assigned ports
+  intact. Gauntlet never picks a number, so gauntlet can never pick a
+  duplicate.
+
+`GAUNTLET_SVC_<NAME>_PORT` always carries the port *as dialable from the
+check* — the container port in network mode, the kernel-assigned host port
+in publish mode. Multi-port services (e.g. a broker exposing two listeners)
+are out of scope for v1; the recorded evolution, when a real service needs
+it, is repeatable named ports (`port "broker" 9092`) surfacing as
+`GAUNTLET_SVC_<NAME>_PORT_<PORTNAME>`, with the bare `_PORT` form reserved
+for the single-port common case.
+
 ## 6. Drivers
 
 One interface, deliberately tiny — create / probe-alive / probe-ready /
