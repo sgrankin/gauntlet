@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{{if .Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+{{if .Refresh}}<noscript><meta http-equiv="refresh" content="5"></noscript>{{end}}
 <title>{{.Title}} · gauntlet</title>
 <style>
 :root {
@@ -139,27 +139,31 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 </header>
 <main>{{block "content" .}}{{end}}</main>
 <footer class="muted"><small>generated {{.GeneratedAt}}{{if .Version}} · gauntlet {{.Version}}{{end}}</small></footer>
+{{if .Refresh}}<script src="{{.IdiomorphURL}}"></script>{{end}}
 <script>
 // Every server-rendered timestamp is a <time datetime="..."> element holding
 // a UTC string (dashboard/server.go's formatTime) — deliberately unchanged
 // visible text, since a mixed-timezone table is more confusing than a
-// consistent one. This just adds a title tooltip, computed client-side at
-// load time, giving the viewer's local zone and a friendly relative age
-// without touching what's actually printed. Pages that meta-refresh (see
-// <meta http-equiv="refresh">, when present) do a full reload every 5s, so
-// running this once on DOMContentLoaded is enough — there's no live-updating
-// content that would need a re-run.
-document.addEventListener('DOMContentLoaded', function () {
+// consistent one. applyTimeTooltips adds a title tooltip, computed
+// client-side, giving the viewer's local zone and a friendly relative age
+// without touching what's actually printed. It's a named, idempotent
+// function (not an inline DOMContentLoaded closure) because a .Refresh page
+// needs to re-run it after every DOM morph below, not just once at load —
+// idiomorph syncs attributes from the fetched HTML onto matching live
+// elements, and a client-set title isn't in that fetched HTML, so it gets
+// stripped on each morph if nothing puts it back.
+function applyTimeTooltips() {
   var units = [
     ['year', 365 * 24 * 3600], ['month', 30 * 24 * 3600], ['day', 24 * 3600],
     ['hour', 3600], ['minute', 60], ['second', 1],
   ];
-  // Built once, not once per <time> element (constructing an Intl formatter
-  // isn't free) — and defensively: an engine without Intl.RelativeTimeFormat
-  // (pre-2020 Safari/older) throws a TypeError constructing it, which would
-  // otherwise take the toLocaleString() half of the tooltip down with it for
-  // every remaining element. rtf stays null in that case and relative()
-  // degrades to "", so the tooltip is just local time with no relative line.
+  // Built once per call, not once per <time> element (constructing an Intl
+  // formatter isn't free) — and defensively: an engine without
+  // Intl.RelativeTimeFormat (pre-2020 Safari/older) throws a TypeError
+  // constructing it, which would otherwise take the toLocaleString() half of
+  // the tooltip down with it for every remaining element. rtf stays null in
+  // that case and relative() degrades to "", so the tooltip is just local
+  // time with no relative line.
   var rtf = null;
   try {
     rtf = new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'});
@@ -183,7 +187,62 @@ document.addEventListener('DOMContentLoaded', function () {
     if (rel) title += '\n' + rel;
     el.title = title;
   });
+}
+document.addEventListener('DOMContentLoaded', applyTimeTooltips);
+
+{{if .Refresh}}
+// Auto-refresh (DESIGN.md decision ledger): a plain <meta http-equiv=
+// "refresh"> full-reloads the page every 5s, which blows away scroll
+// position and any in-progress text selection, and flashes the whole page
+// blank on every tick — jarring on a page that's live-updating exactly
+// because someone is watching it. Instead: poll this same page's own URL,
+// and morph the fetched body onto the live DOM with idiomorph (id-based
+// diffing — an element carrying a stable id is patched in place rather than
+// replaced), so scroll position and selection outside the regions that
+// actually changed survive a tick, and there's no navigation flash. The
+// <noscript> meta-refresh above is the no-JS fallback; if idiomorph itself
+// failed to load (network hiccup on that one extra request), fall back to a
+// real reload so the page still keeps refreshing either way.
+//
+// NOTE for whoever adds a <details> to a page that sets Refresh (today only
+// run.html's captured-check-output rows use <details>, and that page never
+// refreshes): idiomorph syncs attributes from the fetched HTML onto the live
+// DOM, so a viewer-toggled `open` attribute is NOT preserved by itself — the
+// server always renders these collapsed, the next morph diffs against that,
+// and idiomorph's attribute sync removes `open` right back off (same
+// mechanism applyTimeTooltips works around for `title`, just with nothing
+// currently restoring `open`). If that ever matters, either render
+// authoritative server-side open state or add an idiomorph
+// beforeAttributeUpdated callback that refuses to touch `open`.
+document.addEventListener('DOMContentLoaded', function () {
+  // busy: sets before a fetch starts, clears in .finally() once it settles.
+  // setInterval fires on a fixed 5s cadence regardless of whether the
+  // previous tick's request has resolved yet; without this guard a slow
+  // response (backend GC pause, a lossy link) can resolve AFTER a later,
+  // faster tick's response and morph stale state onto the fresher DOM, and
+  // a wedged backend piles up one concurrent fetch per missed tick. Skipping
+  // the tick outright while one is outstanding avoids both.
+  var busy = false;
+  setInterval(function () {
+    if (document.hidden || busy) return; // backgrounded tab, or previous tick still in flight
+    if (!window.Idiomorph) {
+      location.reload();
+      return;
+    }
+    busy = true;
+    fetch(location.href, {credentials: 'same-origin'})
+      .then(function (res) { return res.ok ? res.text() : null; })
+      .then(function (html) {
+        if (!html) return; // non-2xx (e.g. daemon mid-restart): skip this tick, retry next
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        Idiomorph.morph(document.body, doc.body);
+        applyTimeTooltips();
+      })
+      .catch(function () {}) // network error: skip this tick, retry next
+      .finally(function () { busy = false; });
+  }, 5000);
 });
+{{end}}
 </script>
 </body>
 </html>

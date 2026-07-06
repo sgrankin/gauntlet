@@ -920,3 +920,91 @@ func TestIndex_BatchedRunGetsChipBatchedClass(t *testing.T) {
 		t.Errorf("expected the batched run's chip to carry chip-batched, body:\n%s", body)
 	}
 }
+
+// --- auto-refresh: fetch+morph, not meta-refresh -----------------------------
+
+// idiomorphTestPath is the vendored asset's served URL, version-suffixed
+// per server.go's idiomorphVersion/idiomorphURL (cache-busting: a re-vendor
+// changes the URL) — kept in one place here since dashboard_test is an
+// external test package and can't reach the unexported idiomorphURL var
+// directly. Bump alongside server.go's idiomorphVersion.
+const idiomorphTestPath = "/static/idiomorph-0.7.4.min.js"
+
+// TestStatic_ServesIdiomorph confirms GET /static/idiomorph-<version>.min.js
+// serves the vendored asset base.html's auto-refresh script depends on: a
+// 200, a JS content type, and a non-empty body (proving the go:embed
+// actually picked up the file, not just that the route exists).
+func TestStatic_ServesIdiomorph(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := get(t, h, idiomorphTestPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/javascript" {
+		t.Errorf("Content-Type = %q, want text/javascript", ct)
+	}
+	if body == "" {
+		t.Error("body is empty")
+	}
+	if !strings.Contains(body, "Idiomorph") {
+		t.Errorf("body doesn't look like idiomorph's source:\n%s", body)
+	}
+}
+
+// TestRefreshPages_CarryFetchMorphPolling confirms a live page (/, /t/main)
+// carries the whole auto-refresh apparatus this phase replaced meta-refresh
+// with: the no-JS <noscript> fallback, the vendored idiomorph <script src>,
+// the inline poller (Idiomorph.morph/setInterval) and its in-flight guard
+// (the busy flag, so a slow response can't morph stale state over a fresher
+// one) — and that the old bare <meta http-equiv="refresh"> (a full reload,
+// no noscript guard) is gone.
+func TestRefreshPages_CarryFetchMorphPolling(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	for _, path := range []string{"/", "/t/main"} {
+		_, body := get(t, h, path)
+		for _, want := range []string{
+			`<noscript><meta http-equiv="refresh" content="5"></noscript>`,
+			`<script src="` + idiomorphTestPath + `"></script>`,
+			"Idiomorph.morph(document.body, doc.body)",
+			"setInterval(function ()",
+			"var busy = false;",
+			"if (document.hidden || busy) return;",
+			".finally(function () { busy = false; });",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing %q\nbody:\n%s", path, want, body)
+			}
+		}
+		if strings.Contains(body, `<meta http-equiv="refresh" content="5">` /* bare, no noscript */) &&
+			!strings.Contains(body, `<noscript><meta http-equiv="refresh" content="5">`) {
+			t.Errorf("%s: found a bare (non-noscript) meta-refresh tag:\n%s", path, body)
+		}
+	}
+}
+
+// TestNonRefreshPages_NoPolling confirms a static/historical page (/run/{id},
+// which never sets baseData.Refresh) gets none of the polling machinery —
+// no noscript meta-refresh, no idiomorph script tag, no poller — matching
+// the pre-existing behavior that these pages don't auto-refresh at all.
+func TestNonRefreshPages_NoPolling(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	_, body := get(t, h, "/run/whatever")
+	for _, absent := range []string{
+		"meta http-equiv=\"refresh\"",
+		"idiomorph-",
+		"setInterval(function ()",
+	} {
+		if strings.Contains(body, absent) {
+			t.Errorf("/run/whatever unexpectedly contains %q:\n%s", absent, body)
+		}
+	}
+	// The tooltip machinery itself (applyTimeTooltips, unconditional on every
+	// page) must still be present — only the .Refresh-gated polling is absent.
+	if !strings.Contains(body, "function applyTimeTooltips()") {
+		t.Error("/run/whatever missing applyTimeTooltips (should be present on every page, refresh or not)")
+	}
+}

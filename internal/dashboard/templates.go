@@ -13,6 +13,19 @@ import (
 //go:embed templates/*.html
 var templatesFS embed.FS
 
+// staticFS embeds vendored static assets served verbatim (GET
+// /static/idiomorph-<version>.min.js, server.go's idiomorphURL/handleStatic)
+// — kept in a sibling directory rather than templates/ so templatesFS's
+// *.html glob (and mustParse, which parses every embedded file as a Go
+// template) never has to reason about a non-template file living alongside
+// the pages. Currently just idiomorph (auto-refresh's DOM-morphing library,
+// base.html) — see the vendored file's own header comment for
+// version/license/source, and server.go's idiomorphVersion for the single
+// place a re-vendor updates.
+//
+//go:embed static/*.js
+var staticFS embed.FS
+
 // templateFuncs are available to every page: shortSHA and compactRef let a
 // template render a compact form of a SHA/ref inline while keeping the full
 // value available for a title tooltip (e.g. `title="{{.SHA}}"` next to

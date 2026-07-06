@@ -60,8 +60,54 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /run/{runID}/log/{checkName}", d.handleRunLog)
 	mux.HandleFunc("GET /batch/{batchID}", d.handleBatch)
 	mux.HandleFunc("GET /checks", d.handleChecks)
+	mux.HandleFunc("GET "+idiomorphURL, handleStatic)
 	d.mountAPIRoutes(mux)
 	return mux
+}
+
+// idiomorphVersion is the vendored idiomorph release; idiomorphAsset (the
+// vendored filename, static/idiomorph-<version>.min.js — see that file's own
+// header comment for source/license) and idiomorphURL (the path it's served
+// at, and the one baseData.IdiomorphURL/base.html's <script src> use) both
+// derive from it. A re-vendor only needs to (1) bump this, (2) rename the
+// vendored file to match: the route registration above, handleStatic's
+// embed read, and every rendered <script src> all move to the new URL
+// together — a fixed 24h Cache-Control (handleStatic) can never keep
+// serving a stale copy after an upgrade, since the upgrade is a new URL, not
+// the same one with different bytes behind it.
+const idiomorphVersion = "0.7.4"
+
+var (
+	idiomorphAsset = "static/idiomorph-" + idiomorphVersion + ".min.js" // staticFS lookup key
+	idiomorphURL   = "/" + idiomorphAsset                               // served path
+)
+
+// handleStatic serves the one vendored static asset (staticFS,
+// templates.go) auto-refresh's inline script needs client-side: idiomorph,
+// the DOM-morphing library base.html loads to apply a fetched page's body
+// onto the live DOM without a full-page reload (see base.html's own comment
+// for exactly which viewer-visible state that does and doesn't preserve).
+// Not a method on *dash — staticFS is a package-level embed.FS, not
+// per-instance state — and there's exactly one asset today, so this stays a
+// single hardcoded route rather than a generic static-dir server (no
+// directory listing, no path traversal surface to reason about). The 24h
+// max-age is safe precisely because idiomorphURL is version-suffixed: the
+// only way this content ever changes is a re-vendor, which is a new URL
+// (idiomorphVersion bump), never the same URL serving different bytes.
+func handleStatic(w http.ResponseWriter, r *http.Request) {
+	data, err := staticFS.ReadFile(idiomorphAsset)
+	if err != nil {
+		// Only reachable if the go:embed directive itself is broken (a build
+		// would already have failed) — defensive, not a real runtime path.
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	// text/javascript, not the older application/javascript: the WHATWG MIME
+	// spec now names text/javascript the canonical type for JS, and both are
+	// executed identically by every browser either way.
+	w.Header().Set("Content-Type", "text/javascript")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
 }
 
 type dash struct {
@@ -1058,6 +1104,13 @@ type baseData struct {
 	GeneratedAt template.HTML
 	Starting    bool
 	Version     string
+
+	// IdiomorphURL is idiomorphURL (handleStatic's doc) — base.html's
+	// <script src> for the vendored DOM-morphing library, only rendered
+	// when Refresh is set. Carried on baseData (rather than base.html
+	// hardcoding the path) so idiomorphVersion is the single place a
+	// re-vendor touches.
+	IdiomorphURL string
 }
 
 // newBase is a method (rather than a free function) only so it can reach
@@ -1068,7 +1121,7 @@ func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool) baseDat
 	if snap != nil {
 		at = snap.At
 	}
-	return baseData{Title: title, Refresh: refresh, GeneratedAt: formatTime(at), Version: d.version}
+	return baseData{Title: title, Refresh: refresh, GeneratedAt: formatTime(at), Version: d.version, IdiomorphURL: idiomorphURL}
 }
 
 type indexData struct {
