@@ -213,6 +213,41 @@ type errNotReady string
 
 func (e errNotReady) Error() string { return "fake: " + string(e) + " not ready" }
 
+// recordingLog is the Config.Log every lifecycle-logging test below installs
+// in place of the default (nil, silent) test config — captures every logf
+// line so a test can assert the create/evict/reap/adopt events fire with
+// the right identifiers, without pinning the exact line format (a
+// golden-file assertion would be too brittle against wording tweaks).
+type recordingLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *recordingLog) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, string(p))
+	return len(p), nil
+}
+
+func (r *recordingLog) hasSubstring(subs ...string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.lines {
+		ok := true
+		for _, s := range subs {
+			if !strings.Contains(l, s) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // fakeClock is the injectable Config.Now every test in this file drives
 // deterministically instead of sleeping on wall time.
 type fakeClock struct {
@@ -286,6 +321,8 @@ func TestReapSkipsRefcountedAndRespectsTTL(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	fd := newFakeDriver()
 	cfg := testConfig(clock.now, t.TempDir())
+	rec := &recordingLog{}
+	cfg.Log = rec
 	p := newPool(cfg, fd)
 	p.ArmReaper()
 
@@ -319,6 +356,12 @@ func TestReapSkipsRefcountedAndRespectsTTL(t *testing.T) {
 	}
 	if !heldStillThere {
 		t.Error("held instance (refcount 1, past TTL) was reaped despite being in use")
+	}
+	if !rec.hasSubstring("reap", "idle", keyIdle[:12]) {
+		t.Errorf("expected a reap log line for the idle instance %s carrying idle/ttl, got %v", keyIdle[:12], rec.lines)
+	}
+	if rec.hasSubstring("reap", keyHeld[:12]) {
+		t.Errorf("did not expect a reap log line for the still-held instance %s, got %v", keyHeld[:12], rec.lines)
 	}
 }
 
@@ -382,6 +425,8 @@ func TestMaxInstances(t *testing.T) {
 	fd := newFakeDriver()
 	cfg := testConfig(clock.now, t.TempDir())
 	cfg.MaxInstances = 1
+	rec := &recordingLog{}
+	cfg.Log = rec
 	p := newPool(cfg, fd)
 
 	svcA := config.Service{Name: "a", Image: "img", Port: 1, ReadyTimeout: time.Second, IdleTTL: time.Hour}
@@ -401,6 +446,10 @@ func TestMaxInstances(t *testing.T) {
 	// A miss on a different key while at cap must error.
 	if _, err := p.EnsureAll(context.Background(), []config.Service{svcB}, []string{"b"}); err == nil {
 		t.Fatal("EnsureAll b (miss at cap): want error, got nil")
+	}
+	keyB := config.ServiceKey(cfg.Remote, svcB)
+	if !rec.hasSubstring("ensure failed", "\"b\"", keyB[:12]) {
+		t.Errorf("expected an ensure-failed log line for need \"b\"/%s (max-instances reached), got %v", keyB[:12], rec.lines)
 	}
 
 	p.Release(eA)
@@ -462,6 +511,8 @@ func TestEnsureFailureTailsLogsAndDestroys(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	fd := newFakeDriver()
 	cfg := testConfig(clock.now, t.TempDir())
+	rec := &recordingLog{}
+	cfg.Log = rec
 	p := newPool(cfg, fd)
 
 	svc := config.Service{Name: "db", Image: "img", Port: 1, ReadyTimeout: 10 * time.Millisecond, IdleTTL: time.Hour}
@@ -481,6 +532,20 @@ func TestEnsureFailureTailsLogsAndDestroys(t *testing.T) {
 	}
 	if !fd.wasDestroyed(name) {
 		t.Error("not-ready instance was not destroyed")
+	}
+
+	// The ready-probe failure, and the tailed log it carries, must land on
+	// the pool's own logger too — not just the error EnsureAll returns.
+	if !rec.hasSubstring("ready-probe failed", "db", key[:12]) {
+		t.Errorf("expected a ready-probe-failed log line for db/%s, got %v", key[:12], rec.lines)
+	}
+	if !rec.hasSubstring("fake logs for " + name) {
+		t.Errorf("expected the tailed log output on the pool logger, got %v", rec.lines)
+	}
+	// The pool-side ensure-failed line (greppable next to the check-level
+	// park CheckResult.Err becomes) must also fire, keyed by need name.
+	if !rec.hasSubstring("ensure failed", "\"db\"", key[:12]) {
+		t.Errorf("expected an ensure-failed log line for need \"db\"/%s, got %v", key[:12], rec.lines)
 	}
 }
 
@@ -589,6 +654,8 @@ func TestAnyDead(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	fd := newFakeDriver()
 	cfg := testConfig(clock.now, t.TempDir())
+	rec := &recordingLog{}
+	cfg.Log = rec
 	p := newPool(cfg, fd)
 	svc := config.Service{Name: "db", Image: "img", Port: 1, ReadyTimeout: time.Second, IdleTTL: time.Hour}
 
@@ -605,6 +672,9 @@ func TestAnyDead(t *testing.T) {
 	fd.setNotAlive(key, true)
 	if !p.AnyDead(context.Background(), e) {
 		t.Fatal("AnyDead = false for a dead instance")
+	}
+	if !rec.hasSubstring("evict", "db", key[:12], "reason=mid-run-death") {
+		t.Errorf("expected a mid-run-death evict log line for db/%s, got %v", key[:12], rec.lines)
 	}
 
 	p.mu.Lock()
@@ -656,6 +726,8 @@ func TestAdoptMatchAdopts(t *testing.T) {
 	fd := newFakeDriver()
 	stateDir := t.TempDir()
 	cfg := testConfig(clock.now, stateDir)
+	rec := &recordingLog{}
+	cfg.Log = rec
 	svc := config.Service{Name: "db", Image: "img", Port: 1, ReadyTimeout: time.Second, IdleTTL: time.Hour}
 	key, name := seedAdoptable(t, fd, stateDir, cfg, svc, ModeNetwork, clock.now())
 
@@ -672,6 +744,12 @@ func TestAdoptMatchAdopts(t *testing.T) {
 	}
 	if fd.wasDestroyed(name) {
 		t.Error("adopted instance was destroyed")
+	}
+	if !rec.hasSubstring("adopt", "db", key[:12]) {
+		t.Errorf("expected a per-instance adopt log line for db/%s, got %v", key[:12], rec.lines)
+	}
+	if !rec.hasSubstring("adopt summary adopted=1 destroyed=0") {
+		t.Errorf("expected an adopt summary line (adopted=1 destroyed=0), got %v", rec.lines)
 	}
 }
 
@@ -794,6 +872,8 @@ func TestSnapshot_ReflectsLiveInstance(t *testing.T) {
 	clock := newFakeClock(time.Unix(100, 0))
 	fd := newFakeDriver()
 	cfg := testConfig(clock.now, t.TempDir())
+	rec := &recordingLog{}
+	cfg.Log = rec
 	p := newPool(cfg, fd)
 	svc := config.Service{Name: "pg", Image: "postgres:16", Port: 5432, ReadyTimeout: time.Second, IdleTTL: time.Hour}
 
@@ -801,12 +881,19 @@ func TestSnapshot_ReflectsLiveInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	key := config.ServiceKey(cfg.Remote, svc)
+	if !rec.hasSubstring("create start", "pg", key[:12], "postgres:16") {
+		t.Errorf("expected a create-start log line for pg/%s, got %v", key[:12], rec.lines)
+	}
+	if !rec.hasSubstring("create succeeded", "pg", key[:12]) {
+		t.Errorf("expected a create-succeeded log line for pg/%s, got %v", key[:12], rec.lines)
+	}
+
 	snap := p.Snapshot()
 	if len(snap.Instances) != 1 {
 		t.Fatalf("Instances = %v, want exactly 1", snap.Instances)
 	}
 	inst := snap.Instances[0]
-	key := config.ServiceKey(cfg.Remote, svc)
 
 	if inst.Service != "pg" {
 		t.Errorf("Service = %q, want pg", inst.Service)

@@ -13,8 +13,8 @@ const (
 INSERT OR REPLACE INTO runs (
 	run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
 	base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
-	batch_id, position, batch_size
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	batch_id, position, batch_size, speculated, recovered
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
 INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -77,6 +77,16 @@ type RunRow struct {
 	BatchID   string
 	Position  int
 	BatchSize int
+
+	// Speculated and Recovered are core.RunRecord.Speculated/Recovered
+	// verbatim (v7+): Speculated marks a run tested on a predicted
+	// (non-head) base rather than the live target tip; Recovered marks a
+	// record synthesized by crash recovery (no actual trial+check run
+	// happened). Both are purely informational — see RunRecord's own field
+	// docs — and are surfaced only on the run-detail dashboard/API/MCP
+	// view, not the runs listing.
+	Speculated bool
+	Recovered  bool
 }
 
 // CheckRow is one row of the checks table, as read back for the dashboard.
@@ -142,7 +152,7 @@ type DepthPoint struct {
 
 const selectRunColumns = `run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
 	base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
-	batch_id, position, batch_size`
+	batch_id, position, batch_size, speculated, recovered`
 
 // RecentRuns returns target's most recent runs, newest first, capped at
 // limit.
@@ -586,12 +596,13 @@ type rowScanner interface {
 func scanRunRow(row rowScanner) (RunRow, error) {
 	var r RunRow
 	var trialClean int
+	var speculated, recovered int
 	var startedMS, endedMS, durationMS int64
 	err := row.Scan(
 		&r.RunID, &r.Target, &r.CandidateRef, &r.CandidateUser, &r.CandidateTopic, &r.CandidateSHA,
 		&r.BaseOID, &r.MergeSHA, &trialClean, &r.Outcome, &r.Detail,
 		&startedMS, &endedMS, &durationMS,
-		&r.BatchID, &r.Position, &r.BatchSize,
+		&r.BatchID, &r.Position, &r.BatchSize, &speculated, &recovered,
 	)
 	if err != nil {
 		return RunRow{}, err
@@ -600,5 +611,7 @@ func scanRunRow(row rowScanner) (RunRow, error) {
 	r.StartedAt = time.UnixMilli(startedMS)
 	r.EndedAt = time.UnixMilli(endedMS)
 	r.Duration = time.Duration(durationMS) * time.Millisecond
+	r.Speculated = speculated != 0
+	r.Recovered = recovered != 0
 	return r, nil
 }

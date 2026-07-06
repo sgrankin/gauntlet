@@ -1219,15 +1219,20 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 // never contains the same candidate twice.
 //
 // The first candidate whose trial conflicts against the chain built so far
-// stops extending the window for this tick: that candidate parks via
-// startRun's normal rejectPreMerge path, with a Detail that says so
-// explicitly when the conflict is against a PREDICTION (a non-head base) —
-// "conflicts with in-flight <topic>@<sha> (predicted base)" — rather than
-// the generic "trial merge conflict" wording serial/batch use, since a
-// predicted-base conflict is conflicting with in-flight, not-yet-landed
-// work, not with anything actually on the target. Later candidates simply
-// wait for a future tick, once the window has room again (a landing, a
-// bubble, or the culprit's own park freeing a slot).
+// stops extending the window for this tick. At the head (predicted==false,
+// base is the live target tip) that candidate parks via startRun's normal
+// rejectPreMerge path, exactly as serial/batch. At a non-head position
+// (predicted==true, base is a predecessor's own unpushed chainTip) it does
+// NOT park (F2 extended, docs/plans/phase5.md §Amendments — a conflict
+// against a mere prediction proves nothing about the candidate, since that
+// predecessor might itself never land): startRun's skipPreMergePredicted
+// Skips it unparked instead, with a Detail that still says the conflict was
+// against a PREDICTION — "conflicts with in-flight <topic>@<sha> (predicted
+// base)" — rather than the generic "trial merge conflict" wording
+// serial/batch use, and it re-queues to be retested for real in a later
+// window. Later candidates simply wait for a future tick, once the window
+// has room again (a landing, a bubble, or the culprit's own park/re-queue
+// freeing a slot).
 func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, l *lane) {
 	window := t.Window
 	if window < 1 {
@@ -1294,7 +1299,12 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 
 		r, ok := d.startRun(ctx, t, base, cand, predicted, conflictDetail)
 		if !ok {
-			return // conflict or infra error: this candidate parked, stop extending the window this tick
+			// conflict or infra error: at the head (predicted==false) this
+			// candidate parked; at a predicted position (F2 extended,
+			// docs/plans/phase5.md §Amendments) it Skipped unparked and will
+			// re-queue instead. Either way, stop extending the window this
+			// tick.
+			return
 		}
 
 		l = d.lanes[t.Name] // startRun created it on the first successful run
@@ -1336,8 +1346,13 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 //
 // ok reports whether a run was started; false covers every
 // terminal-without-a-run outcome (conflict or any infra error) — the
-// caller's signal to stop extending a window/re-pick, since the candidate
-// that failed has already been parked by this call.
+// caller's signal to stop extending a window/re-pick. When predicted is
+// false the candidate that failed has already been parked by this call
+// (unchanged, real-tip behavior, via rejectPreMerge); when predicted is true
+// it has instead been Skipped unparked and will re-queue (F2 extended to
+// pre-merge failures against a predicted base, docs/plans/phase5.md
+// §Amendments — see skipPreMergePredicted below) — either way the caller
+// must stop, but only the former is a park.
 func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, cand core.Candidate, predicted bool, conflictDetail string) (*run, bool) {
 	// F4 (docs/plans/phase23.md §10): the run's root span starts here,
 	// before MergeTree, so trial-merge is correctly parented as its child
@@ -1378,6 +1393,19 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		return runID
 	})
 	if err != nil {
+		// F2 extended (docs/plans/phase5.md §Amendments): buildChainLink's
+		// error here (MergeTree or CommitTree failing outright, before any
+		// trial tree/merge commit exists) against a PREDICTED base proves
+		// nothing about cand — same false-negative-park risk a trial
+		// CONFLICT has below, and the same category advanceLane's bubble
+		// step already folds into its predicted-base no-park branch for a
+		// post-merge check ERROR (verdictErrored treated identically to
+		// verdictRejected at lane index >0). Skip unparked instead of
+		// parking on an unproven base.
+		if predicted {
+			d.skipPreMergePredicted(ctx, t, cand, "predicted-base build error (retesting once real): "+err.Error(), rootSpan)
+			return nil, false
+		}
 		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, err.Error(), rootSpan)
 		return nil, false
 	}
@@ -1385,6 +1413,22 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		detail := "trial merge conflict: " + strings.Join(trial.Conflicts, ", ")
 		if conflictDetail != "" {
 			detail = conflictDetail + ": " + strings.Join(trial.Conflicts, ", ")
+		}
+		// F2 extended (docs/plans/phase5.md §Amendments): a trial CONFLICT
+		// against a PREDICTED base (refillSpeculate's non-head window
+		// members — base is a predecessor's own unpushed chainTip, never a
+		// real ref) is a prediction-derived verdict in exactly the sense F2
+		// already covers for a post-merge red at lane index >0
+		// (advanceLane's bubble step): the predecessor might be at fault, or
+		// might never even land, so this base might never become real.
+		// Parking cand here is the same false-negative park F2 fixed for
+		// reds. Skip unparked instead — cand re-queues and re-forms in a
+		// later window; if it's STILL conflicting once it actually reaches
+		// lane index 0 against the REAL target tip, it parks there for
+		// real, exactly as today.
+		if predicted {
+			d.skipPreMergePredicted(ctx, t, cand, detail+"; re-queuing for retest against the real tip", rootSpan)
+			return nil, false
 		}
 		d.rejectPreMerge(ctx, t, cand, core.OutcomeConflict, detail, rootSpan)
 		return nil, false
@@ -1699,6 +1743,41 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
 	})
 	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // phase-B amendment, autoretry.go
+}
+
+// skipPreMergePredicted is rejectPreMerge's F2-extended twin (F2, the
+// phase-5 adversarial review's Zuul-reset ruling, extended to pre-merge
+// failures by docs/plans/phase5.md §Amendments) for startRun's two pre-merge
+// failure branches — a trial CONFLICT or a buildChainLink infra ERROR —
+// when predicted is true: the base being tested against is a predecessor's
+// own unpushed chainTip, never the real target tip, so the verdict proves
+// nothing about cand itself (the predecessor might be at fault, or might
+// never even land). Parking here would be exactly the false-negative park
+// F2 already fixed for a post-merge red at lane index >0 (advanceLane's
+// bubble step, reconcile.go ~463-466) — this mirrors that branch's shape
+// precisely: no park, RunRecord.Outcome is OutcomeSkipped (not the raw
+// conflict/error outcome), EventSkipped (not EventTrialConflict/EventError),
+// and no maybeAutoRetry call (finishRun's own park==true gate has the same
+// effect for its callers; there is simply no park here to gate on). cand's
+// slot is untouched by this call, so it re-queues and re-forms in a later
+// window; if it's still bad once it genuinely reaches lane index 0 against
+// the REAL target tip, it parks there for real via rejectPreMerge, same as
+// today.
+func (d *Daemon) skipPreMergePredicted(ctx context.Context, t config.Target, cand core.Candidate, detail string, rootSpan trace.Span) {
+	now := d.now()
+	runID := newRunID(now, cand.SHA)
+	rec := &core.RunRecord{
+		RunID: runID, Target: t.Name, Candidate: cand,
+		Outcome: core.OutcomeSkipped, Detail: detail,
+		StartedAt: now, EndedAt: now,
+	}
+	if rootSpan != nil {
+		obs.EndRun(rootSpan, rec)
+	}
+	d.emit(ctx, core.Event{
+		Kind: core.EventSkipped, At: now, Target: t.Name,
+		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
+	})
 }
 
 // rejectRun parks cand and emits its terminal event for an outcome decided

@@ -331,7 +331,9 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			BaseOID: row.BaseOID, MergeSHA: row.MergeSHA, TrialClean: row.TrialClean,
 			Outcome: wordTag(row.Outcome), Detail: row.Detail,
 			StartedAt: formatTime(row.StartedAt), EndedAt: formatTime(row.EndedAt), Duration: formatDuration(row.Duration),
-			BatchID: row.BatchID,
+			BatchID:    row.BatchID,
+			Speculated: row.Speculated,
+			Recovered:  row.Recovered,
 		},
 	}
 	if row.BatchID != "" {
@@ -1432,6 +1434,13 @@ type runSummaryFull struct {
 	// BatchSize), computed by handleRun rather than in the template.
 	BatchID       string
 	BatchPosition string
+
+	// Speculated and Recovered mirror history.RunRow's own fields
+	// (core.RunRecord.Speculated/Recovered, v7+): purely informational
+	// (RunRecord's own field docs), rendered as a small tag near the
+	// outcome — see run.html.
+	Speculated bool
+	Recovered  bool
 }
 
 // batchData is /batch/{id}'s view model: the members of one batch run

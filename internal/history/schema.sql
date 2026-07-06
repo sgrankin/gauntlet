@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 6).
+-- schema.sql: gauntlet history store schema (user_version = 7).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -32,7 +32,15 @@ CREATE TABLE runs (
   -- member record.
   batch_id     TEXT NOT NULL DEFAULT '',
   position     INTEGER NOT NULL DEFAULT 0,
-  batch_size   INTEGER NOT NULL DEFAULT 1
+  batch_size   INTEGER NOT NULL DEFAULT 1,
+  -- speculated/recovered (v7+): core.RunRecord.Speculated/Recovered
+  -- verbatim. Speculated marks a run tested on a predicted (non-head) base
+  -- rather than the live target tip; recovered marks a record synthesized
+  -- by crash recovery (no actual trial+check run happened). Both are
+  -- purely informational (see RunRecord's own field docs) — surfaced only
+  -- on the run-detail dashboard/API/MCP view, never read by queue logic.
+  speculated   INTEGER NOT NULL DEFAULT 0,
+  recovered    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
 CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';

@@ -431,6 +431,49 @@ func TestAPIRun_BatchFieldsOmittedForSerialRun(t *testing.T) {
 	}
 }
 
+// TestAPIRun_SpeculatedAndRecoveredPresentWhenTrue confirms GET
+// /api/v1/run/{id} surfaces speculated/recovered (core.RunRecord's own
+// fields, v7+) when either is true.
+func TestAPIRun_SpeculatedAndRecoveredPresentWhenTrue(t *testing.T) {
+	store := openTestStore(t)
+	rec := sampleRecord("run-spec-rec", "main")
+	rec.Speculated = true
+	rec.Recovered = true
+	emitRun(t, store, rec)
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/run/run-spec-rec")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	if m["speculated"] != true {
+		t.Errorf("speculated = %v, want true", m["speculated"])
+	}
+	if m["recovered"] != true {
+		t.Errorf("recovered = %v, want true", m["recovered"])
+	}
+}
+
+// TestAPIRun_SpeculatedAndRecoveredOmittedWhenFalse confirms an ordinary run
+// (neither speculated nor recovered) omits both fields entirely (omitempty),
+// matching the batch fields' own convention.
+func TestAPIRun_SpeculatedAndRecoveredOmittedWhenFalse(t *testing.T) {
+	store := openTestStore(t)
+	emitRun(t, store, sampleRecord("run-plain-api", "main"))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/api/v1/run/run-plain-api")
+
+	m := decodeJSON(t, body)
+	for _, key := range []string{"speculated", "recovered"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("plain run must omit %q (omitempty), got %v", key, m[key])
+		}
+	}
+}
+
 // TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured confirms
 // GET /api/v1/run/{id} exposes logPath (always, when non-empty) and logUrl
 // (only when the dashboard is configured to actually serve it, WithLogRoot)

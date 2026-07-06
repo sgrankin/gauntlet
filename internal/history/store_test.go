@@ -859,6 +859,172 @@ func TestMigrate_V5ToV6(t *testing.T) {
 	}
 }
 
+// schemaV6SQL is schema.sql as it existed before chunk 2 (phase 6) added the
+// runs.speculated/runs.recovered columns: every v6 table/column is present
+// (through hook_runs), but runs has neither speculated nor recovered. Kept
+// here, verbatim, so TestMigrate_V6ToV7 can build a genuine v6 database by
+// hand and prove the running code migrates it forward correctly.
+const schemaV6SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL,
+  batch_id     TEXT NOT NULL DEFAULT '',
+  position     INTEGER NOT NULL DEFAULT 0,
+  batch_size   INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE hooks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_hooks_name ON hooks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+
+CREATE TABLE retry_intents (
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  sha    TEXT NOT NULL,
+  at     INTEGER NOT NULL,
+  PRIMARY KEY (target, ref)
+);
+
+CREATE TABLE ignored_refs (
+  at     INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (at, target, ref)
+);
+
+CREATE TABLE hook_runs (
+  run_id      TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  target      TEXT NOT NULL,
+  owed_count  INTEGER NOT NULL,
+  started_at  INTEGER NOT NULL,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT NOT NULL DEFAULT ''
+);
+`
+
+// TestMigrate_V6ToV7 builds a v6 database by hand (schemaV6SQL, runs has no
+// speculated/recovered columns, user_version stamped to 6 — exactly what an
+// already-deployed v6 Store would have on disk) and confirms that opening it
+// with the current code migrates it in place: user_version lands on
+// schemaVersion, the pre-existing run row survives with the new columns
+// readable at their documented defaults (speculated=false, recovered=false),
+// and a fresh write against the migrated database round-trips both new
+// columns correctly.
+func TestMigrate_V6ToV7(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v6.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV6SQL); err != nil {
+		t.Fatalf("apply v6 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 6`); err != nil {
+		t.Fatalf("stamp user_version=6: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1)`,
+	); err != nil {
+		t.Fatalf("seed v6 run: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v6 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	run, _, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if run.RunID != "run-old" {
+		t.Errorf("Run(run-old) after migrate = %+v, want the pre-existing row untouched", run)
+	}
+	if run.Speculated || run.Recovered {
+		t.Errorf("Run(run-old).Speculated/Recovered = %v/%v, want false/false (column defaults)", run.Speculated, run.Recovered)
+	}
+
+	// A fresh write against the migrated database must round-trip both new
+	// columns correctly.
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC))
+	rec.Speculated = true
+	rec.Recovered = true
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	newRun, _, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if !newRun.Speculated || !newRun.Recovered {
+		t.Errorf("Run(run-new).Speculated/Recovered = %v/%v, want true/true", newRun.Speculated, newRun.Recovered)
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }
@@ -967,6 +1133,54 @@ func TestStore_Emit_WritesTerminalEventAndChecks(t *testing.T) {
 	}
 	if checks[1].Output != "boom" {
 		t.Errorf("Run() checks[1].Output = %q, want %q", checks[1].Output, "boom")
+	}
+}
+
+// TestStore_Emit_PersistsSpeculatedAndRecovered confirms writeRecord persists
+// core.RunRecord.Speculated/Recovered (v7+) rather than dropping them at
+// landing the way the pre-v7 schema silently did: both false by default
+// (sampleRecord's zero-value case), and each independently true when set.
+func TestStore_Emit_PersistsSpeculatedAndRecovered(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	started := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+
+	plain := sampleRecord("run-plain", "main", started)
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-plain", Record: plain}); err != nil {
+		t.Fatalf("Emit (plain): %v", err)
+	}
+	run, _, err := s.Run("run-plain")
+	if err != nil {
+		t.Fatalf("Run(run-plain): %v", err)
+	}
+	if run.Speculated || run.Recovered {
+		t.Errorf("Run(run-plain).Speculated/Recovered = %v/%v, want false/false", run.Speculated, run.Recovered)
+	}
+
+	speculated := sampleRecord("run-speculated", "main", started.Add(time.Minute))
+	speculated.Speculated = true
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-speculated", Record: speculated}); err != nil {
+		t.Fatalf("Emit (speculated): %v", err)
+	}
+	run, _, err = s.Run("run-speculated")
+	if err != nil {
+		t.Fatalf("Run(run-speculated): %v", err)
+	}
+	if !run.Speculated || run.Recovered {
+		t.Errorf("Run(run-speculated).Speculated/Recovered = %v/%v, want true/false", run.Speculated, run.Recovered)
+	}
+
+	recovered := sampleRecord("run-recovered", "main", started.Add(2*time.Minute))
+	recovered.Recovered = true
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-recovered", Record: recovered}); err != nil {
+		t.Fatalf("Emit (recovered): %v", err)
+	}
+	run, _, err = s.Run("run-recovered")
+	if err != nil {
+		t.Fatalf("Run(run-recovered): %v", err)
+	}
+	if run.Speculated || !run.Recovered {
+		t.Errorf("Run(run-recovered).Speculated/Recovered = %v/%v, want false/true", run.Speculated, run.Recovered)
 	}
 }
 

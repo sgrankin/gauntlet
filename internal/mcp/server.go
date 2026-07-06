@@ -1,8 +1,9 @@
 // Package mcp exposes gauntlet's live queue state and run history to AI
-// agents over the Model Context Protocol (chunk E5): six tools — status,
-// runs, run, retry, cancel, hook_cancel — mounted at /mcp on the daemon's
-// existing dashboard HTTP port, right alongside the read-only HTML dashboard
-// and its JSON API (internal/dashboard/api.go, chunk E4).
+// agents over the Model Context Protocol (chunk E5): nine tools — status,
+// runs, run, retry, cancel, hook_cancel, batch, checks, services — mounted
+// at /mcp on the daemon's existing dashboard HTTP port, right alongside the
+// read-only HTML dashboard and its JSON API (internal/dashboard/api.go,
+// chunk E4).
 //
 // This package deliberately does not import internal/dashboard: its Params
 // are the same two read sources (a live queue.Snapshot and an optional
@@ -631,6 +632,13 @@ type runOut struct {
 	BatchID   string `json:"batchId,omitempty"`
 	Position  int    `json:"position,omitempty"`
 	BatchSize int    `json:"batchSize,omitempty"`
+
+	// Speculated and Recovered mirror dashboard/api.go's runDetailResponse
+	// additions field-for-field (core.RunRecord.Speculated/Recovered, v7+):
+	// purely informational, omitted when false. Run-detail only — the runs
+	// and batch tools don't carry these.
+	Speculated bool `json:"speculated,omitempty"`
+	Recovered  bool `json:"recovered,omitempty"`
 }
 
 // checkDetail is api.go's checkJSON plus Output: an agent debugging a red
@@ -679,6 +687,8 @@ func handleRun(p Params, in runIn) (runOut, error) {
 		EndedAt:    formatRFC3339(row.EndedAt),
 		DurationMs: row.Duration.Milliseconds(),
 		Checks:     make([]checkDetail, 0, len(checks)),
+		Speculated: row.Speculated,
+		Recovered:  row.Recovered,
 	}
 	if row.BatchID != "" {
 		out.BatchID, out.Position, out.BatchSize = row.BatchID, row.Position, row.BatchSize

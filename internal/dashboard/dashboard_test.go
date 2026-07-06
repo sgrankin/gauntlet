@@ -701,6 +701,33 @@ func TestRun_OmitsBatchIdentityForSerialRun(t *testing.T) {
 	}
 }
 
+// TestRun_ShowsSpeculatedAndRecoveredTags confirms run.html renders the
+// "speculated base"/"recovered landing" tags (core.RunRecord's own fields,
+// v7+) when either is true, and neither when both are false.
+func TestRun_ShowsSpeculatedAndRecoveredTags(t *testing.T) {
+	store := openTestStore(t)
+	rec := sampleRecord("run-spec-rec", "main")
+	rec.Speculated = true
+	rec.Recovered = true
+	emitRun(t, store, rec)
+	emitRun(t, store, sampleRecord("run-plain", "main"))
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+
+	_, body := get(t, h, "/run/run-spec-rec")
+	if !strings.Contains(body, "speculated base") {
+		t.Errorf("expected \"speculated base\" tag, body:\n%s", body)
+	}
+	if !strings.Contains(body, "recovered landing") {
+		t.Errorf("expected \"recovered landing\" tag, body:\n%s", body)
+	}
+
+	_, body = get(t, h, "/run/run-plain")
+	if strings.Contains(body, "speculated base") || strings.Contains(body, "recovered landing") {
+		t.Errorf("plain run must not show speculated/recovered tags:\n%s", body)
+	}
+}
+
 func TestBatch_ListsMembersInPositionOrder(t *testing.T) {
 	store := openTestStore(t)
 	// Emitted out of position order to prove the page sorts by position.

@@ -373,22 +373,20 @@ Configuration (all fields optional; defaults shown in the example above):
   who want a different model, including the former default,
   `claude-haiku-4-5` (see the `effort` note below if you do).
 - **`effort`** — the `output_config.effort` value sent with every
-  summarize call: one of `low`, `medium`, `high`, `xhigh`, `max`. Defaults
-  to `medium` whenever the `summarize` section is present, regardless of
-  `model` (same "node present ⇒ every field gets its default" rule as the
-  rest of this section). Only valid on models that support it —
-  `claude-sonnet-5` (the default model) does, but **`claude-haiku-4-5` and
-  Sonnet 4.5 do not, at any effort value**: the Messages API rejects the
-  request outright (a 400). If you switch `model` to one of those, this
-  config layer has no way to suppress the `effort` field (there is no KDL
-  syntax that round-trips to "explicitly empty" instead of "defaulted"),
-  so every summarize call will 400. That failure is not silent — it hits
-  the same degradation path as any other summarize error: logged as a
-  single line, answered with an empty body, never a blocked landing — but
-  it means summarization is effectively unusable with those models through
-  this config node today. This is the intended tradeoff, not a bug to
-  work around: pairing `effort` with a non-supporting model is the
-  operator's responsibility, called out here so it isn't a surprise.
+  summarize call: one of `none`, `low`, `medium`, `high`, `xhigh`, `max`.
+  Defaults to `medium` whenever the `summarize` section is present,
+  regardless of `model` (same "node present ⇒ every field gets its
+  default" rule as the rest of this section). Only valid on models that
+  support it — `claude-sonnet-5` (the default model) does, but
+  **`claude-haiku-4-5` and Sonnet 4.5 do not, at any nonzero effort
+  value**: the Messages API rejects the request outright (a 400). Set
+  `effort "none"` to omit the `output_config.effort` field from the
+  request entirely — the escape hatch for exactly this case — if you
+  switch `model` to one of those. Forgetting to set it (leaving the
+  `medium` default paired with a non-supporting model) is not silent — it
+  hits the same degradation path as any other summarize error: logged as
+  a single line, answered with an empty body, never a blocked landing —
+  but it does mean every summarize call 400s until `effort "none"` is set.
 - **`api-key-env`** — the environment variable holding the Anthropic API
   key. Defaults to `ANTHROPIC_API_KEY`. The daemon reads this at startup,
   once; it is never read from the config file itself.
@@ -410,10 +408,12 @@ SHA forbids amending later), so a trial whose checks then fail has still
 spent its summary call, and a re-queued candidate spends another on its
 re-trial. Each call is a single request against a handful of commit
 subjects/bodies and a diffstat, capped at a few hundred output tokens.
-**Batch mode multiplies this:** forming a batch of N makes N sequential
-summary calls on the reconcile loop before checks start (bounded by
-N × `timeout`, stalling all targets); large `max-batch` plus summaries
-means accepting that stall or disabling summaries on that daemon.
+**Batch mode multiplies this:** forming a batch of N makes N summary
+calls before checks start, run concurrently (capped at 4 in flight) on
+the reconcile loop, so the stall is bounded by `ceil(N/4) × timeout`
+(stalling all targets) rather than N separate calls back to back; large
+`max-batch` plus summaries still means accepting that stall — smaller
+now, but not zero — or disabling summaries on that daemon.
 Plainly: at the defaults (`claude-sonnet-5`, `effort "medium"`), that call
 costs on the order of **10x** what the old default (`claude-haiku-4-5`,
 no effort/thinking) cost per landing — Sonnet's per-token price is several
@@ -523,6 +523,17 @@ a deploy that's already obsolete.
 
 `hooks-policy` is only meaningful on a target that has at least one
 `hook` — setting it on a target with none is a config error.
+
+**Batch mode + a deploy-style hook needs a non-default policy.** A batch
+of N members lands as N separate `EventLanded`s, so a hook still fires
+once per member — under the default `queue` policy, that's N hook runs
+per batch, and the first N-1 of them run against *intermediate* chain-merge
+trees that the check suite never tested in isolation (checks run once,
+against the chain's tip). For a `hook "deploy"` on a target running
+`mode "batch"`, that means deploying N-1 commits nobody actually validated
+on their own. `coalesce` (or `cancel`) is the intended pairing here: both
+collapse a batch's queued landings down to the newest, so only the
+already-checked tip ever gets deployed.
 
 ## Queue modes
 
@@ -637,6 +648,36 @@ lowerCamel field names; errors are always `{"error": "..."}`.
 
   ```sh
   curl -s http://localhost:8080/api/v1/run/<run-id> | jq .
+  ```
+
+- **`GET /api/v1/batch/{id}`** — every member run of one batch: run ID,
+  target, position, candidate user/topic/SHA, outcome, detail, timing.
+  `404 {"error":"not found"}` for an unknown or empty batch ID; `503
+  {"error":"history disabled"}` if no `history` store is configured.
+
+  ```sh
+  curl -s http://localhost:8080/api/v1/batch/<batch-id> | jq .
+  ```
+
+- **`GET /api/v1/checks?target=<name>&since=<duration>`** — per-check
+  red-rate/duration stats plus the queue-depth series for one target, the
+  same data the dashboard's `/checks` page renders as a table and SVG
+  chart, as JSON. `target` is required (`400` if missing); `since`
+  defaults to the same window the HTML page uses. `503
+  {"error":"history disabled"}` if no `history` store is configured.
+
+  ```sh
+  curl -s 'http://localhost:8080/api/v1/checks?target=main' | jq .
+  ```
+
+- **`GET /api/v1/services`** — the shared-services pool: every live
+  instance (service name, image, key, mode, host/port, created/last-used,
+  refcount, cumulative hit count) plus the pool's `max-instances` and
+  pending-create count. `503 {"error":"services disabled"}` when no
+  `services` block is configured.
+
+  ```sh
+  curl -s http://localhost:8080/api/v1/services | jq .
   ```
 
 - **`POST /api/v1/retry`** — re-queues a parked ref at its current SHA,

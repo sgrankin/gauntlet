@@ -23,7 +23,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 6
+const schemaVersion = 7
 
 var _ core.Channel = (*Store)(nil)
 
@@ -93,6 +93,10 @@ func Open(path string) (*Store, error) {
 //     TABLE all three (S3's persisted retry intent, S7c's durable ignored-ref
 //     capture, S1-C's durable hook owed/skipped marker), stamp
 //     user_version=6, loop.
+//   - 6 (schema v6: runs has no speculated/recovered columns): ALTER TABLE
+//     runs ADD COLUMN speculated/recovered (core.RunRecord.Speculated/
+//     Recovered persistence, closing the "announced live, dropped at
+//     landing" gap), stamp user_version=7, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -200,6 +204,16 @@ CREATE TABLE hook_runs (
 			if _, err := db.Exec(`PRAGMA user_version = 6`); err != nil {
 				return fmt.Errorf("history: set user_version=6: %w", err)
 			}
+		case 6:
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN speculated INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v6->v7 (runs.speculated): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN recovered INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v6->v7 (runs.recovered): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 7`); err != nil {
+				return fmt.Errorf("history: set user_version=7: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -287,6 +301,8 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		rec.BatchID,
 		rec.Position,
 		batchSizeOrDefault(rec.BatchSize),
+		boolToInt(rec.Speculated),
+		boolToInt(rec.Recovered),
 	); err != nil {
 		return fmt.Errorf("history: insert run: %w", err)
 	}

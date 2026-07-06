@@ -1,10 +1,11 @@
 # Gauntlet — a merge queue
 
-**Status:** feature-complete through phase 5 — serial/batch/speculate
-modes, local+container executors, dashboard/API/MCP, Slack duplex with
-reaction commands, GitHub statuses, post-land hooks, Claude merge
-summaries, full log capture, and park persistence are all shipped;
-post-completion consistency audit done · **Date:** 2026-07-05
+**Status:** feature-complete through phase 5, plus shared services (phase
+A) and auto-retry-once on infra-error parks — serial/batch/speculate
+modes, local+container executors, a shared-services pool, dashboard/API/MCP,
+Slack duplex with reaction commands, GitHub statuses, post-land hooks,
+Claude merge summaries, full log capture, auto-retry, and park persistence
+are all shipped; post-completion consistency audit done · **Date:** 2026-07-06
 
 A merge queue for teams that merge often and want their branch history intact.
 Your branch runs the gauntlet: push it to a magic ref, the daemon trial-merges it
@@ -135,41 +136,41 @@ The review checklist. Every plan and every implementation gets graded against th
 
 - **Event shapes are the soft underbelly.** Two review cycles found the same
   family: `EventTrialClean` shipped without the `RunID` its consumers join on
-  (phase-2/3 review, ship-blocker), and `EventCheckFinished` carries no
-  `CheckResult`, so channels can't show per-check verdicts mid-run. The
-  emit-site contract ("terminal events carry a Record"; "run-scoped events
-  carry the run ID") is now partially test-enforced; when events next grow,
-  extend those contract tests first.
+  (phase-2/3 review, ship-blocker), and `EventCheckFinished` originally
+  carried no `CheckResult`, so channels couldn't show per-check verdicts
+  mid-run — **resolved**: `Event.Check *CheckResult` (`internal/core/types.go`)
+  is now set on every `EventCheckFinished`, and hooks/dashboard consume it.
+  The emit-site contract ("terminal events carry a Record"; "run-scoped
+  events carry the run ID") is now partially test-enforced; when events next
+  grow, extend those contract tests first — event shapes have broken twice
+  already and are still the part of the design most likely to break a third
+  time.
 - **`core.Command` carries no SHA** — a delayed retry clears whatever park
   currently exists at the ref. Benign today (parks are keyed to the current
   SHA and a re-push already clears them); matters if commands ever queue for
   long or gain more destructive kinds. `core.CommandCancel` (manual operator
   cancellation) is now that more-destructive kind, and inherits this exact
   gap unchanged: same by-ref, no-SHA addressing, same benign consequence.
-- **Batch members share one `run_id`, so history keeps only the last
-  member's row.** The queue reuses one RunID verbatim across every member of
-  a batch (it doubles as BatchID), but `runs.run_id` is the history table's
-  PRIMARY KEY and writes are `INSERT OR REPLACE` — each member's terminal
-  event clobbers the previous member's row (fresh-context review, 2026-07,
-  confirmed empirically: 3 member events sharing one run_id leave exactly 1
-  row). `history.Store`'s own tests fixture distinct per-member RunIDs
-  sharing a BatchID — the shape the schema assumes; the queue never
-  produces it. Effects: per-member batch history/dashboard rows are
-  silently lost, and boot-time park seeding (`LatestTerminalPerRef`) only
-  ever sees a past batch's last-emitted member — benign for correctness (a
-  missing row just means "no seed") but it defeats the seeding benefit for
-  most batch members. Likely fix: mint each member its own RunID and keep
-  BatchID as the grouping key.
-- **Park-seed resurrection edge** (`queue.Config.SeedParks`, Feature 2): retry
-  a parked ref, then restart the daemon before any new verdict lands for it
-  — the retry cleared the in-memory park, but history's latest row for that
-  (ref, SHA) is still the old red verdict, so `SeedParks` re-parks it on
-  boot. Rare (needs a restart racing right after a retry, before the next
-  reconcile pass even runs) and self-healing (another retry clears it again,
-  exactly as it did the first time) — no correctness impact either way
-  (Invariant 4 still holds; this only ever costs one extra doomed-retest
-  cycle avoided or one extra retry needed), but worth knowing about if an
-  operator reports a just-retried ref looking parked again after a restart.
+- **RESOLVED — batch members shared one `run_id`, so history kept only the
+  last member's row.** The queue used to reuse one RunID verbatim across
+  every member of a batch (it doubles as BatchID), and `runs.run_id`'s
+  `INSERT OR REPLACE` PRIMARY KEY meant each member's terminal event
+  clobbered the previous member's row (fresh-context review, 2026-07,
+  confirmed empirically: 3 member events sharing one run_id left exactly 1
+  row). Fixed by `memberRunID` (`internal/queue/reconcile.go`): position 0
+  keeps the bare `batchRunID`, position >0 gets `<batchRunID>-mN` — every
+  member now carries a distinct RunID while BatchID stays the shared
+  grouping key, so per-member history/dashboard rows and boot-time park
+  seeding (`LatestTerminalPerRef`) both see every member, not just the last.
+- **RESOLVED — park-seed resurrection edge** (`queue.Config.SeedParks`,
+  Feature 2): retrying a parked ref, then restarting the daemon before any
+  new verdict landed for it, used to re-park the ref on boot — the retry
+  cleared the in-memory park, but history's latest row for that (ref, SHA)
+  was still the old red verdict, and `SeedParks` trusted it. Fixed by the S3
+  `retry_intents` suppression: `applyRetry` now emits `EventRetryRequested`,
+  history writes a `retry_intents` row, and `LatestTerminalPerRef` LEFT JOINs
+  it, dropping the seed whenever the retry is newer than the terminal row's
+  `ended_at` (`internal/history/queries.go`) — exactly the scenario above.
 - **`extractTar` writes symlink entries verbatim** — a candidate tree can
   plant a symlink escaping the export dir that a later check follows. Within
   the own-code threat model; revisit if the threat model widens.
@@ -194,9 +195,11 @@ First live run (crashtest demo, 2026-07-05) surfaced three more:
 
 - **Red pings need the failing output.** A rejection's detail says `check "test"
   failed`; the actually-useful line (`airbag: deploy at 148ms, want <= 25ms`)
-  lives only in the RunRecord's tail-capped Output, which history deliberately
-  doesn't store. Channels should include the failing check's output tail in
-  terminal notifications.
+  lives in the RunRecord's tail-capped Output. History *does* store it
+  (schema v2's `checks.output` column) — the gap is that terminal channel
+  notifications (Slack, GitHub status, the log channel) still don't include
+  it. Channels should include the failing check's output tail in terminal
+  notifications; the data is already there, only the surfacing is missing.
 - **kdl-go rejects single-line child blocks** (`check "vet" { command ... }` on
   one line) and reports the error at "line 0". Adopters will write the
   single-line form; docs must show multi-line only, and the parse-error paths

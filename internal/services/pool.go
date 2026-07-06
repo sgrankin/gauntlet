@@ -8,6 +8,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -33,6 +34,16 @@ type Config struct {
 	StateDir     string // <state>/services lives here (records)
 	MaxInstances int
 	Now          func() time.Time // injectable clock (tests); nil means time.Now
+
+	// Log receives one line per lifecycle event (create/ready-probe
+	// failure/evict/reap/adopt/ensure-failure) — the pool's own
+	// operator-visible trail, distinct from the on-disk Record (an
+	// efficiency hint) and Snapshot (pull-based). Defaults to os.Stderr
+	// when nil, matching hooks.Params.Log / slack.Params.Log's convention.
+	// newPool (every test in this package) leaves it nil deliberately —
+	// logf no-ops on a nil Log, so tests stay quiet; only New's production
+	// path defaults it.
+	Log io.Writer
 }
 
 // Ensured is EnsureAll's output: env+networks to reach the resolved
@@ -66,6 +77,8 @@ type Pool struct {
 	inflight    map[string]*inflightCall // key -> in-progress ensure, single-flight
 	reaperArmed bool
 	pending     int // in-flight creates that reserved a slot but haven't landed in instances yet (review BUG 2)
+
+	logMu sync.Mutex // guards writes to cfg.Log (create/evict/reap/adopt all run on different goroutines)
 }
 
 // inflightCall is one in-progress ensure, shared by every concurrent caller
@@ -97,6 +110,9 @@ func New(cfg Config) (*Pool, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		return nil, fmt.Errorf("services: create state dir: %w", err)
 	}
+	if cfg.Log == nil {
+		cfg.Log = os.Stderr
+	}
 	return newPool(cfg, newContainerDriver(cfg.Runtime, cfg.Token)), nil
 }
 
@@ -122,6 +138,22 @@ func (p *Pool) now() time.Time {
 		return p.cfg.Now()
 	}
 	return time.Now()
+}
+
+// logf writes one lifecycle log line, "services: "-prefixed to match
+// hooks.Runner/Slack's own package-prefix convention (their lines read
+// "hooks: ..."/"slack: ...", with "gauntlet: " added only by cmd's own
+// direct os.Stderr writes, never by a package's internal logf). Nil Log
+// (every unit test's newPool call, which never sets Config.Log) makes this
+// a silent no-op — losing a diagnostic line must never do anything worse
+// than lose it, the same discipline Slack.logf's doc states.
+func (p *Pool) logf(format string, args ...any) {
+	if p.cfg.Log == nil {
+		return
+	}
+	p.logMu.Lock()
+	defer p.logMu.Unlock()
+	fmt.Fprintf(p.cfg.Log, "services: "+format+"\n", args...)
 }
 
 // networkName is the one shared network every ModeNetwork instance this
@@ -181,6 +213,10 @@ func (p *Pool) EnsureAll(ctx context.Context, svcs []config.Service, needs []str
 		inst, err := p.ensureOne(ctx, key, svc)
 		if err != nil {
 			p.releaseKeys(ensured.keys)
+			// The pool-side cause, logged next to the check-level park this
+			// error becomes once it flows up into CheckResult.Err — greppable
+			// by key hash without cross-referencing the check's own log.
+			p.logf("ensure failed need=%q key=%s: %v", name, key[:12], err)
 			return Ensured{}, fmt.Errorf("services: ensure %q: %w", name, err)
 		}
 		ensured.keys = append(ensured.keys, key)
@@ -263,6 +299,7 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 		// probe is evicted and falls through to creation, once; a second
 		// failure below (in create) is reported as an ordinary ensure
 		// error (§7 "Ensure-time failure").
+		p.logf("evict %s key=%s instance=%s reason=probe-failed", svc.Name, key[:12], inst.Name)
 		p.evict(ctx, key, inst)
 	}
 
@@ -344,6 +381,9 @@ func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Inst
 		is.Net = p.networkName()
 	}
 
+	p.logf("create start %s key=%s instance=%s image=%s", svc.Name, key[:12], is.Name, svc.Image)
+	readyStart := time.Now()
+
 	inst, err := p.driver.Create(ctx, is)
 	if err != nil {
 		return Instance{}, fmt.Errorf("create %s: %w", svc.Name, err)
@@ -365,8 +405,14 @@ func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Inst
 		logs := p.driver.TailLogs(cctx, inst) // review m5: capture before destroy
 		p.driver.Destroy(cctx, inst)
 		cancel()
+		// The tail lands on the pool's own logger too, not just the error
+		// this function returns — an operator reading stderr sees the same
+		// diagnostic a caller would otherwise only get by threading the
+		// returned error all the way up.
+		p.logf("ready-probe failed %s key=%s instance=%s: %v\nlast output:\n%s", svc.Name, key[:12], is.Name, err, logs)
 		return Instance{}, fmt.Errorf("%s not ready within %s: %w\nlast output:\n%s", svc.Name, svc.ReadyTimeout, err, logs)
 	}
+	p.logf("create succeeded %s key=%s instance=%s endpoint=%s:%s ready_after=%s", svc.Name, key[:12], is.Name, inst.Host, inst.Port, time.Since(readyStart))
 	return inst, nil
 }
 
@@ -462,6 +508,7 @@ func (p *Pool) AnyDead(ctx context.Context, e Ensured) bool {
 		}
 		if alive, err := p.driver.ProbeAlive(ctx, inst); err != nil || !alive {
 			dead = true
+			p.logf("evict %s key=%s instance=%s reason=mid-run-death", inst.Spec.Name, key[:12], inst.Name)
 			p.evict(ctx, key, inst)
 		}
 	}
@@ -524,6 +571,7 @@ func (p *Pool) Adopt(ctx context.Context) error {
 
 	prefix := p.namePrefix()
 	now := p.now()
+	adopted, destroyed := 0, 0
 	for _, name := range names {
 		if !strings.HasPrefix(name, prefix) {
 			continue // not this daemon's namespace (token-scoped, mirrors sweep.go)
@@ -531,20 +579,26 @@ func (p *Pool) Adopt(ctx context.Context) error {
 
 		key, ok, err := p.driver.InspectKey(ctx, name)
 		if err != nil || !ok {
+			p.logf("adopt reject instance=%s reason=no-key-label", name)
 			_ = p.driver.Destroy(ctx, Instance{Name: name})
+			destroyed++
 			continue
 		}
 		rec, ok := byKey[key]
 		if !ok {
+			p.logf("adopt reject instance=%s key=%s reason=no-record", name, key[:12])
 			_ = p.driver.Destroy(ctx, Instance{Name: name, Key: key})
+			destroyed++
 			continue
 		}
 		if rec.Mode != p.cfg.Mode.String() {
 			// M2: an operator who switched executor kind (and so Mode)
 			// since the last run gets a cold, correct pool here, never a
 			// warm instance whose endpoint nothing can reach.
+			p.logf("adopt reject %s key=%s instance=%s reason=mode-mismatch", rec.Spec.Name, key[:12], name)
 			_ = p.driver.Destroy(ctx, Instance{Name: name, Key: key})
 			removeRecord(p.cfg.StateDir, key)
+			destroyed++
 			continue
 		}
 
@@ -554,18 +608,24 @@ func (p *Pool) Adopt(ctx context.Context) error {
 			Spec: rec.Spec, // A1: from the record's spec snapshot, not re-derived
 		}
 		if alive, err := p.driver.ProbeAlive(ctx, inst); err != nil || !alive {
+			p.logf("adopt reject %s key=%s instance=%s reason=not-alive", rec.Spec.Name, key[:12], name)
 			_ = p.driver.Destroy(ctx, inst)
 			removeRecord(p.cfg.StateDir, key)
+			destroyed++
 			continue
 		}
 		if err := p.driver.ProbeReady(ctx, inst); err != nil {
+			p.logf("adopt reject %s key=%s instance=%s reason=not-ready", rec.Spec.Name, key[:12], name)
 			_ = p.driver.Destroy(ctx, inst)
 			removeRecord(p.cfg.StateDir, key)
+			destroyed++
 			continue
 		}
 		if now.Sub(rec.LastUsed) > rec.Spec.IdleTTL {
+			p.logf("adopt reject %s key=%s instance=%s reason=idle-ttl-exceeded", rec.Spec.Name, key[:12], name)
 			_ = p.driver.Destroy(ctx, inst)
 			removeRecord(p.cfg.StateDir, key)
+			destroyed++
 			continue
 		}
 
@@ -574,7 +634,10 @@ func (p *Pool) Adopt(ctx context.Context) error {
 		p.lastUsed[key] = rec.LastUsed
 		p.createdAt[key] = rec.CreatedAt
 		p.mu.Unlock()
+		p.logf("adopt %s key=%s instance=%s endpoint=%s:%s", rec.Spec.Name, key[:12], name, inst.Host, inst.Port)
+		adopted++
 	}
+	p.logf("adopt summary adopted=%d destroyed=%d", adopted, destroyed)
 	return nil
 }
 
@@ -614,10 +677,12 @@ func (p *Pool) Reap(ctx context.Context) {
 		p.mu.Lock()
 		inst, ok := p.instances[key]
 		stillDue := ok && p.refcount[key] == 0
+		lastUsed := p.lastUsed[key]
 		p.mu.Unlock()
 		if !stillDue {
 			continue // raced: refcounted or already evicted since the scan above
 		}
+		p.logf("reap %s key=%s instance=%s idle=%s ttl=%s", inst.Spec.Name, key[:12], inst.Name, now.Sub(lastUsed), inst.Spec.IdleTTL)
 		p.evict(ctx, key, inst)
 		// A reaped key is abandoned (idle past its own TTL), so its hit
 		// counter goes with it — unlike evict's other callers (AnyDead, the

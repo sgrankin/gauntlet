@@ -95,15 +95,23 @@ func TestSpeculateRefill_FillsWindowChained(t *testing.T) {
 	}
 }
 
-// TestSpeculateConflictAgainstPredictedBase_Parks proves §2.5's per-candidate
-// conflict handling: a candidate that conflicts against a non-head
-// (predicted, unpushed) base parks with a Detail that explicitly documents
-// the conflict as being against a PREDICTION — "conflicts with in-flight
-// <topic>@<sha> (predicted base)" — not the generic "trial merge conflict"
-// wording serial/batch use, since the base here was never pushed anywhere;
-// window-extension stops for this tick once that candidate parks (carol
-// never gets picked at all).
-func TestSpeculateConflictAgainstPredictedBase_Parks(t *testing.T) {
+// TestSpeculateConflictAgainstPredictedBase_SkipsRequeuesThenParksOnRealRetest
+// proves §2.5's per-candidate conflict handling, UPDATED for the holistic
+// review's F2 extension (docs/plans/phase5.md §Amendments): a candidate that
+// conflicts against a non-head (predicted, unpushed) base is NOT proven
+// against reality — parking it there is the same false-negative park F2
+// already ruled out for a post-merge red at lane index >0. It must Skip
+// unparked instead (Detail still documents the conflict as being against a
+// PREDICTION — "conflicts with in-flight <topic>@<sha> (predicted base)" —
+// not the generic "trial merge conflict" wording serial/batch use, since the
+// base here was never pushed anywhere) and re-queue; window-extension still
+// stops for this tick once that candidate fails (carol never gets picked at
+// all). This test used to be TestSpeculateConflictAgainstPredictedBase_Parks
+// and asserted the immediate park that WAS the bug; it now also proves the
+// second half: once the SAME candidate is genuinely retested at lane index 0
+// against the real target tip and still conflicts there, THAT is proven
+// against reality and parks for real.
+func TestSpeculateConflictAgainstPredictedBase_SkipsRequeuesThenParksOnRealRetest(t *testing.T) {
 	// Window starts at 1 so the first refill picks ONLY alice — bob/carol
 	// must still be waiting when the conflict is scripted below (a fully
 	// open window would chain all three in one tick, before there's any
@@ -126,17 +134,22 @@ func TestSpeculateConflictAgainstPredictedBase_Parks(t *testing.T) {
 	// PREDICTED chainTip (bob's would-be base) — the fake never conflicts on
 	// its own (git_test.go's MergeTree overlays trees, never fails, unless
 	// scripted), so this is how a chained-base conflict is provoked
-	// deterministically.
+	// deterministically. Keyed on this exact (base, candidate) OID pair, so
+	// it fires again on bob's retest below only because alice's landed
+	// chainTip becomes the real tip at the SAME OID.
 	h.git.scriptConflict(run0.chainTip, shaB, []string{"shared.txt"})
 	h.d.cfg.Targets[0].Window = 3 // widen the window so this refill actually tries bob next
 
-	h.reconcile() // refill: bob conflicts against alice's predicted chainTip and parks; carol is never even tried
+	h.reconcile() // refill: bob conflicts against alice's predicted chainTip -> F2 extended: Skip unparked, re-queues; carol is never even tried
 
 	if !h.git.hasRef(refB) {
-		t.Fatal("bob's ref should still exist (parked, not deleted)")
+		t.Fatal("bob's ref should still exist (unparked, re-queuing)")
 	}
 	if l := h.d.lanes["main"]; l == nil || len(l.runs) != 1 {
-		t.Fatalf("lane = %+v, want exactly 1 run (alice only; bob parked, carol never picked)", h.d.lanes["main"])
+		t.Fatalf("lane = %+v, want exactly 1 run (alice only; bob skipped-and-requeued, carol never picked)", h.d.lanes["main"])
+	}
+	if _, parked := h.d.done["main"][refB]; parked {
+		t.Fatal("bob must NOT be parked yet (conflict against a PREDICTED base, not proven against reality)")
 	}
 
 	var rec *core.RunRecord
@@ -148,8 +161,8 @@ func TestSpeculateConflictAgainstPredictedBase_Parks(t *testing.T) {
 	if rec == nil {
 		t.Fatal("no RunRecord captured for bob")
 	}
-	if rec.Outcome != core.OutcomeConflict {
-		t.Fatalf("bob's Outcome = %v, want Conflict", rec.Outcome)
+	if rec.Outcome != core.OutcomeSkipped {
+		t.Fatalf("bob's Outcome = %v, want Skipped (unparked: conflict against a predicted base, not yet proven)", rec.Outcome)
 	}
 	wantPrefix := "conflicts with in-flight a@" + run0.members[0].cand.SHA + " (predicted base)"
 	if len(rec.Detail) < len(wantPrefix) || rec.Detail[:len(wantPrefix)] != wantPrefix {
@@ -166,7 +179,136 @@ func TestSpeculateConflictAgainstPredictedBase_Parks(t *testing.T) {
 			t.Fatalf("carol should never have been picked this tick, got record %+v", r)
 		}
 	}
+
+	// Land alice for real: the target tip advances to EXACTLY run0.chainTip —
+	// the same OID that was bob's predicted (and scripted-conflicting) base.
+	// Pin the window to 1 first so a quiet tick during release doesn't
+	// re-attempt bob against alice's still-in-flight chainTip meanwhile
+	// (harmless — he'd just skip-and-requeue again — but irrelevant noise).
+	h.d.cfg.Targets[0].Window = 1
+	h.release(run0.runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
+	if h.d.headRun("main") != nil {
+		t.Fatal("alice's run should be gone (landed) before the next refill")
+	}
+	h.d.cfg.Targets[0].Window = 3
+
+	h.reconcile() // bob re-forms at lane index 0, against the now-real tip (same OID he conflicted with as a prediction)
+
+	bobRun := h.d.headRun("main")
+	if bobRun != nil {
+		t.Fatalf("bob's conflict against the now-real tip must not start a run, got %+v", bobRun.members[0].cand)
+	}
+	if !h.git.hasRef(refB) {
+		t.Fatal("bob's ref should still exist (parked, not deleted)")
+	}
+	entry, parked := h.d.done["main"][refB]
+	if !parked || entry.Outcome != core.OutcomeConflict {
+		t.Fatalf("bob's done entry = %+v (parked=%v), want a real Conflict park now (proven against the real target tip)", entry, parked)
+	}
+
+	rec = nil
+	for _, r := range h.ch.Records() {
+		if r.Candidate.Ref == refB {
+			rec = r // walk forward: keep the most recent
+		}
+	}
+	if rec == nil || rec.Outcome != core.OutcomeConflict {
+		t.Fatalf("bob's latest record = %+v, want Outcome Conflict (proven against reality)", rec)
+	}
+	wantRealPrefix := "trial merge conflict: "
+	if len(rec.Detail) < len(wantRealPrefix) || rec.Detail[:len(wantRealPrefix)] != wantRealPrefix {
+		t.Fatalf("bob's real-park Detail = %q, want the generic %q wording (this base is real, not a prediction)", rec.Detail, wantRealPrefix)
+	}
+	if entry.RunID != rec.RunID {
+		t.Fatalf("bob's done entry RunID = %q, want %q (the call that actually parked him)", entry.RunID, rec.RunID)
+	}
 	_ = refA
+}
+
+// TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands is
+// the holistic review's exact regression scenario (docs/plans/phase5.md
+// §Amendments, F2 extended): window [A,B], B conflicts with A's predicted
+// (unpushed) chainTip, then A itself goes red at head and never lands — so
+// the real target tip never advances to that chainTip at all. B must not
+// stay parked on a base that turned out to never exist; it re-queues,
+// re-forms at lane index 0 against the REAL (unmoved) target tip, and —
+// since B was landable there all along — lands.
+func TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands(t *testing.T) {
+	h := newHarness(t, speculateTarget(1))
+	refA, refB, refC := pushThreeSpeculateCandidates(h)
+
+	h.reconcile() // window(1): only alice's own run forms
+
+	run0 := h.d.headRun("main")
+	if run0 == nil {
+		t.Fatal("no head run after the first refill")
+	}
+	shaB := h.git.ref(refB)
+	originalTip := h.git.ref("refs/heads/main")
+
+	// Bob conflicts against alice's PREDICTED chainTip specifically — keyed
+	// on that exact OID, so it will NOT fire once bob is retested below
+	// against the real, never-advanced target tip (a different OID, since
+	// alice never lands).
+	h.git.scriptConflict(run0.chainTip, shaB, []string{"shared.txt"})
+	h.d.cfg.Targets[0].Window = 3
+
+	h.reconcile() // bob conflicts against alice's predicted chainTip -> F2 extended: Skip unparked, re-queues; carol never tried
+
+	if _, parked := h.d.done["main"][refB]; parked {
+		t.Fatal("bob must not be parked from a conflict against a mere prediction")
+	}
+	if l := h.d.lanes["main"]; l == nil || len(l.runs) != 1 {
+		t.Fatalf("lane = %+v, want exactly 1 run (alice only)", h.d.lanes["main"])
+	}
+
+	// Pin the window to 1 while alice's release is in flight, so a quiet
+	// tick doesn't keep re-trying bob against alice's still-predicted
+	// chainTip meanwhile (harmless, just irrelevant noise for this test).
+	h.d.cfg.Targets[0].Window = 1
+	h.release(run0.runID, "test", core.CheckResult{Name: "test", Status: core.CheckFailed}) // alice reds at head: the review's "A goes red and never lands"
+	h.d.cfg.Targets[0].Window = 3
+
+	if entry, parked := h.d.done["main"][refA]; !parked || entry.Outcome != core.OutcomeRejected {
+		t.Fatalf("alice's done entry = %+v (parked=%v), want a real Rejected park (index 0, proven against reality)", entry, parked)
+	}
+	if h.git.ref("refs/heads/main") != originalTip {
+		t.Fatal("target tip must not have advanced: alice never landed")
+	}
+
+	h.reconcile() // next tick: bob re-forms at lane index 0, against the REAL, still-unmoved target tip
+
+	bobRun := h.d.headRun("main")
+	if bobRun == nil || bobRun.members[0].cand.Ref != refB {
+		t.Fatalf("head run after refill = %+v, want bob re-queued at index 0", bobRun)
+	}
+	if bobRun.predicted {
+		t.Fatal("bob's re-queued run at index 0 must NOT be predicted: its base is the real target tip")
+	}
+	if bobRun.baseOID != originalTip {
+		t.Fatalf("bob's retest base = %s, want the original real tip %s (alice never landed, so it never moved)", bobRun.baseOID, originalTip)
+	}
+
+	h.release(bobRun.runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // bob was landable against the real, unchanged tip all along
+
+	if h.git.ref("refs/heads/main") != bobRun.chainTip {
+		t.Fatalf("target tip = %s, want bob's chainTip %s (bob landed)", h.git.ref("refs/heads/main"), bobRun.chainTip)
+	}
+	if h.git.hasRef(refB) {
+		t.Fatal("bob's ref should be deleted (landed)")
+	}
+
+	var bobRec *core.RunRecord
+	for _, r := range h.ch.Records() {
+		if r.Candidate.Ref == refB {
+			bobRec = r // walk forward: keep the most recent
+		}
+	}
+	if bobRec == nil || bobRec.Outcome != core.OutcomeLanded {
+		t.Fatalf("bob's final record = %+v, want Outcome Landed — the F2 extension's whole point: a candidate falsely at risk of parking on a stale prediction must land once retested for real", bobRec)
+	}
+
+	_ = refC
 }
 
 // TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest proves

@@ -1618,6 +1618,133 @@ services {
 	}
 }
 
+// TestLoadDaemon_KitchenSink covers a daemon-side combination that had never
+// been co-parsed in one config document before (test-blind-spot audit):
+// services{} alongside an executor{} block carrying both cache and mount
+// children, plus auto-retry-errors false, plus history/dashboard/github for
+// good measure. Each of these has its own dedicated test elsewhere (e.g.
+// TestLoadDaemon_ExecutorMounts, TestLoadDaemon_Services,
+// TestLoadDaemon_AutoRetryErrors), but never together in one document — this
+// asserts every field still lands correctly when they're all present at
+// once, since kdl-go's per-node unmarshaling could in principle let one
+// section's presence/defaulting interfere with another's.
+//
+// executor.runtime and services.runtime are both explicitly "docker" here
+// (rather than relying on either default) so the runtime cross-check
+// (validate()'s "services: runtime conflicts with executor runtime" guard,
+// A3) is genuinely exercised rather than trivially skipped.
+func TestLoadDaemon_KitchenSink(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/gauntlet.kdl"
+	data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+auto-retry-errors false
+history "/var/lib/gauntlet/history.db" {
+    sample-every "10s"
+    depth-retention "336h"
+}
+dashboard "localhost:8080" {
+    url "https://gauntlet.internal.example"
+}
+github "acme/widgets" {
+    token-env "GITHUB_TOKEN"
+    api-url "https://api.github.com"
+}
+executor "container" {
+    runtime "docker"
+    image "ghcr.io/acme/ci:latest"
+    cache "gocache" path="/root/.cache/go-build"
+    mount "/var/run/docker.sock" path="/var/run/docker.sock"
+}
+services {
+    allow "container"
+    max-instances 4
+    runtime "docker"
+}
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+
+	if d.Remote != "https://example.com/repo.git" {
+		t.Errorf("Remote = %q", d.Remote)
+	}
+	if d.Committer.Name != "Gauntlet" || d.Committer.Email != "gauntlet@example.com" {
+		t.Errorf("Committer = %+v", d.Committer)
+	}
+	if len(d.Targets) != 1 || d.Targets[0].Name != "main" || d.Targets[0].Branch != "main" {
+		t.Errorf("Targets = %+v", d.Targets)
+	}
+
+	if d.AutoRetryErrors == nil || *d.AutoRetryErrors {
+		t.Errorf("AutoRetryErrors = %v, want explicit false", d.AutoRetryErrors)
+	}
+
+	if d.History.Path != "/var/lib/gauntlet/history.db" {
+		t.Errorf("History.Path = %q", d.History.Path)
+	}
+	if d.History.SampleEvery != 10*time.Second {
+		t.Errorf("History.SampleEvery = %v, want 10s", d.History.SampleEvery)
+	}
+	if d.History.DepthRetention != 336*time.Hour {
+		t.Errorf("History.DepthRetention = %v, want 336h", d.History.DepthRetention)
+	}
+
+	if d.Dashboard.Bind != "localhost:8080" {
+		t.Errorf("Dashboard.Bind = %q", d.Dashboard.Bind)
+	}
+	if d.Dashboard.URL != "https://gauntlet.internal.example" {
+		t.Errorf("Dashboard.URL = %q", d.Dashboard.URL)
+	}
+
+	if d.GitHub.Repo != "acme/widgets" {
+		t.Errorf("GitHub.Repo = %q", d.GitHub.Repo)
+	}
+	if d.GitHub.TokenEnv != "GITHUB_TOKEN" {
+		t.Errorf("GitHub.TokenEnv = %q", d.GitHub.TokenEnv)
+	}
+	if d.GitHub.APIURL != "https://api.github.com" {
+		t.Errorf("GitHub.APIURL = %q", d.GitHub.APIURL)
+	}
+
+	if d.Executor.Kind != "container" {
+		t.Errorf("Executor.Kind = %q", d.Executor.Kind)
+	}
+	if d.Executor.Runtime != "docker" {
+		t.Errorf("Executor.Runtime = %q", d.Executor.Runtime)
+	}
+	if d.Executor.Image != "ghcr.io/acme/ci:latest" {
+		t.Errorf("Executor.Image = %q", d.Executor.Image)
+	}
+	wantCaches := []Cache{{Name: "gocache", Path: "/root/.cache/go-build"}}
+	if !reflect.DeepEqual(d.Executor.Caches, wantCaches) {
+		t.Errorf("Executor.Caches = %+v, want %+v", d.Executor.Caches, wantCaches)
+	}
+	wantMounts := []Mount{{Host: "/var/run/docker.sock", Path: "/var/run/docker.sock"}}
+	if !reflect.DeepEqual(d.Executor.Mounts, wantMounts) {
+		t.Errorf("Executor.Mounts = %+v, want %+v", d.Executor.Mounts, wantMounts)
+	}
+
+	if want := []string{"container"}; !reflect.DeepEqual(d.Services.Allow, want) {
+		t.Errorf("Services.Allow = %v, want %v", d.Services.Allow, want)
+	}
+	if d.Services.MaxInstances != 4 {
+		t.Errorf("Services.MaxInstances = %d, want 4", d.Services.MaxInstances)
+	}
+	if d.Services.Runtime != "docker" {
+		t.Errorf("Services.Runtime = %q, want docker", d.Services.Runtime)
+	}
+}
+
 func TestLoadDaemon_MissingFile(t *testing.T) {
 	if _, err := LoadDaemon("/nonexistent/gauntlet.kdl"); err == nil {
 		t.Fatal("LoadDaemon: got nil error for missing file")

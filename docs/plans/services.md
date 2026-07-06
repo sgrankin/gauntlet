@@ -428,11 +428,14 @@ joining the cache key like every other spec field.
 - **Phase A:** spec parsing + key derivation + pool with container driver
   (docker/podman only) + endpoint env + sweep adopt/reap split + red→Err
   conversion + docs. The operator's mssql repo is the acceptance test.
-- **Phase B:** Apple `container` networking path (after livetest), dashboard
-  surface (pool contents, last-used, per-key hit counts — the tuning
-  instrument, as queue-depth was for speculation), and the recorded
-  candidates: auto-retry-once on service-ensure error, per-service resource
-  flags.
+- **Phase B:** Landed — dashboard surface (pool contents, last-used,
+  per-key hit counts, the tuning instrument, as queue-depth was for
+  speculation), auto-retry-once on infra-error parks (config knob
+  `auto-retry-errors`, covering service-ensure and mid-run-death
+  conversions the same as any other `OutcomeError` — DESIGN.md's decision
+  ledger, "Auto-retry once on infra-error parks"), and per-service resource
+  flags (`memory`/`cpus`, §7). Still pending: the Apple `container`
+  networking path (after livetest, §9) — the one genuinely open item.
 - **Phase C (unscheduled):** artifact driver, if and when a concrete
   runtime-less box exists.
 

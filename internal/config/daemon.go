@@ -907,7 +907,7 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("summarize: api-key-env must not be empty")
 		}
 		if !validSummarizeEfforts[d.Summarize.Effort] {
-			return fmt.Errorf("summarize: effort must be one of low, medium, high, xhigh, max, got %q", d.Summarize.Effort)
+			return fmt.Errorf("summarize: effort must be one of none, low, medium, high, xhigh, max, got %q", d.Summarize.Effort)
 		}
 		if d.Summarize.Timeout <= 0 {
 			return fmt.Errorf("summarize: timeout must be positive, got %s", d.Summarize.Timeout)

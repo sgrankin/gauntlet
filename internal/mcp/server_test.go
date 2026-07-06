@@ -347,6 +347,51 @@ func TestRun_BatchFieldsOmittedForSerialRun(t *testing.T) {
 	}
 }
 
+// TestRun_SpeculatedAndRecoveredPresentWhenTrue confirms the run tool
+// surfaces speculated/recovered (core.RunRecord's own fields, v7+) when
+// either is true.
+func TestRun_SpeculatedAndRecoveredPresentWhenTrue(t *testing.T) {
+	store := openTestStore(t)
+	rec := sampleRecord("run-spec-rec", "main")
+	rec.Speculated = true
+	rec.Recovered = true
+	if err := store.Emit(context.Background(), core.Event{Record: rec}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-spec-rec"})
+	if res.IsError {
+		t.Fatalf("run errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{`"speculated":true`, `"recovered":true`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("run content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestRun_SpeculatedAndRecoveredOmittedWhenFalse confirms an ordinary run
+// omits both fields entirely (omitempty).
+func TestRun_SpeculatedAndRecoveredOmittedWhenFalse(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-plain-mcp", "main")}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }, Store: store})
+
+	res := callTool(t, session, "run", map[string]any{"run_id": "run-plain-mcp"})
+	text := textOf(t, res)
+	for _, absent := range []string{`"speculated"`, `"recovered"`} {
+		if strings.Contains(text, absent) {
+			t.Errorf("plain run must omit %q (omitempty):\n%s", absent, text)
+		}
+	}
+}
+
 // TestRuns_BatchFieldsIncludedForBatchMember confirms the runs tool mirrors
 // the same batch fields alongside a serial run in the same result set.
 func TestRuns_BatchFieldsIncludedForBatchMember(t *testing.T) {

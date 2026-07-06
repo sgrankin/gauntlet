@@ -7,6 +7,9 @@ committer {
 }
 merge-message "Merge {{.Topic}} ({{.User}})"   // optional
 log-retention "720h"   // optional; default 30 days ("720h"); full per-check log files under <state>/logs
+// auto-retry-errors false   // optional; default true — set false to fall
+//                           // back to the pre-phase-B behavior where every
+//                           // infra-error park waits for a human retry
 
 target "main" branch="main" {
     // Post-land hooks (optional, ordered, multiple allowed): run against
@@ -103,14 +106,29 @@ executor "container" {
     // mount "/var/run/docker.sock" path="/var/run/docker.sock"
 }
 
+// services (optional): gates shared, cached service instances a check
+// spec's service/needs nodes can request (internal/services) — the repo
+// declares intent, this block grants capability. See README's "Shared
+// services" section for the full contract.
+// services {
+//     allow "container"     // driver kinds permitted on this box; default:
+//                            // none, so any service/needs in a check spec
+//                            // is rejected at run time
+//     max-instances 8        // optional; default shown — hard cap on live
+//                            // instance count, a count bound only, not
+//                            // memory/CPU
+// }
+
 // summarize {
 //     model "claude-sonnet-5"           // optional; default shown
 //     api-key-env "ANTHROPIC_API_KEY"   // optional; default shown
 //     effort "medium"                   // optional; default shown — one of
-//                                        // low|medium|high|xhigh|max, sent
-//                                        // as output_config.effort; only
-//                                        // valid on models that support it
-//                                        // (e.g. NOT claude-haiku-4-5)
+//                                        // none|low|medium|high|xhigh|max,
+//                                        // sent as output_config.effort;
+//                                        // only valid on models that support
+//                                        // it (e.g. NOT claude-haiku-4-5) —
+//                                        // use "none" to omit the field
+//                                        // entirely for those models
 //     timeout "5s"                      // optional; default shown — runs
 //                                        // synchronously on the reconcile
 //                                        // loop before checks start, on

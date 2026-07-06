@@ -105,11 +105,15 @@ Elastic capacity manufactures infra errors: spot eviction, deallocate-vs-
 in-flight races, worker disappearance all surface as `CheckResult.Err` →
 `OutcomeError` → parked until a *human* retries. That's tolerable when infra
 errors are rare (today) and intolerable when scaling makes them routine.
-Auto-requeue-once on error-outcome parks — already recorded as a services
-phase-B candidate for ready-timeout toil (services.md §7) — is the
-connective tissue: it must land before any axis that makes builders
-evictable. It is deliberately narrow (infra errors only, once, never red
+Auto-requeue-once on error-outcome parks is the connective tissue: it has to
+be in place before any axis that makes builders evictable. It is
+deliberately narrow (infra errors only, once per `(ref, SHA)`, never red
 verdicts) so it doesn't reopen phase 1's "no unbounded retry loops" ruling.
+Landed: `auto-retry-errors` (config knob, default **true** — see DESIGN.md's
+decision ledger, "Auto-retry once on infra-error parks"), driven through the
+same clear-and-emit machinery a human Slack/API/CLI retry already used
+(`internal/queue`'s `maybeAutoRetry`/`clearParkAndRetry`). The one real
+prerequisite for axes 2 and 3's evictable-builder shape is satisfied.
 
 ## 6. What this paper refuses
 

@@ -5,6 +5,10 @@
 <p>
 <strong>{{.Run.User}}/{{.Run.Topic}}</strong> on target <a href="/t/{{.Run.Target}}">{{.Run.Target}}</a>
 &middot; <span class="tag {{.Run.Outcome.Class}}">{{.Run.Outcome.Word}}</span>
+<!-- Speculated/Recovered (core.RunRecord's own fields, v7+): purely
+     informational, so a plain neutral tag rather than an ok/bad color. -->
+{{if .Run.Speculated}} <span class="tag neutral" title="tested on a predicted (non-head) base rather than the live target tip">speculated base</span>{{end}}
+{{if .Run.Recovered}} <span class="tag neutral" title="synthesized by crash recovery; no trial or checks actually ran">recovered landing</span>{{end}}
 </p>
 {{if .Run.BatchID}}
 <!-- Batch identity (docs/plans/phase5.md §10 amendment 1): this run's checks

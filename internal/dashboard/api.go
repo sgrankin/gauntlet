@@ -642,6 +642,15 @@ type runDetailResponse struct {
 	BatchID   string `json:"batchId,omitempty"`
 	Position  int    `json:"position,omitempty"`
 	BatchSize int    `json:"batchSize,omitempty"`
+
+	// Speculated and Recovered mirror history.RunRow's own fields
+	// (core.RunRecord.Speculated/Recovered, v7+): purely informational
+	// (RunRecord's own field docs), omitted (rather than present-and-false)
+	// for the common case, matching BatchID's own omitempty convention.
+	// Run-detail only — GET /api/v1/runs and /api/v1/batch/{id} don't carry
+	// these.
+	Speculated bool `json:"speculated,omitempty"`
+	Recovered  bool `json:"recovered,omitempty"`
 }
 
 type checkJSON struct {
@@ -693,6 +702,8 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 		EndedAt:    formatRFC3339(row.EndedAt),
 		DurationMs: row.Duration.Milliseconds(),
 		Checks:     make([]checkJSON, 0, len(checks)),
+		Speculated: row.Speculated,
+		Recovered:  row.Recovered,
 	}
 	if row.BatchID != "" {
 		resp.BatchID, resp.Position, resp.BatchSize = row.BatchID, row.Position, row.BatchSize
