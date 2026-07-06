@@ -765,3 +765,224 @@ func TestAdoptPastTTLDestroyed(t *testing.T) {
 		t.Error("past-TTL instance was not destroyed")
 	}
 }
+
+// --- Snapshot (S5-surface, design §10's tuning instrument) ---
+
+func TestSnapshot_EmptyPool(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	fd := newFakeDriver()
+	cfg := testConfig(clock.now, t.TempDir())
+	cfg.MaxInstances = 5
+	p := newPool(cfg, fd)
+
+	snap := p.Snapshot()
+	if snap.MaxInstances != 5 {
+		t.Errorf("MaxInstances = %d, want 5", snap.MaxInstances)
+	}
+	if snap.Pending != 0 {
+		t.Errorf("Pending = %d, want 0", snap.Pending)
+	}
+	if len(snap.Instances) != 0 {
+		t.Errorf("Instances = %v, want empty", snap.Instances)
+	}
+}
+
+// TestSnapshot_ReflectsLiveInstance confirms every InstanceStatus field is
+// populated correctly for an instance this Pool itself created (as opposed
+// to adopted — see TestSnapshot_ReflectsAdoptedInstance).
+func TestSnapshot_ReflectsLiveInstance(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	fd := newFakeDriver()
+	cfg := testConfig(clock.now, t.TempDir())
+	p := newPool(cfg, fd)
+	svc := config.Service{Name: "pg", Image: "postgres:16", Port: 5432, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+
+	if _, err := p.EnsureAll(context.Background(), []config.Service{svc}, []string{"pg"}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := p.Snapshot()
+	if len(snap.Instances) != 1 {
+		t.Fatalf("Instances = %v, want exactly 1", snap.Instances)
+	}
+	inst := snap.Instances[0]
+	key := config.ServiceKey(cfg.Remote, svc)
+
+	if inst.Service != "pg" {
+		t.Errorf("Service = %q, want pg", inst.Service)
+	}
+	if inst.Image != "postgres:16" {
+		t.Errorf("Image = %q, want postgres:16", inst.Image)
+	}
+	if inst.Key != key {
+		t.Errorf("Key = %q, want %q", inst.Key, key)
+	}
+	if inst.KeyHash12 != key[:12] {
+		t.Errorf("KeyHash12 = %q, want %q", inst.KeyHash12, key[:12])
+	}
+	if inst.Mode != ModeNetwork {
+		t.Errorf("Mode = %v, want ModeNetwork", inst.Mode)
+	}
+	if inst.Refcount != 1 {
+		t.Errorf("Refcount = %d, want 1 (one outstanding ensure, never released)", inst.Refcount)
+	}
+	if inst.Hits != 0 {
+		t.Errorf("Hits = %d, want 0 (the first ensure is a create, not a reuse)", inst.Hits)
+	}
+	if !inst.CreatedAt.Equal(clock.now()) {
+		t.Errorf("CreatedAt = %v, want %v", inst.CreatedAt, clock.now())
+	}
+	if !inst.LastUsed.Equal(clock.now()) {
+		t.Errorf("LastUsed = %v, want %v", inst.LastUsed, clock.now())
+	}
+}
+
+// TestSnapshot_HitsIncrementOnReuseNotCreate is the hit counter's core
+// contract: the first EnsureAll for a key (a create) must not count as a
+// hit, but every subsequent EnsureAll that reuses the live instance must —
+// the "is reuse actually happening" signal an operator sizing idle-ttl/
+// max-instances needs.
+func TestSnapshot_HitsIncrementOnReuseNotCreate(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	fd := newFakeDriver()
+	cfg := testConfig(clock.now, t.TempDir())
+	p := newPool(cfg, fd)
+	svc := config.Service{Name: "pg", Image: "img", Port: 5432, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+
+	if _, err := p.EnsureAll(context.Background(), []config.Service{svc}, []string{"pg"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Snapshot().Instances[0].Hits; got != 0 {
+		t.Fatalf("Hits after the initial create = %d, want 0", got)
+	}
+
+	if _, err := p.EnsureAll(context.Background(), []config.Service{svc}, []string{"pg"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.EnsureAll(context.Background(), []config.Service{svc}, []string{"pg"}); err != nil {
+		t.Fatal(err)
+	}
+
+	inst := p.Snapshot().Instances[0]
+	if inst.Hits != 2 {
+		t.Errorf("Hits after 2 reuses = %d, want 2", inst.Hits)
+	}
+	if inst.Refcount != 3 {
+		t.Errorf("Refcount after 3 outstanding (never-released) ensures = %d, want 3", inst.Refcount)
+	}
+}
+
+// TestSnapshot_DeterministicOrder confirms Instances is always sorted by
+// (service name, key) — p.instances is a map, so without an explicit sort
+// the dashboard table (and any diff between two snapshots) would jitter on
+// every render.
+func TestSnapshot_DeterministicOrder(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	fd := newFakeDriver()
+	cfg := testConfig(clock.now, t.TempDir())
+	p := newPool(cfg, fd)
+
+	// Two distinct "apple" keys (different Port -> different ServiceKey)
+	// plus one "zebra", ensured out of alphabetical order, to exercise both
+	// the service-name sort and the same-service key tiebreak.
+	svcZebra := config.Service{Name: "zebra", Image: "img", Port: 1, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+	svcAppleA := config.Service{Name: "apple", Image: "img", Port: 2, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+	svcAppleB := config.Service{Name: "apple", Image: "img", Port: 3, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+
+	for _, svc := range []config.Service{svcZebra, svcAppleA, svcAppleB} {
+		if _, err := p.EnsureAll(context.Background(), []config.Service{svc}, []string{svc.Name}); err != nil {
+			t.Fatalf("EnsureAll %s: %v", svc.Name, err)
+		}
+	}
+
+	snap := p.Snapshot()
+	if len(snap.Instances) != 3 {
+		t.Fatalf("Instances = %d, want 3", len(snap.Instances))
+	}
+	for i := 1; i < len(snap.Instances); i++ {
+		a, b := snap.Instances[i-1], snap.Instances[i]
+		if a.Service > b.Service || (a.Service == b.Service && a.Key > b.Key) {
+			t.Fatalf("Instances not sorted: [%d]=%+v before [%d]=%+v", i-1, a, i, b)
+		}
+	}
+	if snap.Instances[0].Service != "apple" || snap.Instances[1].Service != "apple" {
+		t.Errorf("expected two 'apple' entries first, got %s, %s", snap.Instances[0].Service, snap.Instances[1].Service)
+	}
+	if snap.Instances[2].Service != "zebra" {
+		t.Errorf("expected 'zebra' last, got %s", snap.Instances[2].Service)
+	}
+}
+
+// TestSnapshot_PendingReflectsInFlightCreate confirms Pending counts a
+// create that has reserved a slot (reserveSlot) but not yet landed in
+// Instances — using the same blockReadyUntilDone fixture
+// TestCreateCleanupUsesDetachedContext uses to park a create mid-ready-poll,
+// the window during which reserveSlot has run but the create hasn't
+// returned yet.
+func TestSnapshot_PendingReflectsInFlightCreate(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	fd := newFakeDriver()
+	fd.setBlockReadyUntilDone(true)
+	cfg := testConfig(clock.now, t.TempDir())
+	p := newPool(cfg, fd)
+	svc := config.Service{Name: "db", Image: "img", Port: 1, ReadyTimeout: 30 * time.Second, IdleTTL: time.Hour}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.EnsureAll(ctx, []config.Service{svc}, []string{"db"})
+	}()
+
+	// Give the goroutine time to reserve its slot and block in the
+	// ready-poll, mirroring TestCreateCleanupUsesDetachedContext's own
+	// fixed-delay synchronization against the same fixture.
+	time.Sleep(20 * time.Millisecond)
+
+	snap := p.Snapshot()
+	if snap.Pending != 1 {
+		t.Errorf("Pending while a create is blocked in ready-poll = %d, want 1", snap.Pending)
+	}
+	if len(snap.Instances) != 0 {
+		t.Errorf("Instances = %v, want none yet (the create hasn't landed)", snap.Instances)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestSnapshot_ReflectsAdoptedInstance confirms Snapshot renders an adopted
+// instance's CreatedAt from the on-disk record (Adopt's doc), not zero-value
+// — the only other path Snapshot's data can come from besides a live create.
+func TestSnapshot_ReflectsAdoptedInstance(t *testing.T) {
+	clock := newFakeClock(time.Unix(1000, 0))
+	fd := newFakeDriver()
+	stateDir := t.TempDir()
+	cfg := testConfig(clock.now, stateDir)
+	svc := config.Service{Name: "db", Image: "img", Port: 1, ReadyTimeout: time.Second, IdleTTL: time.Hour}
+	createdAt := clock.now().Add(-time.Hour)
+	key, _ := seedAdoptable(t, fd, stateDir, cfg, svc, ModeNetwork, createdAt)
+
+	p := newPool(cfg, fd)
+	if err := p.Adopt(context.Background()); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+
+	snap := p.Snapshot()
+	if len(snap.Instances) != 1 {
+		t.Fatalf("Instances = %v, want 1 adopted instance", snap.Instances)
+	}
+	inst := snap.Instances[0]
+	if inst.Key != key {
+		t.Errorf("Key = %q, want %q", inst.Key, key)
+	}
+	if !inst.CreatedAt.Equal(createdAt) {
+		t.Errorf("CreatedAt = %v, want %v (from the adopted record)", inst.CreatedAt, createdAt)
+	}
+	if inst.Refcount != 0 {
+		t.Errorf("Refcount = %d, want 0 (adoption doesn't touch refcount)", inst.Refcount)
+	}
+	if inst.Hits != 0 {
+		t.Errorf("Hits = %d, want 0 (adoption isn't an EnsureAll reuse)", inst.Hits)
+	}
+}

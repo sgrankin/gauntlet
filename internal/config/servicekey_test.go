@@ -18,6 +18,8 @@ func baseService() Service {
 		ReadyCommand: []string{"pg_isready", "-h", "localhost"},
 		ReadyTimeout: defaultReadyTimeout,
 		IdleTTL:      defaultIdleTTL,
+		Memory:       "2g",
+		CPUs:         "1.5",
 	}
 }
 
@@ -115,6 +117,14 @@ func TestServiceKey_AnyFieldChange(t *testing.T) {
 	v = baseService()
 	v.IdleTTL = v.IdleTTL + time.Minute
 	variants["idle-ttl"] = v
+
+	v = baseService()
+	v.Memory = "4g"
+	variants["memory"] = v
+
+	v = baseService()
+	v.CPUs = "2"
+	variants["cpus"] = v
 
 	for name, sv := range variants {
 		if ServiceKey(remote, sv) == baseKey {

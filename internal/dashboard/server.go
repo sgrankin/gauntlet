@@ -137,6 +137,13 @@ type dash struct {
 	// "Post-land hooks" live section simply omit live-hook data in that case
 	// (S5-surface, api.go's WithHookSnapshot doc).
 	hookSnapshot func(target string) (LiveHook, bool)
+
+	// servicesSnapshot is nil unless New was called with
+	// WithServicesSnapshot: the index page's "Services" section and GET
+	// /api/v1/services both treat the shared-services pool as absent in
+	// that case (design §10's tuning instrument, api.go's
+	// WithServicesSnapshot doc).
+	servicesSnapshot func() ServicesStatus
 }
 
 // --- / --------------------------------------------------------------------
@@ -179,6 +186,15 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 				data.IgnoredRefs = append(data.IgnoredRefs, ignoredRefView{Ref: ir.Ref, Detail: ir.Detail, At: formatTime(ir.At)})
 			}
 		}
+	}
+
+	// Shared-services pool (design §10's tuning instrument): a DAEMON-level
+	// section, like ignored refs above — the pool is per-daemon, not scoped
+	// to any one target. Nil (WithServicesSnapshot never wired up, e.g. no
+	// services configured) omits the section entirely, mirroring
+	// IgnoredRefs' own "no section" degradation.
+	if d.servicesSnapshot != nil {
+		data.Services = buildServicesView(d.servicesSnapshot(), snap.At)
 	}
 	render(w, indexTmpl, data)
 }
@@ -917,6 +933,30 @@ func buildHookRunView(hr history.HookRunSummary) hookRunView {
 	}
 }
 
+// buildServicesView builds index.html's view of the shared-services pool
+// (design §10's tuning instrument) from a ServicesStatus snapshot. at is the
+// queue snapshot's "now" (snap.At), the same reference point buildInFlight/
+// buildPipelineRun use for their own elapsed-time fields — Age is computed
+// against it rather than time.Now() so a page render is internally
+// consistent with every other relative time on it.
+func buildServicesView(ss ServicesStatus, at time.Time) *servicesView {
+	v := &servicesView{MaxInstances: ss.MaxInstances, Pending: ss.Pending}
+	for _, inst := range ss.Instances {
+		v.Instances = append(v.Instances, serviceInstanceView{
+			Service:   inst.Service,
+			Image:     inst.Image,
+			KeyHash12: inst.KeyHash12,
+			Mode:      inst.Mode,
+			Endpoint:  inst.Host + ":" + inst.Port,
+			Age:       formatDuration(at.Sub(inst.CreatedAt)),
+			LastUsed:  formatTime(inst.LastUsed),
+			Refcount:  inst.Refcount,
+			Hits:      inst.Hits,
+		})
+	}
+	return v
+}
+
 // render executes t's "base" template into a buffer first, so a template
 // error never leaves a half-written 200 response on the wire.
 func render(w http.ResponseWriter, t *template.Template, data any) {
@@ -1135,6 +1175,39 @@ type indexData struct {
 	// history is disabled or the query errors (logged, degraded to "no
 	// section").
 	IgnoredRefs []ignoredRefView
+
+	// Services is the shared-services pool (design §10's tuning instrument),
+	// another daemon-level section like IgnoredRefs — the pool isn't scoped
+	// to any one target either. Nil when WithServicesSnapshot was never
+	// wired up (no services configured for this daemon).
+	Services *servicesView
+}
+
+// servicesView is index.html's view of the shared-services pool
+// (ServicesStatus, design §10's tuning instrument): the pool's own tuning
+// knobs (MaxInstances/Pending) plus one serviceInstanceView per live
+// instance.
+type servicesView struct {
+	MaxInstances int
+	Pending      int
+	Instances    []serviceInstanceView
+}
+
+// serviceInstanceView is one row of the Services table: KeyHash12 (not the
+// full key) for compact display — services.md §2's "key material vs name
+// material" split, the same truncation the API/MCP surfaces carry the full
+// Key alongside. Age is elapsed-since-CreatedAt (formatDuration, like a
+// check's duration); LastUsed gets the existing formatTime <time> treatment
+// (an instant, not a duration) so its tooltip carries the machine-readable
+// RFC3339 value the same way every other timestamp on this dashboard does.
+type serviceInstanceView struct {
+	Service, Image string
+	KeyHash12      string
+	Mode           string
+	Endpoint       string
+	Age            string
+	LastUsed       template.HTML
+	Refcount, Hits int
 }
 
 type targetCard struct {

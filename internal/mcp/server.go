@@ -99,6 +99,14 @@ type Params struct {
 	// internal/dashboard (same "duplicated rather than imported" convention
 	// as targetStatus and friends — see the package doc).
 	HookSnapshot func(target string) (LiveHook, bool)
+
+	// ServicesSnapshot mirrors dashboard.WithServicesSnapshot
+	// (services.Pool.Snapshot, wired nil-safely by cmd/gauntlet exactly like
+	// HookSnapshot): the services tool reports "services disabled" when this
+	// is nil. See dashboard/api.go's ServiceStatus doc for why this package
+	// defines its own local ServiceStatus/ServicesStatus rather than
+	// importing internal/services or internal/dashboard.
+	ServicesSnapshot func() ServicesStatus
 }
 
 // LiveHook mirrors hooks.LiveState (internal/hooks) / dashboard.LiveHook
@@ -112,6 +120,32 @@ type LiveHook struct {
 	HookCount    int
 	StartedAt    time.Time
 	BacklogDepth int
+}
+
+// ServiceStatus mirrors services.InstanceStatus (internal/services) /
+// dashboard.ServiceStatus field-for-field, deliberately duplicated rather
+// than imported (package doc). Mode is already the string form
+// (services.Mode.String()), same as dashboard.ServiceStatus — cmd/gauntlet's
+// adapter converts it before crossing into either package.
+type ServiceStatus struct {
+	Service    string
+	Image      string
+	Key        string
+	KeyHash12  string
+	Mode       string
+	Host, Port string
+	CreatedAt  time.Time
+	LastUsed   time.Time
+	Refcount   int
+	Hits       int
+}
+
+// ServicesStatus mirrors services.PoolStatus / dashboard.ServicesStatus
+// field-for-field.
+type ServicesStatus struct {
+	MaxInstances int
+	Pending      int
+	Instances    []ServiceStatus
 }
 
 // New builds the MCP-over-Streamable-HTTP handler: one *sdkmcp.Server,
@@ -189,6 +223,16 @@ func New(p Params) http.Handler {
 			"time window. Mirrors GET /api/v1/checks. Requires run history to be enabled.",
 	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in checksIn) (*sdkmcp.CallToolResult, checksOut, error) {
 		out, err := handleChecks(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "services",
+		Description: "The shared-services pool: every live warm instance (name, image, endpoint, age, " +
+			"last-used, refcount, cumulative reuse hits) plus the pool's own tuning knobs (max instances, " +
+			"pending creates). Mirrors GET /api/v1/services. Use this to size idle-ttl/max-instances.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in servicesIn) (*sdkmcp.CallToolResult, servicesOut, error) {
+		out, err := handleServices(p, in)
 		return nil, out, err
 	})
 
@@ -830,6 +874,59 @@ func handleChecks(p Params, in checksIn) (checksOut, error) {
 	}
 	for _, dp := range depth {
 		out.Depth = append(out.Depth, depthPoint{At: formatRFC3339(dp.At), Waiting: dp.Waiting, InFlight: dp.InFlight, Parked: dp.Parked})
+	}
+	return out, nil
+}
+
+// --- services (design §10's tuning instrument) -------------------------------
+
+type servicesIn struct{}
+
+// serviceInstance mirrors dashboard/api.go's serviceInstanceJSON
+// field-for-field. Key carries the full key (services.md §2 review m2/m6 —
+// only the full key is guaranteed collision-free); KeyHash12 is the same
+// truncation the dashboard HTML table shows for compact display.
+type serviceInstance struct {
+	Service   string `json:"service"`
+	Image     string `json:"image"`
+	Key       string `json:"key"`
+	KeyHash12 string `json:"keyHash12"`
+	Mode      string `json:"mode"`
+	Host      string `json:"host"`
+	Port      string `json:"port"`
+	CreatedAt string `json:"createdAt"`
+	LastUsed  string `json:"lastUsed"`
+	Refcount  int    `json:"refcount"`
+	Hits      int    `json:"hits"`
+}
+
+type servicesOut struct {
+	MaxInstances int               `json:"maxInstances"`
+	Pending      int               `json:"pending"`
+	Instances    []serviceInstance `json:"instances"`
+}
+
+// handleServices mirrors dashboard/api.go's handleAPIServices: an error
+// ("services disabled") only when Params.ServicesSnapshot was never wired up
+// (no daemon-level services block configured) — an empty pool is a normal
+// result, not an error, same as every other tool's "disabled" convention.
+func handleServices(p Params, _ servicesIn) (servicesOut, error) {
+	if p.ServicesSnapshot == nil {
+		return servicesOut{}, errors.New("services disabled")
+	}
+
+	ss := p.ServicesSnapshot()
+	out := servicesOut{
+		MaxInstances: ss.MaxInstances, Pending: ss.Pending,
+		Instances: make([]serviceInstance, 0, len(ss.Instances)),
+	}
+	for _, inst := range ss.Instances {
+		out.Instances = append(out.Instances, serviceInstance{
+			Service: inst.Service, Image: inst.Image, Key: inst.Key, KeyHash12: inst.KeyHash12,
+			Mode: inst.Mode, Host: inst.Host, Port: inst.Port,
+			CreatedAt: formatRFC3339(inst.CreatedAt), LastUsed: formatRFC3339(inst.LastUsed),
+			Refcount: inst.Refcount, Hits: inst.Hits,
+		})
 	}
 	return out, nil
 }

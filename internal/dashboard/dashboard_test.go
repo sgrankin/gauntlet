@@ -903,6 +903,86 @@ func TestIndex_OmitsIgnoredRefsSectionWhenNone(t *testing.T) {
 	}
 }
 
+// testServicesStatus builds a small ServicesStatus for the Services-section
+// tests: one live instance, one pending create, cap 4.
+func testServicesStatus() dashboard.ServicesStatus {
+	return dashboard.ServicesStatus{
+		MaxInstances: 4,
+		Pending:      1,
+		Instances: []dashboard.ServiceStatus{
+			{
+				Service: "pg", Image: "postgres:16",
+				Key: "abcdef0123456789fullkey", KeyHash12: "abcdef012345",
+				Mode: "network", Host: "abcdef012345", Port: "5432",
+				CreatedAt: time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC),
+				LastUsed:  time.Date(2026, 7, 5, 11, 55, 0, 0, time.UTC),
+				Refcount:  2, Hits: 7,
+			},
+		},
+	}
+}
+
+// TestIndex_RendersServicesSection confirms the index page renders the
+// daemon-level "Services" section (design §10's tuning instrument) when
+// WithServicesSnapshot is wired up: one row per live instance (name, image,
+// keyhash12, endpoint, refcount, hits), plus the pool's pending/max-instances
+// summary line.
+func TestIndex_RendersServicesSection(t *testing.T) {
+	snap := testSnapshot()
+	ss := testServicesStatus()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil,
+		dashboard.WithServicesSnapshot(func() dashboard.ServicesStatus { return ss }))
+
+	_, body := get(t, h, "/")
+	for _, want := range []string{
+		"Services", "pg", "postgres:16", "abcdef012345", "abcdef012345:5432",
+		"1 pending", "max 4",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("index body missing %q\nbody:\n%s", want, body)
+		}
+	}
+	// Refcount (2) and Hits (7) both render as plain numbers in the row.
+	if !strings.Contains(body, "<td>2</td>") || !strings.Contains(body, "<td>7</td>") {
+		t.Errorf("index body missing refcount/hits cells:\n%s", body)
+	}
+}
+
+// TestIndex_OmitsServicesSectionWhenNotWired confirms the index page omits
+// the Services section entirely when WithServicesSnapshot was never wired up
+// (no services configured for this daemon) — mirroring how the target page
+// still renders without WithHookSnapshot, but for a section that has no
+// "disabled" placeholder at all, only presence/absence.
+func TestIndex_OmitsServicesSectionWhenNotWired(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+
+	_, body := get(t, h, "/")
+	if strings.Contains(body, "Services") {
+		t.Errorf("index body has a Services section with WithServicesSnapshot never wired up:\n%s", body)
+	}
+}
+
+// TestIndex_ServicesSectionNoLiveInstances confirms a wired-up but empty
+// pool still renders the section (so the pool's own MaxInstances/Pending
+// tuning knobs stay visible) with a "no live instances" placeholder instead
+// of an empty table.
+func TestIndex_ServicesSectionNoLiveInstances(t *testing.T) {
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil,
+		dashboard.WithServicesSnapshot(func() dashboard.ServicesStatus {
+			return dashboard.ServicesStatus{MaxInstances: 8}
+		}))
+
+	_, body := get(t, h, "/")
+	if !strings.Contains(body, "Services") {
+		t.Errorf("index body missing Services section:\n%s", body)
+	}
+	if !strings.Contains(body, "no live instances") {
+		t.Errorf("index body missing empty-pool placeholder:\n%s", body)
+	}
+}
+
 // TestIndex_BatchedRunGetsChipBatchedClass confirms the recent-runs chip
 // strip's trivial visual grouping (docs/plans/phase5.md §10 amendment 1,
 // "shared left-border/badge is enough"): a batch member's chip gets the

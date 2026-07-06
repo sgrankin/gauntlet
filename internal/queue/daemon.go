@@ -128,6 +128,18 @@ type Config struct {
 	// check right after every config.ParseChecks call site) rather than
 	// silently running without its dependency.
 	Services ServicePool
+
+	// AutoRetryErrors enables the phase-B auto-retry-once amendment
+	// (DESIGN.md decision ledger, "Auto-retry once on infra-error parks";
+	// docs/plans/scale.md §5): an OutcomeError park is automatically
+	// cleared and re-queued exactly once per (ref, SHA) — maybeAutoRetry
+	// (autoretry.go), called from every OutcomeError park site in
+	// reconcile.go. False is this package's own zero-value default,
+	// matching queue's policy-free stance (this package documents defaults,
+	// it doesn't opinionate on them): internal/config/daemon.go's
+	// Daemon.AutoRetryErrors defaults to true at the config-loading layer,
+	// and cmd/gauntlet wires the resolved value straight through.
+	AutoRetryErrors bool
 }
 
 // ServicePool is the subset of *services.Pool the queue consumes. Its
@@ -276,6 +288,16 @@ type Daemon struct {
 	done  map[string]map[string]parkEntry
 	seq   int64
 
+	// autoRetried is the once-per-(ref,SHA) auto-retry budget for
+	// OutcomeError parks (phase-B amendment, autoretry.go's maybeAutoRetry):
+	// target -> ref -> the SHA already auto-retried. Same shape and same
+	// reconstructible-after-restart argument as done above — losing this
+	// (a restart) only re-grants one already-spent auto-retry per
+	// still-parked ref, never an unbounded retry loop (§9.2). syncBookkeeping
+	// prunes it in lockstep with done: a vanished ref or a moved SHA drops
+	// its entry, so a new SHA on the same ref always gets a fresh budget.
+	autoRetried map[string]map[string]string
+
 	// ignoredRefs dedupes core.EventIgnoredRef (docs/plans/phase23.md §10,
 	// O4): ref -> last-emitted-for SHA, pruned of vanished refs every tick
 	// so it can't grow without bound over a long-running daemon's lifetime.
@@ -375,6 +397,7 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		now:           now,
 		order:         make(map[string]map[string]int64),
 		done:          make(map[string]map[string]parkEntry),
+		autoRetried:   make(map[string]map[string]string),
 		ignoredRefs:   make(map[string]string),
 		lanes:         make(map[string]*lane),
 		batchFallback: make(map[string]bool),

@@ -428,6 +428,16 @@ func run() error {
 		hookSnapshot = hr.Snapshot
 	}
 
+	// servicesSnapshot threads the shared-services pool's tuning surface
+	// (design §10) into the dashboard/MCP/CLI surfaces, nil-safely mirroring
+	// hookSnapshot exactly: nil when no services are configured for this
+	// daemon (pool == nil, above), in which case every surface simply omits
+	// the pool entirely rather than rendering an empty one.
+	var servicesSnapshot func() services.PoolStatus
+	if pool != nil {
+		servicesSnapshot = pool.Snapshot
+	}
+
 	// The summarizer's own Params.Timeout already bounds each Messages API
 	// call, but Config.MergeBody's contract (internal/queue/daemon.go)
 	// puts the timeout decision at the caller, not in queue: this closure
@@ -464,6 +474,10 @@ func run() error {
 		WorkDir:      trialsDir,
 		LogDir:       logsDir,
 		SeedParks:    seedParks,
+		// AutoRetryErrors is a *bool defaulted true in config.applyDefaults
+		// (absent-vs-explicit-false needs the pointer); the queue takes the
+		// resolved value.
+		AutoRetryErrors: *cfg.AutoRetryErrors,
 	}
 	// pool is a *services.Pool; assigning it into the queue.ServicePool
 	// interface field unconditionally (even when nil) would leave a
@@ -488,7 +502,7 @@ func run() error {
 	// sampler/pruner exit, the dashboard's graceful Shutdown completes,
 	// then — only then — the store closes.
 	//
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, &wg)
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}

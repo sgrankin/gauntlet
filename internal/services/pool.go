@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,8 @@ type Pool struct {
 	instances   map[string]Instance      // key -> live/adopted instance
 	refcount    map[string]int           // key -> in-flight reference count
 	lastUsed    map[string]time.Time     // key -> M3 idle clock
+	createdAt   map[string]time.Time     // key -> when the live instance was created/adopted (Snapshot's tuning surface)
+	hits        map[string]int           // key -> cumulative EnsureAll reuse count (Snapshot's "is reuse happening" signal)
 	inflight    map[string]*inflightCall // key -> in-progress ensure, single-flight
 	reaperArmed bool
 	pending     int // in-flight creates that reserved a slot but haven't landed in instances yet (review BUG 2)
@@ -108,6 +111,8 @@ func newPool(cfg Config, driver Driver) *Pool {
 		instances: make(map[string]Instance),
 		refcount:  make(map[string]int),
 		lastUsed:  make(map[string]time.Time),
+		createdAt: make(map[string]time.Time),
+		hits:      make(map[string]int),
 		inflight:  make(map[string]*inflightCall),
 	}
 }
@@ -243,6 +248,14 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 	if ok {
 		if alive, err := p.driver.ProbeAlive(ctx, inst); err == nil && alive {
 			if err := p.driver.ProbeReady(ctx, inst); err == nil {
+				// Snapshot's hit counter (S5-surface, design §10 tuning
+				// instrument): this is the one true "reuse, not create" path —
+				// a concurrent caller that instead coalesces onto this
+				// key's inflight call (ensureOne) never reaches doEnsure at
+				// all, so it's not double-counted here.
+				p.mu.Lock()
+				p.hits[key]++
+				p.mu.Unlock()
 				return inst, nil
 			}
 		}
@@ -274,6 +287,7 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 	p.mu.Lock()
 	p.instances[key] = inst
 	p.lastUsed[key] = now
+	p.createdAt[key] = now
 	p.mu.Unlock()
 
 	rec := Record{
@@ -458,6 +472,12 @@ func (p *Pool) AnyDead(ctx context.Context, e Ensured) bool {
 // driver) and its on-disk record. Called on a failed liveness/ready probe
 // (doEnsure step 3, AnyDead) and during Adopt for anything unmatchable.
 //
+// p.hits is deliberately NOT cleared here: key is spec identity (services.md
+// §2), so a hit count earned before an evict+recreate cycle is still a true
+// count of how often this exact spec has been reused over the Pool's
+// lifetime — Snapshot's "is reuse actually happening" signal is more useful
+// cumulative than reset to zero by an incidental eviction.
+//
 // Destroy runs on a detached cleanup context, not ctx (review BUG 1, same
 // reasoning as create's doc): AnyDead and the doEnsure reuse-probe-failure
 // path both call evict with the live ensure/check ctx, which can be exactly
@@ -468,6 +488,7 @@ func (p *Pool) evict(ctx context.Context, key string, inst Instance) {
 	delete(p.instances, key)
 	delete(p.refcount, key)
 	delete(p.lastUsed, key)
+	delete(p.createdAt, key)
 	p.mu.Unlock()
 	cctx, cancel := cleanupContext(ctx)
 	defer cancel()
@@ -548,6 +569,7 @@ func (p *Pool) Adopt(ctx context.Context) error {
 		p.mu.Lock()
 		p.instances[key] = inst
 		p.lastUsed[key] = rec.LastUsed
+		p.createdAt[key] = rec.CreatedAt
 		p.mu.Unlock()
 	}
 	return nil
@@ -595,6 +617,80 @@ func (p *Pool) Reap(ctx context.Context) {
 		}
 		p.evict(ctx, key, inst)
 	}
+}
+
+// InstanceStatus is one live instance's observability view (design §10's
+// tuning instrument: an operator sizing idle-ttl/max-instances needs to SEE
+// the pool, not just poke it blind). KeyHash12 is the same truncation
+// instanceName uses for container names/network aliases — safe for compact
+// display; Key is the full key, carried for a caller (the JSON API, MCP)
+// that wants to correlate exactly, since only the full key is guaranteed
+// collision-free (services.md §2 review m2/m6).
+type InstanceStatus struct {
+	Service    string // config.Service.Name
+	Image      string
+	Key        string
+	KeyHash12  string
+	Mode       Mode
+	Host, Port string
+	CreatedAt  time.Time
+	LastUsed   time.Time
+	Refcount   int
+
+	// Hits is how many EnsureAll calls resolved this key by reuse rather
+	// than create (doEnsure's alive+ready reuse path), cumulative for the
+	// key's whole lifetime in this Pool — including across an evict+recreate
+	// cycle, since key is spec identity (evict's doc). The "is reuse
+	// actually happening" signal: a key with Refcount==0 and Hits==0 has
+	// never once saved a cold create.
+	Hits int
+}
+
+// PoolStatus is Pool.Snapshot's output: the pool's own tuning knobs
+// (MaxInstances, the configured cap; Pending, in-flight creates that
+// reserved a slot but haven't landed in Instances yet — reserveSlot's
+// bookkeeping) alongside one InstanceStatus per live instance.
+type PoolStatus struct {
+	MaxInstances int
+	Pending      int
+	Instances    []InstanceStatus
+}
+
+// Snapshot returns a point-in-time view of the whole pool for the
+// dashboard/API/MCP tuning surface (design §10; S5's hard parity ruling —
+// every operator-visible fact appears on all three surfaces). Instances is
+// sorted by (service name, key) — p.instances is a map, so iteration order
+// is otherwise undefined, and a stable order is what makes the dashboard
+// table (and a diff between two snapshots) readable.
+func (p *Pool) Snapshot() PoolStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	out := PoolStatus{MaxInstances: p.cfg.MaxInstances, Pending: p.pending}
+	out.Instances = make([]InstanceStatus, 0, len(p.instances))
+	for key, inst := range p.instances {
+		out.Instances = append(out.Instances, InstanceStatus{
+			Service:   inst.Spec.Name,
+			Image:     inst.Spec.Image,
+			Key:       key,
+			KeyHash12: key[:12],
+			Mode:      inst.Mode,
+			Host:      inst.Host,
+			Port:      inst.Port,
+			CreatedAt: p.createdAt[key],
+			LastUsed:  p.lastUsed[key],
+			Refcount:  p.refcount[key],
+			Hits:      p.hits[key],
+		})
+	}
+	sort.Slice(out.Instances, func(i, j int) bool {
+		a, b := out.Instances[i], out.Instances[j]
+		if a.Service != b.Service {
+			return a.Service < b.Service
+		}
+		return a.Key < b.Key
+	})
+	return out
 }
 
 // envSafeName upcases name and replaces every non-alphanumeric rune with

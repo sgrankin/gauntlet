@@ -22,6 +22,8 @@ service "pg" {
     ready-command "pg_isready" "-h" "localhost"
     ready-timeout "90s"
     idle-ttl "2h"
+    memory "2g"
+    cpus "1.5"
 }
 
 check "svc" {
@@ -44,6 +46,8 @@ check "svc" {
 		ReadyCommand: []string{"pg_isready", "-h", "localhost"},
 		ReadyTimeout: 90 * time.Second,
 		IdleTTL:      2 * time.Hour,
+		Memory:       "2g",
+		CPUs:         "1.5",
 	}
 	if !reflect.DeepEqual(cs.Services[0], want) {
 		t.Errorf("Services[0] = %+v, want %+v", cs.Services[0], want)

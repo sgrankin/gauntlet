@@ -192,6 +192,19 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 			delete(done, ref)
 		}
 	}
+	// autoRetried mirrors done's own per-(ref,SHA) pruning above (see its
+	// field doc, daemon.go): a vanished ref or one that moved to a new SHA
+	// no longer needs its spent auto-retry budget remembered — the next
+	// time it parks (a fresh SHA, or a re-discovered ref), it gets a fresh
+	// budget. nil-safe: ranging a nil map is a no-op, and this never
+	// allocates one (only maybeAutoRetry does, lazily, on first use).
+	if autoRetried := d.autoRetried[t.Name]; autoRetried != nil {
+		for ref, sha := range autoRetried {
+			if c, ok := cands[ref]; !ok || c.SHA != sha {
+				delete(autoRetried, ref)
+			}
+		}
+	}
 
 	var newRefs []string
 	for ref := range cands {
@@ -1138,6 +1151,7 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 			Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 			Candidate: link.cand, RunID: rec.RunID, Record: rec, Detail: detail,
 		})
+		d.maybeAutoRetry(ctx, t.Name, link.cand, outcome) // phase-B amendment, autoretry.go
 	}
 	obs.EndRun(rootSpan, lastRec)
 }
@@ -1560,6 +1574,15 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 			Record:    m.rec,
 			Detail:    detail,
 		})
+		// Phase-B amendment (autoretry.go): only a member that was actually
+		// just parked (park==true) is eligible — maybeAutoRetry itself
+		// no-ops for anything but OutcomeError, but gating on park here too
+		// avoids ever consulting/clearing a stale, unrelated park entry for
+		// a member this call never touched (the park==false invalidation
+		// path above never calls d.park for these members at all).
+		if park {
+			d.maybeAutoRetry(ctx, t.Name, m.cand, outcome)
+		}
 	}
 }
 
@@ -1679,6 +1702,7 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 		Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
 	})
+	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // phase-B amendment, autoretry.go
 }
 
 // rejectRun parks cand and emits its terminal event for an outcome decided
@@ -1701,6 +1725,7 @@ func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candi
 		Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
 	})
+	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // phase-B amendment, autoretry.go
 }
 
 // parkEntry records why a (ref, SHA) is parked — its terminal outcome, a

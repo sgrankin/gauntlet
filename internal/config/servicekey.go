@@ -25,11 +25,25 @@ import (
 //	Env: element count, then sorted by Name, each (Name,Value) length-prefixed
 //	ReadyCommand: element count + each element length-prefixed
 //	ReadyTimeout, IdleTTL: int64 nanoseconds, 8-byte big-endian
+//	Memory, CPUs: length-prefixed strings, appended after IdleTTL
 //
 // Returns the full 64-hex digest. Truncation to a 12-hex alias (key[:12])
 // is the services pool's job, for container/network names meant for humans
 // — records and boot adoption must match on the FULL key (review m2/m6),
 // never the truncated alias.
+//
+// Extending this encoding — as Memory/CPUs just did — changes EVERY existing
+// key the moment the new binary parses a spec, old or new: an instance
+// created under the previous encoding keeps that old key forever (it's
+// baked into the container label and the on-disk record), so no future
+// EnsureAll call ever computes a matching key for it again. It's not
+// destroyed at boot — adoption still finds its label and record agreeing
+// with each other and keeps it alive — but it's now orphaned: nothing will
+// ever ask for its key again, so it just ages out via IdleTTL like any
+// abandoned instance, while every check gets a fresh instance under the new
+// key. Net effect: a one-time, slower-but-correct full pool recycle after
+// upgrade, never a wrong answer (docs/plans/services-impl.md §2.5/A6 —
+// Env's count prefix landed under the identical tradeoff).
 func ServiceKey(remote string, svc Service) string {
 	h := sha256.New()
 	writeString(h, remote)
@@ -59,6 +73,9 @@ func ServiceKey(remote string, svc Service) string {
 
 	writeUint64(h, uint64(svc.ReadyTimeout))
 	writeUint64(h, uint64(svc.IdleTTL))
+
+	writeString(h, svc.Memory)
+	writeString(h, svc.CPUs)
 
 	return hex.EncodeToString(h.Sum(nil))
 }

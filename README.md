@@ -137,6 +137,16 @@ re-queued run's own progress under the same root rather than posting a new
 one (see "Slack app" below). Not available on a batch root — see the
 batch-root exception there.
 
+An `OutcomeError` park — a daemon-side infra failure (executor unreachable, a
+service failing to come up, a service dying mid-run), never a red verdict or
+a trial conflict — is additionally auto-retried once per `(ref, SHA)`
+without any operator action, using this exact same retry machinery
+(`auto-retry-errors`, default on — see "Configuration reference" below). If
+that automatic retry also errors, the park sticks around for a human exactly
+as before; a fresh push (new SHA) always gets its own fresh auto-retry
+budget. Set `auto-retry-errors false` to fall back to the pre-phase-B
+behavior, where every infra-error park waits for an operator.
+
 **Operator cancellation.** An operator (not the author) can stop
 a candidate that's currently being tested, or pull one out of the queue
 before it's ever picked up, without deleting the ref: react `:x:` on the
@@ -171,6 +181,7 @@ existing phase-1 `gauntlet.kdl` keeps working unchanged.
 
 ```kdl
 log-retention "720h"   // optional; default 30 days ("720h")
+auto-retry-errors true // optional; default true — set false to disable (see "Retry semantics" above)
 
 history "/var/lib/gauntlet/history.db" {
     sample-every "10s"
@@ -692,7 +703,7 @@ can connect directly:
 claude mcp add --transport http gauntlet http://localhost:8080/mcp
 ```
 
-Six tools are exposed, mirroring the JSON API above (same lowerCamel field
+Nine tools are exposed, mirroring the JSON API above (same lowerCamel field
 names, so an agent reading both sees one vocabulary):
 
 - **`status`** (`target` optional) — every target's live queue state, or
@@ -720,6 +731,15 @@ names, so an agent reading both sees one vocabulary):
   `POST /api/v1/hooks/cancel`. Returns `{"status": "cancelled"}` or
   `{"status": "no-op"}` (nothing was running — not an error), or an error if
   hook cancellation isn't wired up.
+- **`batch`** (`batch_id` required) — every member run of one batch (run ID,
+  ref, position, outcome, SHA). Same shape as `GET /api/v1/batch/{id}`.
+- **`checks`** (`target` required, `since` optional) — per-check
+  red-rate/duration stats plus the queue-depth series, the dashboard's
+  `/checks` page as data. Same shape as `GET /api/v1/checks`.
+- **`services`** (no arguments) — the shared-services pool: every live warm
+  instance with image, endpoint, age, last-used, refcount, and cumulative
+  hit count. Same shape as `GET /api/v1/services`; errors with
+  `"services disabled"` when no `services` block is configured.
 
 **Trust model.** Same as the dashboard and its JSON API: no authentication
 of its own, so bind it to a trusted interface and put it behind your
@@ -903,6 +923,8 @@ service "mssql" {
     ready-command "/opt/mssql-tools/bin/sqlcmd" "-S" "localhost" "-U" "sa" "-P" "gauntlet-scratch-pw1" "-Q" "SELECT 1"
     ready-timeout "90s"
     idle-ttl "2h"
+    memory "2g"
+    cpus "1.5"
 }
 
 check "test" {
@@ -956,6 +978,16 @@ which is whatever the runtime defaults to (typically unlimited). A single
 heavyweight service spec can still pressure the builder; that's a known,
 documented gap in phase A, not a solved problem.
 
+**`memory`/`cpus` (phase B) put a ceiling on that.** `memory "2g"` is passed
+to the container runtime's `--memory` verbatim; `cpus "1.5"` likewise to
+`--cpus`. Both are optional — omit either and no flag is emitted at all, the
+runtime's own (typically unlimited) default applies, exactly as before.
+Because these join the service's cache key like every other field, the
+first upgrade to a gauntlet version that adds a new spec field recycles the
+*entire* pool once: instances started under the old key just age out via
+`idle-ttl` and get recreated fresh under the new one — slower that one time,
+never wrong.
+
 **Distroless/shell-less images need an explicit `ready-command`.** Omitting
 it gets a default readiness probe — but that default execs *into* the
 instance to check for a listening socket (there's no way for the daemon to
@@ -985,6 +1017,15 @@ never share a service instance, even with byte-identical declarations. This
 is a forfeited optimization, not a bug: an instance's single all-powerful
 account (the `sa` above) has no per-repo partitioning, so sharing across
 repos would let one repo's pushed branch read or drop another's fixtures.
+
+**Sizing `idle-ttl`/`max-instances` needs visibility, not guesswork.** Every
+live instance (name, image, endpoint, age, last-used, refcount, and a
+cumulative reuse-hit counter — "is reuse actually happening") plus the
+pool's own cap and pending-create count are all surfaced on the dashboard's
+index page (a "Services" section, since the pool is per-daemon rather than
+per-target), `GET /api/v1/services` (JSON; 503 when no services are
+configured), and the MCP `services` tool — the same three surfaces every
+other operator-visible fact on this daemon appears on.
 
 ### OTLP export
 

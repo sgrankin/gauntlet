@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -78,7 +79,29 @@ type Service struct {
 	// "Eviction"). Same before-hashing default treatment as ReadyTimeout,
 	// via applyServiceDefaults/defaultIdleTTL.
 	IdleTTL time.Duration `kdl:"idle-ttl,format:units"`
+
+	// Memory is docker/podman's --memory value (e.g. "2g"), passed through
+	// to the runtime verbatim — gauntlet does not interpret or normalize it
+	// (docs/plans/services.md §7 "Resource honesty" phase-B landing). Empty
+	// (the zero value) means no --memory flag is emitted at all: the
+	// runtime's own default (typically unlimited), never a gauntlet-chosen
+	// one.
+	Memory string `kdl:"memory"`
+
+	// CPUs is docker/podman's --cpus value (e.g. "2" or "1.5"), same
+	// verbatim-passthrough and no-flag-if-empty treatment as Memory above.
+	CPUs string `kdl:"cpus"`
 }
+
+// memoryPattern and cpusPattern are plausibility checks only, not a full
+// grammar for docker/podman's --memory/--cpus syntax (which also accepts
+// things like fractional bytes or explicit units this doesn't bother
+// distinguishing) — good enough to reject an obvious typo loudly at spec-load
+// time rather than pass it through to a runtime error mid-Create.
+var (
+	memoryPattern = regexp.MustCompile(`(?i)^[0-9]+[bkmg]?$`)
+	cpusPattern   = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+)
 
 // RequiresServices reports whether this spec declares any dependency on the
 // shared-services machinery: at least one Service, or at least one Check
@@ -197,6 +220,14 @@ func (cs *CheckSpec) validate() error {
 		}
 		if s.IdleTTL <= 0 {
 			return fmt.Errorf("service %q: idle-ttl must be positive, got %s", s.Name, s.IdleTTL)
+		}
+		// Both optional (zero value = no flag emitted, services.md §7) — only
+		// checked for plausibility when the author actually set one.
+		if s.Memory != "" && !memoryPattern.MatchString(s.Memory) {
+			return fmt.Errorf("service %q: memory %q: must match %s (e.g. \"2g\")", s.Name, s.Memory, memoryPattern.String())
+		}
+		if s.CPUs != "" && !cpusPattern.MatchString(s.CPUs) {
+			return fmt.Errorf("service %q: cpus %q: must match %s (e.g. \"1.5\")", s.Name, s.CPUs, cpusPattern.String())
 		}
 	}
 

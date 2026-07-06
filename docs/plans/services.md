@@ -388,7 +388,9 @@ draft's gap):
 else. Per-instance memory/CPU is whatever the runtime defaults to —
 typically unlimited — so one heavyweight spec can still hurt the builder;
 that is documented, not solved, in v1. If it bites, per-service `memory`/
-`cpus` passthrough flags are the obvious phase-B shape.
+`cpus` passthrough flags are the obvious phase-B shape. Phase B landed
+exactly that: optional `memory`/`cpus` fields passed to the runtime verbatim,
+joining the cache key like every other spec field.
 
 ## 8. What this design refuses to do
 

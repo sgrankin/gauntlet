@@ -170,6 +170,25 @@ type Daemon struct {
 	// (30 days) rather than only defaulting when some section is "enabled".
 	LogRetention time.Duration `kdl:"log-retention,format:units"`
 
+	// AutoRetryErrors gates the phase-B auto-retry-once amendment (DESIGN.md
+	// decision ledger, "Auto-retry once on infra-error parks";
+	// docs/plans/scale.md §5): an OutcomeError park — executor unreachable,
+	// service-ensure failure, a service dying mid-run; never a red verdict,
+	// never a trial conflict — is automatically cleared and re-queued
+	// exactly once per (ref, SHA), through the same machinery an operator's
+	// Slack :recycle:/API/CLI retry uses (internal/queue's
+	// maybeAutoRetry/clearParkAndRetry). Defaults to true (applyDefaults
+	// below).
+	//
+	// A *bool, not a plain bool, for the same reason as Summarize's
+	// pointer-ness (see that field's doc): kdl-go leaves an absent bool
+	// property at its zero value ("false"), indistinguishable from an
+	// operator explicitly writing `auto-retry-errors false`. Only a pointer
+	// lets applyDefaults tell "never written" (nil, default to true) apart
+	// from "written false" (non-nil, respected) without stomping the
+	// latter.
+	AutoRetryErrors *bool `kdl:"auto-retry-errors"`
+
 	History   History   `kdl:"history"`   // Path=="" ⇒ disabled
 	Dashboard Dashboard `kdl:"dashboard"` // Bind=="" ⇒ disabled
 	GitHub    GitHub    `kdl:"github"`    // Repo=="" ⇒ disabled
@@ -498,6 +517,14 @@ func (d *Daemon) applyDefaults() {
 	// every phase-2/3 section below.
 	if d.LogRetention == 0 {
 		d.LogRetention = defaultLogRetention
+	}
+	// AutoRetryErrors defaults unconditionally to true (see field doc):
+	// like LogRetention above, there is no "section absent -> disabled"
+	// state to preserve — the knob's only job is letting an operator opt
+	// OUT of a behavior that's on by default.
+	if d.AutoRetryErrors == nil {
+		v := true
+		d.AutoRetryErrors = &v
 	}
 
 	// History: SampleEvery defaults to the reconcile cadence. Only meaningful

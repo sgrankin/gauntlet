@@ -1140,3 +1140,90 @@ func TestAPIChecks_NoStore503(t *testing.T) {
 		t.Errorf("error = %v", m["error"])
 	}
 }
+
+// --- GET /api/v1/services (design §10's tuning instrument) ------------------
+
+func TestAPIServices_Shape(t *testing.T) {
+	ss := testServicesStatus()
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil,
+		dashboard.WithServicesSnapshot(func() dashboard.ServicesStatus { return ss }))
+
+	resp, body := get(t, h, "/api/v1/services")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	assertJSONContentType(t, resp)
+
+	m := decodeJSON(t, body)
+	if m["maxInstances"] != float64(4) {
+		t.Errorf("maxInstances = %v, want 4", m["maxInstances"])
+	}
+	if m["pending"] != float64(1) {
+		t.Errorf("pending = %v, want 1", m["pending"])
+	}
+	instances, ok := m["instances"].([]any)
+	if !ok || len(instances) != 1 {
+		t.Fatalf("instances = %v, want a 1-element array", m["instances"])
+	}
+	inst := instances[0].(map[string]any)
+	for _, key := range []string{
+		"service", "image", "key", "keyHash12", "mode", "host", "port",
+		"createdAt", "lastUsed", "refcount", "hits",
+	} {
+		if _, ok := inst[key]; !ok {
+			t.Errorf("instance missing key %q: %v", key, inst)
+		}
+	}
+	// Key carries the FULL key (services.md §2), distinct from the
+	// truncated keyHash12 the HTML table shows for compact display.
+	if inst["key"] != "abcdef0123456789fullkey" {
+		t.Errorf("key = %v, want the full key", inst["key"])
+	}
+	if inst["keyHash12"] != "abcdef012345" {
+		t.Errorf("keyHash12 = %v", inst["keyHash12"])
+	}
+	if inst["refcount"] != float64(2) || inst["hits"] != float64(7) {
+		t.Errorf("refcount/hits = %v/%v, want 2/7", inst["refcount"], inst["hits"])
+	}
+}
+
+// TestAPIServices_NotWired503 confirms GET /api/v1/services degrades the
+// same way GET /api/v1/runs does when its data source is absent (history
+// disabled there, services disabled here): 503 with an explanatory error,
+// never a 404 or a panic.
+func TestAPIServices_NotWired503(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+
+	resp, body := get(t, h, "/api/v1/services")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["error"] != "services disabled" {
+		t.Errorf("error = %v", m["error"])
+	}
+}
+
+// TestAPIServices_EmptyPool confirms a wired-up but empty pool still reports
+// its tuning knobs (MaxInstances) with an empty (not omitted) instances
+// array, so a client doesn't need to special-case "no live instances" as
+// "services disabled".
+func TestAPIServices_EmptyPool(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil,
+		dashboard.WithServicesSnapshot(func() dashboard.ServicesStatus {
+			return dashboard.ServicesStatus{MaxInstances: 8}
+		}))
+
+	resp, body := get(t, h, "/api/v1/services")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["maxInstances"] != float64(8) {
+		t.Errorf("maxInstances = %v, want 8", m["maxInstances"])
+	}
+	instances, ok := m["instances"].([]any)
+	if !ok || len(instances) != 0 {
+		t.Errorf("instances = %v, want an empty array", m["instances"])
+	}
+}

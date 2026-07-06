@@ -235,7 +235,7 @@ func decodeCanned(t *testing.T) statusAPIResponse {
 func TestRenderStatus_CompactSummary(t *testing.T) {
 	resp := decodeCanned(t)
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, ""); err != nil {
+	if err := renderStatus(&buf, resp, "", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	out := buf.String()
@@ -266,7 +266,7 @@ func TestRenderStatus_CompactSummary(t *testing.T) {
 func TestRenderStatus_FiltersByTarget(t *testing.T) {
 	resp := decodeCanned(t)
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, "release"); err != nil {
+	if err := renderStatus(&buf, resp, "release", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	out := buf.String()
@@ -282,7 +282,7 @@ func TestRenderStatus_FiltersByTarget(t *testing.T) {
 func TestRenderStatus_UnknownTargetNotice(t *testing.T) {
 	resp := decodeCanned(t)
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, "does-not-exist"); err != nil {
+	if err := renderStatus(&buf, resp, "does-not-exist", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	if !strings.Contains(buf.String(), "no such target: does-not-exist") {
@@ -339,7 +339,7 @@ func TestRenderStatus_HookFieldsRendered(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, ""); err != nil {
+	if err := renderStatus(&buf, resp, "", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	out := buf.String()
@@ -369,7 +369,7 @@ func TestRenderStatus_IgnoredRefsSurviveTargetFilter(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, "main"); err != nil {
+	if err := renderStatus(&buf, resp, "main", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	if !strings.Contains(buf.String(), "ignored refs (no configured target):") {
@@ -384,7 +384,7 @@ func TestRenderStatus_IgnoredRefsSurviveTargetFilter(t *testing.T) {
 func TestRenderStatus_NoHookFieldsOmitsSections(t *testing.T) {
 	resp := decodeCanned(t)
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, "main"); err != nil {
+	if err := renderStatus(&buf, resp, "main", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	out := buf.String()
@@ -398,7 +398,7 @@ func TestRenderStatus_NoHookFieldsOmitsSections(t *testing.T) {
 func TestRenderStatus_NoParkedOmitsSection(t *testing.T) {
 	resp := decodeCanned(t)
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, "release"); err != nil {
+	if err := renderStatus(&buf, resp, "release", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	if strings.Contains(buf.String(), "parked:") {
@@ -463,7 +463,7 @@ func TestRenderStatus_PipelineRendersPositionRefAndSpeculatedMarker(t *testing.T
 	}
 
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, ""); err != nil {
+	if err := renderStatus(&buf, resp, "", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	out := buf.String()
@@ -490,10 +490,85 @@ func TestRenderStatus_PipelineRendersPositionRefAndSpeculatedMarker(t *testing.T
 func TestRenderStatus_SingleMemberPipelineOmitsSection(t *testing.T) {
 	resp := decodeCanned(t) // canned's "main" target has no "pipeline" key at all
 	var buf bytes.Buffer
-	if err := renderStatus(&buf, resp, "main"); err != nil {
+	if err := renderStatus(&buf, resp, "main", nil); err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
 	if strings.Contains(buf.String(), "pipeline:") {
 		t.Errorf("expected no pipeline section without a multi-run/multi-member pipeline:\n%s", buf.String())
+	}
+}
+
+// --- services section (design §10's tuning instrument) -----------------------
+
+// testServicesResponse builds a small statusAPIServicesResponse fixture for
+// the services-section renderStatus tests below.
+func testServicesResponse() *statusAPIServicesResponse {
+	return &statusAPIServicesResponse{
+		MaxInstances: 4,
+		Pending:      1,
+		Instances: []statusAPIServiceInst{
+			{
+				Service: "pg", Image: "postgres:16",
+				Key: "abcdef0123456789fullkey", KeyHash12: "abcdef012345",
+				Mode: "network", Host: "abcdef012345", Port: "5432",
+				CreatedAt: "2026-07-05T10:00:00Z", LastUsed: "2026-07-05T11:55:00Z",
+				Refcount: 2, Hits: 7,
+			},
+		},
+	}
+}
+
+// TestRenderStatus_ServicesSectionRendered confirms renderStatus prints the
+// shared-services pool's tuning knobs and one line per live instance
+// (mirroring hook-runs' rendering) when svc is non-nil.
+func TestRenderStatus_ServicesSectionRendered(t *testing.T) {
+	resp := decodeCanned(t)
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "", testServicesResponse()); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"services (max=4 pending=1):",
+		"pg [abcdef012345] abcdef012345:5432 refs=2 hits=7",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\noutput:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderStatus_ServicesSectionOmittedWhenNil confirms renderStatus omits
+// the services section entirely when svc is nil — services aren't
+// configured for this daemon, or the CLI's separate /api/v1/services fetch
+// failed (runStatus's best-effort doc).
+func TestRenderStatus_ServicesSectionOmittedWhenNil(t *testing.T) {
+	resp := decodeCanned(t)
+	var buf bytes.Buffer
+	if err := renderStatus(&buf, resp, "", nil); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	if strings.Contains(buf.String(), "services (") {
+		t.Errorf("expected no services section when svc is nil:\n%s", buf.String())
+	}
+}
+
+// TestRenderStatus_ServicesSectionEmptyPool confirms an empty (but
+// non-nil, e.g. wired-up-with-nothing-live) pool still prints its
+// max/pending line with a "none live" placeholder, rather than an empty
+// table or omitting the section.
+func TestRenderStatus_ServicesSectionEmptyPool(t *testing.T) {
+	resp := decodeCanned(t)
+	var buf bytes.Buffer
+	svc := &statusAPIServicesResponse{MaxInstances: 8}
+	if err := renderStatus(&buf, resp, "", svc); err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "services (max=8 pending=0):") {
+		t.Errorf("output missing empty-pool summary line:\n%s", out)
+	}
+	if !strings.Contains(out, "none live") {
+		t.Errorf("output missing \"none live\" placeholder:\n%s", out)
 	}
 }

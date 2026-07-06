@@ -898,3 +898,89 @@ func TestChecks_NilStore_ErrorResult(t *testing.T) {
 		t.Fatalf("expected error result when history is disabled, got: %s", textOf(t, res))
 	}
 }
+
+// --- services (design §10's tuning instrument) -------------------------------
+
+// testServicesStatus builds a small mcpsrv.ServicesStatus, mirroring
+// internal/dashboard's own test fixture in shape (one live instance, one
+// pending create), not value, since this package can't import that
+// unexported helper.
+func testServicesStatus() mcpsrv.ServicesStatus {
+	return mcpsrv.ServicesStatus{
+		MaxInstances: 4,
+		Pending:      1,
+		Instances: []mcpsrv.ServiceStatus{
+			{
+				Service: "pg", Image: "postgres:16",
+				Key: "abcdef0123456789fullkey", KeyHash12: "abcdef012345",
+				Mode: "network", Host: "abcdef012345", Port: "5432",
+				CreatedAt: time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC),
+				LastUsed:  time.Date(2026, 7, 5, 11, 55, 0, 0, time.UTC),
+				Refcount:  2, Hits: 7,
+			},
+		},
+	}
+}
+
+// TestServices_Shape confirms the services tool's JSON mirrors GET
+// /api/v1/services field-for-field: the pool's tuning knobs (maxInstances,
+// pending) plus the full key (not just keyHash12 — an agent debugging reuse
+// needs to correlate exactly, services.md §2 review m2/m6) per instance.
+func TestServices_Shape(t *testing.T) {
+	ss := testServicesStatus()
+	session := connect(t, mcpsrv.Params{
+		Snapshot:         func() *queue.Snapshot { return nil },
+		ServicesSnapshot: func() mcpsrv.ServicesStatus { return ss },
+	})
+
+	res := callTool(t, session, "services", map[string]any{})
+	if res.IsError {
+		t.Fatalf("services errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	for _, want := range []string{
+		`"maxInstances":4`, `"pending":1`,
+		`"service":"pg"`, `"image":"postgres:16"`,
+		`"key":"abcdef0123456789fullkey"`, `"keyHash12":"abcdef012345"`,
+		`"mode":"network"`, `"refcount":2`, `"hits":7`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("services content missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestServices_NotWired_ErrorResult confirms the services tool reports an
+// error (not a panic or an empty success) when Params.ServicesSnapshot was
+// never wired up — mirroring TestChecks_NilStore_ErrorResult's "disabled"
+// convention.
+func TestServices_NotWired_ErrorResult(t *testing.T) {
+	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return nil }})
+
+	res := callTool(t, session, "services", map[string]any{})
+	if !res.IsError {
+		t.Fatalf("expected error result when services aren't wired up, got: %s", textOf(t, res))
+	}
+}
+
+// TestServices_EmptyPool confirms a wired-up but empty pool reports its
+// tuning knobs with an empty (not omitted) instances array, mirroring
+// TestAPIServices_EmptyPool's dashboard-side counterpart.
+func TestServices_EmptyPool(t *testing.T) {
+	session := connect(t, mcpsrv.Params{
+		Snapshot:         func() *queue.Snapshot { return nil },
+		ServicesSnapshot: func() mcpsrv.ServicesStatus { return mcpsrv.ServicesStatus{MaxInstances: 8} },
+	})
+
+	res := callTool(t, session, "services", map[string]any{})
+	if res.IsError {
+		t.Fatalf("services errored: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	if !strings.Contains(text, `"maxInstances":8`) {
+		t.Errorf("services content missing maxInstances:\n%s", text)
+	}
+	if !strings.Contains(text, `"instances":[]`) {
+		t.Errorf("services content should have an empty instances array:\n%s", text)
+	}
+}

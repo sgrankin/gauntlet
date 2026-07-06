@@ -119,6 +119,33 @@ type statusAPIWaiting struct {
 	Seq int64  `json:"seq"`
 }
 
+// statusAPIServicesResponse mirrors dashboard.servicesResponse's JSON shape
+// (internal/dashboard/api.go) — duplicated here deliberately, like every
+// other statusAPI* type in this file. Unlike everything above, this is
+// fetched from a SEPARATE endpoint (GET /api/v1/services, not embedded in
+// /api/v1/status): the shared-services pool is its own daemon-global
+// resource (design §10's tuning instrument), not something the queue
+// snapshot carries.
+type statusAPIServicesResponse struct {
+	MaxInstances int                    `json:"maxInstances"`
+	Pending      int                    `json:"pending"`
+	Instances    []statusAPIServiceInst `json:"instances"`
+}
+
+type statusAPIServiceInst struct {
+	Service   string `json:"service"`
+	Image     string `json:"image"`
+	Key       string `json:"key"`
+	KeyHash12 string `json:"keyHash12"`
+	Mode      string `json:"mode"`
+	Host      string `json:"host"`
+	Port      string `json:"port"`
+	CreatedAt string `json:"createdAt"`
+	LastUsed  string `json:"lastUsed"`
+	Refcount  int    `json:"refcount"`
+	Hits      int    `json:"hits"`
+}
+
 type statusAPIParked struct {
 	Ref     string `json:"ref"`
 	SHA     string `json:"sha"`
@@ -181,7 +208,21 @@ func runStatus(args []string) error {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return fmt.Errorf("decode /api/v1/status response: %w", err)
 	}
-	return renderStatus(os.Stdout, resp, f.target)
+
+	// The shared-services pool (design §10's tuning instrument) lives at its
+	// own endpoint, fetched best-effort: a 503 (no services configured for
+	// this daemon) or any other failure just omits the section renderStatus
+	// prints below — never fails the whole `gauntlet status` command over an
+	// optional, daemon-global extra.
+	var svc *statusAPIServicesResponse
+	if svcBody, err := httpGetBody(f.url + "/api/v1/services"); err == nil {
+		var parsed statusAPIServicesResponse
+		if err := json.Unmarshal(svcBody, &parsed); err == nil {
+			svc = &parsed
+		}
+	}
+
+	return renderStatus(os.Stdout, resp, f.target, svc)
 }
 
 // renderStatus writes a compact, per-target summary of resp to w: branch
@@ -190,7 +231,13 @@ func runStatus(args []string) error {
 // predicted-base run — S10, docs/plans/phase5.md §3.4), the waiting count,
 // and one line per parked ref with its outcome and reason. Pure (no I/O
 // beyond w), so it's testable against canned API JSON without a network.
-func renderStatus(w io.Writer, resp statusAPIResponse, target string) error {
+//
+// svc is the shared-services pool's own separately-fetched response (design
+// §10's tuning instrument, runStatus's doc) — nil when services aren't
+// configured for this daemon or the fetch failed, in which case the section
+// below is omitted entirely, same convention as every other optional section
+// here.
+func renderStatus(w io.Writer, resp statusAPIResponse, target string, svc *statusAPIServicesResponse) error {
 	shown := 0
 	for _, t := range resp.Targets {
 		if target != "" && t.Name != target {
@@ -274,6 +321,22 @@ func renderStatus(w io.Writer, resp statusAPIResponse, target string) error {
 		fmt.Fprintf(w, "ignored refs (no configured target):\n")
 		for _, ir := range resp.IgnoredRefs {
 			fmt.Fprintf(w, "  %s: %s\n", ir.Ref, ir.Detail)
+		}
+	}
+
+	// Shared-services pool (design §10's tuning instrument): another
+	// DAEMON-level section, rendered once at the end regardless of any
+	// -target filter, same reasoning as ignored refs above — the pool isn't
+	// scoped to any one target either. Omitted entirely when svc is nil
+	// (services disabled, or the separate /api/v1/services fetch failed).
+	if svc != nil {
+		fmt.Fprintf(w, "services (max=%d pending=%d):\n", svc.MaxInstances, svc.Pending)
+		if len(svc.Instances) == 0 {
+			fmt.Fprintf(w, "  none live\n")
+		}
+		for _, inst := range svc.Instances {
+			fmt.Fprintf(w, "  %s [%s] %s:%s refs=%d hits=%d (created=%s last-used=%s)\n",
+				inst.Service, inst.KeyHash12, inst.Host, inst.Port, inst.Refcount, inst.Hits, inst.CreatedAt, inst.LastUsed)
 		}
 	}
 	return nil

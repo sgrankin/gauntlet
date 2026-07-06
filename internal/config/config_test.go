@@ -185,6 +185,11 @@ target "main" branch="main"
 	if d.LogRetention != defaultLogRetention {
 		t.Errorf("LogRetention = %v, want default %v", d.LogRetention, defaultLogRetention)
 	}
+	// AutoRetryErrors defaults unconditionally to true, same "no absent
+	// state to preserve" reasoning as LogRetention above.
+	if d.AutoRetryErrors == nil || !*d.AutoRetryErrors {
+		t.Errorf("AutoRetryErrors = %v, want default true", d.AutoRetryErrors)
+	}
 
 	// All phase-2/3 sections are absent from this config; each should come
 	// back disabled (zero-valued) except Executor.Kind, which always
@@ -630,6 +635,50 @@ services {
 	if d.Services.Runtime != "" {
 		t.Errorf("Services.Runtime = %q, want \"\" (executor runtime wins, A3)", d.Services.Runtime)
 	}
+}
+
+// TestLoadDaemon_AutoRetryErrors covers the *bool pointer-ness this field's
+// doc comment argues for: an operator explicitly writing
+// "auto-retry-errors false" must be respected (not silently re-defaulted
+// back to true), and explicit "true" must round-trip too — proving
+// applyDefaults' nil check, not the field's zero value, is what
+// distinguishes "never written" from "written false".
+func TestLoadDaemon_AutoRetryErrors(t *testing.T) {
+	build := func(t *testing.T, extra string) *Daemon {
+		t.Helper()
+		dir := t.TempDir()
+		path := dir + "/gauntlet.kdl"
+		data := []byte(`
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+` + extra)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := LoadDaemon(path)
+		if err != nil {
+			t.Fatalf("LoadDaemon: %v", err)
+		}
+		return d
+	}
+
+	t.Run("explicit false is respected", func(t *testing.T) {
+		d := build(t, "auto-retry-errors false\n")
+		if d.AutoRetryErrors == nil || *d.AutoRetryErrors {
+			t.Errorf("AutoRetryErrors = %v, want explicit false", d.AutoRetryErrors)
+		}
+	})
+
+	t.Run("explicit true parses", func(t *testing.T) {
+		d := build(t, "auto-retry-errors true\n")
+		if d.AutoRetryErrors == nil || !*d.AutoRetryErrors {
+			t.Errorf("AutoRetryErrors = %v, want explicit true", d.AutoRetryErrors)
+		}
+	})
 }
 
 func TestLoadDaemon_DurationParsing(t *testing.T) {
@@ -1721,6 +1770,48 @@ check "test" {
 }
 `,
 			wantErr: `service "mssql": idle-ttl must be positive`,
+		},
+		{
+			name: "service garbage memory",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+    memory "lots"
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": memory "lots"`,
+		},
+		{
+			name: "service memory with space",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+    memory "2 gigs"
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": memory "2 gigs"`,
+		},
+		{
+			name: "service negative cpus",
+			kdl: `
+service "mssql" {
+    image "img"
+    port 1433
+    cpus "-1"
+}
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `service "mssql": cpus "-1"`,
 		},
 	}
 	for _, tc := range cases {

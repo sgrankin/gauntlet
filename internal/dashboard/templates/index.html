@@ -43,5 +43,21 @@
 </table>
 </div>
 {{end}}
+{{if .Services}}
+<div class="section">
+<h2>Services</h2>
+<p class="muted">shared-services pool &middot; {{len .Services.Instances}} live{{if gt .Services.Pending 0}} &middot; {{.Services.Pending}} pending{{end}} &middot; max {{.Services.MaxInstances}}</p>
+{{if .Services.Instances}}
+<table>
+<tr><th>name</th><th>image</th><th>key</th><th>mode</th><th>endpoint</th><th>age</th><th>last used</th><th>refs</th><th>hits</th></tr>
+{{range .Services.Instances}}
+<tr><td>{{.Service}}</td><td class="mono muted">{{.Image}}</td><td class="mono muted">{{.KeyHash12}}</td><td class="muted">{{.Mode}}</td><td class="mono">{{.Endpoint}}</td><td class="muted nowrap">{{.Age}}</td><td class="muted nowrap">{{.LastUsed}}</td><td>{{.Refcount}}</td><td>{{.Hits}}</td></tr>
+{{end}}
+</table>
+{{else}}
+<p class="muted">no live instances</p>
+{{end}}
+</div>
+{{end}}
 {{end}}
 {{end}}

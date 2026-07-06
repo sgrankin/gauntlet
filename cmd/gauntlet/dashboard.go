@@ -16,6 +16,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/hooks"
 	gauntletmcp "github.com/sgrankin/gauntlet/internal/mcp"
 	"github.com/sgrankin/gauntlet/internal/queue"
+	"github.com/sgrankin/gauntlet/internal/services"
 )
 
 // dashboardShutdownTimeout bounds the dashboard's graceful shutdown so
@@ -59,7 +60,14 @@ const dashboardShutdownTimeout = 5 * time.Second
 // nil-safely: nil here degrades both surfaces to their documented
 // "hooks disabled"/"hook cancel is disabled" responses, exactly as
 // store == nil already degrades every history-backed view.
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), wg *sync.WaitGroup) {
+//
+// servicesSnapshot, if non-nil (services are configured, main.go's pool is
+// non-nil), is wired into dashboard.WithServicesSnapshot (the index page's
+// "Services" section and GET /api/v1/services) and gauntletmcp.Params.
+// ServicesSnapshot (the services tool) — services.Pool.Snapshot itself,
+// nil-safely mirroring hookSnapshot: nil here means both surfaces simply
+// omit the pool entirely (design §10's tuning instrument, S5-style parity).
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -95,6 +103,19 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 			return dashboard.LiveHook(ls), ok
 		}))
 	}
+	// servicesSnapshot (services.Pool.Snapshot, nil when services aren't
+	// configured — see main.go) feeds both surfaces' pool-tuning views
+	// (design §10). Unlike hookSnapshot above, this can't be a plain
+	// type conversion: services.InstanceStatus.Mode is a services.Mode,
+	// not the string dashboard.ServiceStatus.Mode/gauntletmcp.ServiceStatus.
+	// Mode expect, so dashboardServicesStatus/mcpServicesStatus below convert
+	// field-by-field instead — still the one place either adapter's struct
+	// shape is built, so neither package needs to import internal/services.
+	if servicesSnapshot != nil {
+		opts = append(opts, dashboard.WithServicesSnapshot(func() dashboard.ServicesStatus {
+			return dashboardServicesStatus(servicesSnapshot())
+		}))
+	}
 
 	// The MCP server (chunk E5) is mounted at /mcp on the same listener as
 	// the dashboard, since it's meant for agents that already know the
@@ -110,6 +131,11 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 		mcpParams.HookSnapshot = func(target string) (gauntletmcp.LiveHook, bool) {
 			ls, ok := hookSnapshot(target)
 			return gauntletmcp.LiveHook(ls), ok
+		}
+	}
+	if servicesSnapshot != nil {
+		mcpParams.ServicesSnapshot = func() gauntletmcp.ServicesStatus {
+			return mcpServicesStatus(servicesSnapshot())
 		}
 	}
 	mux := http.NewServeMux()
@@ -137,6 +163,43 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 			os.Exit(1)
 		}
 	}()
+}
+
+// dashboardServicesStatus converts a services.PoolStatus into
+// dashboard.ServicesStatus, field-by-field rather than a plain type
+// conversion (unlike hookSnapshot's dashboard.LiveHook(ls) cast above):
+// InstanceStatus.Mode is a services.Mode, and dashboard.ServiceStatus.Mode is
+// already the string form, since internal/dashboard must not import
+// internal/services just to read it (startDashboard's servicesSnapshot doc).
+func dashboardServicesStatus(ps services.PoolStatus) dashboard.ServicesStatus {
+	out := dashboard.ServicesStatus{MaxInstances: ps.MaxInstances, Pending: ps.Pending}
+	out.Instances = make([]dashboard.ServiceStatus, 0, len(ps.Instances))
+	for _, inst := range ps.Instances {
+		out.Instances = append(out.Instances, dashboard.ServiceStatus{
+			Service: inst.Service, Image: inst.Image, Key: inst.Key, KeyHash12: inst.KeyHash12,
+			Mode: inst.Mode.String(), Host: inst.Host, Port: inst.Port,
+			CreatedAt: inst.CreatedAt, LastUsed: inst.LastUsed,
+			Refcount: inst.Refcount, Hits: inst.Hits,
+		})
+	}
+	return out
+}
+
+// mcpServicesStatus mirrors dashboardServicesStatus, converting into
+// gauntletmcp.ServicesStatus instead — see that function's doc for why this
+// can't be a plain type conversion.
+func mcpServicesStatus(ps services.PoolStatus) gauntletmcp.ServicesStatus {
+	out := gauntletmcp.ServicesStatus{MaxInstances: ps.MaxInstances, Pending: ps.Pending}
+	out.Instances = make([]gauntletmcp.ServiceStatus, 0, len(ps.Instances))
+	for _, inst := range ps.Instances {
+		out.Instances = append(out.Instances, gauntletmcp.ServiceStatus{
+			Service: inst.Service, Image: inst.Image, Key: inst.Key, KeyHash12: inst.KeyHash12,
+			Mode: inst.Mode.String(), Host: inst.Host, Port: inst.Port,
+			CreatedAt: inst.CreatedAt, LastUsed: inst.LastUsed,
+			Refcount: inst.Refcount, Hits: inst.Hits,
+		})
+	}
+	return out
 }
 
 // depthHeartbeat bounds how long a target's queue_depth series can go

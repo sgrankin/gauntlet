@@ -69,40 +69,59 @@ func (d *Daemon) applyCommand(ctx context.Context, cmd core.Command, refs map[st
 // seed-park query for why: without it, a daemon crash between this retry
 // and the retried run's own terminal event would have restart's park-seed
 // query re-read the stale pre-retry verdict and silently re-park the ref at
-// its old rejection, undoing the operator's action. In-memory bookkeeping
-// (delete(done, cmd.Ref)) is otherwise unchanged from before S3 — the two
-// emits are additional, not a replacement. Idempotent in-memory: retrying a
-// ref that isn't parked (already cleared by an earlier retry, a re-push, or
-// because it was never parked at all) is a silent no-op — touches no ref,
-// no CAS, nothing but this in-memory bookkeeping (a redundant
-// EventRetryRequested for an already-cleared park is never emitted, since
-// this whole method returns early in that case).
+// its old rejection, undoing the operator's action. Idempotent in-memory:
+// retrying a ref that isn't parked (already cleared by an earlier retry, a
+// re-push, or because it was never parked at all) is a silent no-op —
+// touches no ref, no CAS, nothing but this in-memory bookkeeping (a
+// redundant EventRetryRequested for an already-cleared park is never
+// emitted, since clearParkAndRetry returns early in that case).
+//
+// The actual clear+emit is clearParkAndRetry (below), shared verbatim with
+// the phase-B automatic retry (maybeAutoRetry, autoretry.go) — this
+// operator path's own Detail strings ("retry: park cleared" on EventQueued,
+// unset on EventRetryRequested) are unchanged from before that sharing.
 func (d *Daemon) applyRetry(ctx context.Context, cmd core.Command) {
-	done := d.done[cmd.Target]
+	d.clearParkAndRetry(ctx, cmd.Target, cmd.Ref, "retry: park cleared", "")
+}
+
+// clearParkAndRetry clears (target, ref)'s park, if one currently exists,
+// and emits EventQueued (carrying queuedDetail) plus EventRetryRequested
+// (carrying retryDetail) — the shared machinery behind both an operator's
+// explicit CommandRetry (applyRetry, above) and the phase-B automatic retry
+// (maybeAutoRetry, autoretry.go), so Slack threading, history's
+// retry_intents-based stale-park suppression, and the dashboard all treat
+// the two identically; only the Detail text on the two events tells them
+// apart. Reports whether a park actually existed and was cleared — false
+// (unknown target, or ref not currently parked) is a no-op that touches
+// nothing else, matching applyRetry's pre-existing idempotence contract.
+func (d *Daemon) clearParkAndRetry(ctx context.Context, target, ref, queuedDetail, retryDetail string) bool {
+	done := d.done[target]
 	if done == nil {
-		return
+		return false
 	}
-	entry, ok := done[cmd.Ref]
+	entry, ok := done[ref]
 	if !ok {
-		return
+		return false
 	}
-	delete(done, cmd.Ref)
+	delete(done, ref)
 
 	now := d.now()
-	const detail = "retry: park cleared"
+	cand := core.Candidate{Ref: ref, Target: target, SHA: entry.SHA}
 	d.emit(ctx, core.Event{
 		Kind:      core.EventQueued,
 		At:        now,
-		Target:    cmd.Target,
-		Candidate: core.Candidate{Ref: cmd.Ref, Target: cmd.Target, SHA: entry.SHA},
-		Detail:    detail,
+		Target:    target,
+		Candidate: cand,
+		Detail:    queuedDetail,
 	})
 	d.emit(ctx, core.Event{
 		Kind:      core.EventRetryRequested,
 		At:        now,
-		Target:    cmd.Target,
-		Candidate: core.Candidate{Ref: cmd.Ref, Target: cmd.Target, SHA: entry.SHA},
+		Target:    target,
+		Candidate: cand,
+		Detail:    retryDetail,
 	})
+	return true
 }
 
 // cancelDetail is the Detail every CommandCancel-caused park/skip carries —

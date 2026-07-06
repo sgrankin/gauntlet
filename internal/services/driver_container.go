@@ -43,21 +43,7 @@ func (d *containerDriver) Create(ctx context.Context, is InstanceSpec) (Instance
 		}
 	}
 
-	args := []string{"run", "-d",
-		"--name", is.Name,
-		"--label", serviceKeyLabel + "=" + is.Key,
-		"--restart", "no",
-	}
-	switch is.Mode {
-	case ModeNetwork:
-		args = append(args, "--network", is.Net, "--network-alias", is.Alias)
-	case ModePublish:
-		args = append(args, "-p", fmt.Sprintf("127.0.0.1:0:%d", is.Spec.Port))
-	}
-	for _, e := range is.Spec.Env {
-		args = append(args, "-e", e.Name+"="+e.Value)
-	}
-	args = append(args, is.Spec.Image)
+	args := createArgs(is)
 
 	out, err := exec.CommandContext(ctx, d.bin, args...).CombinedOutput()
 	if err != nil {
@@ -86,6 +72,38 @@ func (d *containerDriver) Create(ctx context.Context, is InstanceSpec) (Instance
 		inst.Host, inst.Port = host, port
 	}
 	return inst, nil
+}
+
+// createArgs builds the `run -d` argv for is — split out of Create as a pure
+// function so its shape (mode-specific flags, resource limits, env, image)
+// is unit-testable without a real docker/podman daemon (the rest of Create
+// is dockerlive-only).
+func createArgs(is InstanceSpec) []string {
+	args := []string{"run", "-d",
+		"--name", is.Name,
+		"--label", serviceKeyLabel + "=" + is.Key,
+		"--restart", "no",
+	}
+	switch is.Mode {
+	case ModeNetwork:
+		args = append(args, "--network", is.Net, "--network-alias", is.Alias)
+	case ModePublish:
+		args = append(args, "-p", fmt.Sprintf("127.0.0.1:0:%d", is.Spec.Port))
+	}
+	// Verbatim passthrough, omitted entirely when unset (services.md §7
+	// "Resource honesty" phase-B landing) — no gauntlet-chosen default fills
+	// in for an author who left these unset.
+	if is.Spec.Memory != "" {
+		args = append(args, "--memory", is.Spec.Memory)
+	}
+	if is.Spec.CPUs != "" {
+		args = append(args, "--cpus", is.Spec.CPUs)
+	}
+	for _, e := range is.Spec.Env {
+		args = append(args, "-e", e.Name+"="+e.Value)
+	}
+	args = append(args, is.Spec.Image)
+	return args
 }
 
 // ensureNetwork creates name if it doesn't already exist. "already exists"

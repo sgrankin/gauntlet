@@ -175,6 +175,47 @@ const (
 	ignoredRefsLimit = 10
 )
 
+// ServiceStatus mirrors services.InstanceStatus (internal/services) as a
+// dashboard-local struct, same "duplicated rather than imported" convention
+// as LiveHook — this package never needs to import internal/services just to
+// render the shared-services pool's tuning surface (design §10, S5's parity
+// ruling: every operator-visible fact appears on dashboard HTML, the JSON
+// API, and MCP). Mode is already the string form (services.Mode.String())
+// rather than the numeric services.Mode type: cmd/gauntlet's adapter — the
+// one place a services.Mode value ever exists outside internal/services —
+// converts it before crossing into this package.
+type ServiceStatus struct {
+	Service    string
+	Image      string
+	Key        string
+	KeyHash12  string
+	Mode       string
+	Host, Port string
+	CreatedAt  time.Time
+	LastUsed   time.Time
+	Refcount   int
+	Hits       int
+}
+
+// ServicesStatus mirrors services.PoolStatus field-for-field.
+type ServicesStatus struct {
+	MaxInstances int
+	Pending      int
+	Instances    []ServiceStatus
+}
+
+// WithServicesSnapshot wires fn so the index page's "Services" section and
+// GET /api/v1/services can render the shared-services pool (design §10's
+// tuning instrument: operators sizing idle-ttl/max-instances need to SEE the
+// pool). Without this option — services aren't configured for this daemon,
+// or cmd/gauntlet never wired it up — both surfaces treat the pool as
+// absent: the index page omits the section entirely, and GET
+// /api/v1/services responds 503 "services disabled", mirroring
+// WithHookCancel's own nil-safe degradation.
+func WithServicesSnapshot(fn func() ServicesStatus) Option {
+	return func(d *dash) { d.servicesSnapshot = fn }
+}
+
 // mountAPIRoutes registers the JSON API beside the HTML routes New already
 // registers. /api/v1/retry is registered without a method verb (unlike the
 // GET-only routes) because its handler needs full control over the 405
@@ -186,6 +227,7 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/run/{id}", d.handleAPIRun)
 	mux.HandleFunc("GET /api/v1/batch/{id}", d.handleAPIBatch)
 	mux.HandleFunc("GET /api/v1/checks", d.handleAPIChecks)
+	mux.HandleFunc("GET /api/v1/services", d.handleAPIServices)
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
 	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
@@ -779,6 +821,63 @@ func (d *dash) handleAPIChecks(w http.ResponseWriter, r *http.Request) {
 	for _, p := range depth {
 		resp.Depth = append(resp.Depth, depthPointJSON{
 			At: formatRFC3339(p.At), Waiting: p.Waiting, InFlight: p.InFlight, Parked: p.Parked,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- GET /api/v1/services -----------------------------------------------------
+
+// serviceInstanceJSON is one live shared-service instance, mirroring
+// ServiceStatus field-for-field (design §10's tuning instrument). Key is the
+// full key (services.md §2 review m2/m6 — only the full key is guaranteed
+// collision-free); KeyHash12 is the same truncation the dashboard HTML table
+// shows for compact display.
+type serviceInstanceJSON struct {
+	Service   string `json:"service"`
+	Image     string `json:"image"`
+	Key       string `json:"key"`
+	KeyHash12 string `json:"keyHash12"`
+	Mode      string `json:"mode"`
+	Host      string `json:"host"`
+	Port      string `json:"port"`
+	CreatedAt string `json:"createdAt"`
+	LastUsed  string `json:"lastUsed"`
+	Refcount  int    `json:"refcount"`
+	Hits      int    `json:"hits"`
+}
+
+// servicesResponse mirrors ServicesStatus (services.PoolStatus)
+// field-for-field: the pool's own tuning knobs alongside one
+// serviceInstanceJSON per live instance.
+type servicesResponse struct {
+	MaxInstances int                   `json:"maxInstances"`
+	Pending      int                   `json:"pending"`
+	Instances    []serviceInstanceJSON `json:"instances"`
+}
+
+// handleAPIServices renders the shared-services pool (design §10's tuning
+// instrument), mirroring handleAPIRuns/handleAPIRun's "disabled" degradation:
+// 503 {"error":"services disabled"} when WithServicesSnapshot was never
+// wired up (no daemon-level services block configured, or this build has no
+// services support) — the one case this route can't do anything meaningful.
+func (d *dash) handleAPIServices(w http.ResponseWriter, r *http.Request) {
+	if d.servicesSnapshot == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "services disabled")
+		return
+	}
+
+	ss := d.servicesSnapshot()
+	resp := servicesResponse{
+		MaxInstances: ss.MaxInstances, Pending: ss.Pending,
+		Instances: make([]serviceInstanceJSON, 0, len(ss.Instances)),
+	}
+	for _, inst := range ss.Instances {
+		resp.Instances = append(resp.Instances, serviceInstanceJSON{
+			Service: inst.Service, Image: inst.Image, Key: inst.Key, KeyHash12: inst.KeyHash12,
+			Mode: inst.Mode, Host: inst.Host, Port: inst.Port,
+			CreatedAt: formatRFC3339(inst.CreatedAt), LastUsed: formatRFC3339(inst.LastUsed),
+			Refcount: inst.Refcount, Hits: inst.Hits,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
