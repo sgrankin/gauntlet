@@ -67,6 +67,20 @@ type Params struct {
 	// unaffected, so the container run shape itself is unchanged, just
 	// rooted differently on the host.
 	ScratchDir string
+
+	// Token namespaces this daemon's container names
+	// (gauntlet-<Token>-<runID>-<check>, see containerName) so
+	// cmd/gauntlet's startup orphan sweep only ever reaps containers from
+	// its own -state dir (B1, phase-6 B-track review). Without it, the
+	// "gauntlet-" name prefix is host-global — identical for every gauntlet
+	// process on the box — so a daemon restarting against a different
+	// -state dir could `rm -f` a live sibling daemon's in-flight
+	// containers; AcquireLock's flock only guards the -state dir itself,
+	// not this shared naming namespace. Minted once in cmd/gauntlet from a
+	// short hash of the absolute -state path and threaded through to both
+	// this executor and the sweep. Empty preserves the pre-B1 naming
+	// exactly (test compatibility).
+	Token string
 }
 
 // runtimeSpec captures the one CLI-shape difference between supported
@@ -164,7 +178,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		}
 	}
 
-	name := containerName(job.RunID, job.Name)
+	name := containerName(c.params.Token, job.RunID, job.Name)
 	args := c.params.runArgs(job, name, resultDir)
 
 	cmd := exec.CommandContext(ctx, c.spec.Bin, args...)
@@ -309,13 +323,33 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 	return args
 }
 
+// maxContainerNameLen conservatively caps the assembled container name well
+// below every known runtime's practical limit (B1, phase-6 B-track review).
+// Only the runID+check tail is ever truncated to fit — the "gauntlet-
+// <token>-" prefix is never touched, since cmd/gauntlet/sweep.go's
+// sweepContainerOrphans matches on that exact prefix to scope its kills to
+// this daemon; truncating it would break that scoping.
+const maxContainerNameLen = 200
+
 // containerName derives a docker-compatible container name from a run ID
 // and check name (§2.4 / §4.5: run IDs are unique per-process, and now give
-// container names real collision-avoidance teeth). Both inputs are
-// sanitized since neither is guaranteed name-safe (check names are
-// free-form config; run IDs embed a trial-tree OID prefix).
-func containerName(runID, check string) string {
-	return "gauntlet-" + sanitizeName(runID) + "-" + sanitizeName(check)
+// container names real collision-avoidance teeth), namespaced by token (B1):
+// "gauntlet-<token>-<runID>-<check>" when token is non-empty, or the pre-B1
+// "gauntlet-<runID>-<check>" when it's empty (test compatibility — see
+// Params.Token's doc for why the namespace exists at all). Both runID and
+// check are sanitized since neither is guaranteed name-safe (check names are
+// free-form config; run IDs embed a trial-tree OID prefix); token is minted
+// in cmd/gauntlet as a hex hash and needs no sanitizing.
+func containerName(token, runID, check string) string {
+	prefix := "gauntlet-"
+	if token != "" {
+		prefix += token + "-"
+	}
+	tail := sanitizeName(runID) + "-" + sanitizeName(check)
+	if budget := maxContainerNameLen - len(prefix); budget > 0 && len(tail) > budget {
+		tail = tail[:budget]
+	}
+	return prefix + tail
 }
 
 // sanitizeName replaces every rune outside [A-Za-z0-9_.-] with '-', the

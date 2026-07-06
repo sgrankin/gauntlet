@@ -400,26 +400,29 @@ func TestSlack_HookFinishedNilCheckPostsNothing(t *testing.T) {
 	}
 }
 
-// TestSlack_HookStartedPostsStandaloneMessage confirms EventHookStarted
-// (S5-surface, the "surfaced everywhere" half of S1-C's discoverability
-// requirement) posts a standalone (non-threaded) message naming the hook —
-// same reasoning as postHookFinished: by hook time the run's root is already
-// forgotten, so there's no thread to reply on.
-func TestSlack_HookStartedPostsStandaloneMessage(t *testing.T) {
+// TestSlack_HookStartedPostsNothing confirms EventHookStarted produces no
+// Slack post (N3, phase-6 B-track review: a behavior change from the
+// original S5-surface plan). Live hook-in-progress state is the
+// dashboard/API's job; standalone start+finish messages per hook were ~2N
+// posts per landing, pure noise — mirrors the existing ignored-kind tests
+// (e.g. TestSlack_RetryRequestedPostsNothing) rather than asserting a post.
+func TestSlack_HookStartedPostsNothing(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	cand := core.Candidate{Ref: "refs/heads/for/main/jill/deploy", Target: "main", User: "jill", Topic: "deploy", SHA: "cafefeed"}
 
 	mustEmit(t, s, ctx, core.Event{Kind: core.EventHookStarted, Target: "main", Candidate: cand, RunID: "run-hook-started", CheckName: "deploy"})
 
-	posts := fake.waitForPosts(1, testTimeout)
-	post := posts[0]
-	if post.method != "chat.postMessage" || post.threadTS != "" {
-		t.Fatalf("hook-started post = %+v, want a standalone (non-threaded) chat.postMessage", post)
+	s.mu.Lock()
+	wake := s.notify
+	s.mu.Unlock()
+	select {
+	case <-wake:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the event to be processed")
 	}
-	for _, want := range []string{"▶", "deploy", "main"} {
-		if !strings.Contains(post.text, want) {
-			t.Errorf("hook-started text = %q, want it to contain %q", post.text, want)
-		}
+
+	if got := fake.snapshotPosts(); len(got) != 0 {
+		t.Fatalf("expected no Slack post for EventHookStarted, got %+v", got)
 	}
 }
 

@@ -402,6 +402,26 @@ type RefVerdict struct {
 // later produces its OWN newer terminal row (e.g. it rejects again), that
 // row's ended_at is newer than the retry, the join condition is satisfied
 // again, and the ref re-parks correctly with the new reason.
+//
+// Accepted millisecond-tie (N1, phase-6 B-track review): both ri.at and
+// ended_at are millisecond-truncated (.UnixMilli()), and the join uses <=,
+// so a retry landing in the SAME millisecond as the terminal it's retrying
+// away from (an automated immediate-retry, or a coarse/fixed test clock)
+// still satisfies ri.at <= ended_at — the park is kept, and the operator's
+// retry is silently discarded on restart, exactly the narrow-window S3 bug
+// this method otherwise closes. This can't be fixed by flipping to a strict
+// <: the retried run's own newer terminal, landing at ended_at == ri.at
+// (its natural case when the retry and its own outcome are timestamped
+// identically at millisecond granularity), must still satisfy the
+// comparison to re-park with the fresh reason — flipping the operator would
+// just break re-park-on-new-terminal instead. The tie is genuinely
+// unresolvable by a timestamp compare alone; disambiguating it would need a
+// monotonic sequence number or run-identity ordering, not a threshold
+// change. Accepted as low severity: a human operator's retry normally trails
+// the rejection it's responding to by seconds, not sub-millisecond, so
+// ri.at >> ended_at in practice — the seedparks/retryintent tests only pass
+// because their clock advances between reject and retry; the equal-`at`
+// boundary itself is untested.
 func (s *Store) LatestTerminalPerRef(target string) ([]RefVerdict, error) {
 	rows, err := s.db.Query(`
 SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at

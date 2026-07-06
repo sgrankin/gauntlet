@@ -194,32 +194,40 @@ func run() error {
 		return fmt.Errorf("sweep logs dir %s: %w", logsDir, err)
 	}
 
-	ex, err := buildExecutor(cfg, scratchDir)
+	// B1 (phase-6 B-track review): a short, stable hash of this daemon's own
+	// absolute -state path, namespacing its container names
+	// (executor.Params.Token) distinctly from any sibling gauntlet daemon
+	// on the same box pointed at a different -state dir. See stateToken's
+	// doc for why AcquireLock's flock alone doesn't cover this.
+	token, err := stateToken(*statePath)
+	if err != nil {
+		return fmt.Errorf("derive state token: %w", err)
+	}
+
+	ex, err := buildExecutor(cfg, scratchDir, token)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
 	}
 
 	// S16 (phase-6 audit synthesis): sweep containers orphaned by a prior
 	// gauntlet process that crashed mid-check, before its own --rm cleanup
-	// ran. Only attempted when a container executor is actually configured,
-	// and only safe now that AcquireLock (S2) above guarantees no live
-	// sibling daemon's own in-flight containers could be mistaken for
-	// orphans. Tolerant of the runtime binary being entirely absent (logs
-	// and continues — see sweepContainerOrphans' doc).
-	//
-	// CAUTION: this phase's own verification only ran sweepContainerOrphans
-	// against a fake runtime script (sweep_test.go), never a real
-	// container runtime — the demo box runs Apple `container` on macOS,
-	// where behavior against the actual CLI (in particular whether
-	// `container ps --filter name=... --format {{.Names}}` matches
-	// docker/podman's output shape) has not been live-verified. Verify on
-	// the demo box before relying on this in that environment.
+	// ran. Only attempted when a container executor is actually configured.
+	// AcquireLock (S2) above guarantees no other gauntlet daemon can be
+	// using THIS -state dir concurrently, but that alone is not sufficient
+	// here: container names live in a host-global namespace shared by every
+	// gauntlet daemon on the box, regardless of -state dir, so a live
+	// sibling daemon pointed at a *different* -state dir could otherwise
+	// have its in-flight containers mistaken for orphans. token (above)
+	// closes that gap — sweepContainerOrphans only ever matches this
+	// daemon's own "gauntlet-<token>-" prefix (B1, phase-6 B-track review).
+	// Tolerant of the runtime binary being entirely absent (logs and
+	// continues — see sweepContainerOrphans' doc).
 	if cfg.Executor.Kind == "container" {
 		runtime := cfg.Executor.Runtime
 		if runtime == "" {
 			runtime = "container"
 		}
-		sweepContainerOrphans(ctx, runtime, os.Stderr)
+		sweepContainerOrphans(ctx, runtime, token, os.Stderr)
 	}
 
 	// Channels: log always first (it's the one output every deployment
@@ -227,6 +235,21 @@ func run() error {
 	// config-field order.
 	chans := []core.Channel{channel.NewLogChannel(os.Stderr)}
 
+	// LOAD-BEARING ORDER (S1, phase-6 B-track review): store must be
+	// registered in chans before the hooks Runner hr is (further down,
+	// where hr is appended after buildHooksRunner). hook_runs.run_id
+	// REFERENCES runs(run_id), FK-enforced (store.go's DSN), so a
+	// writeHookStarted/writeHookSkipped insert only succeeds once the
+	// landing's runs row already exists. That row is written by
+	// history.Store.Emit — a synchronous sqlite write — on EventLanded;
+	// queue.Daemon.emit (internal/queue/daemon.go) fans EventLanded out to
+	// d.chans strictly in registration order, so history's write completing
+	// before hr even dequeues the landing (its own Emit just enqueues,
+	// asynchronously) depends entirely on history sitting earlier in this
+	// slice than hr. Reorder them and every owed/skipped hook_runs write
+	// FK-violates — now logged (S1's daemon.go fix) rather than silently
+	// dropped, but still a correctness regression for S1-C's
+	// crash-discoverability guarantee. Don't move hr's append above this.
 	store, err := buildHistoryStore(cfg)
 	if err != nil {
 		return fmt.Errorf("build history store: %w", err)
@@ -313,6 +336,8 @@ func run() error {
 		if err := sweepAndRecreate(hooksDir); err != nil {
 			return fmt.Errorf("sweep hooks dir: %w", err)
 		}
+		// hr must be appended after store above, never before — see the
+		// LOAD-BEARING ORDER comment at store's own append site (S1).
 		chans = append(chans, hr)
 		wg.Add(1)
 		go func() {
@@ -406,4 +431,25 @@ func run() error {
 func remoteKey(remote string) string {
 	sum := sha256.Sum256([]byte(remote))
 	return hex.EncodeToString(sum[:8])
+}
+
+// stateToken derives a short, stable token (the first 8 hex chars of a
+// sha256 of the absolute -state directory path) that namespaces this
+// daemon's container names (B1, phase-6 B-track review). The "gauntlet-"
+// container-name prefix is host-global — identical for every gauntlet
+// process on the box — while AcquireLock's flock only guards this
+// process's own -state dir. Without a further namespace, a daemon
+// restarting against a different -state dir could `rm -f` a live sibling
+// daemon's in-flight containers during its startup orphan sweep; two
+// daemons on different -state dirs get distinct tokens, so each one's
+// sweep only ever matches its own containers. Threaded into both
+// executor.Params.Token (which names containers) and sweepContainerOrphans
+// (which filters on the same prefix).
+func stateToken(stateDir string) (string, error) {
+	abs, err := filepath.Abs(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute state dir: %w", err)
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return hex.EncodeToString(sum[:4]), nil
 }

@@ -203,18 +203,39 @@ func TestParams_RunArgs_NameAndRmRW(t *testing.T) {
 
 func TestContainerName(t *testing.T) {
 	cases := []struct {
-		runID, check, want string
+		token, runID, check, want string
 	}{
-		{"run1", "build", "gauntlet-run1-build"},
-		{"20260704T120000Z-1-abc123def456", "unit test", "gauntlet-20260704T120000Z-1-abc123def456-unit-test"},
-		{"weird/run:id", "check/name", "gauntlet-weird-run-id-check-name"},
-		{"", "", "gauntlet--"},
+		// Empty token preserves the pre-B1 shape exactly (test compatibility).
+		{"", "run1", "build", "gauntlet-run1-build"},
+		{"", "20260704T120000Z-1-abc123def456", "unit test", "gauntlet-20260704T120000Z-1-abc123def456-unit-test"},
+		{"", "weird/run:id", "check/name", "gauntlet-weird-run-id-check-name"},
+		{"", "", "", "gauntlet--"},
+		// B1: a non-empty token namespaces the name so
+		// cmd/gauntlet/sweep.go's orphan sweep can scope to it.
+		{"a1b2c3d4", "run1", "build", "gauntlet-a1b2c3d4-run1-build"},
+		{"a1b2c3d4", "", "", "gauntlet-a1b2c3d4--"},
 	}
 	for _, c := range cases {
-		got := containerName(c.runID, c.check)
+		got := containerName(c.token, c.runID, c.check)
 		if got != c.want {
-			t.Errorf("containerName(%q, %q) = %q, want %q", c.runID, c.check, got, c.want)
+			t.Errorf("containerName(%q, %q, %q) = %q, want %q", c.token, c.runID, c.check, got, c.want)
 		}
+	}
+}
+
+// TestContainerName_TruncatesTailNotToken proves a pathologically long
+// runID/check never eats into the "gauntlet-<token>-" prefix that
+// sweepContainerOrphans matches on (B1): the token must always survive
+// intact.
+func TestContainerName_TruncatesTailNotToken(t *testing.T) {
+	longRunID := strings.Repeat("x", 300)
+	got := containerName("mytoken", longRunID, "check")
+	const wantPrefix = "gauntlet-mytoken-"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("containerName truncation ate into the prefix: got %q, want prefix %q", got, wantPrefix)
+	}
+	if len(got) > maxContainerNameLen {
+		t.Fatalf("containerName length = %d, want <= %d (got %q)", len(got), maxContainerNameLen, got)
 	}
 }
 

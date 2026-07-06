@@ -21,7 +21,11 @@ import (
 // AcquireLock (S2) makes that sweep safe. Empty preserves each executor's
 // prior os.MkdirTemp("", ...) fallback verbatim — every existing caller
 // that built one of these executors directly (tests) is unaffected.
-func buildExecutor(cfg *config.Daemon, scratchDir string) (core.Executor, error) {
+//
+// token namespaces the container executor's container names (B1, phase-6
+// B-track review) — see executor.Params.Token's doc. Unused by the local
+// executor, which has no host-global naming namespace to collide on.
+func buildExecutor(cfg *config.Daemon, scratchDir, token string) (core.Executor, error) {
 	switch cfg.Executor.Kind {
 	case "", "local":
 		return executor.LocalExecutor{BaseDir: scratchDir}, nil
@@ -36,6 +40,7 @@ func buildExecutor(cfg *config.Daemon, scratchDir string) (core.Executor, error)
 			Workdir:    cfg.Executor.Workdir,
 			Caches:     caches,
 			ScratchDir: scratchDir,
+			Token:      token,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("container executor: %w", err)

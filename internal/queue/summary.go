@@ -37,6 +37,11 @@ type mergeBodyRequest struct {
 // buildChainLinkPrecomputed's lookup on a nil map degrades to "" per key,
 // identical to MergeBody's own best-effort empty-string contract.
 //
+// N2 (phase-6 B-track review): results is keyed by SHA, not by ref, so two
+// distinct refs in the same batch that happen to point at the same commit
+// share one entry — harmless only because MergeBody's output is (and must
+// stay) a pure function of base..SHA, never of cand.Ref/Topic.
+//
 // Every req in a batch chain is deliberately summarized against the SAME
 // base (startBatchRun passes the batch's pre-chain target tip for every
 // member, not each link's own chained, unpushed base): the true per-link

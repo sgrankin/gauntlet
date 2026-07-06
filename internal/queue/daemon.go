@@ -17,6 +17,7 @@ package queue
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"text/template"
 	"time"
@@ -421,11 +422,24 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	return nil
 }
 
-// emit reports ev to every configured channel. Channel.Emit must not block
-// the reconcile loop (its contract) and errors are not actionable here, so
-// they're discarded.
+// emit reports ev to every configured channel, in order. Channel.Emit must
+// not block the reconcile loop (its contract), so a slow/misbehaving
+// channel can't wedge this loop — but an error is no longer silently
+// discarded (S1, phase-6 B-track review): most channels' Emit never fails
+// (log, dashboard's no-op, slack's non-blocking outbox), but
+// history.Store.Emit is a real synchronous sqlite write and can return a
+// real error — e.g. a hook_runs FK violation, if d.chans is ever
+// constructed with the hooks Runner ahead of history (see chans'
+// construction in cmd/gauntlet/main.go for why that ordering is
+// load-bearing). A durability-marker write failing silently is exactly the
+// crash-discoverability gap S1-C exists to close, so it's logged instead.
+// One unrate-limited log line is fine: a channel Emit failing is not
+// expected in steady state, so unlike per-check output this can't itself
+// become the noise problem.
 func (d *Daemon) emit(ctx context.Context, ev core.Event) {
 	for _, ch := range d.chans {
-		_ = ch.Emit(ctx, ev)
+		if err := ch.Emit(ctx, ev); err != nil {
+			fmt.Fprintf(os.Stderr, "queue: channel emit error (kind=%d target=%s run=%s): %v\n", ev.Kind, ev.Target, ev.RunID, err)
+		}
 	}
 }

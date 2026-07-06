@@ -214,6 +214,10 @@ func shouldRecord(last, current depthTuple, lastAt, now time.Time) bool {
 // and checks are never pruned; see PruneDepth's doc for why only the depth
 // series gets a retention bound.
 //
+// S2 (phase-6 B-track review): ignored_refs gets the same retention
+// treatment, piggybacking on this same tick with the same cutoff — see
+// Store.PruneIgnoredRefs' doc for why it needed one too.
+//
 // Only called when store != nil. wg gains one count, released once this
 // goroutine exits on ctx.Done() — see startDashboard's doc for why main
 // waits on it before closing store.
@@ -249,8 +253,15 @@ func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() 
 				}
 
 				if lastPrune.IsZero() || snap.At.Sub(lastPrune) >= depthHeartbeat {
-					if err := store.PruneDepth(snap.At.Add(-cfg.History.DepthRetention)); err != nil {
+					cutoff := snap.At.Add(-cfg.History.DepthRetention)
+					if err := store.PruneDepth(cutoff); err != nil {
 						fmt.Fprintf(os.Stderr, "gauntlet: history: prune depth: %v\n", err)
+					}
+					// S2 (phase-6 B-track review): same cutoff, same tick —
+					// see PruneIgnoredRefs' doc for why ignored_refs needed
+					// a retention bound too.
+					if err := store.PruneIgnoredRefs(cutoff); err != nil {
+						fmt.Fprintf(os.Stderr, "gauntlet: history: prune ignored refs: %v\n", err)
 					}
 					lastPrune = snap.At
 				}

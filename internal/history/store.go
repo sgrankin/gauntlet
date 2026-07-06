@@ -489,6 +489,28 @@ func (s *Store) PruneDepth(cutoff time.Time) error {
 	return nil
 }
 
+// PruneIgnoredRefs deletes ignored_refs rows recorded before cutoff (S2,
+// phase-6 B-track review): unlike queue_depth, ignored_refs had no retention
+// at all — it's a pure append (writeIgnoredRef's INSERT OR REPLACE never
+// updates an existing row, every occurrence is its own durable fact), and
+// the in-memory dedup in checkIgnoredRefs (internal/queue/reconcile.go) only
+// suppresses repeat emissions within a single process's lifetime, not
+// across restarts or across distinct SHAs on a chronically misconfigured
+// ref. Left unbounded, it's the one other table (besides queue_depth) that
+// can grow in proportion to wall-clock time/restart count rather than to
+// real merge activity, so it gets the same retention treatment: called
+// alongside PruneDepth, with the same depth-retention window
+// (cfg.History.DepthRetention), from cmd/gauntlet's depth sampler. Like
+// PruneDepth (and unlike runs/checks), this is a best-effort trend/discovery
+// aid, not part of gauntlet's audit-quality historical record.
+func (s *Store) PruneIgnoredRefs(cutoff time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM ignored_refs WHERE at < ?`, cutoff.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("history: prune ignored refs: %w", err)
+	}
+	return nil
+}
+
 // batchSizeOrDefault normalizes RunRecord.BatchSize for storage: callers that
 // never touch batching (serial's tryStartTrial/rejectRun/rejectPreMerge/
 // recoverLanded, internal/queue) leave BatchSize at its Go zero value, but

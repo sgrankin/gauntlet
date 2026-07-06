@@ -428,10 +428,18 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 		s.logf("slack: ignored ref target=%s ref=%s", ev.Target, ev.Candidate.Ref)
 	case ev.Kind == core.EventHookFinished:
 		s.postHookFinished(ctx, ev)
-	case ev.Kind == core.EventHookStarted:
-		s.postHookStarted(ctx, ev)
 	case ev.Kind == core.EventHookSkipped:
 		s.postHookSkipped(ctx, ev)
+		// EventHookStarted is deliberately a no-op here (N3, phase-6 B-track
+		// review, a behavior change from the phase-6 B-track plan): live
+		// hook-in-progress state is the dashboard/API's job (S5's
+		// hooks.LiveState surface), not Slack's. Posting a standalone
+		// top-level message per hook start, on top of postHookFinished's
+		// per-hook post, was ~2N standalone channel messages for every
+		// N-hook landing — noise nobody acted on. EventHookSkipped (above)
+		// stays: it's rare and load-bearing (S1-C's crash-recovery
+		// discoverability), unlike routine hook-start chatter.
+		//
 		// EventRetryRequested is a history-only durability signal (S3, phase-6
 		// B-track plan): "Other channels default-ignore it; only history acts."
 		// Falling through here (no case) is deliberate, not an oversight.
@@ -759,20 +767,6 @@ func (s *Slack) postHookFinished(ctx context.Context, ev core.Event) {
 
 	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false)); err != nil {
 		s.logf("slack: hook-failed post failed run=%s hook=%s: %v", ev.RunID, ev.CheckName, err)
-	}
-}
-
-// postHookStarted posts a standalone (non-threaded) channel message
-// announcing that a post-land hook has begun (S5-surface, the "surfaced
-// everywhere" half of S1-C's discoverability requirement). Like
-// postHookFinished, by hook time the run's root ts is already forgotten
-// (postTerminal's forget call runs at landing time, before any hook has even
-// started), so there is no thread to reply on — this posts a fresh
-// top-level message instead.
-func (s *Slack) postHookStarted(ctx context.Context, ev core.Event) {
-	text := fmt.Sprintf("▶ hook %s (%s) → %s", ev.CheckName, ev.Candidate.Topic, ev.Target)
-	if _, _, err := s.api.PostMessageContext(ctx, s.channel, goslack.MsgOptionText(text, false)); err != nil {
-		s.logf("slack: hook-started post failed run=%s hook=%s: %v", ev.RunID, ev.CheckName, err)
 	}
 }
 

@@ -1886,3 +1886,54 @@ func TestStore_PruneDepth(t *testing.T) {
 		t.Errorf("RecentRuns after PruneDepth = %+v, want run-ancient untouched", runs)
 	}
 }
+
+// TestStore_PruneIgnoredRefs confirms PruneIgnoredRefs (S2, phase-6 B-track
+// review) deletes only ignored_refs rows strictly older than its cutoff,
+// leaving rows at or after the cutoff untouched — same boundary semantics
+// as TestStore_PruneDepth — and never touches runs/checks.
+func TestStore_PruneIgnoredRefs(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+
+	for i, at := range []time.Time{base, base.Add(time.Hour), base.Add(2 * time.Hour)} {
+		if err := s.Emit(ctx, core.Event{
+			Kind: core.EventIgnoredRef, At: at, Target: "typoed",
+			Candidate: core.Candidate{Ref: "refs/heads/for/typoed/a/1", SHA: fmt.Sprintf("sha%d", i)},
+			Detail:    `target "typoed" is not configured`,
+		}); err != nil {
+			t.Fatalf("Emit(%v): %v", at, err)
+		}
+	}
+
+	// A very old run/check row: pruning ignored_refs must leave it alone.
+	oldRec := sampleRecord("run-ancient", "main", base.Add(-24*time.Hour))
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-ancient", Record: oldRec}); err != nil {
+		t.Fatalf("Emit(run-ancient): %v", err)
+	}
+
+	if err := s.PruneIgnoredRefs(base.Add(time.Hour)); err != nil {
+		t.Fatalf("PruneIgnoredRefs: %v", err)
+	}
+
+	refs, err := s.IgnoredRefs(10)
+	if err != nil {
+		t.Fatalf("IgnoredRefs: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("IgnoredRefs after prune = %d rows, want 2 (base+1h and base+2h kept, base+1h is the boundary)", len(refs))
+	}
+	for _, r := range refs {
+		if r.At.Before(base.Add(time.Hour)) {
+			t.Errorf("IgnoredRefs after prune contains a row at %v, want nothing before %v", r.At, base.Add(time.Hour))
+		}
+	}
+
+	runs, err := s.RecentRuns("main", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunID != "run-ancient" {
+		t.Errorf("RecentRuns after PruneIgnoredRefs = %+v, want run-ancient untouched", runs)
+	}
+}
