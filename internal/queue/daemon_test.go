@@ -28,13 +28,26 @@ var testCommitter = core.Identity{Name: "Gauntlet", Email: "gauntlet@example.com
 // recoverLanded's run-ID comments in reconcile.go).
 var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}Z-\d+-[0-9a-f]{12}$`)
 
-// testHarness wires a Daemon to a fakeGitRepo, a GatedExecutor, and a
+// gatedExecutor is the subset of *executor.GatedExecutor that testHarness's
+// own helpers (release, awaitStarted) actually need, narrowed to an
+// interface (docs/plans/services-impl.md §4.6) so a wrapping test double —
+// services_test.go's recordingGatedExecutor, which additionally captures
+// every core.CheckJob RunCheck received, so tests can assert what the queue
+// wrapper actually handed the executor — can stand in for a plain
+// *executor.GatedExecutor without testHarness itself knowing anything about
+// services.
+type gatedExecutor interface {
+	Started(runID, name string) <-chan struct{}
+	Release(runID, name string, result core.CheckResult)
+}
+
+// testHarness wires a Daemon to a fakeGitRepo, a gatedExecutor, and a
 // RecordingChannel, with an injectable clock — everything queue's tests
 // need to drive ReconcileOnce deterministically and inspect the result.
 type testHarness struct {
 	t     *testing.T
 	git   *fakeGitRepo
-	exec  *executor.GatedExecutor
+	exec  gatedExecutor
 	ch    *channel.RecordingChannel
 	d     *Daemon
 	clock time.Time
@@ -43,12 +56,32 @@ type testHarness struct {
 // newHarness builds a testHarness for a single target named "main" tracking
 // branch "main", unless targets is given explicitly.
 func newHarness(t *testing.T, targets ...config.Target) *testHarness {
+	return newHarnessWithExecutor(t, executor.NewGatedExecutor(), nil, targets...)
+}
+
+// newHarnessWithServices is newHarness, but wires svc into Config.Services
+// (docs/plans/services-impl.md §4.4) — for tests whose check spec declares
+// `needs` and need a Daemon whose service ensure/release/dead-check calls
+// are scriptable. nil behaves exactly like newHarness (services disabled).
+func newHarnessWithServices(t *testing.T, svc ServicePool, targets ...config.Target) *testHarness {
+	return newHarnessWithExecutor(t, executor.NewGatedExecutor(), svc, targets...)
+}
+
+// newHarnessWithExecutor is the common constructor behind newHarness and
+// newHarnessWithServices: exec is anything satisfying both core.Executor
+// (what the Daemon actually runs checks against) and gatedExecutor (what
+// testHarness's own release/awaitStarted helpers drive) — a plain
+// *executor.GatedExecutor, or services_test.go's recordingGatedExecutor
+// wrapping one.
+func newHarnessWithExecutor(t *testing.T, exec interface {
+	core.Executor
+	gatedExecutor
+}, svc ServicePool, targets ...config.Target) *testHarness {
 	t.Helper()
 	if len(targets) == 0 {
 		targets = []config.Target{{Name: "main", Branch: "main"}}
 	}
 	git := newFakeGitRepo()
-	exec := executor.NewGatedExecutor()
 	ch := channel.NewRecordingChannel()
 	h := &testHarness{
 		t: t, git: git, exec: exec, ch: ch,
@@ -59,6 +92,7 @@ func newHarness(t *testing.T, targets ...config.Target) *testHarness {
 		Targets:   targets,
 		CheckSpec: testCheckSpecPath,
 		Committer: testCommitter,
+		Services:  svc,
 	}, h.now)
 	if err != nil {
 		t.Fatalf("New: %v", err)

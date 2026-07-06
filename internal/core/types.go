@@ -69,6 +69,20 @@ type CheckJob struct {
 	// Clean is reserved for the phase-4 clean-build escape hatch (Invariant
 	// 7: a cache-poisoning workaround). Always false in phase 1.
 	Clean bool
+
+	// ServiceEnv is extra environment (GAUNTLET_SVC_<NAME>_HOST/PORT) for
+	// this check's resolved `needs` (docs/plans/services.md §4), appended
+	// after the six built-in GAUNTLET_* vars by every executor. nil for
+	// checks with no needs and for hooks (internal/hooks builds CheckJob
+	// with no needs grammar at all — services.md §5, v1 pinned "no").
+	ServiceEnv []string
+
+	// Networks are container networks the check must join to reach its
+	// services (ModeNetwork — a shared runtime, e.g. the container
+	// executor). The container executor adds one --network per entry; the
+	// local executor ignores it (ModePublish reaches the service at
+	// 127.0.0.1 instead). nil for no-needs checks, hooks, and publish mode.
+	Networks []string
 }
 
 // CheckStatus is a check's three-valued verdict.

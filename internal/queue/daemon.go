@@ -27,6 +27,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/obs"
+	"github.com/sgrankin/gauntlet/internal/services"
 )
 
 // Config is the subset of the admin daemon config (internal/config.Daemon)
@@ -118,6 +119,42 @@ type Config struct {
 	// real one. nil (the default, and every pre-Feature-2 Daemon) disables
 	// seeding entirely — byte-identical startup behavior.
 	SeedParks func(target string) []ParkSeed
+
+	// Services is the shared-services pool this daemon consumes for checks
+	// declaring `needs` (docs/plans/services-impl.md §4.4). nil ⇒ services
+	// disabled entirely: hooks and needs-free checks are unaffected either
+	// way, but a check spec that itself declares service/needs is rejected
+	// loudly at parse time (config.CheckSpec.RequiresServices, the gating
+	// check right after every config.ParseChecks call site) rather than
+	// silently running without its dependency.
+	Services ServicePool
+}
+
+// ServicePool is the subset of *services.Pool the queue consumes. Its
+// blocking methods (EnsureAll/AnyDead) MUST be called only from a
+// check-execution goroutine (review F1) — reconcile.go's startCheck wrapper
+// is the only call site; ReconcileOnce/advanceLane/refillLane/startRun never
+// call any of these. Safe for concurrent use — *services.Pool satisfies this
+// structurally, with no explicit `var _ ServicePool = (*services.Pool)(nil)`
+// needed.
+type ServicePool interface {
+	// EnsureAll resolves every name in needs against svcs to a ready
+	// instance, BLOCKING (create + up-to-ReadyTimeout ready-poll). Errors
+	// map to CheckResult.Err (park-as-error, services.md §7), never a
+	// verdict.
+	EnsureAll(ctx context.Context, svcs []config.Service, needs []string) (services.Ensured, error)
+
+	// Release drops one reference per key in e and touches its last-used
+	// clock (M3). Never destroys; the reaper does.
+	Release(e services.Ensured)
+
+	// AnyDead probe-alives every instance in e, BLOCKING. Callers MUST call
+	// this only on a FAILED check (M1) — a passing check never re-probes.
+	AnyDead(ctx context.Context, e services.Ensured) bool
+
+	// ArmReaper marks the pool's reaper live (idempotent) — called once,
+	// after the first full ReconcileOnce pass completes (review q3).
+	ArmReaper()
 }
 
 // ParkSeed is one candidate ref's park state as derived from run history at
@@ -191,6 +228,14 @@ type run struct {
 	checks    []config.Check
 	idx       int // index into checks of the current (or next) check
 
+	// services is spec.Services verbatim — set once in startRun/
+	// finishBatchStart, read-only for the rest of the run's life
+	// (docs/plans/services-impl.md §4.3): no cross-goroutine mutation, no
+	// race. startCheck's per-check goroutine reads it (alongside the
+	// current check's own Needs, r.checks[r.idx].Needs) to resolve `needs`
+	// against declared Service specs.
+	services []config.Service
+
 	verdict runVerdict // set by advanceChecks, consumed by advanceLane
 
 	rootCtx  context.Context
@@ -260,6 +305,16 @@ type Daemon struct {
 	// returned anything — so seeding is attempted at most once per target
 	// per Daemon lifetime, never on a later restart-free reconcile pass.
 	seeded map[string]bool
+
+	// reaperArmed marks whether Config.Services.ArmReaper has already been
+	// called (docs/plans/services-impl.md §4.4, review q3): set true at the
+	// end of the first ReconcileOnce pass that completes a full sweep over
+	// every target, never again. Left false forever when Config.Services is
+	// nil. Unlike seeded (per-target), this is once per Daemon lifetime,
+	// full stop — the reaper must not run until every target's in-flight
+	// work from before a restart has had one whole pass to re-ensure (and
+	// so refcount) whatever it still needs.
+	reaperArmed bool
 
 	// snap holds the most recently published Snapshot (docs/plans/phase23.md
 	// §2.1); nil until the first successful ReconcileOnce pass completes.
@@ -422,6 +477,16 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 
 	for _, t := range d.cfg.Targets {
 		d.reconcileTarget(ctx, t, refs)
+	}
+
+	// Arm the services reaper once this pass has swept every target (review
+	// q3): by now, any in-flight work recovered from a restart has had this
+	// whole pass to re-ensure (and so refcount) everything it still needs,
+	// so the reaper can never race a just-recovered instance out from under
+	// it. No-op forever when Config.Services is nil.
+	if !d.reaperArmed && d.cfg.Services != nil {
+		d.cfg.Services.ArmReaper()
+		d.reaperArmed = true
 	}
 
 	d.snap.Store(d.buildSnapshot(refs))

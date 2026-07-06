@@ -82,6 +82,19 @@ func sweepContainerOrphans(ctx context.Context, runtime, token string, log io.Wr
 
 	prefix := containerNamePrefix(token)
 	for _, name := range names {
+		// Service instances (gauntlet-svc-<token>-<keyhash12>,
+		// internal/services) are a structurally disjoint namespace this
+		// sweep must never touch: they're meant to survive a restart, and
+		// internal/services.Pool.Adopt (called at boot, before this sweep
+		// would ever run concurrently with it) owns their entire
+		// adopt-or-destroy lifecycle instead (docs/plans/services.md §3
+		// "Adoption at boot, not reaping"; services-impl.md §4.5). Guarded
+		// explicitly, not just left to the token-prefix check below, so a
+		// future naming change to either namespace can't silently regress
+		// this split into a kill.
+		if strings.HasPrefix(name, "gauntlet-svc-") {
+			continue
+		}
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}

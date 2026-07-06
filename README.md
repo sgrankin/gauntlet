@@ -205,6 +205,12 @@ executor "container" {
     cache "gomodcache" path="/go/pkg/mod"
 }
 
+services {
+    allow "container"
+    max-instances 8
+    runtime "docker"   // only consulted when executor is "local" — see below
+}
+
 summarize {
     model "claude-sonnet-5"
     api-key-env "ANTHROPIC_API_KEY"
@@ -302,6 +308,20 @@ summarize {
   (host path + `path` + optional `readonly`) add plain host bind mounts —
   see "Container executor" below for the docker-socket/testcontainers case
   and its trust implications.
+- **`services`** — gates shared, cached service instances a check spec's
+  `service`/`needs` nodes can request (`internal/services`); see
+  ["Shared services"](#shared-services) below for the full contract.
+  `allow` lists the driver kinds permitted on this box — phase A implements
+  only `"container"` (`"artifact"`/`"oci-unpack"` are rejected as reserved
+  for a future release). `max-instances` hard-caps the pool's live instance
+  count (default 8) — a count cap only, not a memory/CPU bound. `runtime`
+  (`"docker"` or `"podman"`; default `"docker"`) is **only consulted when
+  `executor` is `"local"`**: under `executor "container"`, the executor's
+  own `runtime` wins instead (and must itself be docker/podman — Apple's
+  `container` CLI is a hard startup error for services in phase A), so
+  setting both to conflicting values is a config error. **`allow` absent ⇒
+  disabled**: a check spec declaring `service`/`needs` is then rejected at
+  run time, loudly, like a malformed check spec — never silently ignored.
 - **`summarize`** — enables a Claude-written merge-commit body
   (`internal/summarize`); see [Summaries](#summaries) below. **Node absent
   ⇒ disabled**: merge commits get exactly the phase-1/2/3 subject +
@@ -861,6 +881,111 @@ them by hand against the real service once, per docs/plans/phase23.md §5.
      or drop `credsStore` from `~/.docker/config.json` on a headless
      builder.
 
+### Shared services
+
+Some test suites need a real backing service — SQL Server, a message
+broker — that's too slow to spin up per check or per run. `services` lets a
+check spec declare one, cached and reused across runs (and across daemon
+restarts) instead of started fresh every time.
+
+**Declare it in the repo, not the daemon.** Service instances are declared
+in your check spec (the same `.gauntlet.kdl` the checks themselves live in),
+read from the trial-merged tree exactly like `check` — a branch that bumps
+an image tag or adds an env var is tested against its own declaration,
+without touching anything else's warm instance:
+
+```kdl
+service "mssql" {
+    image "ghcr.io/acme/mssql-fts:2022-cu14"
+    port 1433
+    env "ACCEPT_EULA" "Y"
+    env "MSSQL_SA_PASSWORD" "gauntlet-scratch-pw1"
+    ready-command "/opt/mssql-tools/bin/sqlcmd" "-S" "localhost" "-U" "sa" "-P" "gauntlet-scratch-pw1" "-Q" "SELECT 1"
+    ready-timeout "90s"
+    idle-ttl "2h"
+}
+
+check "test" {
+    command "go" "test" "./..."
+    needs "mssql"
+}
+```
+
+`service`/`ready-command`/`env` are **multi-line child blocks only** —
+kdl-go doesn't accept a single-line `service "x" { image "y" }` form. `needs`
+takes one or more service names on a single node (`needs "mssql" "redis"`);
+every name must match a declared `service` in the same spec, or the spec
+fails to parse (the same loud, `OutcomeRejected` treatment as any other
+malformed check spec). A check with no `needs` is wholly unaffected —
+nothing here changes for it, cost or behavior.
+
+The daemon must separately opt in with a `services` node (see
+["Configuration reference"](#configuration-reference) above) — the repo
+declares intent, the daemon config gates capability. **No `services` node ⇒
+any `service`/`needs` in a check spec is rejected at run time**, loudly, so
+an author can't believe a service was provided when it silently wasn't.
+
+**What gauntlet guarantees, what your harness owns.** For each resolved
+`needs`, the check gets `GAUNTLET_SVC_<NAME>_HOST`/`_PORT` (see ["Check
+environment reference"](#check-environment-reference) above): an instance
+matching your declaration, ready, reachable for the run's duration.
+Everything *inside* the instance — per-test/per-run tenancy, cleanup,
+concurrency safety — is the harness's job, using `GAUNTLET_RUN_ID` to
+namespace what it creates (`CREATE DATABASE testdb_$GAUNTLET_RUN_ID`, …),
+same as it would against any shared, reused test database.
+
+**Trust, stated honestly.** The real change here isn't sandboxing — a
+service instance runs in the same kind of container a check does — it's
+**lifetime**. A check container dies with its run; a service instance
+persists on the builder until `idle-ttl`, and can be kept warm indefinitely
+by continued pushes, including from a branch that never lands. `env`
+secrets in a service declaration (the `MSSQL_SA_PASSWORD` above) are
+therefore **scratch secrets only** — throwaway credentials whose entire
+dataset is generated test fixtures, reachable only from the builder, never
+anything that protects something real. `max-instances` and `idle-ttl` are
+the only bounds on this capability; `allow` is the switch operators who
+don't want it on a given box simply never flip. Adoption at boot also
+trusts on-box container names/labels not to have been forged by something
+else running on the machine — same threat model as everything else here
+(your own developers, not hostile tenants), named explicitly so it's a
+decision, not an accident.
+
+**`max-instances` bounds count, not resources.** It caps how many live
+instances the pool will create — nothing enforces per-instance memory/CPU,
+which is whatever the runtime defaults to (typically unlimited). A single
+heavyweight service spec can still pressure the builder; that's a known,
+documented gap in phase A, not a solved problem.
+
+**Distroless/shell-less images need an explicit `ready-command`.** Omitting
+it gets a default readiness probe — but that default execs *into* the
+instance to check for a listening socket (there's no way for the daemon to
+dial it directly on the container network), which needs *some* shell/binary
+present. An image with no shell must declare its own `ready-command`, or
+readiness will never be detected.
+
+**Hooks can't declare services in phase A.** Post-land hooks have no
+`needs` grammar at all — this is deliberate scope control for v1, not an
+oversight; a hook's environment never carries `GAUNTLET_SVC_*` vars.
+
+**Apple's `container` runtime is deferred for services.** Phase A's
+docker/podman networking model (a shared user-defined network, service
+containers as aliases on it) has no Apple `container` CLI equivalent yet.
+A daemon configured for services under a container-networked mode with
+runtime `"container"` fails at startup with:
+`services require docker or podman in phase A; Apple container networking is deferred (docs/plans/services.md §9)`.
+`executor "local"` plus `services { runtime "docker" }`
+(services containerized, checks run as local subprocesses) works fine on
+any box with docker/podman, Apple `container` included for the checks
+themselves.
+
+**Cross-repo sharing is deliberately impossible.** An instance's cache key
+includes the daemon's configured `remote` — the same push-trust boundary
+gauntlet already enforces everywhere else — so two repos on the same daemon
+never share a service instance, even with byte-identical declarations. This
+is a forfeited optimization, not a bug: an instance's single all-powerful
+account (the `sa` above) has no per-repo partitioning, so sharing across
+repos would let one repo's pushed branch read or drop another's fixtures.
+
 ### OTLP export
 
 1. Point `otlp` at any OTLP/HTTP collector endpoint (e.g. a local
@@ -891,6 +1016,14 @@ running a check's command, and provides a result file for reporting
   `testdb_$GAUNTLET_RUN_ID` on a shared SQL Server — so concurrent runs
   (the speculate window, or a batch's members) can't collide on the same
   external resource.
+
+A check that declares `needs` (see ["Shared services"](#shared-services)
+below) additionally gets one pair per resolved service:
+
+- `GAUNTLET_SVC_<NAME>_HOST` / `GAUNTLET_SVC_<NAME>_PORT` — where to reach
+  the service (`<NAME>` is the service's declared name, upcased,
+  non-alphanumerics turned into `_`). Absent entirely for a check with no
+  `needs`, and for hooks (which can't declare `needs` at all in phase A).
 
 **Result-file protocol.** A non-zero exit is always a failure, full stop —
 the result file is ignored on failure. On exit 0: a result file containing

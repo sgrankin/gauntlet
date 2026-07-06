@@ -30,6 +30,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/hooks"
 	"github.com/sgrankin/gauntlet/internal/obs"
 	"github.com/sgrankin/gauntlet/internal/queue"
+	"github.com/sgrankin/gauntlet/internal/services"
 )
 
 func main() {
@@ -204,6 +205,52 @@ func run() error {
 		return fmt.Errorf("derive state token: %w", err)
 	}
 
+	// Shared services (docs/plans/services-impl.md §4.5, Amendments A3):
+	// pool construction, adoption, and (below, once wg exists) the reaper
+	// are all gated on the daemon capability block (services.md §7) —
+	// len(cfg.Services.Allow)==0 leaves pool nil, and queue.Config.Services
+	// stays nil too (byte-identical behavior for every daemon that never
+	// opts in).
+	var pool *services.Pool
+	if len(cfg.Services.Allow) > 0 {
+		// Mode/runtime derivation (A3): the container executor's own
+		// runtime wins (it must already be docker/podman for phase A —
+		// Apple's is the hard-fail below); the local executor has no
+		// runtime of its own, so cfg.Services.Runtime (validated
+		// docker/podman by config.Daemon.validate) supplies it instead.
+		mode := services.ModePublish
+		runtime := cfg.Services.Runtime
+		if cfg.Executor.Kind == "container" {
+			mode = services.ModeNetwork
+			runtime = cfg.Executor.Runtime
+		}
+		if mode == services.ModeNetwork && runtime == "container" {
+			return fmt.Errorf("services require docker or podman in phase A; Apple container networking is deferred (docs/plans/services.md §9)")
+		}
+
+		svcStateDir := filepath.Join(*statePath, "services")
+		if err := os.MkdirAll(svcStateDir, 0o755); err != nil {
+			return fmt.Errorf("create services state dir: %w", err)
+		}
+		pool, err = services.New(services.Config{
+			Remote:       cfg.Remote,
+			Token:        token,
+			Mode:         mode,
+			Runtime:      runtime,
+			StateDir:     svcStateDir,
+			MaxInstances: cfg.Services.MaxInstances,
+			Now:          time.Now,
+		})
+		if err != nil {
+			return fmt.Errorf("build services pool: %w", err)
+		}
+		// Best-effort, like sweepContainerOrphans below: a failed adopt
+		// costs a cold pool (slower first runs), never a wrong one.
+		if err := pool.Adopt(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "gauntlet: services: adopt: %v\n", err)
+		}
+	}
+
 	ex, err := buildExecutor(cfg, scratchDir, token)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
@@ -289,6 +336,29 @@ func run() error {
 	// cancelled, and neither was previously counted, so shutdown could race
 	// ahead of them and store.Close() out from under an in-flight write.
 	var wg sync.WaitGroup
+
+	// Services reaper (docs/plans/services-impl.md §4.5): a dedicated 30s
+	// ticker, no config knob in phase A, destroying instances idle past
+	// their IdleTTL. No-op until pool.ArmReaper is called (queue.Daemon
+	// calls it once, after the first full ReconcileOnce pass — review q3),
+	// so this can start immediately without racing boot adoption. Joined by
+	// wg like every other background goroutine here.
+	if pool != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					pool.Reap(ctx)
+				}
+			}
+		}()
+	}
 
 	sc, err := buildSlackChannel(cfg)
 	if err != nil {
@@ -385,7 +455,7 @@ func run() error {
 		seedParks = buildSeedParks(store)
 	}
 
-	d, err := queue.New(repo, ex, chans, queue.Config{
+	qcfg := queue.Config{
 		Targets:      cfg.Targets,
 		CheckSpec:    cfg.CheckSpec,
 		Committer:    cfg.Committer,
@@ -394,7 +464,17 @@ func run() error {
 		WorkDir:      trialsDir,
 		LogDir:       logsDir,
 		SeedParks:    seedParks,
-	}, nil)
+	}
+	// pool is a *services.Pool; assigning it into the queue.ServicePool
+	// interface field unconditionally (even when nil) would leave a
+	// non-nil interface holding a nil pointer — reconcile.go's own `d.cfg.
+	// Services == nil` gate (byte-identical current behavior for a daemon
+	// with no services block) depends on the field being a genuine nil
+	// interface in that case, so this only assigns when pool is real.
+	if pool != nil {
+		qcfg.Services = pool
+	}
+	d, err := queue.New(repo, ex, chans, qcfg, nil)
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
 	}

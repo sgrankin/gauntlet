@@ -603,8 +603,37 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 
 	result := make(chan core.CheckResult, 1)
 	start := d.now()
+	// Shared-services ensure/release/re-probe (docs/plans/services-impl.md
+	// §4.3, the load-bearing change): ALL blocking service work — EnsureAll
+	// and the M1 re-probe — happens here, inside this check's own
+	// goroutine, never on the reconcile goroutine (review F1). needs/svcs
+	// are captured by value into the closure so a later mutation of r (none
+	// happens, but defensively) can't race this goroutine.
+	needs := check.Needs
+	svcs := r.services
 	go func() {
-		result <- d.exec.RunCheck(spanCtx, job)
+		if len(needs) == 0 || d.cfg.Services == nil {
+			result <- d.exec.RunCheck(spanCtx, job) // unchanged path: hooks & needs-free checks
+			return
+		}
+		ens, err := d.cfg.Services.EnsureAll(spanCtx, svcs, needs) // BLOCKING, off the reconcile loop (F1)
+		if err != nil {
+			result <- core.CheckResult{Name: check.Name, Err: fmt.Errorf("service ensure: %w", err)}
+			return // -> verdictErrored -> OutcomeError, park-as-error (services.md §7)
+		}
+		defer d.cfg.Services.Release(ens) // refcount--, touch last-used (M3)
+		job.ServiceEnv, job.Networks = ens.Env, ens.Networks
+		res := d.exec.RunCheck(spanCtx, job)
+		if res.Err == nil && res.Status == core.CheckFailed {
+			// M1: only a genuinely red verdict re-probes — a passing check
+			// never touches AnyDead.
+			if d.cfg.Services.AnyDead(spanCtx, ens) {
+				res.Err = fmt.Errorf("service died mid-run (park-as-error); check output retained above")
+				// res.Output/LogPath are left exactly as RunCheck set them,
+				// for the skeptical (services.md §7).
+			}
+		}
+		result <- res
 	}()
 	r.cur = &checkInFlight{name: check.Name, cancel: cancel, result: result, span: span, start: start}
 
@@ -1004,6 +1033,14 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
+	// Capability gating (services.md §7 "loud like a malformed check",
+	// services-impl.md §4.4): a spec that declares service/needs on a
+	// daemon with no services block is a spec validation error, never a
+	// silent no-op.
+	if spec.RequiresServices() && d.cfg.Services == nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
+		return
+	}
 
 	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
 	if err != nil {
@@ -1049,6 +1086,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		dir:      dir,
 		checks:   spec.Checks,
 		idx:      0,
+		services: spec.Services,
 		verdict:  verdictNone,
 		rootCtx:  rootCtx,
 		rootSpan: rootSpan,
@@ -1349,6 +1387,14 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return nil, false
 	}
+	// Capability gating (services.md §7 "loud like a malformed check",
+	// services-impl.md §4.4): a spec that declares service/needs on a
+	// daemon with no services block is a spec validation error, never a
+	// silent no-op.
+	if spec.RequiresServices() && d.cfg.Services == nil {
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
+		return nil, false
+	}
 
 	// F2 (docs/plans/phase23.md §10): trial-tree export dirs are created
 	// under cfg.WorkDir when it's set. os.MkdirTemp treats an empty dir
@@ -1387,6 +1433,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		dir:       dir,
 		checks:    spec.Checks,
 		idx:       0,
+		services:  spec.Services,
 		verdict:   verdictNone,
 		rootCtx:   rootCtx,
 		rootSpan:  rootSpan,

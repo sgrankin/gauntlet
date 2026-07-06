@@ -25,11 +25,11 @@ var readyPollInterval = 500 * time.Millisecond
 
 // Config configures a Pool (docs/plans/services-impl.md §3.1).
 type Config struct {
-	Remote       string           // the daemon's remote URL — key material (services.md §2, M5)
-	Token        string           // state-dir token; namespaces names/network (== cmd's stateToken)
-	Mode         Mode             // derived from executor kind (cmd wiring, §4.5)
-	Runtime      string           // "docker" | "podman"; "container" (Apple) REJECTED in phase A
-	StateDir     string           // <state>/services lives here (records)
+	Remote       string // the daemon's remote URL — key material (services.md §2, M5)
+	Token        string // state-dir token; namespaces names/network (== cmd's stateToken)
+	Mode         Mode   // derived from executor kind (cmd wiring, §4.5)
+	Runtime      string // "docker" | "podman"; "container" (Apple) REJECTED in phase A
+	StateDir     string // <state>/services lives here (records)
 	MaxInstances int
 	Now          func() time.Time // injectable clock (tests); nil means time.Now
 }

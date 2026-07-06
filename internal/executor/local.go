@@ -71,6 +71,11 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		core.EnvResultFile+"="+resultFile,
 		core.EnvRunID+"="+job.RunID,
 	)
+	// Shared-services env (docs/plans/services-impl.md §4.2): appended
+	// after the six built-ins, nil for checks with no `needs`. Networks is
+	// ModeNetwork-only (a shared runtime network) and has no meaning for a
+	// local subprocess, so it's deliberately ignored here.
+	cmd.Env = append(cmd.Env, job.ServiceEnv...)
 
 	out := &tailBuffer{cap: outputCap}
 

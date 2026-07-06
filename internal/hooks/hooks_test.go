@@ -407,7 +407,7 @@ func TestRunner_NonLandedEventsIgnored(t *testing.T) {
 		{Kind: core.EventQueued, Target: "main"},
 		{Kind: core.EventCheckFinished, Target: "main", Record: nil},
 		{Kind: core.EventRejected, Target: "main", Record: &core.RunRecord{}}, // terminal, but not a landing
-		{Kind: core.EventKind(999), Target: "main"},                          // unrecognized kind (S14)
+		{Kind: core.EventKind(999), Target: "main"},                           // unrecognized kind (S14)
 	}
 	for _, ev := range cases {
 		if err := r.Emit(context.Background(), ev); err != nil {

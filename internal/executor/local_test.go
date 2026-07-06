@@ -192,6 +192,30 @@ exit 0
 	}
 }
 
+func TestLocalExecutor_ServiceEnvAppended(t *testing.T) {
+	dir := t.TempDir()
+	body := `#!/bin/sh
+test "$GAUNTLET_SVC_PG_HOST" = "127.0.0.1" || { echo "bad host: $GAUNTLET_SVC_PG_HOST"; exit 1; }
+test "$GAUNTLET_SVC_PG_PORT" = "54321" || { echo "bad port: $GAUNTLET_SVC_PG_PORT"; exit 1; }
+exit 0
+`
+	cmd := script(t, dir, "check.sh", body)
+	job := baseJob(t, cmd)
+	job.ServiceEnv = []string{"GAUNTLET_SVC_PG_HOST=127.0.0.1", "GAUNTLET_SVC_PG_PORT=54321"}
+	// Networks is ModeNetwork-only and meaningless to a local subprocess;
+	// setting it here proves LocalExecutor ignores it rather than erroring.
+	job.Networks = []string{"gauntlet-svc-abcd1234"}
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+}
+
 func TestLocalExecutor_OutputCap(t *testing.T) {
 	dir := t.TempDir()
 	// Write well more than outputCap bytes of distinguishable output, then

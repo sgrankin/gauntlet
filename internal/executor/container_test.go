@@ -257,6 +257,42 @@ func TestParams_RunArgs_NoMounts(t *testing.T) {
 	}
 }
 
+func TestParams_RunArgs_NetworksAndServiceEnv(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img"}
+	job := containerJob([]string{"true"})
+	job.Networks = []string{"gauntlet-svc-abcd1234"}
+	job.ServiceEnv = []string{"GAUNTLET_SVC_PG_HOST=keyhash12", "GAUNTLET_SVC_PG_PORT=5432"}
+
+	got := p.runArgs(job, "n", "/rd")
+
+	if !containsPair(got, "--network", "gauntlet-svc-abcd1234") {
+		t.Fatalf("expected --network gauntlet-svc-abcd1234; argv=%v", got)
+	}
+	if !containsPair(got, "-e", "GAUNTLET_SVC_PG_HOST=keyhash12") {
+		t.Fatalf("expected -e GAUNTLET_SVC_PG_HOST=keyhash12; argv=%v", got)
+	}
+	if !containsPair(got, "-e", "GAUNTLET_SVC_PG_PORT=5432") {
+		t.Fatalf("expected -e GAUNTLET_SVC_PG_PORT=5432; argv=%v", got)
+	}
+	imgIdx := indexOf(got, "img")
+	netIdx := indexOfPair(got, "--network", "gauntlet-svc-abcd1234")
+	envIdx := indexOfPair(got, "-e", "GAUNTLET_SVC_PG_HOST=keyhash12")
+	if imgIdx == -1 || netIdx == -1 || envIdx == -1 || !(netIdx < imgIdx && envIdx < imgIdx) {
+		t.Fatalf("expected --network/-e (services) before the image; argv=%v", got)
+	}
+}
+
+func TestParams_RunArgs_NoNetworksNoServiceEnv(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img"}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	if contains(got, "--network") {
+		t.Fatalf("expected no --network flag for a needs-free job; argv=%v", got)
+	}
+}
+
 func TestParams_RunArgs_CommandArgvPassedThrough(t *testing.T) {
 	p := Params{Workdir: "/w", Image: "img"}
 	job := containerJob([]string{"go", "vet", "./..."})

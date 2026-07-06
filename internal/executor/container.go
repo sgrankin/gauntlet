@@ -320,6 +320,8 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //	  -e GAUNTLET_* (all six)           \
 //	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
 //	  -v <mountHost>:<mountPath>[:ro] ... # operator-configured host bind mounts \
+//	  --network <n> ...                # docs/plans/services-impl.md §4.2: one per job.Networks (ModeNetwork) \
+//	  -e <kv> ...                      # one per job.ServiceEnv (resolved `needs`) \
 //	  <image> <job.Command...>
 //
 // Pure and exec-free: exhaustively unit-testable without any runtime.
@@ -350,6 +352,14 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 			v += ":ro"
 		}
 		args = append(args, "-v", v)
+	}
+	// Shared-services wiring (docs/plans/services-impl.md §4.2): nil for
+	// checks with no `needs`, so this is a no-op append in the common case.
+	for _, n := range job.Networks {
+		args = append(args, "--network", n)
+	}
+	for _, kv := range job.ServiceEnv {
+		args = append(args, "-e", kv)
 	}
 	args = append(args, p.Image)
 	args = append(args, job.Command...)
