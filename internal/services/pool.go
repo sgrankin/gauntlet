@@ -62,7 +62,7 @@ type Pool struct {
 	refcount    map[string]int           // key -> in-flight reference count
 	lastUsed    map[string]time.Time     // key -> M3 idle clock
 	createdAt   map[string]time.Time     // key -> when the live instance was created/adopted (Snapshot's tuning surface)
-	hits        map[string]int           // key -> cumulative EnsureAll reuse count (Snapshot's "is reuse happening" signal)
+	hits        map[string]int           // key -> warm resolutions (one per alive+ready reuse, NOT per EnsureAll call: single-flight piggybackers coalesce to the leader's one; Snapshot's "is reuse happening" signal)
 	inflight    map[string]*inflightCall // key -> in-progress ensure, single-flight
 	reaperArmed bool
 	pending     int // in-flight creates that reserved a slot but haven't landed in instances yet (review BUG 2)
@@ -476,7 +476,10 @@ func (p *Pool) AnyDead(ctx context.Context, e Ensured) bool {
 // §2), so a hit count earned before an evict+recreate cycle is still a true
 // count of how often this exact spec has been reused over the Pool's
 // lifetime — Snapshot's "is reuse actually happening" signal is more useful
-// cumulative than reset to zero by an incidental eviction.
+// cumulative than reset to zero by an incidental eviction. Reap, by
+// contrast, DOES drop the counter (see its doc): a TTL'd-out key is
+// abandoned, not mid-cycle, and hits was otherwise the one per-key map with
+// no cleanup path at all (phase-B review NIT-1).
 //
 // Destroy runs on a detached cleanup context, not ctx (review BUG 1, same
 // reasoning as create's doc): AnyDead and the doEnsure reuse-probe-failure
@@ -616,6 +619,17 @@ func (p *Pool) Reap(ctx context.Context) {
 			continue // raced: refcounted or already evicted since the scan above
 		}
 		p.evict(ctx, key, inst)
+		// A reaped key is abandoned (idle past its own TTL), so its hit
+		// counter goes with it — unlike evict's other callers (AnyDead, the
+		// reuse-probe failure), where the same key is usually recreated on
+		// the next run and the cumulative count stays meaningful (evict's
+		// doc). Without this, hits would be the one per-key map that never
+		// shrinks (phase-B review NIT-1) — every retired spec, including
+		// every pre-upgrade key after a canonical-encoding change, would
+		// hold an entry for the daemon's lifetime.
+		p.mu.Lock()
+		delete(p.hits, key)
+		p.mu.Unlock()
 	}
 }
 
