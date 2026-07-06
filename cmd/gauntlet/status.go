@@ -125,6 +125,11 @@ type statusAPIParked struct {
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason"`
 	At      string `json:"at"`
+	// RunID is the run that parked this candidate, mirroring
+	// dashboard.parkedStatus.RunID (internal/dashboard/api.go) — "" for a
+	// boot-seeded park predating this field, in which case renderStatus
+	// omits it rather than printing an empty run= token.
+	RunID string `json:"runId"`
 }
 
 type statusFlags struct {
@@ -230,7 +235,7 @@ func renderStatus(w io.Writer, resp statusAPIResponse, target string) error {
 		if len(t.Parked) > 0 {
 			fmt.Fprintf(w, "  parked:\n")
 			for _, p := range t.Parked {
-				fmt.Fprintf(w, "    %s [%s]: %s\n", p.Ref, p.Outcome, p.Reason)
+				fmt.Fprintf(w, "    %s [%s]: %s%s\n", p.Ref, p.Outcome, p.Reason, parkedSuffix(p.RunID, p.At))
 			}
 		}
 
@@ -290,6 +295,28 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// parkedSuffix builds the trailing "(run=... at=...)" a parked line appends
+// (renderStatus), key=value style matching the hook-runs section's
+// owed=/done= tokens just below it. Either half can be legitimately absent —
+// runID is "" for a boot-seeded park predating that field (see
+// statusAPIParked.RunID's doc), at is "" only defensively (a live park
+// always records one) — so each token is included only when its value is
+// non-empty, and the whole suffix is "" (not "()") when both are, rather
+// than printing an empty/misleading parenthetical.
+func parkedSuffix(runID, at string) string {
+	var parts []string
+	if runID != "" {
+		parts = append(parts, "run="+runID)
+	}
+	if at != "" {
+		parts = append(parts, "at="+at)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, " ") + ")"
 }
 
 // --- gauntlet retry -------------------------------------------------------

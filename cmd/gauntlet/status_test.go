@@ -208,7 +208,8 @@ const canned = `{
 				{"ref": "refs/heads/for/main/bob/second", "sha": "2222222222222222222222222222222222222222", "seq": 5}
 			],
 			"parked": [
-				{"ref": "refs/heads/for/main/mallory/evil", "sha": "4444444444444444444444444444444444444444", "outcome": "rejected", "reason": "build failed", "at": "2026-07-05T11:00:00Z"}
+				{"ref": "refs/heads/for/main/mallory/evil", "sha": "4444444444444444444444444444444444444444", "outcome": "rejected", "reason": "build failed", "at": "2026-07-05T11:00:00Z", "runId": "run-mallory-1"},
+				{"ref": "refs/heads/for/main/dave/legacy", "sha": "5555555555555555555555555555555555555555", "outcome": "conflict", "reason": "stale seed", "at": "2026-07-05T10:00:00Z"}
 			]
 		},
 		{
@@ -243,7 +244,12 @@ func TestRenderStatus_CompactSummary(t *testing.T) {
 		"main (main) tip=aaaaaaaa",
 		"in-flight: refs/heads/for/main/alice/feat-a check=test",
 		"waiting: 2",
-		"refs/heads/for/main/mallory/evil [rejected]: build failed",
+		// mallory's park carries a runId: both run= and at= render.
+		"refs/heads/for/main/mallory/evil [rejected]: build failed (run=run-mallory-1 at=2026-07-05T11:00:00Z)",
+		// dave's park has no runId (a boot-seeded park predating that
+		// field): the run= token is omitted entirely, not printed empty —
+		// at= still renders on its own.
+		"refs/heads/for/main/dave/legacy [conflict]: stale seed (at=2026-07-05T10:00:00Z)",
 		"release (release/v2) tip=-",
 		"in-flight: -",
 		"waiting: 0",
@@ -251,6 +257,9 @@ func TestRenderStatus_CompactSummary(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\noutput:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "run=)") || strings.Contains(out, "()") {
+		t.Errorf("output contains an empty run=/at= parenthetical:\n%s", out)
 	}
 }
 
