@@ -1,0 +1,89 @@
+version: 2
+
+project_name: gauntlet
+
+builds:
+  - id: gauntlet
+    main: ./cmd/gauntlet
+    binary: gauntlet
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Only linux_amd64, linux_arm64, darwin_arm64 are published.
+      - goos: darwin
+        goarch: amd64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: gauntlet
+    ids: [gauntlet]
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  github:
+    owner: sgrankin
+    name: gauntlet
+  draft: false
+
+# Classic per-arch docker blocks + a manifest, not the newer dockers_v2
+# schema: dockers_v2 wasn't stable enough as of writing to commit to
+# sight-unseen (this whole pipeline can't be dry-run locally — see
+# docs/deploy.md "Releases"). Each block here builds FROM
+# Dockerfile.release (NOT the top-level multi-stage Dockerfile — goreleaser's
+# classic docker build copies the already-built binary into a throwaway
+# context; it can't run a multi-stage `go build` itself), one image per arch,
+# unified into a single multi-arch tag by docker_manifests below.
+dockers:
+  - id: gauntlet-amd64
+    ids: [gauntlet]
+    goos: linux
+    goarch: amd64
+    use: buildx
+    dockerfile: Dockerfile.release
+    image_templates:
+      - 'ghcr.io/sgrankin/gauntlet:{{ .Version }}-amd64'
+    build_flag_templates:
+      - '--platform=linux/amd64'
+
+  - id: gauntlet-arm64
+    ids: [gauntlet]
+    goos: linux
+    goarch: arm64
+    use: buildx
+    dockerfile: Dockerfile.release
+    image_templates:
+      - 'ghcr.io/sgrankin/gauntlet:{{ .Version }}-arm64'
+    build_flag_templates:
+      - '--platform=linux/arm64'
+
+docker_manifests:
+  - name_template: 'ghcr.io/sgrankin/gauntlet:{{ .Version }}'
+    image_templates:
+      - 'ghcr.io/sgrankin/gauntlet:{{ .Version }}-amd64'
+      - 'ghcr.io/sgrankin/gauntlet:{{ .Version }}-arm64'
+
+  - name_template: 'ghcr.io/sgrankin/gauntlet:latest'
+    image_templates:
+      - 'ghcr.io/sgrankin/gauntlet:{{ .Version }}-amd64'
+      - 'ghcr.io/sgrankin/gauntlet:{{ .Version }}-arm64'

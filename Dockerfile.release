@@ -1,0 +1,28 @@
+# goreleaser's release-time image. Unlike the top-level Dockerfile (a
+# multi-stage from-source build), this one only ever runs against a
+# prebuilt binary goreleaser drops into the build context — see
+# .goreleaser.yaml's `dockers` blocks. Runtime contract (packages, fixed
+# UID, volume, entrypoint) is intentionally identical to the top-level
+# Dockerfile's runtime stage; keep the two in sync by hand if either
+# changes (see docs/deploy.md "Releases").
+
+FROM alpine:latest
+
+RUN apk add --no-cache \
+        git \
+        openssh-client \
+        ca-certificates \
+        tzdata \
+    && addgroup -g 1000 gauntlet \
+    && adduser -S -u 1000 -G gauntlet -h /data gauntlet \
+    && mkdir -p /data \
+    && chown gauntlet:gauntlet /data
+
+COPY gauntlet /usr/local/bin/gauntlet
+
+VOLUME /data
+USER gauntlet
+WORKDIR /data
+
+ENTRYPOINT ["gauntlet"]
+CMD ["-config", "/data/gauntlet.kdl", "-state", "/data/state"]

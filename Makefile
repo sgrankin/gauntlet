@@ -16,7 +16,7 @@ LDFLAGS := -X main.version=$(VERSION)
 # Override on the command line (`make image RUNTIME=podman`) to force one.
 RUNTIME := $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null || command -v container 2>/dev/null)
 
-.PHONY: build test image clean
+.PHONY: build test image clean release-snapshot
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/gauntlet
@@ -33,3 +33,10 @@ image:
 
 clean:
 	rm -f $(BINARY)
+
+# Local dry-run of the tagged-release pipeline (.goreleaser.yaml): builds
+# every target archive and the ghcr images without publishing anything or
+# needing a real tag/git history. Requires the `goreleaser` binary on PATH
+# (not installed by this Makefile). See docs/deploy.md "Releases".
+release-snapshot:
+	goreleaser release --snapshot --clean --skip=publish,docker

@@ -5,7 +5,8 @@ requirements both share, and the exposure/backup notes that apply regardless
 of which one you pick. For what the daemon does and how to configure it, see
 [README.md](../README.md) and [`gauntlet.kdl`](../gauntlet.kdl); for the
 design rationale behind "refs are the queue" and "SQLite is disposable
-history", see [DESIGN.md](../DESIGN.md).
+history", see [DESIGN.md](../DESIGN.md). See [docs/runbooks/](runbooks/) for
+step-shaped runbooks distilled from this guide.
 
 Scope note: this doc covers packaging and operating the daemon itself.
 Deployments run *as* post-land hooks (README's ["Hooks"](../README.md#hooks)
@@ -215,6 +216,38 @@ docker run -d --name gauntlet \
   the `docker run` above (or your orchestrator's equivalent rolling
   restart); the "no durable in-flight state" argument from topology (a)'s
   upgrade procedure applies identically.
+
+## Releases
+
+Both topologies above can be fed from tagged releases instead of a local
+`make build`/`make image`: pushing a tag matching `v*` (e.g. `v1.4.0`) runs
+`.github/workflows/release.yml`, which drives `goreleaser` (`.goreleaser.yaml`)
+to publish, on the GitHub release page, `linux_amd64`/`linux_arm64`/
+`darwin_arm64` binary tarballs (each with a checksum file) plus, to
+`ghcr.io/sgrankin/gauntlet`, a multi-arch (`linux/amd64`+`linux/arm64`) image
+tagged both `<version>` and `latest`. Every push to `main` and every pull
+request separately runs `.github/workflows/ci.yml` (`go build`, `go vet`,
+`go test -race`) — the release workflow only runs on a tag push, and does not
+re-run the test suite itself.
+
+- **Topology (a)** (warm builder VM): `curl -L` the release tarball for your
+  arch from the GitHub release page instead of `scp`-ing a locally built
+  binary; everything else in that topology's setup/upgrade steps is
+  unchanged.
+- **Topology (b)** (container): `docker pull ghcr.io/sgrankin/gauntlet:<version>`
+  (or `:latest`) instead of `make image`; the `docker run` invocation and
+  volume/state layout above are identical either way.
+- **Why the release image isn't built from the top-level [`Dockerfile`](../Dockerfile):**
+  goreleaser's docker builder copies a prebuilt binary into a throwaway
+  context rather than running a multi-stage build, so releases use a
+  separate, runtime-stage-only `Dockerfile.release` that mirrors this
+  Dockerfile's runtime contract (packages, fixed UID, `/data` volume,
+  entrypoint) byte-for-byte; the original `Dockerfile` stays the one used for
+  from-source builds (`make image`). A plain `ko` build was rejected instead,
+  since ko's default base images ship no `git`, and the daemon shells out to
+  `git` at runtime for every trial merge.
+- `gauntlet -version` prints the same version either way — ldflags-stamped
+  from the pushed tag by goreleaser, or from `git describe` by `make build`.
 
 ## Required git version
 
