@@ -371,6 +371,13 @@ type RefVerdict struct {
 	Outcome string
 	Detail  string
 	EndedAt time.Time
+
+	// RunID is the winning row's own run_id — plumbed through so
+	// cmd/gauntlet's SeedParks closure can carry it into queue.ParkSeed,
+	// letting a boot-seeded park still link to the run that produced its
+	// verdict (queue.ParkedEntry.RunID) rather than rendering unlinked
+	// until the ref's next real terminal event.
+	RunID string
 }
 
 // LatestTerminalPerRef returns, for every distinct candidate_ref recorded
@@ -424,9 +431,9 @@ type RefVerdict struct {
 // boundary itself is untested.
 func (s *Store) LatestTerminalPerRef(target string) ([]RefVerdict, error) {
 	rows, err := s.db.Query(`
-SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at
+SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at, t.run_id
 FROM (
-	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at,
+	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at, run_id,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY candidate_ref
 	           ORDER BY started_at DESC, run_id DESC
@@ -445,7 +452,7 @@ WHERE t.rn = 1 AND (ri.at IS NULL OR ri.at <= t.ended_at)`, target, target)
 	for rows.Next() {
 		var v RefVerdict
 		var endedMS int64
-		if err := rows.Scan(&v.Ref, &v.SHA, &v.Outcome, &v.Detail, &endedMS); err != nil {
+		if err := rows.Scan(&v.Ref, &v.SHA, &v.Outcome, &v.Detail, &endedMS, &v.RunID); err != nil {
 			return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
 		}
 		v.EndedAt = time.UnixMilli(endedMS)

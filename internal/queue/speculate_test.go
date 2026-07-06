@@ -302,6 +302,9 @@ func TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest(t *testi
 	if entry, parked := h.d.done["main"][refB]; !parked || entry.Outcome != core.OutcomeRejected {
 		t.Fatalf("bob's done entry = %+v (parked=%v), want a real Rejected park now", entry, parked)
 	}
+	if entry := h.d.done["main"][refB]; entry.RunID != bobRec.RunID {
+		t.Fatalf("bob's done entry RunID = %q, want %q (the run that actually rejected him)", entry.RunID, bobRec.RunID)
+	}
 }
 
 // TestSpeculateValiditySweep_MemberMoveTruncatesSuffix proves §2.2's

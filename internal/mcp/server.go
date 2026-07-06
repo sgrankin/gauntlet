@@ -305,6 +305,9 @@ type parkedStatus struct {
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason"`
 	At      string `json:"at"`
+	// RunID mirrors dashboard/api.go's own parkedStatus.RunID addition: the
+	// run that parked this candidate, "" (omitted) when unknown.
+	RunID string `json:"runId,omitempty"`
 }
 
 // handleStatus never returns an error: an absent snapshot or an unknown
@@ -373,6 +376,7 @@ func buildTargetStatus(p Params, ts queue.TargetSnapshot) targetStatus {
 		out.Parked = append(out.Parked, parkedStatus{
 			Ref: pe.Candidate.Ref, SHA: pe.Candidate.SHA,
 			Outcome: outcomeWord(pe.Outcome), Reason: pe.Reason, At: formatRFC3339(pe.At),
+			RunID: pe.RunID,
 		})
 	}
 

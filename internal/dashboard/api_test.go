@@ -98,13 +98,16 @@ func TestAPIStatus_Shape(t *testing.T) {
 		t.Fatalf("parked = %v", main["parked"])
 	}
 	pm := parked[0].(map[string]any)
-	for _, key := range []string{"ref", "sha", "outcome", "reason", "at"} {
+	for _, key := range []string{"ref", "sha", "outcome", "reason", "at", "runId"} {
 		if _, ok := pm[key]; !ok {
 			t.Errorf("parked missing key %q", key)
 		}
 	}
 	if pm["outcome"] != "rejected" {
 		t.Errorf("parked.outcome = %v", pm["outcome"])
+	}
+	if pm["runId"] != "run-mallory-rejected" {
+		t.Errorf("parked.runId = %v, want run-mallory-rejected", pm["runId"])
 	}
 }
 

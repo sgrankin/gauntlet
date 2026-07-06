@@ -55,6 +55,7 @@ func testSnapshot() *queue.Snapshot {
 						Outcome:   core.OutcomeRejected,
 						Reason:    "build failed",
 						At:        now.Add(-time.Hour),
+						RunID:     "run-mallory-rejected",
 					},
 				},
 			},
@@ -211,7 +212,7 @@ func TestStatus_ContentIncludesTargetName(t *testing.T) {
 		t.Fatalf("status errored: %s", textOf(t, res))
 	}
 	text := textOf(t, res)
-	for _, want := range []string{`"name":"main"`, "alice/feat-a", "bob", "mallory"} {
+	for _, want := range []string{`"name":"main"`, "alice/feat-a", "bob", "mallory", `"runId":"run-mallory-rejected"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("status content missing %q:\n%s", want, text)
 		}

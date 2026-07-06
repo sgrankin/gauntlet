@@ -71,8 +71,8 @@ func TestStore_LatestTerminalPerRef_Interleaved(t *testing.T) {
 	if v := byRef[refA]; v.SHA != "sha-a2" || v.Outcome != "landed" {
 		t.Errorf("refA (red-then-landed) latest = %+v, want SHA=sha-a2 Outcome=landed (no park)", v)
 	}
-	if v := byRef[refB]; v.SHA != "sha-b2" || v.Outcome != "rejected" || v.Detail != "regressed" {
-		t.Errorf("refB (landed-then-red) latest = %+v, want SHA=sha-b2 Outcome=rejected Detail=regressed (a park)", v)
+	if v := byRef[refB]; v.SHA != "sha-b2" || v.Outcome != "rejected" || v.Detail != "regressed" || v.RunID != "b-2" {
+		t.Errorf("refB (landed-then-red) latest = %+v, want SHA=sha-b2 Outcome=rejected Detail=regressed RunID=b-2 (a park)", v)
 	}
 	if v := byRef[refC]; v.SHA != "sha-c3" || v.Outcome != "error" || v.Detail != "red #3 (latest)" {
 		t.Errorf("refC (multiple reds) latest = %+v, want SHA=sha-c3 Outcome=error (only the LATEST wins)", v)

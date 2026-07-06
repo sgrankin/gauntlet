@@ -220,7 +220,7 @@ func (d *Daemon) cancelBatchMember(ctx context.Context, t config.Target, r *run,
 	for i := range r.members {
 		m := &r.members[i]
 		if m.cand.Ref == ref {
-			d.park(t.Name, m.cand, m.rec.Outcome, m.rec.Detail)
+			d.park(t.Name, m.cand, m.rec.Outcome, m.rec.Detail, m.rec.RunID)
 		}
 		d.emit(ctx, core.Event{
 			Kind:      eventKindForOutcome(m.rec.Outcome),
@@ -260,7 +260,7 @@ func (d *Daemon) cancelWaiting(ctx context.Context, target, ref string, refs map
 		Outcome: core.OutcomeRejected, Detail: cancelDetail,
 		StartedAt: now, EndedAt: now,
 	}
-	d.park(target, cand, core.OutcomeRejected, cancelDetail)
+	d.park(target, cand, core.OutcomeRejected, cancelDetail, runID)
 	d.emit(ctx, core.Event{
 		Kind: eventKindForOutcome(core.OutcomeRejected), At: now, Target: target,
 		Candidate: cand, RunID: runID, Record: rec, Detail: cancelDetail,

@@ -307,6 +307,10 @@ type parkedStatus struct {
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason"`
 	At      string `json:"at"`
+	// RunID is the run that parked this candidate, "" when unknown (mirrors
+	// queue.ParkedEntry.RunID — see its doc). omitempty so an old boot-seed
+	// park without one doesn't clutter the JSON with an empty string.
+	RunID string `json:"runId,omitempty"`
 }
 
 func (d *dash) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
@@ -371,6 +375,7 @@ func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 		out.Parked = append(out.Parked, parkedStatus{
 			Ref: pe.Candidate.Ref, SHA: pe.Candidate.SHA,
 			Outcome: outcomeWord(pe.Outcome), Reason: pe.Reason, At: formatRFC3339(pe.At),
+			RunID: pe.RunID,
 		})
 	}
 

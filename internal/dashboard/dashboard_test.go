@@ -92,6 +92,7 @@ func testSnapshot() *queue.Snapshot {
 						Outcome: core.OutcomeRejected,
 						Reason:  "build failed: " + hostileTopic,
 						At:      now.Add(-1 * time.Hour),
+						RunID:   "run-mallory-rejected",
 					},
 				},
 			},
@@ -329,6 +330,17 @@ func TestTarget_WaitingOrderAndParkedReasons(t *testing.T) {
 	if !strings.Contains(body, "build failed:") {
 		t.Errorf("parked reason missing from body")
 	}
+	// This dashboard was built with a nil store (history disabled): even
+	// though testSnapshot's parked entry carries a RunID (a live park always
+	// sets one, independent of whether THIS dashboard has a store to look
+	// runs up in — see parkedView's doc), the outcome tag must render
+	// unlinked, not as a link to a /run/ page handleRun would 404 on.
+	if strings.Contains(body, `<a href="/run/run-mallory-rejected"`) {
+		t.Errorf("parked outcome tag linked to /run/ with history disabled (would 404):\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="tag bad">rejected</span>`) {
+		t.Errorf("parked outcome tag should render as a plain unlinked span with history disabled:\n%s", body)
+	}
 }
 
 func TestTarget_EscapesHostileTopicAndReason(t *testing.T) {
@@ -563,6 +575,12 @@ func TestTarget_RecentRunsRenderAsChips(t *testing.T) {
 	}
 	if !strings.Contains(body, `href="/run/run-hist-1" class="chip chip-bad"`) {
 		t.Errorf("expected the chip anchor itself to carry the run link:\n%s", body)
+	}
+	// Unlike TestTarget_WaitingOrderAndParkedReasons (nil store), this
+	// dashboard has a real store, so StoreEnabled is true and the parked
+	// outcome tag must link to the run that parked it.
+	if !strings.Contains(body, `<a href="/run/run-mallory-rejected" class="tag bad">rejected</a>`) {
+		t.Errorf("expected the parked outcome tag to link to its run when history is enabled:\n%s", body)
 	}
 }
 

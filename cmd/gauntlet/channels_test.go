@@ -138,8 +138,8 @@ func TestBuildSeedParks_MapsLatestRedVerdicts(t *testing.T) {
 		byRef[s.Ref] = true
 		switch s.Ref {
 		case refRed:
-			if s.Outcome != core.OutcomeRejected || s.SHA != "sha-run-1" || s.Reason != "check failed" {
-				t.Errorf("refRed seed = %+v, want Outcome=Rejected SHA=sha-run-1 Reason=%q", s, "check failed")
+			if s.Outcome != core.OutcomeRejected || s.SHA != "sha-run-1" || s.Reason != "check failed" || s.RunID != "run-1" {
+				t.Errorf("refRed seed = %+v, want Outcome=Rejected SHA=sha-run-1 Reason=%q RunID=run-1", s, "check failed")
 			}
 		case refGreen:
 			if s.Outcome != core.OutcomeLanded {

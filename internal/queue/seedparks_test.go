@@ -52,11 +52,12 @@ func TestSeedParks_ParkedRefNotRePicked(t *testing.T) {
 	sha := git.pushCandidate(ref, "", checkSpecFile("test"))
 
 	seedAt := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	const seedRunID = "run-pre-restart-1"
 	seedParks := func(target string) []ParkSeed {
 		if target != "main" {
 			return nil
 		}
-		return []ParkSeed{{Ref: ref, SHA: sha, Outcome: core.OutcomeRejected, Reason: "prior red (pre-restart)", At: seedAt}}
+		return []ParkSeed{{Ref: ref, SHA: sha, Outcome: core.OutcomeRejected, Reason: "prior red (pre-restart)", At: seedAt, RunID: seedRunID}}
 	}
 	d, ch := newSeededDaemon(t, git, seedParks)
 
@@ -71,8 +72,8 @@ func TestSeedParks_ParkedRefNotRePicked(t *testing.T) {
 		t.Fatal("a run started for a ref the boot seed parked")
 	}
 	entry, ok := d.done["main"][ref]
-	if !ok || entry.SHA != sha || entry.Outcome != core.OutcomeRejected {
-		t.Fatalf("d.done[main][%s] = %+v (ok=%v), want a Rejected park at %s", ref, entry, ok, sha)
+	if !ok || entry.SHA != sha || entry.Outcome != core.OutcomeRejected || entry.RunID != seedRunID {
+		t.Fatalf("d.done[main][%s] = %+v (ok=%v), want a Rejected park at %s with RunID %q", ref, entry, ok, sha, seedRunID)
 	}
 
 	snap := d.Snapshot()
@@ -84,6 +85,9 @@ func TestSeedParks_ParkedRefNotRePicked(t *testing.T) {
 		for _, p := range ts.Parked {
 			if p.Candidate.Ref == ref {
 				found = true
+				if p.RunID != seedRunID {
+					t.Errorf("Snapshot's ParkedEntry.RunID = %q, want %q (the seeded RunID)", p.RunID, seedRunID)
+				}
 			}
 		}
 	}

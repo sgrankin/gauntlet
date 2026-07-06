@@ -10,11 +10,11 @@
 {{range .Members}}
 <tr>
 <td>{{.Position}}</td>
-<td><a href="/run/{{.RunID}}">{{.RunID}}</a></td>
+<td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td>
 <td>{{.User}}/{{.Topic}}</td>
 <td><span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span></td>
 <td>{{.Detail}}</td>
-<td class="muted">{{.StartedAt}}</td>
+<td class="muted nowrap">{{.StartedAt}}</td>
 <td>{{.Duration}}</td>
 </tr>
 {{end}}

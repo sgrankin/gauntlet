@@ -73,7 +73,7 @@
 <table>
 <tr><th>user/topic</th><th>sha</th><th>outcome</th><th>reason</th><th>at</th></tr>
 {{range .Parked}}
-<tr><td>{{.User}}/{{.Topic}}</td><td><code title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td><span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span></td><td>{{.Reason}}</td><td class="muted">{{.At}}</td></tr>
+<tr><td>{{.User}}/{{.Topic}}</td><td><code title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td>{{if and .RunID $.StoreEnabled}}<a href="/run/{{.RunID}}" class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</a>{{else}}<span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span>{{end}}</td><td>{{.Reason}}</td><td class="muted nowrap">{{.At}}</td></tr>
 {{end}}
 </table>
 {{else}}
@@ -90,7 +90,7 @@
 <table>
 <tr><th>run</th><th>owed</th><th>done</th><th>started</th><th>status</th></tr>
 {{range .HookRuns}}
-<tr><td><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.Owed}}</td><td>{{.Done}}</td><td class="muted">{{.StartedAt}}</td><td>{{if .Skipped}}<span class="tag warn">skipped</span> {{.SkipReason}}{{else if .Incomplete}}<span class="tag bad">crash-incomplete</span>{{else}}<span class="tag ok">complete</span>{{end}}</td></tr>
+<tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.Owed}}</td><td>{{.Done}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{if .Skipped}}<span class="tag warn">skipped</span> {{.SkipReason}}{{else if .Incomplete}}<span class="tag bad">crash-incomplete</span>{{else}}<span class="tag ok">complete</span>{{end}}</td></tr>
 {{end}}
 </table>
 {{else if not .LiveHook}}
@@ -105,7 +105,7 @@
 <table>
 <tr><th>run</th><th>user/topic</th><th>outcome</th><th>detail</th><th>started</th><th>duration</th></tr>
 {{range .RecentRuns}}
-<tr><td><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a></td><td>{{.Detail}}</td><td class="muted">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
+<tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a></td><td>{{.Detail}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
 {{end}}
 </table>
 {{else}}

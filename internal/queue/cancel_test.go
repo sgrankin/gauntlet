@@ -114,6 +114,9 @@ func TestCommand_CancelWaitingParksBeforePickup(t *testing.T) {
 	if !h.git.hasRef(refBob) {
 		t.Fatal("bob's slot removed by a cancel; it should only be parked")
 	}
+	if entry, parked := h.d.done["main"][refBob]; !parked || entry.RunID != bobRec.RunID {
+		t.Fatalf("bob's done entry = %+v (parked=%v), want RunID %q (the record cancelWaiting synthesized)", entry, parked, bobRec.RunID)
+	}
 
 	h.release(aliceRunID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // alice lands
 

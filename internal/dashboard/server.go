@@ -192,6 +192,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 		data.Parked = append(data.Parked, parkedView{
 			User: pe.Candidate.User, Topic: pe.Candidate.Topic, SHA: pe.Candidate.SHA,
 			Outcome: wordTag(outcomeWord(pe.Outcome)), Reason: pe.Reason, At: formatTime(pe.At),
+			RunID: pe.RunID,
 		})
 	}
 
@@ -911,11 +912,21 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
-func formatTime(t time.Time) string {
+// formatTime renders t as a <time> element carrying both a machine-readable
+// RFC3339 UTC instant (its datetime attribute, for base.html's tooltip
+// script) and the same "2006-01-02 15:04:05 UTC" text this used to return
+// bare — the visible text is unchanged, only the wrapper is new. Both parts
+// come straight from t itself, never from user input, so building this with
+// Sprintf rather than the html/template escaper is safe; returning
+// template.HTML is exactly what tells html/template to trust that and emit
+// it unescaped. A zero Time (no value recorded) renders as plain "-" text,
+// not a <time> with nothing to date.
+func formatTime(t time.Time) template.HTML {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.UTC().Format("2006-01-02 15:04:05 UTC")
+	u := t.UTC()
+	return template.HTML(fmt.Sprintf(`<time datetime="%s">%s</time>`, u.Format(time.RFC3339), u.Format("2006-01-02 15:04:05 UTC")))
 }
 
 // tag is a display word paired with a CSS class (ok/bad/warn/neutral).
@@ -1044,7 +1055,7 @@ func compactRef(ref string) string {
 type baseData struct {
 	Title       string
 	Refresh     bool
-	GeneratedAt string
+	GeneratedAt template.HTML
 	Starting    bool
 	Version     string
 }
@@ -1146,11 +1157,12 @@ type checkView struct {
 // outcome-chip strip on / and /t/{target} (ChipClass/Title), not the old
 // bordered text pill.
 type runSummary struct {
-	RunID, User, Topic  string
-	ChipClass           string // ok|bad|warn|conflict|error|neutral -> chip-<class>
-	Title               string // tooltip: "landed · topic · 2m ago"
-	Detail              string
-	StartedAt, Duration string
+	RunID, User, Topic string
+	ChipClass          string // ok|bad|warn|conflict|error|neutral -> chip-<class>
+	Title              string // tooltip: "landed · topic · 2m ago"
+	Detail             string
+	StartedAt          template.HTML
+	Duration           string
 
 	// Batched is whether this run landed as part of a batch (RunRow.BatchID
 	// != "") — the recent-runs chip strip (index.html, target.html) adds a
@@ -1204,7 +1216,7 @@ type liveHookView struct {
 type hookRunView struct {
 	RunID      string
 	Owed, Done int
-	StartedAt  string
+	StartedAt  template.HTML
 	Skipped    bool
 	SkipReason string
 	Incomplete bool
@@ -1213,7 +1225,8 @@ type hookRunView struct {
 // ignoredRefView is index.html's view of one history.IgnoredRef row (the
 // daemon-level "recently ignored refs" section).
 type ignoredRefView struct {
-	Ref, Detail, At string
+	Ref, Detail string
+	At          template.HTML
 }
 
 type waitingView struct {
@@ -1221,10 +1234,23 @@ type waitingView struct {
 	Ref, User, Topic, SHA string
 }
 
+// parkedView is target.html's view of one queue.ParkedEntry: RunID (the
+// terminal run that parked this candidate) can be "" when the queue never
+// had one to plumb through — history disabled at boot-seed time, or a park
+// entry seeded from a pre-RunID history row — in which case target.html
+// renders the outcome tag unlinked rather than pointing /run/ at an ID that
+// doesn't exist. But RunID alone isn't enough to link safely: a LIVE park
+// (queue.Daemon.park, independent of whether THIS dashboard has a store)
+// always sets it, even when the dashboard itself was built with store == nil
+// — handleRun 404s unconditionally in that case (no store to look the run up
+// in), so target.html's link must also check targetData.StoreEnabled, not
+// RunID alone.
 type parkedView struct {
 	User, Topic, SHA string
 	Outcome          tag
-	Reason, At       string
+	Reason           string
+	At               template.HTML
+	RunID            string
 }
 
 type runData struct {
@@ -1241,13 +1267,14 @@ type runData struct {
 }
 
 type runSummaryFull struct {
-	RunID, Target                string
-	Ref, User, Topic, SHA        string
-	BaseOID, MergeSHA            string
-	TrialClean                   bool
-	Outcome                      tag
-	Detail                       string
-	StartedAt, EndedAt, Duration string
+	RunID, Target         string
+	Ref, User, Topic, SHA string
+	BaseOID, MergeSHA     string
+	TrialClean            bool
+	Outcome               tag
+	Detail                string
+	StartedAt, EndedAt    template.HTML
+	Duration              string
 
 	// BatchID is this run's batch, empty for serial/speculate — run.html
 	// only renders the "landed in batch <id>" line when it's non-empty.
@@ -1267,19 +1294,20 @@ type batchData struct {
 }
 
 type batchMemberView struct {
-	RunID, Target       string
-	Position            int
-	User, Topic, SHA    string
-	Outcome             tag
-	Detail              string
-	StartedAt, Duration string
+	RunID, Target    string
+	Position         int
+	User, Topic, SHA string
+	Outcome          tag
+	Detail           string
+	StartedAt        template.HTML
+	Duration         string
 }
 
 type checksData struct {
 	baseData
 	StoreEnabled     bool
 	Target           string
-	Since            string
+	Since            template.HTML
 	AvailableTargets []string
 	Stats            []statView
 	// HasDepth is len(depth series) > 0; DepthChart is only meaningful (a

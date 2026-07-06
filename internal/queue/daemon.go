@@ -130,6 +130,12 @@ type ParkSeed struct {
 	Outcome core.Outcome
 	Reason  string
 	At      time.Time
+
+	// RunID is the terminal run that produced this verdict, mirrored
+	// straight through to parkEntry.RunID (seedParksOnce) — "" for history
+	// predating this field, in which case the seeded park simply renders
+	// unlinked on the dashboard, same as any other RunID-less park.
+	RunID string
 }
 
 // checkInFlight is the currently-running check within an in-flight run: its

@@ -68,6 +68,12 @@ th { color: var(--muted); font-weight: 600; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
 footer { margin-top: 2rem; }
 .section { margin-bottom: 1.5rem; }
+/* nowrap: run IDs (e.g. 20260705T224731Z-5-bb12231a0a65) and formatted
+   timestamps both contain hyphens/spaces that a table cell will wrap on at
+   awkward points otherwise — applied directly to the cell or link, not to
+   <table> generally, since plenty of other columns (topic, reason) should
+   still wrap. */
+.nowrap { white-space: nowrap; }
 
 /* --- status chips: shared between /, /t/{target} and /run/{id} ---------
    A chip is always a small solid-fill square, never text (bullet 5's
@@ -96,8 +102,19 @@ footer { margin-top: 2rem; }
 
 /* --- per-check output (/run/{id}) --------------------------------------- */
 .checklist { margin: .5rem 0 1rem; border-top: 1px solid var(--border); }
-.check-row, details.check-row summary { display: block; padding: .4rem .2rem; border-bottom: 1px solid var(--border); font-size: .88rem; }
-details.check-row summary { cursor: pointer; }
+/* .check-row is the one shared "row" box, whichever element carries it: a
+   plain <div class="check-row"> (no output) or a <details class="check-row">
+   (has output, run.html) — the padding/border-bottom belongs to that outer
+   box either way, so a collapsed details row measures identically to a
+   plain div row, and an expanded one still puts its bottom border AFTER the
+   <pre class="output"> (the details box encloses both summary and pre),
+   not in between them. Giving the SAME rule to <summary> too (the previous
+   shape of this CSS) doubles both the border and the padding on the details
+   element, which owns them once already as its parent box — that was the
+   double-border/indent bug this rule fixes. summary itself only needs its
+   own display/cursor/marker treatment now, no box of its own. */
+.check-row { display: block; padding: .4rem .2rem; border-bottom: 1px solid var(--border); font-size: .88rem; }
+details.check-row summary { display: block; cursor: pointer; }
 details.check-row summary::marker { color: var(--muted); }
 pre.output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .6rem; margin: .3rem 0 .6rem; overflow-x: auto; overflow-y: auto; max-height: 30em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; white-space: pre; }
 
@@ -122,6 +139,52 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 </header>
 <main>{{block "content" .}}{{end}}</main>
 <footer class="muted"><small>generated {{.GeneratedAt}}{{if .Version}} · gauntlet {{.Version}}{{end}}</small></footer>
+<script>
+// Every server-rendered timestamp is a <time datetime="..."> element holding
+// a UTC string (dashboard/server.go's formatTime) — deliberately unchanged
+// visible text, since a mixed-timezone table is more confusing than a
+// consistent one. This just adds a title tooltip, computed client-side at
+// load time, giving the viewer's local zone and a friendly relative age
+// without touching what's actually printed. Pages that meta-refresh (see
+// <meta http-equiv="refresh">, when present) do a full reload every 5s, so
+// running this once on DOMContentLoaded is enough — there's no live-updating
+// content that would need a re-run.
+document.addEventListener('DOMContentLoaded', function () {
+  var units = [
+    ['year', 365 * 24 * 3600], ['month', 30 * 24 * 3600], ['day', 24 * 3600],
+    ['hour', 3600], ['minute', 60], ['second', 1],
+  ];
+  // Built once, not once per <time> element (constructing an Intl formatter
+  // isn't free) — and defensively: an engine without Intl.RelativeTimeFormat
+  // (pre-2020 Safari/older) throws a TypeError constructing it, which would
+  // otherwise take the toLocaleString() half of the tooltip down with it for
+  // every remaining element. rtf stays null in that case and relative()
+  // degrades to "", so the tooltip is just local time with no relative line.
+  var rtf = null;
+  try {
+    rtf = new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'});
+  } catch (e) {}
+  function relative(d) {
+    if (!rtf) return '';
+    var secs = (d.getTime() - Date.now()) / 1000;
+    for (var i = 0; i < units.length; i++) {
+      var unit = units[i][0], secondsInUnit = units[i][1];
+      if (Math.abs(secs) >= secondsInUnit || unit === 'second') {
+        return rtf.format(Math.round(secs / secondsInUnit), unit);
+      }
+    }
+    return '';
+  }
+  document.querySelectorAll('time[datetime]').forEach(function (el) {
+    var d = new Date(el.getAttribute('datetime'));
+    if (isNaN(d.getTime())) return;
+    var title = d.toLocaleString();
+    var rel = relative(d);
+    if (rel) title += '\n' + rel;
+    el.title = title;
+  });
+});
+</script>
 </body>
 </html>
 {{end}}

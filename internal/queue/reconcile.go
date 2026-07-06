@@ -236,7 +236,7 @@ func (d *Daemon) seedParksOnce(target string) {
 			m = make(map[string]parkEntry)
 			d.done[target] = m
 		}
-		m[seed.Ref] = parkEntry{SHA: seed.SHA, Outcome: seed.Outcome, Reason: seed.Reason, At: seed.At}
+		m[seed.Ref] = parkEntry{SHA: seed.SHA, Outcome: seed.Outcome, Reason: seed.Reason, At: seed.At, RunID: seed.RunID}
 	}
 }
 
@@ -1095,7 +1095,7 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 		}
 		prevBase = link.mergeOID
 		lastRec = rec
-		d.park(t.Name, link.cand, outcome, detail)
+		d.park(t.Name, link.cand, outcome, detail, rec.RunID)
 		d.emit(ctx, core.Event{
 			Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 			Candidate: link.cand, RunID: rec.RunID, Record: rec, Detail: detail,
@@ -1496,7 +1496,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 		m.rec.EndedAt = d.now()
 
 		if park {
-			d.park(t.Name, m.cand, outcome, detail)
+			d.park(t.Name, m.cand, outcome, detail, m.rec.RunID)
 		}
 	}
 
@@ -1624,7 +1624,7 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 		Outcome: outcome, Detail: detail,
 		StartedAt: now, EndedAt: now,
 	}
-	d.park(t.Name, cand, outcome, detail)
+	d.park(t.Name, cand, outcome, detail, runID)
 	if rootSpan != nil {
 		obs.EndRun(rootSpan, rec)
 	}
@@ -1646,7 +1646,7 @@ func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candi
 		Outcome: outcome, Detail: detail,
 		StartedAt: now, EndedAt: now,
 	}
-	d.park(t.Name, cand, outcome, detail)
+	d.park(t.Name, cand, outcome, detail, runID)
 	if rootSpan != nil {
 		obs.EndRun(rootSpan, rec)
 	}
@@ -1667,18 +1667,29 @@ type parkEntry struct {
 	Outcome core.Outcome
 	Reason  string
 	At      time.Time
+
+	// RunID is the terminal RunRecord that parked this (ref, SHA) — the
+	// dashboard's /t/{target} Parked table links its outcome tag to
+	// /run/{RunID} when this is non-empty (docs/plans this phase's "parked
+	// entries must link to the run that parked them"). Every live call site
+	// (finishRun, rejectPreMerge, rejectRun, rejectBatch, the two
+	// command.go cancel paths) has its own record's RunID in scope by
+	// construction; only a boot-time seed (seedParksOnce, from history
+	// predating this field) can leave it "".
+	RunID string
 }
 
-// park marks cand's (ref, SHA) as parked for target, recording outcome and
-// detail as the park's reason: it will not be re-tested until the ref's SHA
-// changes, the ref vanishes, or a CommandRetry clears it (§9.1).
-func (d *Daemon) park(target string, cand core.Candidate, outcome core.Outcome, detail string) {
+// park marks cand's (ref, SHA) as parked for target, recording outcome,
+// detail, and the RunID of the run that decided it as the park's reason: it
+// will not be re-tested until the ref's SHA changes, the ref vanishes, or a
+// CommandRetry clears it (§9.1).
+func (d *Daemon) park(target string, cand core.Candidate, outcome core.Outcome, detail, runID string) {
 	m := d.done[target]
 	if m == nil {
 		m = make(map[string]parkEntry)
 		d.done[target] = m
 	}
-	m[cand.Ref] = parkEntry{SHA: cand.SHA, Outcome: outcome, Reason: detail, At: d.now()}
+	m[cand.Ref] = parkEntry{SHA: cand.SHA, Outcome: outcome, Reason: detail, At: d.now(), RunID: runID}
 }
 
 func eventKindForOutcome(o core.Outcome) core.EventKind {

@@ -94,6 +94,12 @@ type ParkedEntry struct {
 	Outcome   core.Outcome // why it parked (rejected/conflict/error)
 	Reason    string       // RunRecord.Detail at park time
 	At        time.Time
+
+	// RunID is the terminal run that parked this candidate — copied
+	// straight from parkEntry.RunID — or "" when none is known (a boot
+	// seed predating that field). The dashboard's /t/{target} Parked table
+	// links its outcome tag to /run/{RunID} only when this is non-empty.
+	RunID string
 }
 
 // buildSnapshot assembles a fresh Snapshot from the reconcile goroutine's
@@ -186,7 +192,7 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 			// synthesize a Candidate with a stale Target/User/Topic split.
 			cand = core.Candidate{Ref: ref, Target: t.Name, SHA: entry.SHA}
 		}
-		ts.Parked = append(ts.Parked, ParkedEntry{Candidate: cand, Outcome: entry.Outcome, Reason: entry.Reason, At: entry.At})
+		ts.Parked = append(ts.Parked, ParkedEntry{Candidate: cand, Outcome: entry.Outcome, Reason: entry.Reason, At: entry.At, RunID: entry.RunID})
 	}
 
 	return ts
