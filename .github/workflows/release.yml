@@ -33,10 +33,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
+      # goreleaser is a go.mod tool dependency, so `go tool` resolves the
+      # exact pinned version — CI and `make release-snapshot` can never
+      # drift apart the way an action-managed binary could.
+      - run: go tool goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

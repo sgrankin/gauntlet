@@ -36,7 +36,8 @@ clean:
 
 # Local dry-run of the tagged-release pipeline (.goreleaser.yaml): builds
 # every target archive and the ghcr images without publishing anything or
-# needing a real tag/git history. Requires the `goreleaser` binary on PATH
-# (not installed by this Makefile). See docs/deploy.md "Releases".
+# needing a real tag/git history. goreleaser is pinned as a go.mod tool
+# dependency (`tool` directive), so `go tool` runs the exact version the
+# module records — same binary CI uses. See docs/deploy.md "Releases".
 release-snapshot:
-	goreleaser release --snapshot --clean --skip=publish,docker
+	go tool goreleaser release --snapshot --clean --skip=publish,docker

@@ -9,6 +9,13 @@ daemon config, systemd unit, GitHub/Slack setup, and first-run verification,
 see [deploy-linux.md](deploy-linux.md) — this runbook references its phases
 rather than repeating them.
 
+**Maintainability-averse?** This runbook is a hand-provisioned pet VM —
+`az` CLI commands (or the Terraform variant below) get it running, but
+day-2 upgrades still involve SSH and a script. If you'd rather never SSH in
+to fix drift and have every upgrade be a `terraform apply`, see
+[azure-vm-immutable.md](azure-vm-immutable.md) instead — same data-disk/
+recovery philosophy, but the VM itself is replaced, never patched.
+
 **Prerequisites**
 
 - `az` CLI logged in (`az login`) with a subscription selected
@@ -232,6 +239,8 @@ resource "azurerm_network_security_group" "gauntlet" {
   }
   # No rule for 8080 (or any other port) here, deliberately — reach the
   # dashboard over an SSH tunnel or tailnet, never a public inbound rule.
+  # See "Optional: expose the dashboard over Tailscale" below for the
+  # tailnet path.
 }
 
 resource "azurerm_public_ip" "gauntlet" {
@@ -338,6 +347,61 @@ Two things this HCL does **not** do, on purpose:
   drift** on the next `terraform plan`. No `ignore_changes` block is
   needed for that reason; keep the timer-driven automation exactly as
   written in Phase 4 regardless of which provisioning path created the VM.
+
+## Optional: expose the dashboard over Tailscale
+
+The NSG above opens SSH only — no inbound rule for 8080, on either the az
+CLI or Terraform path. If you want the dashboard/API/MCP reachable from
+somewhere other than an SSH tunnel (a laptop, a teammate's box), put it on
+your tailnet instead of opening a port: `tailscale serve` proxies a
+localhost port onto the tailnet over HTTPS with a MagicDNS name, so the
+daemon config never changes — `dashboard "localhost:8080"` stays exactly
+as every other phase in this doc has it, no rebind to `0.0.0.0`.
+
+1. Install and join, using a **pre-authorized, tagged** auth key (generate
+   one in the Tailscale admin console, scoped to e.g. `tag:ci`) rather than
+   an interactive login — a tagged key lets this unattended builder join
+   headless, and tagged nodes don't expire the way a personal-account
+   node's key would out from under it:
+
+   ```sh
+   curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
+     | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+   curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list \
+     | sudo tee /etc/apt/sources.list.d/tailscale.list
+   sudo apt-get update && sudo apt-get install -y tailscale
+   sudo tailscale up --auth-key=<TAILSCALE_AUTH_KEY>
+   ```
+
+2. Proxy the dashboard's existing localhost port onto the tailnet:
+
+   ```sh
+   sudo tailscale serve --bg 8080
+   ```
+
+3. **VERIFY** — find the tailnet URL and confirm it answers:
+
+   ```sh
+   tailscale serve status
+   # expect: an https://<VM_NAME>.<TAILNET>.ts.net URL mapped to 127.0.0.1:8080
+   curl -s https://<VM_NAME>.<TAILNET>.ts.net/api/v1/status | jq '.targets | length'
+   # expect: a number > 0, over HTTPS, from any device on the tailnet — no SSH tunnel needed
+   ```
+
+**Trust note:** anyone on the tailnet can now reach the dashboard **and**
+its mutating endpoints (`retry`/`cancel`) and `/mcp` — the dashboard/API/MCP
+still have no authentication of their own (same trust model as
+[deploy.md's exposure guidance](../deploy.md#dashboard--api--mcp-exposure-guidance));
+Tailscale is the access boundary here, not an additional auth layer on top
+of gauntlet itself. Scope tailnet ACLs accordingly if not everyone on it
+should reach this.
+
+This composes with Phase 4's park/wake automation with no extra work:
+`tailscaled` reconnects automatically on `tailscale up`'s next boot after a
+wake, and the `tailscale serve` config persists across a deallocate/start
+cycle (it's stored on the VM's own disk, not re-run at every boot) — no
+part of this section needs to be redone after a park/wake, only after the
+recovery drill's from-scratch VM recreate.
 
 ## Phase 4 — Park/wake automation (cost control)
 

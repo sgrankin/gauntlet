@@ -363,9 +363,13 @@ gauntlet cancel -url http://localhost:8080 -target main -ref refs/heads/for/main
 | Path | What | Safe to delete? |
 | --- | --- | --- |
 | `repos/` | bare clone(s) of the remote | Yes — re-clones on next start (slower once) |
-| `trials/` | scratch exports of in-flight trial merges | Yes, and the daemon does this itself on every start |
-| `logs/<runID>/*.log.zst` | full per-check/hook logs | Yes — pruned automatically after `log-retention` (default 30d) |
-| `history.db` | SQLite run/check history for the dashboard | Yes — disposable telemetry; losing it loses history, not correctness |
+| `trials/` | scratch exports of in-flight trial merges | Yes — ephemeral, the daemon sweeps and recreates it on every start regardless |
+| `scratch/` | executor scratch dirs (local/container check result files) | Yes — ephemeral, swept and recreated on every start, same as `trials/` |
+| `logs/<runID>/*.log.zst` | full per-check/hook logs | Yes, but you lose them — pruned automatically after `log-retention` (default 30d); deleting early just gives that window up sooner |
+| `hooks/` | scratch exports for whatever post-land hook is currently running | Yes — ephemeral, swept and recreated on every start, same as `trials/` |
+| `services/` | shared-services pool records (spec snapshot, endpoint, last-used) | Yes — efficiency hints only; deleting them just costs a colder pool next boot (instances get re-adopted or recreated), never a wrong one |
+| `gauntlet.lock` | the flock enforcing one daemon per `-state` dir | **Never delete while a daemon is running against this `-state`** — harmless if no daemon is running (recreated on next start) |
+| `history.db` | SQLite run/check/queue-depth history for the dashboard, and what boot-time park seeding reads from | The one file actually worth backing up — deleting it loses all run history, and parks re-derive as empty on the next restart (costs one re-test per still-parked ref, never a correctness gap) |
 
 **Two daemons on one state dir refuse to start** — this is an intentional
 flock, not a bug. If a restart hangs on "already running", check for a
