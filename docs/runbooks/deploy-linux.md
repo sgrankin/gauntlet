@@ -115,6 +115,12 @@ read that doc for the *why*; this is the *how*, in order.
        image "<CHECK_BUILDER_IMAGE>"   // must contain whatever your check spec's commands need (Go, make, ...)
        cache "gocache"    path="/root/.cache/go-build"
        cache "gomodcache" path="/go/pkg/mod"
+       // `cache` entries are docker NAMED VOLUMES (the name is a volume
+       // name, not a host path) — they live wherever docker's own
+       // data-root is, so they're only as durable as that directory is
+       // (see docs/runbooks/azure-vm.md's/azure-vm-immutable.md's data-root
+       // relocation if your `-state` dir lives on a separate/persistent
+       // disk from docker's default /var/lib/docker, e.g. on Azure).
 
        // OPTIONAL, TRUST-SENSITIVE — only if a check needs the host docker
        // daemon (testcontainers-based suites). Uncomment only if every

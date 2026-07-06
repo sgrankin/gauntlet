@@ -137,6 +137,19 @@ pointing `-state` at the mounted data disk:
 #!/bin/sh
 set -eu
 
+# Docker's data-root MUST move onto the data disk BEFORE docker's first
+# start, or every pulled image and every named cache volume (the
+# executor's `cache "gocache" path="..."` entries — README's Configuration
+# reference) lands on the disposable OS disk instead, and a VM
+# recreate/recovery-drill quietly cold-starts every check again. Writing
+# this before `apt-get install docker-ce` matters: that package's postinst
+# starts dockerd immediately, and once it's created /var/lib/docker on the
+# OS disk once, moving it later is the retrofit dance in "Operations"
+# below, not a one-line config write.
+sudo mkdir -p /mnt/gauntlet-state/docker
+sudo mkdir -p /etc/docker
+echo '{"data-root": "/mnt/gauntlet-state/docker"}' | sudo tee /etc/docker/daemon.json
+
 # Docker engine from docker's own apt repo (not Ubuntu's, which lags).
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
@@ -173,7 +186,50 @@ ExecStart=/usr/local/bin/gauntlet -config /etc/gauntlet/gauntlet.kdl -state /mnt
 
 **VERIFY** — run deploy-linux.md's Phase 5 VERIFY (`systemctl is-active
 gauntlet`, `journalctl -u gauntlet -n 30`), then the full
-[verify.md](verify.md) checklist once, end to end.
+[verify.md](verify.md) checklist once, end to end. Also confirm docker
+actually took the relocated data-root before you rely on it surviving a
+recreate:
+
+```sh
+docker info --format '{{.DockerRootDir}}'
+# expect: /mnt/gauntlet-state/docker, not /var/lib/docker
+```
+
+**What this preserves across a VM recreate, and what it doesn't.** Pulled
+images, the executor's named `cache` volumes (`gocache`/`gomodcache` in
+deploy-linux.md's example — bare volume names live inside docker's
+data-root, so the move above covers them with no config change needed),
+and buildkit's own cache all live under `/mnt/gauntlet-state/docker` now,
+so they survive a recreate intact — no cold re-pull, no cold module cache.
+**Warm shared-service instances (`services` block) do not carry over the
+same way**, even though their containers technically still exist on disk:
+a VM recreate is a fresh boot, so every previously-running container comes
+back *stopped*, and gauntlet's own boot-time adoption sweep destroys any
+service instance that isn't actively running (services.md §3 "Adoption at
+boot, not reaping" — probe-alive fails for a stopped container, so it's
+treated as unmatched and torn down) rather than restarting it. The next run
+needing that service recreates it fresh — fast, because the *image* is
+still warm, just not instant the way a merely-park/waked VM (which never
+stops its containers) would be. Only a VM **recreate** (this phase, or the
+recovery drill) goes through this; ordinary park/wake deallocation leaves
+containers exactly as they were.
+
+**Operations note — retrofitting an already-provisioned VM** that installed
+docker before this data-root relocation existed:
+
+```sh
+sudo systemctl stop docker
+# Either move the existing data (keeps current images/caches, needs enough
+# free space on the data disk for the copy):
+sudo mkdir -p /mnt/gauntlet-state/docker
+sudo rsync -a /var/lib/docker/ /mnt/gauntlet-state/docker/
+# ...or skip the move and accept a one-time cold re-pull/rebuild instead —
+# fine if the box is between busy periods and you'd rather not wait on rsync.
+sudo mkdir -p /etc/docker
+echo '{"data-root": "/mnt/gauntlet-state/docker"}' | sudo tee /etc/docker/daemon.json
+sudo systemctl start docker
+docker info --format '{{.DockerRootDir}}'   # VERIFY: /mnt/gauntlet-state/docker
+```
 
 ## Terraform variant (provisioning phases 1–3)
 
@@ -579,11 +635,19 @@ doubt.
    # expect: history.db present (pre-dates this recreate — proves the disk
    # round-tripped), and gauntlet active (systemd started it via
    # first-boot's custom-data / unit install)
+   ssh <ADMIN_USER>@<VM_IP> "docker info --format '{{.DockerRootDir}}' && docker images"
+   # expect: /mnt/gauntlet-state/docker, and your check/service images
+   # already listed with no pull needed — confirms the docker data-root
+   # relocation (Phase 3) survived the recreate along with everything else
+   # on the data disk
    ```
 
    Then run [verify.md](verify.md)'s full checklist — a candidate landing
    end-to-end after a from-scratch VM recreate is the real pass/fail signal
-   for this whole drill, not any individual `az` command's exit code.
+   for this whole drill, not any individual `az` command's exit code. A
+   check run's build step finishing in warm-cache time rather than a cold
+   module download is the practical confirmation that the named `cache`
+   volumes rode along with the images, not just the images themselves.
 
 ## Backup notes
 

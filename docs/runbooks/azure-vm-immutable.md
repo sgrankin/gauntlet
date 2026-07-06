@@ -237,6 +237,28 @@ and the VM being live):
 
 package_update: true
 
+# --- docker's data-root: write BEFORE docker ever starts, not after ---
+#
+# This is the highest-stakes fix in this whole file for the immutable-
+# replace design specifically: every upgrade IS a VM replace (Phase 5), so
+# without this, every upgrade also cold-discards every pulled image and
+# every named cache volume (the executor's `cache "gocache" path="..."`
+# entries) — the durable-data-disk design buys nothing if docker's actual
+# data still lives on the disposable OS disk. `write_files` and
+# `fs_setup`/`mounts` (below) are both early-stage cloud-init modules that
+# complete well before `runcmd` (a later stage — where docker actually gets
+# installed and started, further down) ever runs — so by the time the
+# `docker-ce` package's postinst starts dockerd for the very first time on
+# this VM, /etc/docker/daemon.json already points it at the data disk, AND
+# that disk is already mounted. No stop/move/restart retrofit dance is
+# needed here the way it is for an already-running pet VM (see azure-vm.md's
+# Operations section for that case) — this file only ever runs against a VM
+# that hasn't started docker yet.
+write_files:
+  - path: /etc/docker/daemon.json
+    content: |
+      {"data-root": "/mnt/gauntlet-state/docker"}
+
 # --- format + mount the data disk, WITHOUT reformatting it on every replace ---
 #
 # This is the one part of this file to read twice before trusting it. The
@@ -275,6 +297,12 @@ mounts:
   - [/dev/disk/azure/scsi1/lun0, /mnt/gauntlet-state, ext4, "defaults,nofail", "0", "2"]
 
 runcmd:
+  # Must run after fs_setup/mounts (above) have the data disk live at
+  # /mnt/gauntlet-state — runcmd's own stage runs later than both, so this
+  # is safe, but don't reorder this ahead of docker's install below without
+  # rechecking that the mount is actually up by then.
+  - mkdir -p /mnt/gauntlet-state/docker
+
   # Docker engine from docker's own apt repo (Ubuntu's lags).
   - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg
   - >
@@ -363,7 +391,28 @@ until secrets land)
 ssh <ADMIN_USER>@<VM_IP> 'mount | grep gauntlet-state && systemctl is-enabled gauntlet'
 # expect: /dev/disk/azure/scsi1/lun0 on /mnt/gauntlet-state, and "enabled"
 # (NOT "active" yet — that's expected before Phase 3)
+ssh <ADMIN_USER>@<VM_IP> "docker info --format '{{.DockerRootDir}}'"
+# expect: /mnt/gauntlet-state/docker, not /var/lib/docker — confirms
+# write_files won the ordering race above, on THIS boot, not just in theory
 ```
+
+**What survives the next replace/upgrade, and what doesn't.** Pulled
+images, the executor's named `cache` volumes (deploy-linux.md's
+`gocache`/`gomodcache` example — bare volume names live inside docker's
+data-root, no extra config needed once the move above is in place), and
+buildkit's cache all live under `/mnt/gauntlet-state/docker`, so
+Phase 5's upgrade (a full VM replace) doesn't cold-discard them — this is
+the entire point of moving data-root before docker's first start.
+**Shared-service instances (`services` block) are the one thing this does
+NOT carry over warm across a replace**, even though their containers still
+physically exist in the preserved data-root: a replace is a fresh VM boot,
+so every previously-running service container comes back *stopped*, and
+gauntlet's boot-adoption sweep destroys anything that isn't actively
+running (services.md §3 "Adoption at boot, not reaping" — probe-alive
+fails for a stopped container) rather than restarting it. The next run
+needing that service recreates it — fast, since the *image* survived, just
+not instantly warm the way it would after a mere park/wake deallocation
+(which never stops containers at all, only the VM around them).
 
 ## Phase 3 — First provision + one-time secrets delivery
 
@@ -521,6 +570,21 @@ ssh <ADMIN_USER>@<VM_IP> 'ls /mnt/gauntlet-state/gauntlet.kdl && systemctl is-ac
 # expect: gauntlet.kdl present (pre-dates the replace — proves the disk and
 # its delivered secrets round-tripped), and gauntlet active
 ```
+
+Once there's real history to lose, this drill doubles as confirmation the
+docker data-root move (Phase 2) is actually holding — a from-scratch VM
+should NOT come back with a cold docker:
+
+```sh
+ssh <ADMIN_USER>@<VM_IP> docker images
+# expect: your check-builder/service images already listed, no pull needed
+```
+
+Trigger a check run against this fresh VM and compare its build-step timing
+to a typical warm run (deploy-linux.md's second-run expectation for the
+container executor's caches) — a go-build step finishing in warm-cache time
+rather than a full cold-module-download confirms the named `cache` volumes
+(not just the images) rode along too.
 
 Then run [verify.md](verify.md) end to end, same as azure-vm.md's drill.
 
