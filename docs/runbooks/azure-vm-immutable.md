@@ -149,7 +149,11 @@ resource "azurerm_linux_virtual_machine" "gauntlet" {
   name                   = var.vm_name
   resource_group_name    = azurerm_resource_group.gauntlet.name
   location               = azurerm_resource_group.gauntlet.location
-  size                   = "Standard_D4s_v5"
+  # 8 vCPU / 32 GiB: a heavily parallel `go test` saturates 8 cores before
+  # SQL Server and dockerd take their share; D4s_v5 is the floor, D16s_v5
+  # the next notch if timings show sustained saturation — measure first.
+  size                   = "Standard_D8s_v5"
+  zone                   = "1" # must match the Premium v2 data disk's zone
   admin_username         = var.admin_user
   network_interface_ids  = [azurerm_network_interface.gauntlet.id]
 
@@ -191,9 +195,16 @@ resource "azurerm_managed_disk" "gauntlet_state" {
   name                 = "${var.vm_name}-state"
   location             = azurerm_resource_group.gauntlet.location
   resource_group_name  = azurerm_resource_group.gauntlet.name
-  storage_account_type = "Premium_LRS"
+  # Premium SSD v2: per-GB billing + 3000 IOPS/125 MBps included baseline —
+  # cheaper AND faster than tiered Premium v1 at this size, and it grows
+  # per-GB as build caches accumulate instead of jumping provisioned tiers.
+  # Zonal-only (must match the VM's zone). Tune disk_iops_read_write /
+  # disk_mbps_read_write if checks ever get IO-bound. Fall back to
+  # Premium_LRS if the region/zone lacks v2.
+  storage_account_type = "PremiumV2_LRS"
+  zone                 = "1"
   create_option        = "Empty"
-  disk_size_gb         = 64
+  disk_size_gb         = 512
 
   # The safety net for the whole "replace the VM freely" design — a
   # `terraform destroy` (or an errant plan that would replace this
@@ -208,14 +219,11 @@ resource "azurerm_virtual_machine_data_disk_attachment" "gauntlet_state" {
   managed_disk_id    = azurerm_managed_disk.gauntlet_state.id
   virtual_machine_id = azurerm_linux_virtual_machine.gauntlet.id
   lun                = "0"   # cloud-init's fs_setup below targets this exact LUN via /dev/disk/azure/scsi1/lun0
-  # ReadWrite host caching favors throughput (git objects, docker layers,
-  # build caches — the bulk of this disk). The database-conservative choice
-  # is ReadOnly: a HOST failure can lose write-cached data, and history.db
-  # is the one file here that isn't derivable. Accepted under gauntlet's
-  # state doctrine (parks re-derive from history at boot; a lost tail of
-  # history rows costs bookkeeping, not correctness) — flip to ReadOnly if
-  # that trade reads differently for your deployment.
-  caching = "ReadWrite"
+  # Premium v2 does not support host caching — "None" is the only valid
+  # value (a ReadWrite/ReadOnly request fails at attach). This also moots
+  # the host-write-cache durability question v1 raised for history.db; the
+  # disk's own 3000-IOPS baseline is what serves the git/docker/build bulk.
+  caching = "None"
 }
 ```
 

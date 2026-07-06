@@ -40,19 +40,28 @@ az vm create \
   --resource-group <RESOURCE_GROUP> \
   --name <VM_NAME> \
   --image Ubuntu2404 \
-  --size Standard_D4s_v5 \
+  --size Standard_D8s_v5 \
+  --zone 1 \
   --admin-username <ADMIN_USER> \
   --ssh-key-values ~/.ssh/id_ed25519.pub \
   --custom-data first-boot.sh \
   --public-ip-sku Standard
 ```
 
-- **Sizing:** `Standard_D4s_v5` (4 vCPU / 16 GiB RAM) is the floor for a
-  builder running anything SQL-Server-class in the container executor's
-  `services` block (README's ["Shared services"](../../README.md#shared-services)
-  wants headroom beyond the container's own `memory`/`cpus` ceiling for the
-  host + docker daemon + other checks running concurrently). A plain Go/lint
-  builder with no heavy services can go smaller.
+- **Sizing:** `Standard_D8s_v5` (8 vCPU / 32 GiB RAM) is the recommendation
+  for a builder whose test suite parallelizes aggressively — a heavily
+  parallel `go test` run saturates 8 cores on its own, before SQL Server and
+  the docker daemon take their share (README's
+  ["Shared services"](../../README.md#shared-services) wants headroom beyond
+  the containers' own `memory`/`cpus` ceilings). `D4s_v5` (4/16) is the
+  floor for anything running SQL-Server-class services at all; if wall-clock
+  timings show sustained 8-core saturation, `D16s_v5` is the next notch —
+  measure before paying for it. Ballpark cost (East US PAYG, drifts): D8s
+  ≈ $280/mo always-on, ≈ $84/mo parked outside ~220 work-hours; D4s is half
+  that; storage below is ~$45/mo either way.
+- `--zone 1`: the VM must be **zonal** (any zone, but pinned) because the
+  Premium SSD **v2** data disk below is zonal-only and must live in the same
+  zone as the VM.
 - **No spot instance, on purpose** — spot eviction is exactly the kind of
   infra error `auto-retry-errors` (README's ["Retry
   semantics"](../../README.md#landing-changes), already shipped) exists to
@@ -88,14 +97,25 @@ importantly `history.db` — lives on a **separate** managed disk instead.
 az disk create \
   --resource-group <RESOURCE_GROUP> \
   --name <VM_NAME>-state \
-  --size-gb 64 \
-  --sku Premium_LRS
+  --size-gb 512 \
+  --sku PremiumV2_LRS \
+  --zone 1
 
 az vm disk attach \
   --resource-group <RESOURCE_GROUP> \
   --vm-name <VM_NAME> \
   --name <VM_NAME>-state
 ```
+
+- **Premium SSD v2**, not v1: per-GB billing (≈ $42/mo at 500 GiB vs ≈ $66
+  for a P20) *and* a higher included baseline (3000 IOPS / 125 MBps, tunable
+  upward for money) — the better deal at this size, and it grows per-GB as
+  build caches accumulate instead of jumping provisioned tiers. Two
+  constraints it imposes, both already handled here: it is **zonal-only**
+  (`--zone` must match the VM's) and it does **not support host caching**
+  (attach with default/`None` caching — do not request ReadWrite). If your
+  region/zone lacks v2, fall back to `--sku Premium_LRS` (tiered, host
+  caching allowed).
 
 On the VM, format (first attach only — skip this on a re-attach to an
 existing disk, or you'll destroy its data) and mount by UUID, not device
@@ -331,7 +351,8 @@ resource "azurerm_linux_virtual_machine" "gauntlet" {
   name                   = "<VM_NAME>"
   resource_group_name    = azurerm_resource_group.gauntlet.name
   location               = azurerm_resource_group.gauntlet.location
-  size                   = "Standard_D4s_v5"   # same sizing rationale as Phase 1
+  size                   = "Standard_D8s_v5"   # same sizing rationale as Phase 1
+  zone                   = "1"                 # must match the Premium v2 data disk's zone below
   admin_username         = "<ADMIN_USER>"
   network_interface_ids  = [azurerm_network_interface.gauntlet.id]
 
@@ -373,9 +394,15 @@ resource "azurerm_managed_disk" "gauntlet_state" {
   name                 = "<VM_NAME>-state"
   location             = azurerm_resource_group.gauntlet.location
   resource_group_name  = azurerm_resource_group.gauntlet.name
-  storage_account_type = "Premium_LRS"
+  # Premium SSD v2: per-GB billing + 3000 IOPS/125 MBps included baseline —
+  # cheaper AND faster than tiered Premium v1 at this size, and it grows
+  # per-GB as caches accumulate. Zonal-only (must match the VM's zone);
+  # tune disk_iops_read_write/disk_mbps_read_write here if checks ever get
+  # IO-bound. Fall back to Premium_LRS if the region/zone lacks v2.
+  storage_account_type = "PremiumV2_LRS"
+  zone                 = "1"
   create_option        = "Empty"
-  disk_size_gb         = 64
+  disk_size_gb         = 512
 
   # Belt-and-braces matching the recovery drill's whole premise (further
   # down this doc): a `terraform destroy`, or an errant apply that would
@@ -391,12 +418,11 @@ resource "azurerm_virtual_machine_data_disk_attachment" "gauntlet_state" {
   managed_disk_id    = azurerm_managed_disk.gauntlet_state.id
   virtual_machine_id = azurerm_linux_virtual_machine.gauntlet.id
   lun                = "0"
-  # ReadWrite host caching favors the disk's bulk workload (git objects,
-  # docker layers, build caches); the database-conservative choice is
-  # ReadOnly, since a HOST failure can lose write-cached data and
-  # history.db is the one non-derivable file. Accepted trade — see the
-  # immutable runbook's attachment block for the full reasoning.
-  caching = "ReadWrite"
+  # Premium v2 does not support host caching — "None" is the only valid
+  # value (a ReadWrite/ReadOnly request fails at attach). The write-cache
+  # durability tradeoff that host caching raised for history.db under
+  # Premium v1 is therefore moot on v2.
+  caching = "None"
 }
 ```
 
@@ -620,12 +646,16 @@ doubt.
      --resource-group <RESOURCE_GROUP> \
      --name <VM_NAME> \
      --image Ubuntu2404 \
-     --size Standard_D4s_v5 \
+     --size Standard_D8s_v5 \
+     --zone 1 \
      --admin-username <ADMIN_USER> \
      --ssh-key-values ~/.ssh/id_ed25519.pub \
      --custom-data first-boot.sh \
      --public-ip-sku Standard
    ```
+
+   (`--zone` must match the data disk's zone — a Premium v2 disk can only
+   attach to a VM in its own zone.)
 
 4. **Reattach the data disk** (Phase 2's `az vm disk attach`, skipping the
    `mkfs.ext4` step — the filesystem and its data already exist, only the
