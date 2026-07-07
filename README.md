@@ -106,11 +106,18 @@ push.
 **`gauntlet land`** does it for you:
 
 ```sh
-gauntlet land -target main -topic my-feature
+gauntlet land                                  # infer target and topic
+gauntlet land -target main -topic my-feature   # or spell them out
 ```
 
-- `-target` (required) — the target name from the daemon's `gauntlet.kdl`.
-- `-topic` — defaults to the current branch name.
+- `-target` — the target name from the daemon's `gauntlet.kdl`. Defaults to
+  the remote's default branch, read from `refs/remotes/<remote>/HEAD` (set
+  once by clone, or by `git remote set-head origin --auto`).
+- `-topic` — defaults to the current branch name; on a detached HEAD (the
+  normal state of a colocated jj repo, which exports bookmarks as git
+  branches), to the one local branch pointing at HEAD. The target's own
+  branch never counts — sitting on the target tip is an error, not a
+  candidate.
 - `-remote` — defaults to `origin`.
 
 It derives `<user>` from `git config user.name` (falling back to `$USER`),
@@ -138,6 +145,10 @@ jj git push -b for/main/$USER/my-feature
 
 (`-r @` if you're landing the change you just described; `-r @-` if you've
 already moved on to a new empty commit on top of it.)
+
+Or skip the `for/` spelling entirely: in a colocated repo, a bookmark on the
+change you're landing (`jj bookmark set my-feature -r @-`) is a git branch
+at HEAD, so a bare `gauntlet land` picks it up as the topic.
 
 **Author cancellation** is ref deletion — nothing more:
 
