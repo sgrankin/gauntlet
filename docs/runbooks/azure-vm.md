@@ -51,8 +51,8 @@ az vm create \
 - **Sizing:** `Standard_D8s_v5` (8 vCPU / 32 GiB RAM) is the recommendation
   for a builder whose test suite parallelizes aggressively — a heavily
   parallel `go test` run saturates 8 cores on its own, before SQL Server and
-  the docker daemon take their share (README's
-  ["Shared services"](../../README.md#shared-services) wants headroom beyond
+  the docker daemon take their share (checks.md's
+  ["Shared services"](../checks.md#shared-services) wants headroom beyond
   the containers' own `memory`/`cpus` ceilings). `D4s_v5` (4/16) is the
   floor for anything running SQL-Server-class services at all; if wall-clock
   timings show sustained 8-core saturation, `D16s_v5` is the next notch —
@@ -159,8 +159,8 @@ set -eu
 
 # Docker's data-root MUST move onto the data disk BEFORE docker's first
 # start, or every pulled image and every named cache volume (the
-# executor's `cache "gocache" path="..."` entries — README's Configuration
-# reference) lands on the disposable OS disk instead, and a VM
+# executor's `cache "gocache" path="..."` entries — docs/config.md)
+# lands on the disposable OS disk instead, and a VM
 # recreate/recovery-drill quietly cold-starts every check again. Writing
 # this before `apt-get install docker-ce` matters: that package's postinst
 # starts dockerd immediately, and once it's created /var/lib/docker on the

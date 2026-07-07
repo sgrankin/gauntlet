@@ -3,13 +3,14 @@
 This is the production guide: two deployment topologies, the git/auth
 requirements both share, and the exposure/backup notes that apply regardless
 of which one you pick. For what the daemon does and how to configure it, see
-[README.md](../README.md) and [`gauntlet.kdl`](../gauntlet.kdl); for the
+[README.md](../README.md), [config.md](config.md), and
+[`gauntlet.kdl`](../gauntlet.kdl); for the
 design rationale behind "refs are the queue" and "SQLite is disposable
 history", see [DESIGN.md](../DESIGN.md). See [docs/runbooks/](runbooks/) for
 step-shaped runbooks distilled from this guide.
 
 Scope note: this doc covers packaging and operating the daemon itself.
-Deployments run *as* post-land hooks (README's ["Hooks"](../README.md#hooks)
+Deployments run *as* post-land hooks (config.md's ["Hooks"](config.md#hooks)
 section) — ordered commands the daemon runs against the landed tree, via
 the same executor that runs checks — but gauntlet itself never grows a CD
 system past that (DESIGN.md's decision ledger, "Deployments as post-land
@@ -21,8 +22,8 @@ reverse proxy/CD system for those.
 
 If a target's deploy hook runs slower than that target merges (a builder
 box running `make deploy` against a five-minute deploy while candidates
-land every thirty seconds is the common case), see README's ["Backlog
-policies"](../README.md#backlog-policies) (`hooks-policy`): the default
+land every thirty seconds is the common case), see config.md's ["Backlog
+policies"](config.md#backlog-policies) (`hooks-policy`): the default
 (`queue`) runs every landing's deploy, back to back, however stale each
 one is by the time it starts; `coalesce`/`cancel` let the backlog collapse
 to "deploy the latest successful one next" instead.
@@ -73,7 +74,7 @@ containerize (topology (b), below).
    configured. To read one directly off disk, `zstd -d` it. Unlike
    `trials/`, `logs/` is meant to survive restarts: it's aged out by the
    `log-retention` config node instead (default 30 days, `"720h"`; see
-   README's "Configuration reference"), swept once at startup and then
+   [config.md](config.md)), swept once at startup and then
    hourly for the rest of the process's lifetime. None of this needs
    backing up; see "Backups" below.
 
@@ -137,7 +138,7 @@ containerize (topology (b), below).
    ```
 
 5. **Logs**: the daemon logs to stderr (the always-on log channel, see
-   README's "Configuration reference"); under systemd that's journald:
+   [config.md](config.md)); under systemd that's journald:
 
    ```sh
    journalctl -u gauntlet -f              # follow
@@ -174,13 +175,13 @@ itself never needs a local toolchain.
 only `git`, `openssh-client`, `ca-certificates`, and `tzdata` — no Go, no
 `make`, nothing else. If your check spec's `local` executor commands need a
 toolchain, this image cannot run them; either point the `executor
-"container"` config at a separate image that has what checks need (docs
-"Container executor" section, README), or don't containerize the daemon
-itself — use topology (a).
+"container"` config at a separate image that has what checks need (the
+["Container executor" guide](setup.md#container-executor)), or don't
+containerize the daemon itself — use topology (a).
 
 If checks need the host docker socket (testcontainers-based suites), that's
-a separate `mount` entry on `executor "container"` — see README's "Container
-executor" section for the config and, more importantly, the trust
+a separate `mount` entry on `executor "container"` — see the ["Container
+executor" guide](setup.md#container-executor) for the config and, more importantly, the trust
 implication: mounting the socket hands every check full control of whatever
 docker daemon it points at.
 
@@ -314,8 +315,8 @@ the same as to executor credentials.
 ## GitHub fine-grained PAT: minimal permissions
 
 If you enable the GitHub commit-status channel (`github "<owner>/<repo>"`
-in `gauntlet.kdl`; README's "Configuration reference" and "GitHub commit
-status" setup guide), create a **fine-grained** PAT scoped to that one
+in `gauntlet.kdl`; [config.md](config.md) and the ["GitHub commit
+status" guide](setup.md#github-commit-status)), create a **fine-grained** PAT scoped to that one
 repository with exactly:
 
 - **Commit statuses: Read and write** — this is the only permission the
@@ -337,8 +338,8 @@ workflows, or touches repo settings.
 
 ## Slack token summary
 
-If you enable the Slack channel, see README's ["Slack app" setup
-guide](../README.md#slack-app) for the manifest (socket mode, bot scopes
+If you enable the Slack channel, see the ["Slack app" setup
+guide](setup.md#slack-app) for the manifest (socket mode, bot scopes
 `chat:write`, `reactions:read`, `reactions:write`, and `channels:history`,
 `connections:write` app-level scope, `reaction_added` event subscription)
 and the two resulting tokens (`SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN`)
@@ -358,7 +359,7 @@ does nothing. For a **private** posting channel, that fetch needs
 The dashboard, its JSON API (`/api/v1/*`), and the MCP server (`/mcp`) all
 share one bind/port (`dashboard "<bind>"` in config) and have **no
 authentication of their own** — this is a deliberate scope boundary
-(DESIGN.md, README's "Trust model" notes), not an oversight.
+(DESIGN.md, [api.md](api.md)'s "Trust model" notes), not an oversight.
 
 - **Bind to localhost** (`dashboard "localhost:8080"`, the example in
   `gauntlet.kdl`) unless you have your own access control in front.

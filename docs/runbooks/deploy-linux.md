@@ -202,7 +202,7 @@ check "test" {
 }
 ```
 
-See [README.md](../../README.md#configuration-reference) for the full
+See [checks.md](../checks.md) for the full
 check-spec grammar (`service`/`needs`, multi-command checks, etc.) — one
 minimal check is enough to verify the pipeline end-to-end before adding more.
 
@@ -387,5 +387,5 @@ chain link out from under an in-flight run. A plain `git gc` (default grace
 period) is always safe.
 
 See [docs/deploy.md](../deploy.md) for the full production guide this
-runbook distills, and [README.md](../../README.md) for the complete
+runbook distills, and [docs/config.md](../config.md) for the complete
 configuration reference.
