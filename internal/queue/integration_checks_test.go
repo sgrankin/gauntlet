@@ -52,16 +52,17 @@ func TestIntegration_SkippedCheck(t *testing.T) {
 	}
 }
 
-// TestIntegration_CheckEnvExported is §5's "Check env exported" row: the
-// four SHA/REF env vars LocalExecutor exports must match the daemon's own
-// bookkeeping. BaseSHA and Ref are known before the candidate is even
-// pushed (base is whatever "main" already is; Ref is a name we choose), so
-// the check script asserts those directly and fails the check if either is
-// wrong. CandidateSHA and MergeSHA can't be baked into the very script
-// whose content determines those hashes (the same hash-circularity
-// docs/plans/phase1.md §9.4 hit for run IDs), so the script only reports
-// them and the test compares against the RunRecord's own authoritative
-// fields — still a real assertion, just performed in Go instead of shell.
+// TestIntegration_CheckEnvExported proves the four SHA/REF env vars
+// LocalExecutor exports must match the daemon's own bookkeeping. BaseSHA
+// and Ref are known before the candidate is even pushed (base is whatever
+// "main" already is; Ref is a name we choose), so the check script asserts
+// those directly and fails the check if either is wrong. CandidateSHA and
+// MergeSHA can't be baked into the very script whose content determines
+// those hashes (the same hash-circularity a run ID minted from the merge
+// commit OID would hit — see docs/design/core.md, "Run identity"), so the
+// script only reports them and the test compares against the RunRecord's
+// own authoritative fields — still a real assertion, just performed in Go
+// instead of shell.
 func TestIntegration_CheckEnvExported(t *testing.T) {
 	h := newIntegrationHarness(t, nil, executor.LocalExecutor{})
 	remote := h.remote

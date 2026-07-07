@@ -90,7 +90,7 @@ type Channel interface {
 	// loop.
 	Emit(ctx context.Context, ev Event) error
 
-	// Commands yields inbound Command values. The phase-1 LogChannel
-	// implementation never yields on this channel.
+	// Commands yields inbound Command values. The LogChannel implementation
+	// never yields on this channel.
 	Commands() <-chan Command
 }

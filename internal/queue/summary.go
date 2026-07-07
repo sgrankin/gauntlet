@@ -8,17 +8,16 @@ import (
 )
 
 // maxConcurrentMergeBodies bounds how many Config.MergeBody calls
-// precomputeMergeBodies runs at once (S6, phase-6 audit synthesis):
-// batch mode used to call MergeBody once per chained member, serially,
-// inside startBatchRun's chain loop, so a batch of N blocked the single
-// reconcile goroutine for up to N*cfg.Summarize.Timeout. Fanning the calls
-// out — still each individually best-effort per Config.MergeBody's own
-// contract — bounds wall clock to roughly one timeout regardless of N. The
-// cap keeps a large batch from opening dozens of simultaneous Messages API
-// calls; hand-rolled with a semaphore channel + sync.WaitGroup rather than
-// golang.org/x/sync/errgroup, which isn't a go.mod dependency of this
-// module (only pulled in transitively) and this phase's ground rules don't
-// permit adding one for this.
+// precomputeMergeBodies runs at once: calling MergeBody once per chained
+// member, serially, inside startBatchRun's chain loop would block the
+// single reconcile goroutine for up to N*cfg.Summarize.Timeout on a batch
+// of N. Fanning the calls out — still each individually best-effort per
+// Config.MergeBody's own contract — bounds wall clock to roughly one
+// timeout regardless of N. The cap keeps a large batch from opening dozens
+// of simultaneous Messages API calls; hand-rolled with a semaphore channel
+// + sync.WaitGroup rather than golang.org/x/sync/errgroup, which isn't a
+// go.mod dependency of this module (only pulled in transitively) and isn't
+// worth adding for this alone.
 const maxConcurrentMergeBodies = 4
 
 // mergeBodyRequest is one candidate to summarize, alongside the base OID
@@ -37,10 +36,10 @@ type mergeBodyRequest struct {
 // buildChainLinkPrecomputed's lookup on a nil map degrades to "" per key,
 // identical to MergeBody's own best-effort empty-string contract.
 //
-// N2 (phase-6 B-track review): results is keyed by SHA, not by ref, so two
-// distinct refs in the same batch that happen to point at the same commit
-// share one entry — harmless only because MergeBody's output is (and must
-// stay) a pure function of base..SHA, never of cand.Ref/Topic.
+// results is keyed by SHA, not by ref, so two distinct refs in the same
+// batch that happen to point at the same commit share one entry — harmless
+// only because MergeBody's output is (and must stay) a pure function of
+// base..SHA, never of cand.Ref/Topic.
 //
 // Every req in a batch chain is deliberately summarized against the SAME
 // base (startBatchRun passes the batch's pre-chain target tip for every

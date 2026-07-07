@@ -1,8 +1,8 @@
 // `gauntlet land` is client-side porcelain: it pushes the current HEAD to a
-// candidate ref (the core.Candidate grammar, docs/plans/phase1.md §9.3)
+// candidate ref (the core.Candidate grammar)
 // "for/<target>/<user>/<topic>". It does no queue logic of its own — the
 // daemon does the actual trial-merge/test/land — it just saves typing the
-// refspec by hand. See docs/plans/phase23.md §6 (chunk D8).
+// refspec by hand.
 package main
 
 import (
@@ -51,7 +51,7 @@ func runLand(args []string) error {
 }
 
 // landRefspec builds the "git push <remote> <refspec>" destination for a
-// candidate, per the ref grammar in docs/plans/phase1.md §9.3.
+// candidate, matching core.Candidate's ref grammar.
 func landRefspec(target, user, topic string) string {
 	return fmt.Sprintf("HEAD:refs/heads/for/%s/%s/%s", target, user, topic)
 }

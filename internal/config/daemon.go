@@ -1,8 +1,8 @@
 // Package config parses gauntlet's two KDL config files into plain structs:
 // the admin-written daemon config and the repo-side check spec. This is the
-// only package that touches KDL, so the config language stays swappable
-// (docs/plans/phase1.md §9.8) and callers depend on the structs and
-// LoadDaemon/ParseChecks signatures, never on kdl-go directly.
+// only package that touches KDL, so the config language stays swappable and
+// callers depend on the structs and LoadDaemon/ParseChecks signatures, never
+// on kdl-go directly.
 //
 // kdl-go's unmarshaler has thin validation (no required-field or
 // non-negative-value enforcement), so every exported load function here runs
@@ -30,9 +30,8 @@ const (
 	defaultCheckSpec = ".gauntlet.kdl"
 )
 
-// Defaults for the phase-2/3 optional sections (docs/plans/phase23.md §3);
-// applied only when the section is enabled (its required key non-empty) and
-// the defaulted field is unset.
+// Defaults for the optional sections below; applied only when the section
+// is enabled (its required key non-empty) and the defaulted field is unset.
 const (
 	defaultGitHubTokenEnv = "GITHUB_TOKEN"
 	defaultGitHubAPIURL   = "https://api.github.com"
@@ -77,44 +76,43 @@ const (
 	defaultSummarizeTimeout = 5 * time.Second
 
 	// defaultMaxBatch, defaultWindow, and defaultOnBatchRed are the
-	// phase-5 per-target queue-mode defaults (docs/plans/phase5.md §4.1),
-	// applied only for their own mode (batch/batch/batch respectively;
-	// Window/speculate below), same "only default within the relevant
-	// section" pattern as defaultHooksPolicy above.
+	// per-target queue-mode defaults, applied only for their own mode
+	// (batch/batch/batch respectively; Window/speculate below), same
+	// "only default within the relevant section" pattern as
+	// defaultHooksPolicy above.
 	defaultMaxBatch    = 8
 	defaultOnBatchRed  = "serial"
 	defaultWindow      = 4
-	maxAllowedMaxBatch = 64 // sane safety valve, not mandated by phase5.md §4 — see MaxBatch's field doc
-	maxAllowedWindow   = 32 // sane safety valve, not mandated by phase5.md §4 — see Window's field doc
+	maxAllowedMaxBatch = 64 // sane safety valve, not a hard requirement — see MaxBatch's field doc
+	maxAllowedWindow   = 32 // sane safety valve, not a hard requirement — see Window's field doc
 
 	// defaultDepthRetention is how long queue_depth samples are kept before
-	// the depth sampler prunes them (docs/plans phase23 E1). Runs/checks
-	// have no retention bound — this applies to the depth series only.
+	// the depth sampler prunes them. Runs/checks have no retention bound —
+	// this applies to the depth series only.
 	defaultDepthRetention = 14 * 24 * time.Hour
 
 	// defaultLogRetention is how long full per-check log directories
 	// (Config.LogDir/<runID>/, DESIGN.md "Full per-check log files") are
 	// kept before cmd/gauntlet's prune sweep deletes them — 30 days.
 	// Unlike depth-retention, this applies unconditionally: cmd/gauntlet
-	// always wires Config.LogDir (chunk F-b), so this default always
-	// matters, not only when some optional section is enabled.
+	// always wires Config.LogDir, so this default always matters, not only
+	// when some optional section is enabled.
 	defaultLogRetention = 30 * 24 * time.Hour
 
 	// defaultReadyTimeout and defaultIdleTTL are Service's per-field
-	// defaults (docs/plans/services-impl.md §2.4), applied by
-	// checks.go's applyServiceDefaults before a Service is ever hashed via
-	// servicekey.go's ServiceKey — see that function's doc for why the
-	// ordering matters. defaultMaxInstances is the Services daemon block's
-	// default hard count cap (§2.3), applied only when the block is enabled
-	// (len(Services.Allow) > 0).
+	// defaults, applied by checks.go's applyServiceDefaults before a
+	// Service is ever hashed via servicekey.go's ServiceKey — see that
+	// function's doc for why the ordering matters. defaultMaxInstances is
+	// the Services daemon block's default hard count cap, applied only
+	// when the block is enabled (len(Services.Allow) > 0).
 	defaultReadyTimeout = 60 * time.Second
 	defaultIdleTTL      = 30 * time.Minute
 	defaultMaxInstances = 8
 
 	// defaultServicesRuntime is the daemon services block's default
-	// container runtime (docs/plans/services-impl.md §Amendments A3),
-	// applied only when the executor is "local" — see Services.Runtime's
-	// field doc for why "container" executor kind is never defaulted here.
+	// container runtime, applied only when the executor is "local" — see
+	// Services.Runtime's field doc for why "container" executor kind is
+	// never defaulted here.
 	defaultServicesRuntime = "docker"
 )
 
@@ -145,11 +143,11 @@ var validSummarizeEfforts = map[string]bool{
 	"max":    true,
 }
 
-// Daemon is the admin-written daemon config (docs/plans/phase1.md §4): one
-// remote, the reconcile cadence, the committer identity used for merge
-// commits, the merge-message template, and the target branches to
-// reconcile. The phase-2/3 sections (docs/plans/phase23.md §3) are all
-// optional value structs (not pointers): kdl-go leaves a struct-typed field
+// Daemon is the admin-written daemon config: one remote, the reconcile
+// cadence, the committer identity used for merge commits, the merge-message
+// template, and the target branches to reconcile. The optional sections
+// below are all optional value structs (not pointers): kdl-go leaves a
+// struct-typed field
 // at its zero value when the corresponding node is absent from the document
 // (confirmed against kdl-go's unmarshalNodesToStruct, which only visits
 // nodes actually present), so "section present" is encoded as "its required
@@ -170,10 +168,10 @@ type Daemon struct {
 	// (30 days) rather than only defaulting when some section is "enabled".
 	LogRetention time.Duration `kdl:"log-retention,format:units"`
 
-	// AutoRetryErrors gates the phase-B auto-retry-once amendment (DESIGN.md
-	// decision ledger, "Auto-retry once on infra-error parks";
-	// docs/plans/scale.md §5): an OutcomeError park — executor unreachable,
-	// service-ensure failure, a service dying mid-run; never a red verdict,
+	// AutoRetryErrors gates the auto-retry-once behavior (DESIGN.md decision
+	// ledger, "Auto-retry once on infra-error parks"): an OutcomeError
+	// park — executor unreachable, service-ensure failure, a service dying
+	// mid-run; never a red verdict,
 	// never a trial conflict — is automatically cleared and re-queued
 	// exactly once per (ref, SHA), through the same machinery an operator's
 	// Slack :recycle:/API/CLI retry uses (internal/queue's
@@ -193,7 +191,7 @@ type Daemon struct {
 	Dashboard Dashboard `kdl:"dashboard"` // Bind=="" ⇒ disabled
 	GitHub    GitHub    `kdl:"github"`    // Repo=="" ⇒ disabled
 	Slack     Slack     `kdl:"slack"`     // Channel=="" ⇒ disabled
-	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (phase-1 default)
+	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (the default)
 	Executor  Executor  `kdl:"executor"`  // Kind=="" ⇒ "local"
 	Services  Services  `kdl:"services"`  // len(Allow)==0 ⇒ disabled
 
@@ -209,31 +207,29 @@ type Daemon struct {
 	Summarize *Summarize `kdl:"summarize"`
 }
 
-// History configures the optional SQLite run-history store
-// (docs/plans/phase23.md §4.1). Path=="" disables it.
+// History configures the optional SQLite run-history store. Path=="" disables
+// it.
 type History struct {
 	Path           string        `kdl:",arg"`
 	SampleEvery    time.Duration `kdl:"sample-every,format:units"`    // default = Poll
 	DepthRetention time.Duration `kdl:"depth-retention,format:units"` // default 14 days; queue_depth only
 }
 
-// Dashboard configures the optional read-only web dashboard
-// (docs/plans/phase23.md §4.2). Bind=="" disables it.
+// Dashboard configures the optional read-only web dashboard. Bind=="" disables
+// it.
 type Dashboard struct {
 	Bind string `kdl:",arg"` // "localhost:8080"; "" disables
-	URL  string `kdl:"url"`  // §9.3: optional public base URL for outbound links
+	URL  string `kdl:"url"`  // optional public base URL for outbound links
 }
 
-// GitHub configures the optional commit-status channel
-// (docs/plans/phase23.md §4.3). Repo=="" disables it.
+// GitHub configures the optional commit-status channel. Repo=="" disables it.
 type GitHub struct {
 	Repo     string `kdl:",arg"`      // "owner/name"
 	TokenEnv string `kdl:"token-env"` // default "GITHUB_TOKEN"
 	APIURL   string `kdl:"api-url"`   // default "https://api.github.com"
 }
 
-// Slack configures the optional Slack channel (docs/plans/phase23.md §4.4).
-// Channel=="" disables it.
+// Slack configures the optional Slack channel. Channel=="" disables it.
 type Slack struct {
 	Channel     string `kdl:",arg"`          // channel ID
 	AppTokenEnv string `kdl:"app-token-env"` // default "SLACK_APP_TOKEN"
@@ -250,16 +246,15 @@ type Slack struct {
 	AllowedUsers []string `kdl:"allowed-users"`
 }
 
-// OTLP configures the optional OTLP trace exporter (docs/plans/phase23.md
-// §4.6). Endpoint=="" leaves tracing a no-op (the phase-1 default).
+// OTLP configures the optional OTLP trace exporter. Endpoint=="" leaves
+// tracing a no-op (the default).
 type OTLP struct {
 	Endpoint string `kdl:",arg"`
 	Insecure bool   `kdl:"insecure"`
 }
 
-// Executor selects the check-execution backend (docs/plans/phase23.md §4.5).
-// Kind=="" defaults to "local" (the phase-1 in-process executor); "container"
-// requires Image.
+// Executor selects the check-execution backend. Kind=="" defaults to "local"
+// (the in-process executor); "container" requires Image.
 type Executor struct {
 	Kind    string  `kdl:",arg"`    // "local" (default) | "container"
 	Runtime string  `kdl:"runtime"` // "docker"|"podman"|"container"; default "container"
@@ -311,37 +306,36 @@ type Mount struct {
 }
 
 // Services gates whether repo-declared services (config.Service, checks.go)
-// may run on this box (docs/plans/services.md §7). Absent ⇒ Allow nil ⇒ a
-// check spec declaring service/needs is REJECTED at run time (loud, like a
-// malformed check — CheckSpec.RequiresServices() is how the queue detects
-// this). Presence is signalled by len(Allow) > 0, same pattern as
-// GitHub.Repo/Slack.Channel/etc.
+// may run on this box. Absent ⇒ Allow nil ⇒ a check spec declaring
+// service/needs is REJECTED at run time (loud, like a malformed check —
+// CheckSpec.RequiresServices() is how the queue detects this). Presence is
+// signalled by len(Allow) > 0, same pattern as GitHub.Repo/Slack.Channel/etc.
 type Services struct {
-	// Allow lists the driver kinds permitted on this box; phase A supports
-	// only "container" — validate() rejects "artifact"/"oci-unpack" as
-	// reserved for a future release (mirroring Target.OnBatchRed's
-	// "bisect" handling above), rather than silently ignoring them.
+	// Allow lists the driver kinds permitted on this box; currently only
+	// "container" is implemented — validate() rejects "artifact" and
+	// "oci-unpack" as reserved for a future release (mirroring
+	// Target.OnBatchRed's "bisect" handling above), rather than silently
+	// ignoring them.
 	Allow []string `kdl:"allow"`
 
 	// MaxInstances hard-caps the number of live service instances this
-	// daemon's pool will create (docs/plans/services.md §7 "Resource
-	// honesty": count only, not memory/CPU). Defaults to
+	// daemon's pool will create (count only, not memory/CPU). Defaults to
 	// defaultMaxInstances (8) when the block is enabled and this is left
 	// zero.
 	MaxInstances int `kdl:"max-instances"`
 
 	// Runtime is the container runtime the services pool uses to create
-	// instances: "docker" or "podman" in phase A (docs/plans/services-impl.md
-	// §Amendments A3). This field exists because "executor local" has no
-	// runtime of its own, and local-executor-plus-containerized-services is
-	// a first-class deployment shape — but it is ONLY CONSULTED when the
-	// executor kind is "local" (cmd/gauntlet wires this at boot, chunk 3 of
-	// docs/plans/services-impl.md). When the executor kind is "container",
-	// the executor's own Runtime wins instead (it must already be
-	// docker/podman — Apple `container` networking is a hard-fail there),
-	// and applyDefaults deliberately leaves this field undefaulted in that
-	// case so validate() can tell "operator wrote a conflicting value" from
-	// "operator never wrote one" — see validate()'s cross-check.
+	// instances: currently "docker" or "podman". This field exists because
+	// "executor local" has no runtime of its own, and
+	// local-executor-plus-containerized-services is a first-class
+	// deployment shape — but it is ONLY CONSULTED when the executor kind is
+	// "local" (cmd/gauntlet wires this at boot). When the executor kind is
+	// "container", the executor's own Runtime wins instead (it must already
+	// be docker/podman — Apple `container` networking is a hard-fail
+	// there), and applyDefaults deliberately leaves this field undefaulted
+	// in that case so validate() can tell "operator wrote a conflicting
+	// value" from "operator never wrote one" — see validate()'s
+	// cross-check.
 	Runtime string `kdl:"runtime"`
 }
 
@@ -381,7 +375,7 @@ type Summarize struct {
 // Target is one target branch the daemon reconciles candidates onto. Name
 // is the queue-grammar name parsed out of candidate refs
 // (refs/heads/for/<name>/...) and must not contain '/'; Branch is the
-// actual git branch and may (docs/plans/phase1.md §9.3).
+// actual git branch and may.
 type Target struct {
 	Name   string `kdl:",arg"`
 	Branch string `kdl:"branch"`
@@ -389,7 +383,7 @@ type Target struct {
 	// Hooks are this target's post-land hooks (DESIGN.md's decision
 	// ledger, "Deployments as post-land hooks"; internal/hooks), run in
 	// order against the landed tree once a candidate lands. Nil/empty
-	// means no hooks — the phase-1/2/3 behavior, unchanged.
+	// means no hooks.
 	Hooks []Hook `kdl:"hook,multiple"`
 
 	// HooksPolicy controls what happens to this target's hook backlog
@@ -405,71 +399,68 @@ type Target struct {
 	// policy about.
 	HooksPolicy string `kdl:"hooks-policy"`
 
-	// Mode selects this target's queueing discipline (docs/plans/phase5.md
-	// §0, §4): "serial" (default) tests and lands one candidate at a time,
-	// byte-for-byte the phase-1 behavior; "batch" merges up to MaxBatch
-	// queued candidates into one --no-ff chain and runs a single check
-	// suite over the combined tree; "speculate" pipelines up to Window
-	// runs, each testing its own candidate chained onto the predicted
-	// (not-yet-landed) tip of the run ahead of it.
+	// Mode selects this target's queueing discipline: "serial" (default)
+	// tests and lands one candidate at a time, the baseline discipline;
+	// "batch" merges up to MaxBatch queued candidates into one --no-ff
+	// chain and runs a single check suite over the combined tree;
+	// "speculate" pipelines up to Window runs, each testing its own
+	// candidate chained onto the predicted (not-yet-landed) tip of the run
+	// ahead of it.
 	//
 	// "" is the zero value and means "serial" everywhere Mode is read.
 	// Unlike HooksPolicy, applyDefaults deliberately does NOT normalize ""
 	// to "serial" here: a target with no mode configured must keep
-	// reporting Mode=="" so a zero Target{} (and internal/queue's
-	// lane-per-target refactor, phase5.md P5-C) sees serial without any
-	// special-casing — "the fields' zero value already means serial".
+	// reporting Mode=="" so a zero Target{} sees serial without any
+	// special-casing in internal/queue's lane model — "the fields' zero
+	// value already means serial".
 	Mode string `kdl:"mode"` // serial (default) | batch | speculate
 
 	// MaxBatch caps how many queued candidates one batch run combines
-	// into a single --no-ff chain and check suite (docs/plans/phase5.md
-	// §4.1). Legal only when Mode=="batch" — validate() rejects it being
-	// set for any other mode. Defaults to 8 when Mode=="batch" and left
-	// unset (zero).
+	// into a single --no-ff chain and check suite. Legal only when
+	// Mode=="batch" — validate() rejects it being set for any other mode.
+	// Defaults to 8 when Mode=="batch" and left unset (zero).
 	//
-	// Bounded to [1, maxAllowedMaxBatch] (64) — a cap chosen here, not
-	// mandated by the plan: each additional batch member costs one more
+	// Bounded to [1, maxAllowedMaxBatch] (64) — a cap chosen here, not a
+	// hard requirement: each additional batch member costs one more
 	// synchronous Config.MergeBody/summarize call on the reconcile loop
-	// before checks even start (docs/plans/phase5.md §9's documented
-	// stall cost), so an unbounded max-batch could stall the whole daemon
-	// for many multiples of summarize.timeout on a single refill.
+	// before checks even start, so an unbounded max-batch could stall the
+	// whole daemon for many multiples of summarize.timeout on a single
+	// refill.
 	MaxBatch int `kdl:"max-batch"`
 
 	// Window is the speculation pipeline depth: up to this many runs are
-	// in flight at once for the target (docs/plans/phase5.md §4.1, §4.2 —
-	// a fixed v1 window; see WindowStart/WindowMax/WindowHalveOnRed below
-	// for the reserved adaptive-governor knobs). Legal only when
-	// Mode=="speculate"; defaults to 4 when left unset (zero).
+	// in flight at once for the target — a fixed window; see
+	// WindowStart/WindowMax/WindowHalveOnRed below for the reserved
+	// adaptive-governor knobs. Legal only when Mode=="speculate"; defaults
+	// to 4 when left unset (zero).
 	//
-	// Bounded to [1, maxAllowedWindow] (32) — a cap chosen here, not
-	// mandated by the plan. Each speculative run executes at most one
-	// check at a time, so Window is ALSO the maximum number of concurrent
-	// check processes/containers this target drives against the build
-	// executor (docs/plans/phase5.md §10 amendment 4): an operator sizing
-	// window is sizing builder concurrency, not just queue depth.
+	// Bounded to [1, maxAllowedWindow] (32) — a cap chosen here, not a
+	// hard requirement. Each speculative run executes at most one check at
+	// a time, so Window is ALSO the maximum number of concurrent check
+	// processes/containers this target drives against the build executor:
+	// an operator sizing window is sizing builder concurrency, not just
+	// queue depth.
 	Window int `kdl:"window"`
 
-	// OnBatchRed selects the batch red-recovery strategy
-	// (docs/plans/phase5.md §2.6): "serial" (default) re-queues every
-	// batch member unparked and re-forms them one at a time on the next
-	// refill until the culprit is found and parked, then batching
-	// resumes; "bisect" is a documented growth path only. Legal only
-	// when Mode=="batch".
+	// OnBatchRed selects the batch red-recovery strategy: "serial"
+	// (default) re-queues every batch member unparked and re-forms them
+	// one at a time on the next refill until the culprit is found and
+	// parked, then batching resumes; "bisect" is a reserved growth path
+	// only. Legal only when Mode=="batch".
 	//
-	// "bisect" is accepted here so config stays forward-compatible, but
-	// phase 5 does NOT implement it: LoadDaemon rejects a target that
-	// sets on-batch-red "bisect" with a "reserved for a future release"
-	// error, rather than silently running it as "serial".
+	// "bisect" is accepted here so config stays forward-compatible, but is
+	// not implemented: LoadDaemon rejects a target that sets on-batch-red
+	// "bisect" with a "reserved for a future release" error, rather than
+	// silently running it as "serial".
 	OnBatchRed string `kdl:"on-batch-red"` // serial (default) | bisect (reserved, rejected)
 
 	// WindowStart, WindowMax, and WindowHalveOnRed reserve the config
 	// surface for a future adaptive speculation-window governor
-	// (Zuul-style: start small, grow on green, halve on red;
-	// docs/plans/phase5.md §4.2). Phase 5 implements only the fixed
-	// Window above; setting any of these three is rejected at load with
-	// a "reserved for a future release" error (same rationale as
-	// OnBatchRed's "bisect") so a config that names them fails loudly
-	// instead of silently no-opping.
+	// (Zuul-style: start small, grow on green, halve on red). Only the
+	// fixed Window above is implemented; setting any of these three is
+	// rejected at load with a "reserved for a future release" error (same
+	// rationale as OnBatchRed's "bisect") so a config that names them
+	// fails loudly instead of silently no-opping.
 	WindowStart      int  `kdl:"window-start"`
 	WindowMax        int  `kdl:"window-max"`
 	WindowHalveOnRed bool `kdl:"window-halve-on-red"`
@@ -514,7 +505,7 @@ func (d *Daemon) applyDefaults() {
 	}
 	// LogRetention defaults unconditionally (see its doc): there is no
 	// "log-retention section absent -> disabled" state to preserve, unlike
-	// every phase-2/3 section below.
+	// every optional section below.
 	if d.LogRetention == 0 {
 		d.LogRetention = defaultLogRetention
 	}
@@ -564,9 +555,9 @@ func (d *Daemon) applyDefaults() {
 	}
 
 	// Executor.Kind always defaults to "local", regardless of whether the
-	// "executor" node was present at all (an absent node ⇒ local executor,
-	// matching phase-1 behavior). Runtime/Workdir only matter for the
-	// container executor, so only default them in that case.
+	// "executor" node was present at all (an absent node ⇒ local executor).
+	// Runtime/Workdir only matter for the container executor, so only
+	// default them in that case.
 	if d.Executor.Kind == "" {
 		d.Executor.Kind = defaultExecutorKind
 	}
@@ -611,7 +602,7 @@ func (d *Daemon) applyDefaults() {
 
 		// Mode's own knobs default only within their own mode — same
 		// "required field non-empty is the enable signal" pattern as
-		// HooksPolicy above and the phase-2/3 sections in Daemon. Mode
+		// HooksPolicy above and the optional sections in Daemon. Mode
 		// itself is never defaulted (see its field doc): "" stays "".
 		switch d.Targets[i].Mode {
 		case "batch":
@@ -698,8 +689,8 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("target %q: duplicate", t.Name)
 		}
 		seen[t.Name] = true
-		// Two targets on the same branch would contend via CAS (phase-1
-		// review finding O2): reject at config load instead.
+		// Two targets on the same branch would contend via CAS: reject at
+		// config load instead.
 		if owner, ok := seenBranch[t.Branch]; ok {
 			return fmt.Errorf("target %q: branch %q already used by target %q", t.Name, t.Branch, owner)
 		}
@@ -731,9 +722,9 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("target %q: hooks-policy must be one of queue, coalesce, cancel, got %q", t.Name, t.HooksPolicy)
 		}
 
-		// Mode + its mode-scoped knobs (docs/plans/phase5.md §4.1): each
-		// knob is legal only under its own mode, matching hooks-policy's
-		// "catch config mistakes" strictness above.
+		// Mode + its mode-scoped knobs: each knob is legal only under its
+		// own mode, matching hooks-policy's "catch config mistakes"
+		// strictness above.
 		switch t.Mode {
 		case "", "serial":
 			if t.MaxBatch != 0 {
@@ -756,10 +747,10 @@ func (d *Daemon) validate() error {
 			case "serial":
 				// v1-implemented; see field doc.
 			case "bisect":
-				// Reserved growth path (docs/plans/phase5.md §2.6, §9
-				// non-goals): validated but rejected at load rather than
-				// silently running as "serial".
-				return fmt.Errorf("target %q: on-batch-red \"bisect\" is reserved for a future release, not implemented in phase 5", t.Name)
+				// NOTE: reserved growth path, validated but rejected at
+				// load rather than silently running as "serial" — see
+				// docs/design/queue-modes.md ("Deliberately not built").
+				return fmt.Errorf("target %q: on-batch-red \"bisect\" is reserved for a future release", t.Name)
 			default:
 				return fmt.Errorf("target %q: on-batch-red must be \"serial\" or \"bisect\", got %q", t.Name, t.OnBatchRed)
 			}
@@ -777,17 +768,17 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("target %q: mode must be one of \"\", \"serial\", \"batch\", \"speculate\", got %q", t.Name, t.Mode)
 		}
 
-		// Reserved adaptive-window-governor knobs (docs/plans/phase5.md
-		// §4.2): parsed for forward compatibility, always rejected in
-		// phase 5, regardless of Mode.
+		// NOTE: reserved adaptive-window-governor knobs, parsed for forward
+		// compatibility and always rejected regardless of Mode — see
+		// docs/design/queue-modes.md ("Deliberately not built").
 		if t.WindowStart != 0 {
-			return fmt.Errorf("target %q: window-start is reserved for a future adaptive-window governor, not implemented in phase 5", t.Name)
+			return fmt.Errorf("target %q: window-start is reserved for a future adaptive-window governor", t.Name)
 		}
 		if t.WindowMax != 0 {
-			return fmt.Errorf("target %q: window-max is reserved for a future adaptive-window governor, not implemented in phase 5", t.Name)
+			return fmt.Errorf("target %q: window-max is reserved for a future adaptive-window governor", t.Name)
 		}
 		if t.WindowHalveOnRed {
-			return fmt.Errorf("target %q: window-halve-on-red is reserved for a future adaptive-window governor, not implemented in phase 5", t.Name)
+			return fmt.Errorf("target %q: window-halve-on-red is reserved for a future adaptive-window governor", t.Name)
 		}
 	}
 
@@ -872,11 +863,13 @@ func (d *Daemon) validate() error {
 			case "container":
 				// v1-implemented; see field doc.
 			case "artifact", "oci-unpack":
-				// Reserved growth path (docs/plans/services.md §6):
-				// validated but rejected at load rather than silently
+				// NOTE: reserved growth path — the artifact and oci-unpack
+				// drivers were designed and deliberately left unbuilt; see
+				// docs/design/services.md ("Deliberately not built").
+				// Validated but rejected at load rather than silently
 				// no-opping, same "reserved for a future release"
 				// treatment as Target.OnBatchRed's "bisect" above.
-				return fmt.Errorf("services: allow %q is reserved for a future release, not implemented in phase A", a)
+				return fmt.Errorf("services: allow %q is reserved for a future release", a)
 			default:
 				return fmt.Errorf("services: allow must be \"container\", got %q", a)
 			}
@@ -884,7 +877,7 @@ func (d *Daemon) validate() error {
 		if d.Services.MaxInstances < 1 {
 			return fmt.Errorf("services: max-instances must be at least 1, got %d", d.Services.MaxInstances)
 		}
-		// Runtime cross-check (A3): under "container", the executor's own
+		// Runtime cross-check: under "container", the executor's own
 		// runtime wins, so services.runtime is legal only if it agrees with
 		// it (or was never written — applyDefaults leaves it "" in that
 		// case). Under "local" (and any other executor kind, defensively),

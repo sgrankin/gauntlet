@@ -5,7 +5,6 @@
 # invalidates from index 0, taking the WHOLE window (Skipped, none parked —
 # their base prediction "the target tip is X" is simply wrong now, not
 # anyone's fault); the next refill rebuilds the whole window on the new tip.
-# Ports docs/plans/phase5.md §5.2's speculate_head_target_moved row.
 
 set-mode main speculate 3
 direct-push main files/spec

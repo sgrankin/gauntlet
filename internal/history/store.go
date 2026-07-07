@@ -44,8 +44,8 @@ type Store struct {
 // framework: version 0 means "apply schema.sql and stamp version 1".
 //
 // The pool is capped at 4 connections, not 1: Emit runs inline on the
-// reconcile goroutine (docs/plans/phase23.md §4.1), so a writer that has to
-// wait behind a slow dashboard read (e.g. CheckStats's JOIN) would block
+// reconcile goroutine, so a writer that has to wait behind a slow dashboard
+// read (e.g. CheckStats's JOIN) would block
 // reconcile progress on an unrelated HTTP request. WAL mode is built for
 // exactly this — readers never block the writer and the writer never blocks
 // readers — so capping at 1 connection only self-inflicted serialization
@@ -88,11 +88,11 @@ func Open(path string) (*Store, error) {
 //   - 3 (schema v3: no hooks table): CREATE TABLE hooks (log/history parity
 //     for post-land hooks, internal/hooks), stamp user_version=4, loop.
 //   - 4 (schema v4: runs has no batch columns): ALTER TABLE runs ADD COLUMN
-//     batch_id/position/batch_size (docs/plans/phase5.md §10 amendment 1,
-//     batch-aware CheckStats), stamp user_version=5, loop.
+//     batch_id/position/batch_size (batch-aware CheckStats), stamp
+//     user_version=5, loop.
 //   - 5 (schema v5: no retry_intents/ignored_refs/hook_runs tables): CREATE
-//     TABLE all three (S3's persisted retry intent, S7c's durable ignored-ref
-//     capture, S1-C's durable hook owed/skipped marker), stamp
+//     TABLE all three (a persisted retry intent, a durable ignored-ref
+//     capture, and a durable hook owed/skipped marker), stamp
 //     user_version=6, loop.
 //   - 6 (schema v6: runs has no speculated/recovered columns): ALTER TABLE
 //     runs ADD COLUMN speculated/recovered (core.RunRecord.Speculated/
@@ -241,7 +241,7 @@ func (s *Store) Close() error {
 // Emit writes ev's carried RunRecord, or — for EventHookFinished — one
 // post-land hook result (internal/hooks; log/history parity with checks), or
 // — for EventRetryRequested/EventIgnoredRef/EventHookStarted/
-// EventHookSkipped — one of the v6 durability rows (S3, S7c, S1-C). Every
+// EventHookSkipped — one of the v6 durability rows. Every
 // other non-terminal event (Record == nil and none of the above, including a
 // crash-recovered EventLanded whose record didn't survive) is silently
 // ignored — Emit never blocks or fails the reconcile loop for history-side
@@ -325,9 +325,9 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 	// called, and by the time a run's terminal event arrives, rec.Checks
 	// already holds every check that ran, in order — so there is nothing a
 	// per-event check row would capture that this one transaction doesn't
-	// already write. Deliberate and correct by construction (S28), not a
-	// gap: mirrors ghstatus's and hooks.Runner's own documented "ignores
-	// this event kind on purpose" stance.
+	// already write. Deliberate and correct by construction, not a gap:
+	// mirrors ghstatus's and hooks.Runner's own documented "ignores this
+	// event kind on purpose" stance.
 	for i, cr := range rec.Checks {
 		if _, err := tx.ExecContext(ctx, insertCheckSQL,
 			rec.RunID,
@@ -375,7 +375,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 // the one case this would double-count rather than replace; INSERT OR
 // REPLACE here guards against exact-same-seq collisions, not against that.
 //
-// GUARD (S25): the safety margin here is actually stronger than the
+// GUARD: the safety margin here is actually stronger than the
 // paragraph above states — hooks.Runner.Run drains a single global landing
 // queue in one goroutine (internal/hooks/hooks.go), so hook execution is
 // serial across every target at once, not merely "one landing per target at
@@ -427,8 +427,8 @@ func (s *Store) writeHookResult(ctx context.Context, ev core.Event) error {
 	return nil
 }
 
-// writeRetryIntent upserts one retry_intents row (core.EventRetryRequested,
-// S3): the latest retry for (target, ref) always wins — INSERT ... ON
+// writeRetryIntent upserts one retry_intents row (core.EventRetryRequested):
+// the latest retry for (target, ref) always wins — INSERT ... ON
 // CONFLICT(target, ref) DO UPDATE — since only the most recent retry's
 // timestamp matters to LatestTerminalPerRef's seed-park suppression (a
 // retry superseded by a later one is no longer the operative "don't re-park
@@ -442,8 +442,8 @@ func (s *Store) writeRetryIntent(ctx context.Context, ev core.Event) error {
 	return nil
 }
 
-// writeIgnoredRef inserts one ignored_refs row (core.EventIgnoredRef, S7c):
-// a well-formed candidate ref whose target segment names no configured
+// writeIgnoredRef inserts one ignored_refs row (core.EventIgnoredRef): a
+// well-formed candidate ref whose target segment names no configured
 // target. Unlike retry_intents, this is a pure append (INSERT OR REPLACE
 // keyed on (at, target, ref), never an update) — every occurrence is its own
 // durable fact, so an operator can discover a misconfiguration after the
@@ -458,7 +458,7 @@ func (s *Store) writeIgnoredRef(ctx context.Context, ev core.Event) error {
 }
 
 // writeHookStarted upserts hook_runs' "owed" row for ev.RunID on the FIRST
-// core.EventHookStarted hooks.Runner emits for a landing (S1-C): ON
+// core.EventHookStarted hooks.Runner emits for a landing: ON
 // CONFLICT(run_id) DO NOTHING means every subsequent hook in the same
 // landing's chain is a no-op here — only the first hook's owed_count/
 // started_at are ever recorded, which is exactly right since owed_count is
@@ -475,7 +475,7 @@ func (s *Store) writeHookStarted(ctx context.Context, ev core.Event) error {
 
 // writeHookSkipped upserts hook_runs' row for ev.RunID on
 // core.EventHookSkipped (a recovery-synthesized landing whose hooks were
-// never run at all, S1-C): skipped=1 and skip_reason=ev.Detail mark it so
+// never run at all): skipped=1 and skip_reason=ev.Detail mark it so
 // HookRunSummaries never mistakes "deliberately never attempted" for
 // "crashed mid-chain" (owed_count > done_count). ON CONFLICT(run_id) DO
 // UPDATE rather than DO NOTHING: unlike writeHookStarted, a landing's own
@@ -517,9 +517,9 @@ func (s *Store) PruneDepth(cutoff time.Time) error {
 	return nil
 }
 
-// PruneIgnoredRefs deletes ignored_refs rows recorded before cutoff (S2,
-// phase-6 B-track review): unlike queue_depth, ignored_refs had no retention
-// at all — it's a pure append (writeIgnoredRef's INSERT OR REPLACE never
+// PruneIgnoredRefs deletes ignored_refs rows recorded before cutoff: unlike
+// queue_depth, ignored_refs had no retention at all — it's a pure append
+// (writeIgnoredRef's INSERT OR REPLACE never
 // updates an existing row, every occurrence is its own durable fact), and
 // the in-memory dedup in checkIgnoredRefs (internal/queue/reconcile.go) only
 // suppresses repeat emissions within a single process's lifetime, not

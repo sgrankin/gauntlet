@@ -126,10 +126,10 @@ func TestReconcile_IsAncestorRecovery(t *testing.T) {
 		t.Fatal("no EventLanded emitted for the recovered candidate")
 	}
 
-	// F1 (docs/plans/phase23.md §10): the recovery path must synthesize a
-	// complete RunRecord rather than emit EventLanded with Record==nil —
-	// the terminal-event contract every channel (and D1's SQLite writer)
-	// relies on.
+	// The recovery path must synthesize a complete RunRecord rather than
+	// emit EventLanded with Record==nil — the terminal-event contract every
+	// channel (and history's SQLite writer) relies on (see
+	// docs/design/core.md, "Event model").
 	recs := h.ch.Records()
 	last := recs[len(recs)-1]
 	if last.Outcome != core.OutcomeLanded {

@@ -1,15 +1,14 @@
 # Batch green lands the whole chain: 3 candidates batch together into one
 # --no-ff chain, one check suite runs over the combined tip tree, one CAS
 # push lands all three, and each gets its own EventLanded in FIFO order.
-# Ports docs/plans/phase5.md §5.2's batch_green_lands_chain row.
 
 set-mode main batch 8
 
 # The check spec must already be on main's tip before any candidate is
 # pushed: if each candidate independently introduced an IDENTICAL spec from
 # scratch, the very first member's link would "change" the spec from
-# absent to present and terminate the batch there (§10 amendment 3) —
-# exactly the behavior batch_member_repush_reforms.txtar and the
+# absent to present and terminate the batch there (the spec-change batch
+# boundary) — exactly the behavior batch_member_repush_reforms.txtar and the
 # spec-change Go test exercise deliberately; this scenario is about the
 # happy path, so the spec is seeded once, up front.
 direct-push main files/spec

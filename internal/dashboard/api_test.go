@@ -112,8 +112,8 @@ func TestAPIStatus_Shape(t *testing.T) {
 }
 
 // TestAPIStatus_PipelineFieldPresent confirms GET /api/v1/status carries a
-// "pipeline" array per target (docs/plans/phase5.md §3.4, chunk P5-H),
-// additive alongside "inFlight" (which stays the head run for back-compat):
+// "pipeline" array per target, additive alongside "inFlight" (which stays
+// the head run for back-compat):
 // each element's RunSnapshot fields (members, chainTip, predicted, batchId,
 // checksDone, currentCheck, startedAt) round-trip through JSON.
 func TestAPIStatus_PipelineFieldPresent(t *testing.T) {
@@ -245,9 +245,9 @@ func TestAPIRuns_Shape(t *testing.T) {
 }
 
 // TestAPIRuns_BatchFieldsPresentForBatchMemberOmittedForSerial confirms
-// GET /api/v1/runs surfaces batchId/position/batchSize (docs/plans/phase5.md
-// §10 amendment 1) for a batch member, and omits all three (omitempty) for
-// an ordinary serial run in the same result set.
+// GET /api/v1/runs surfaces batchId/position/batchSize for a batch member,
+// and omits all three (omitempty) for an ordinary serial run in the same
+// result set.
 func TestAPIRuns_BatchFieldsPresentForBatchMemberOmittedForSerial(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, batchMemberRecord("batch-run-1", "main", "batch-xyz", 1))
@@ -380,7 +380,7 @@ func TestAPIRun_Shape(t *testing.T) {
 
 	// checks[1] ("test") is sampleRecord's failing check, seeded with
 	// Output: "boom" — confirms the API surfaces the same output column the
-	// HTML page and MCP already render (S9), instead of requiring a second
+	// HTML page and MCP already render, instead of requiring a second
 	// round-trip through the log file.
 	c1 := checks[1].(map[string]any)
 	if c1["output"] != "boom" {
@@ -389,8 +389,7 @@ func TestAPIRun_Shape(t *testing.T) {
 }
 
 // TestAPIRun_BatchFieldsPresentForBatchMember confirms GET /api/v1/run/{id}
-// surfaces batchId/position/batchSize (docs/plans/phase5.md §10 amendment 1)
-// for a batch member.
+// surfaces batchId/position/batchSize for a batch member.
 func TestAPIRun_BatchFieldsPresentForBatchMember(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, batchMemberRecord("batch-run-2", "main", "batch-xyz", 2))
@@ -477,7 +476,7 @@ func TestAPIRun_SpeculatedAndRecoveredOmittedWhenFalse(t *testing.T) {
 // TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured confirms
 // GET /api/v1/run/{id} exposes logPath (always, when non-empty) and logUrl
 // (only when the dashboard is configured to actually serve it, WithLogRoot)
-// on each check — chunk F-b's API field additions.
+// on each check.
 func TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured(t *testing.T) {
 	store := openTestStore(t)
 	const logPath = "/var/lib/gauntlet/logs/run-log-api/test.log"
@@ -528,8 +527,8 @@ func TestAPIRun_ChecksOmitLogURLWithoutLogRoot(t *testing.T) {
 }
 
 // TestAPIRun_HooksFieldPresentAndPopulated confirms GET /api/v1/run/{id}
-// gains a "hooks" array alongside "checks" (chunk P5-B, log/history
-// parity): present (as an array, never omitted) even when empty, and
+// gains a "hooks" array alongside "checks" (log/history parity): present
+// (as an array, never omitted) even when empty, and
 // populated with the same field shape as a check when the run actually has
 // hook rows.
 func TestAPIRun_HooksFieldPresentAndPopulated(t *testing.T) {
@@ -562,7 +561,7 @@ func TestAPIRun_HooksFieldPresentAndPopulated(t *testing.T) {
 		t.Errorf("hooks[0] = %v", hk)
 	}
 	if hk["output"] != "deployed ok" {
-		t.Errorf("hooks[0] output = %v, want %q (S9: same column the HTML/MCP views already render)", hk["output"], "deployed ok")
+		t.Errorf("hooks[0] output = %v, want %q (same column the HTML/MCP views already render)", hk["output"], "deployed ok")
 	}
 }
 
@@ -706,7 +705,7 @@ func TestAPIRetry_MethodNotAllowed405(t *testing.T) {
 	}
 }
 
-// --- POST /api/v1/cancel (Feature 1: manual operator cancellation) --------
+// --- POST /api/v1/cancel (manual operator cancellation) ------------------
 // Mirrors the retry suite above exactly: same wiring (dashboard.Channel),
 // same request/response shape, differing only in core.Command.Kind.
 
@@ -788,7 +787,7 @@ func TestAPICancel_MethodNotAllowed405(t *testing.T) {
 	}
 }
 
-// --- POST /api/v1/hooks/cancel (Feature 1: hook cancellation) -------------
+// --- POST /api/v1/hooks/cancel (hook cancellation) ------------------------
 
 func TestAPIHookCancel_NoHookCancelWiredIs503(t *testing.T) {
 	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
@@ -870,12 +869,7 @@ func TestAPIHookCancel_MethodNotAllowed405(t *testing.T) {
 	}
 }
 
-// --- GET /api/v1/status: liveHook/hookRuns/ignoredRefs (S5-surface, S7c) -----
-//
-// HookRunSummaries/IgnoredRefs are backed by internal/history's
-// btrack_contract_stub.go (chunk 1 not landed yet): the stub returns one
-// fixed canned row per target regardless of target name, which is exactly
-// enough to prove the handler shape end-to-end. See that file's doc.
+// --- GET /api/v1/status: liveHook/hookRuns/ignoredRefs -----------------------
 
 func TestAPIStatus_LiveHookFieldFromSnapshotCloser(t *testing.T) {
 	snap := testSnapshot()
@@ -943,11 +937,11 @@ func TestAPIStatus_NoHookSnapshotOmitsLiveHook(t *testing.T) {
 }
 
 // TestAPIStatus_HookRunsAndIgnoredRefsFromStore confirms GET /api/v1/status
-// surfaces the durable hook-run ledger per target (S1-C/S5) and
-// recently-ignored refs at the TOP level (S7c, daemon-wide — an ignored
-// ref's target segment names no configured target, so it can't be scoped to
-// one) when a store is configured — seeded through the store's real Emit
-// path, exactly as the daemon writes these rows:
+// surfaces the durable hook-run ledger per target and recently-ignored
+// refs at the TOP level (daemon-wide — an ignored ref's target segment
+// names no configured target, so it can't be scoped to one) when a store
+// is configured — seeded through the store's real Emit path, exactly as
+// the daemon writes these rows:
 //
 //   - a terminal run record first (the runs row hook_runs FK-references);
 //   - EventHookStarted with HookCount=2 (the owed row, owed=2);
@@ -1046,7 +1040,7 @@ func TestAPIStatus_NoStoreOmitsHookRunsAndIgnoredRefs(t *testing.T) {
 	}
 }
 
-// --- GET /api/v1/batch/{id} (S7a) --------------------------------------------
+// --- GET /api/v1/batch/{id} --------------------------------------------------
 
 func TestAPIBatch_Shape(t *testing.T) {
 	store := openTestStore(t)
@@ -1110,7 +1104,7 @@ func TestAPIBatch_NoStore503(t *testing.T) {
 	}
 }
 
-// --- GET /api/v1/checks?target=&since= (S7b) ---------------------------------
+// --- GET /api/v1/checks?target=&since= ----------------------------------------
 
 func TestAPIChecks_Shape(t *testing.T) {
 	store := openTestStore(t)
@@ -1184,7 +1178,7 @@ func TestAPIChecks_NoStore503(t *testing.T) {
 	}
 }
 
-// --- GET /api/v1/services (design §10's tuning instrument) ------------------
+// --- GET /api/v1/services ------------------------------------------------------
 
 func TestAPIServices_Shape(t *testing.T) {
 	ss := testServicesStatus()
@@ -1271,7 +1265,7 @@ func TestAPIServices_EmptyPool(t *testing.T) {
 	}
 }
 
-// --- GET /api/v1/status: idleSince (docs/plans/scale.md §2) -----------------
+// --- GET /api/v1/status: idleSince -----------------------------------------
 
 // TestAPIStatus_IdleSinceAbsentWhenQueueBusy confirms idleSince is omitted
 // (not just empty) whenever queue.Snapshot.IdleSince is zero — testSnapshot's

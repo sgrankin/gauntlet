@@ -1,7 +1,7 @@
 package dashboard
 
-// This file adds a JSON API alongside the HTML dashboard in server.go (work
-// chunk E4, docs/plans/phase23.md): GET /api/v1/status mirrors the live
+// This file adds a JSON API alongside the HTML dashboard in server.go:
+// GET /api/v1/status mirrors the live
 // queue.Snapshot, GET /api/v1/runs and /api/v1/run/{id} mirror the history
 // views, and POST /api/v1/retry lets a script (or a future `gauntlet mcp`)
 // inject a core.CommandRetry the same way a Slack ":recycle:" reaction does.
@@ -77,10 +77,10 @@ func (c *Channel) Commands() <-chan core.Command { return c.cmds }
 
 // TrySend attempts to enqueue cmd onto c's inbound buffer, reporting
 // whether it was accepted. It never blocks: a full buffer reports false
-// rather than waiting for the queue to drain. Exported (chunk E5,
-// internal/mcp) so the MCP retry tool can feed the same channel POST
-// /api/v1/retry does and distinguish "queued" from "dropped, buffer
-// full" the way an HTTP response code lets api.go's caller do.
+// rather than waiting for the queue to drain. Exported so internal/mcp's
+// retry tool can feed the same channel POST /api/v1/retry does and
+// distinguish "queued" from "dropped, buffer full" the way an HTTP
+// response code lets api.go's caller do.
 func (c *Channel) TrySend(cmd core.Command) bool {
 	select {
 	case c.cmds <- cmd:
@@ -111,9 +111,9 @@ func WithChannel(ch *Channel) Option {
 }
 
 // WithVersion sets the gauntlet version string shown in every page's
-// footer (cmd/gauntlet wires this from its own main.version, docs/deploy.md
-// P1 packaging). Without this option the footer omits the version line
-// entirely, same as today.
+// footer (cmd/gauntlet wires this from its own main.version — see
+// docs/deploy.md for how that's packaged). Without this option the footer
+// omits the version line entirely, same as today.
 func WithVersion(v string) Option {
 	return func(d *dash) { d.version = v }
 }
@@ -131,9 +131,9 @@ func WithLogRoot(root string) Option {
 }
 
 // WithHookCancel wires fn so POST /api/v1/hooks/cancel can cancel a target's
-// currently-running post-land hook execution (Feature 1: hooks.Runner.
-// CancelCurrent, cmd/gauntlet's nil-safe wiring when hooks are configured).
-// Without this option the route always responds 503 "hooks disabled" — see
+// currently-running post-land hook execution (hooks.Runner.CancelCurrent,
+// cmd/gauntlet's nil-safe wiring when hooks are configured). Without this
+// option the route always responds 503 "hooks disabled" — see
 // handleAPIHookCancel.
 func WithHookCancel(fn func(target string) bool) Option {
 	return func(d *dash) { d.hookCancel = fn }
@@ -141,10 +141,10 @@ func WithHookCancel(fn func(target string) bool) Option {
 
 // LiveHook mirrors hooks.LiveState (internal/hooks) as a dashboard-local
 // struct, so this package never needs to import internal/hooks just to read
-// one target's live post-land hook progress (S5-surface, phase-6 B-track
-// plan). Target is included even though a caller always already knows which
-// target it asked WithHookSnapshot's func for, purely so LiveHook is a
-// complete, self-describing value on its own.
+// one target's live post-land hook progress. Target is included even
+// though a caller always already knows which target it asked
+// WithHookSnapshot's func for, purely so LiveHook is a complete,
+// self-describing value on its own.
 type LiveHook struct {
 	Target       string
 	Running      bool
@@ -157,8 +157,8 @@ type LiveHook struct {
 
 // WithHookSnapshot wires fn so GET /api/v1/status (per target) and the
 // target page's "Post-land hooks" section can render a target's current
-// in-flight hook progress (S5-surface: hooks.Runner.Snapshot, chunk 3's
-// nil-safe wiring mirroring WithHookCancel). Without this option, both
+// in-flight hook progress (hooks.Runner.Snapshot, nil-safe wiring mirroring
+// WithHookCancel). Without this option, both
 // surfaces simply omit live-hook data (ok=false, as if no hook were ever
 // running) — the durable hookRuns/HookRunSummaries data (from the history
 // store, independent of this) still renders regardless.
@@ -178,9 +178,9 @@ const (
 // ServiceStatus mirrors services.InstanceStatus (internal/services) as a
 // dashboard-local struct, same "duplicated rather than imported" convention
 // as LiveHook — this package never needs to import internal/services just to
-// render the shared-services pool's tuning surface (design §10, S5's parity
-// ruling: every operator-visible fact appears on dashboard HTML, the JSON
-// API, and MCP). Mode is already the string form (services.Mode.String())
+// render the shared-services pool's tuning surface: every operator-visible
+// fact appears on dashboard HTML, the JSON API, and MCP alike. Mode is
+// already the string form (services.Mode.String())
 // rather than the numeric services.Mode type: cmd/gauntlet's adapter — the
 // one place a services.Mode value ever exists outside internal/services —
 // converts it before crossing into this package.
@@ -205,11 +205,11 @@ type ServicesStatus struct {
 }
 
 // WithServicesSnapshot wires fn so the index page's "Services" section and
-// GET /api/v1/services can render the shared-services pool (design §10's
-// tuning instrument: operators sizing idle-ttl/max-instances need to SEE the
-// pool). Without this option — services aren't configured for this daemon,
-// or cmd/gauntlet never wired it up — both surfaces treat the pool as
-// absent: the index page omits the section entirely, and GET
+// GET /api/v1/services can render the shared-services pool: operators
+// sizing idle-ttl/max-instances need to SEE the pool. Without this option
+// — services aren't configured for this daemon, or cmd/gauntlet never
+// wired it up — both surfaces treat the pool as absent: the index page
+// omits the section entirely, and GET
 // /api/v1/services responds 503 "services disabled", mirroring
 // WithHookCancel's own nil-safe degradation.
 func WithServicesSnapshot(fn func() ServicesStatus) Option {
@@ -240,11 +240,11 @@ type statusResponse struct {
 	Targets    []targetStatus `json:"targets"`
 
 	// IgnoredRefs surfaces recently pushed refs that named NO configured
-	// target (history.Store.IgnoredRefs, S7c). Deliberately a top-level,
-	// daemon-wide field rather than per-target (phase-6 B-track integration
-	// finding): an ignored ref's defining property is that its target
-	// segment names no configured target — reconcile emits EventIgnoredRef
-	// under that unconfigured name — so a per-configured-target list could
+	// target (history.Store.IgnoredRefs). Deliberately a top-level,
+	// daemon-wide field rather than per-target: an ignored ref's defining
+	// property is that its target segment names no configured target —
+	// reconcile emits EventIgnoredRef under that unconfigured name — so a
+	// per-configured-target list could
 	// never match anything. Each entry's target field carries the
 	// unconfigured name for display. Omitted (not just empty) when history
 	// is disabled.
@@ -252,10 +252,10 @@ type statusResponse struct {
 
 	// IdleSince is the RFC3339 instant since which the WHOLE daemon has been
 	// idle — every target's queue is idle (queue.Snapshot.IdleSince) AND no
-	// target has a post-land hook running or backlogged right now
-	// (docs/plans/scale.md §2: the signal an external Azure Function polls
-	// to know when it's safe to deallocate the parked builder VM). Omitted
-	// whenever the daemon isn't idle at this instant — there is no "was
+	// target has a post-land hook running or backlogged right now: the
+	// signal an external timer function polls to know when it's safe to
+	// deallocate the parked builder VM. Omitted whenever the daemon isn't
+	// idle at this instant — there is no "was
 	// idle, no longer" value here, only "idle since T" or absent. See
 	// dash.idleSince for the composition (queue idleness lives in
 	// internal/queue; hook idleness lives outside it entirely, Invariant 8,
@@ -274,11 +274,11 @@ type targetStatus struct {
 
 	// LiveHook is this target's current post-land hook progress
 	// (hooks.Runner.Snapshot via WithHookSnapshot), nil when no hook is
-	// running right now or WithHookSnapshot was never wired up (S5-surface).
+	// running right now or WithHookSnapshot was never wired up.
 	LiveHook *liveHookStatus `json:"liveHook,omitempty"`
 
 	// HookRuns surfaces the durable hook-run ledger (history.Store.
-	// HookRunSummaries, S1-C/S5): each landing's owed/done hook count, so a
+	// HookRunSummaries): each landing's owed/done hook count, so a
 	// crash-incomplete or recovery-skipped hook chain is visible without
 	// digging into /run/{id}. Omitted (not just empty) when history is
 	// disabled. (Ignored refs, by contrast, live at the response's top
@@ -299,8 +299,8 @@ type liveHookStatus struct {
 
 // hookRunStatus is GET /api/v1/status's JSON view of one history.
 // HookRunSummary row. Incomplete is computed here (OwedCount > DoneCount &&
-// !Skipped) rather than left for the client to derive, matching the plan's
-// "crash-incomplete" signal.
+// !Skipped) rather than left for the client to derive: it's the
+// crash-incomplete signal.
 type hookRunStatus struct {
 	RunID      string `json:"runID"`
 	OwedCount  int    `json:"owedCount"`
@@ -330,9 +330,9 @@ type inFlightStatus struct {
 	ChecksDone   []string `json:"checksDone"`
 }
 
-// pipelineStatus mirrors one queue.RunSnapshot within a target's pipeline
-// (docs/plans/phase5.md §3.4): head first, additive alongside inFlight
-// (which stays the head run, back-compat). Field names are RunSnapshot's,
+// pipelineStatus mirrors one queue.RunSnapshot within a target's pipeline:
+// head first, additive alongside inFlight (which stays the head run,
+// back-compat). Field names are RunSnapshot's,
 // lowerCamel.
 type pipelineStatus struct {
 	Members      []pipelineMemberStatus `json:"members"`
@@ -399,8 +399,8 @@ func (d *dash) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// idleSince composes queue idleness (snap.IdleSince, docs/plans/scale.md §2)
-// with hook idleness into the one daemon-wide idle instant GET
+// idleSince composes queue idleness (snap.IdleSince) with hook idleness
+// into the one daemon-wide idle instant GET
 // /api/v1/status, the MCP status tool (internal/mcp/server.go's own
 // idleSince), and the index page's footer line all surface identically:
 // zero (not idle) unless the queue has been idle since some instant AND no
@@ -424,8 +424,8 @@ func (d *dash) idleSince(snap *queue.Snapshot) time.Time {
 }
 
 // buildTargetStatus is a method (rather than a free function) so it can
-// reach d.hookSnapshot/d.store for the live/durable hook fields
-// (S5-surface) — every other field is built exactly as before. Ignored refs
+// reach d.hookSnapshot/d.store for the live/durable hook fields —
+// every other field is built exactly as before. Ignored refs
 // are daemon-level, populated by handleAPIStatus itself, not here.
 func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
@@ -504,8 +504,7 @@ func buildInFlightStatus(rs *queue.RunSnapshot) *inFlightStatus {
 }
 
 // buildPipelineStatus builds one pipelineStatus from a RunSnapshot, for
-// GET /api/v1/status's additive "pipeline" array (docs/plans/phase5.md
-// §3.4).
+// GET /api/v1/status's additive "pipeline" array.
 func buildPipelineStatus(rs queue.RunSnapshot) pipelineStatus {
 	v := pipelineStatus{
 		Members:    make([]pipelineMemberStatus, 0, len(rs.Members)),
@@ -548,13 +547,13 @@ type runSummaryJSON struct {
 	EndedAt    string `json:"endedAt"`
 	DurationMs int64  `json:"durationMs"`
 
-	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
-	// §10 amendment 1) as-is: all three are omitted entirely for a serial or
-	// speculate run (BatchID == ""), present for a batch member. Note
-	// omitempty's one blind spot: a batch's member 0 also omits "position"
-	// (Go's zero value for int), so a client must treat "batchId present,
-	// position absent" as position 0, not "not a batch member" — batchId's
-	// presence is the actual batch-membership signal.
+	// BatchID/Position/BatchSize surface batch identity as-is: all three
+	// are omitted entirely for a serial or speculate run (BatchID == ""),
+	// present for a batch member. Note omitempty's one blind spot: a
+	// batch's member 0 also omits "position" (Go's zero value for int), so
+	// a client must treat "batchId present, position absent" as position
+	// 0, not "not a batch member" — batchId's presence is the actual
+	// batch-membership signal.
 	BatchID   string `json:"batchId,omitempty"`
 	Position  int    `json:"position,omitempty"`
 	BatchSize int    `json:"batchSize,omitempty"`
@@ -632,13 +631,13 @@ type runDetailResponse struct {
 	// empty one.
 	Hooks []checkJSON `json:"hooks"`
 
-	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
-	// §10 amendment 1) as-is: all three are omitted entirely for a serial or
-	// speculate run (BatchID == ""), present for a batch member. Note
-	// omitempty's one blind spot: a batch's member 0 also omits "position"
-	// (Go's zero value for int), so a client must treat "batchId present,
-	// position absent" as position 0, not "not a batch member" — batchId's
-	// presence is the actual batch-membership signal.
+	// BatchID/Position/BatchSize surface batch identity as-is: all three
+	// are omitted entirely for a serial or speculate run (BatchID == ""),
+	// present for a batch member. Note omitempty's one blind spot: a
+	// batch's member 0 also omits "position" (Go's zero value for int), so
+	// a client must treat "batchId present, position absent" as position
+	// 0, not "not a batch member" — batchId's presence is the actual
+	// batch-membership signal.
 	BatchID   string `json:"batchId,omitempty"`
 	Position  int    `json:"position,omitempty"`
 	BatchSize int    `json:"batchSize,omitempty"`
@@ -739,8 +738,8 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 
 // batchMemberJSON is one member of GET /api/v1/batch/{id}'s response — the
 // same data handleBatch (server.go) already renders as HTML, over
-// history.Store.BatchMembers (S7a: no new data source, just a JSON surface
-// for it).
+// history.Store.BatchMembers: no new data source, just a JSON surface
+// for it.
 type batchMemberJSON struct {
 	RunID      string `json:"runID"`
 	Target     string `json:"target"`
@@ -824,9 +823,8 @@ type checksAPIResponse struct {
 	Depth  []depthPointJSON `json:"depth"`
 }
 
-// handleAPIChecks is the JSON counterpart to handleChecks (server.go), the
-// one HTML section (red-rate/avg-duration table + depth chart) that was
-// previously machine-unreadable (S7b): it reuses the exact same
+// handleAPIChecks is the JSON counterpart to handleChecks (server.go)'s
+// red-rate/avg-duration table and depth chart: it reuses the exact same
 // CheckStats/DepthSeries queries and parseSince parsing, just serialized as
 // JSON numbers/points instead of an SVG.
 func (d *dash) handleAPIChecks(w http.ResponseWriter, r *http.Request) {
@@ -879,10 +877,10 @@ func (d *dash) handleAPIChecks(w http.ResponseWriter, r *http.Request) {
 // --- GET /api/v1/services -----------------------------------------------------
 
 // serviceInstanceJSON is one live shared-service instance, mirroring
-// ServiceStatus field-for-field (design §10's tuning instrument). Key is the
-// full key (services.md §2 review m2/m6 — only the full key is guaranteed
-// collision-free); KeyHash12 is the same truncation the dashboard HTML table
-// shows for compact display.
+// ServiceStatus field-for-field. Key is the full key (see
+// docs/design/services.md, "Full key versus name" — only the full key is
+// guaranteed collision-free); KeyHash12 is the same truncation the
+// dashboard HTML table shows for compact display.
 type serviceInstanceJSON struct {
 	Service   string `json:"service"`
 	Image     string `json:"image"`
@@ -906,8 +904,8 @@ type servicesResponse struct {
 	Instances    []serviceInstanceJSON `json:"instances"`
 }
 
-// handleAPIServices renders the shared-services pool (design §10's tuning
-// instrument), mirroring handleAPIRuns/handleAPIRun's "disabled" degradation:
+// handleAPIServices renders the shared-services pool, mirroring
+// handleAPIRuns/handleAPIRun's "disabled" degradation:
 // 503 {"error":"services disabled"} when WithServicesSnapshot was never
 // wired up (no daemon-level services block configured, or this build has no
 // services support) — the one case this route can't do anything meaningful.
@@ -965,7 +963,7 @@ func (d *dash) handleAPIRetry(w http.ResponseWriter, r *http.Request) {
 
 // --- POST /api/v1/cancel ------------------------------------------------------
 
-// cancelRequest mirrors retryRequest's shape (Feature 1, manual operator
+// cancelRequest mirrors retryRequest's shape (manual operator
 // cancellation): same (target, ref) pair, a different Command.Kind.
 type cancelRequest struct {
 	Target string `json:"target"`
@@ -1011,8 +1009,8 @@ type hookCancelRequest struct {
 }
 
 // handleAPIHookCancel cancels target's currently-running post-land hook
-// execution, if any (Feature 1's hook-cancel surface, hooks.Runner.
-// CancelCurrent via WithHookCancel). Unlike handleAPICancel/handleAPIRetry
+// execution, if any (hooks.Runner.CancelCurrent via WithHookCancel). Unlike
+// handleAPICancel/handleAPIRetry
 // (which enqueue a Command for the next reconcile pass to apply), this calls
 // straight through synchronously and its result is known immediately:
 // "cancelled" if a running landing was found and signalled, "no-op"

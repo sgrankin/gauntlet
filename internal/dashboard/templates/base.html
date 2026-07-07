@@ -126,9 +126,9 @@ footer { margin-top: 2rem; }
 .chip-error { background: var(--error); }
 .chip-neutral { background: var(--neutral); }
 /* chip-batched: a thin ring around a chip whose run landed as part of a
-   batch (docs/plans/phase5.md §10 amendment 1) — enough to read the strip
-   as visually grouped without a redesign; the ring color is deliberately
-   neutral (not tied to outcome) so it layers over any chip-<class> fill. */
+   batch — enough to read the strip as visually grouped without a
+   redesign; the ring color is deliberately neutral (not tied to outcome)
+   so it layers over any chip-<class> fill. */
 .chip-batched { box-shadow: 0 0 0 2px var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; min-width: 0; }
 /* .check-ratio: the compact "✓ passed/total" next to a run's outcome chip
@@ -138,7 +138,7 @@ footer { margin-top: 2rem; }
    jittering width as different rows show 1-2 vs 10+ checks. */
 .check-ratio { margin-left: .3rem; font-variant-numeric: tabular-nums; }
 
-/* --- pipeline stacked list (/t/{target}, docs/plans/phase5.md §3.4) ----- */
+/* --- pipeline stacked list (/t/{target}) --------------------------------- */
 .pipeline-run { border-top: 1px solid var(--border); padding-top: .6rem; margin-top: .6rem; }
 .pipeline-run:first-child { border-top: none; padding-top: 0; margin-top: 0; }
 .pipeline-members { margin: .2rem 0 .4rem; padding-left: 1.2rem; }

@@ -2,8 +2,7 @@ package main
 
 // Tests for gauntlet status/retry's pure pieces: flag parsing and
 // renderStatus against canned API JSON. No network, no exec — matching
-// land_test.go's "argv construction only" style (docs/plans/phase23.md §6
-// chunk D8 / E4).
+// land_test.go's "argv construction only" style.
 
 import (
 	"bytes"
@@ -573,7 +572,7 @@ func TestRenderStatus_ServicesSectionEmptyPool(t *testing.T) {
 	}
 }
 
-// --- idle signal (docs/plans/scale.md §2) ------------------------------------
+// --- idle signal ------------------------------------------------------------
 
 // TestRenderStatus_IdleSinceRendered confirms renderStatus prints a trailing
 // "idle since ..." line when the API response carries a non-empty

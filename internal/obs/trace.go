@@ -1,6 +1,6 @@
 // Package obs is a thin OTel wrapper around the queue's run lifecycle: it
-// starts/ends the span tree described in docs/plans/phase1.md §3
-// (Observability) and maps core.RunRecord / core.CheckResult onto span
+// starts/ends the span tree described in docs/design/core.md
+// ("Observability") and maps core.RunRecord / core.CheckResult onto span
 // attributes. It depends only on core and the OTel API (no SDK) — with no
 // provider registered, every span produced here is a no-op.
 package obs
@@ -32,7 +32,7 @@ const (
 )
 
 // Tracer returns gauntlet's shared tracer. With no provider registered
-// (the phase-1 default), every span it produces is a no-op
+// (the default), every span it produces is a no-op
 // (IsRecording()==false) and carries no cost.
 func Tracer() trace.Tracer { return otel.Tracer("gauntlet") }
 
@@ -41,7 +41,7 @@ func Tracer() trace.Tracer { return otel.Tracer("gauntlet") }
 // carrying the span; callers that fan work out to another goroutine (e.g.
 // a check) should derive that goroutine's context from this one via
 // trace.ContextWithSpan(ctx, rootSpan) so children parent correctly across
-// the goroutine boundary, per §3.
+// the goroutine boundary.
 func StartRun(ctx context.Context, tr trace.Tracer, runID, target string, cand core.Candidate, mergeSHA string) (context.Context, trace.Span) {
 	return tr.Start(ctx, "run", trace.WithAttributes(
 		attribute.String(AttrRunID, runID),
@@ -100,7 +100,7 @@ func EndSpan(span trace.Span, err error) {
 
 // EndRun ends the run's root span: records rec's summary as attributes and
 // sets a status mapped from rec.Outcome (Landed -> Ok; Rejected, Conflict,
-// Error -> Error with rec.Detail as description; Skipped -> Unset), per §3.
+// Error -> Error with rec.Detail as description; Skipped -> Unset).
 // rec nil (a run ending without ever producing a record) just ends span.
 func EndRun(span trace.Span, rec *core.RunRecord) {
 	if rec == nil {

@@ -1,16 +1,16 @@
 package queue
 
-// This file implements the phase-B auto-retry-once amendment (DESIGN.md
-// decision ledger, "Auto-retry once on infra-error parks"): a narrow,
-// scoped exception to phase 1's §9.2 "no unbounded retry loops" ruling.
-// Two phase-B pressures manufacture OutcomeError parks that a single
-// automatic retry absorbs without a human: cold-service ready-timeouts
-// (docs/plans/services.md §7, "recorded phase-B candidate") and, later,
-// evictable builders (docs/plans/scale.md §5). Scope is deliberately
-// narrow: only OutcomeError (never OutcomeRejected — a red verdict is an
-// author problem — and never OutcomeConflict), exactly once per (ref,
-// SHA), gated by Config.AutoRetryErrors (default true, see that field's
-// doc).
+// This file implements the auto-retry-once mechanism (DESIGN.md decision
+// ledger, "Auto-retry once on infra-error parks"): a narrow, scoped
+// exception to the "no unbounded retry loops" rule. Two pressures
+// manufacture OutcomeError parks that a single automatic retry absorbs
+// without a human: cold-service ready-timeouts (see docs/design/services.md,
+// "Failure semantics") and evictable builders (see docs/design/scaling.md,
+// "The one real prerequisite: auto-requeue on infra errors"). Scope is
+// deliberately narrow: only OutcomeError (never OutcomeRejected — a red
+// verdict is an author problem — and never OutcomeConflict), exactly once
+// per (ref, SHA), gated by Config.AutoRetryErrors (default true, see that
+// field's doc).
 
 import (
 	"context"
@@ -46,8 +46,7 @@ const (
 // The once-per-SHA guard (d.autoRetried) is in-memory only, by design: a
 // daemon restart resets it, which only re-grants one already-spent
 // auto-retry per still-parked ref — bounded by restarts, never an unbounded
-// retry-every-tick loop (the very thing §9.2 ruled out; this amendment
-// grants exactly one extra attempt, not a loop). syncBookkeeping
+// retry-every-tick loop. syncBookkeeping
 // (reconcile.go) prunes stale entries — a vanished ref, or one that moved
 // to a new SHA — in lockstep with d.done, so this map never grows without
 // bound over a long daemon lifetime, and a fresh SHA on the same ref always

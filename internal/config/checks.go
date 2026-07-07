@@ -9,8 +9,8 @@ import (
 	kdl "github.com/sblinch/kdl-go"
 )
 
-// CheckSpec is the repo-side check spec (docs/plans/phase1.md §4,
-// `.gauntlet.kdl`): every adopter writes this, and it's read out of the
+// CheckSpec is the repo-side check spec (`.gauntlet.kdl`): every adopter
+// writes this, and it's read out of the
 // candidate's own trial tree (never from a file path) so a candidate that
 // changes its checks is tested by its own definition.
 type CheckSpec struct {
@@ -19,39 +19,38 @@ type CheckSpec struct {
 }
 
 // Check is one named check: a command to run against the exported trial
-// tree. See core.CheckJob and docs/plans/phase1.md §5A for the
-// environment/verdict contract the executor applies when it runs Command.
+// tree. See core.CheckJob and docs/checks.md for the environment/verdict
+// contract the executor applies when it runs Command.
 type Check struct {
 	Name    string   `kdl:",arg"`
 	Command []string `kdl:"command,child"`
 
 	// Needs names the Services (by Service.Name, below) this check requires
-	// ensured and reachable before it runs (docs/plans/services.md §1).
-	// Every entry must match a Service declared in the same CheckSpec —
-	// validate() enforces this so an undeclared need fails loudly at parse
-	// time (ParseChecks error → OutcomeRejected), never silently at run
-	// time. nil means the check has no service dependencies and is wholly
-	// unaffected by the services machinery: a lint check shouldn't block on
-	// (or keep warm) a database it never touches (services.md §1).
+	// ensured and reachable before it runs. Every entry must match a
+	// Service declared in the same CheckSpec — validate() enforces this so
+	// an undeclared need fails loudly at parse time (ParseChecks error →
+	// OutcomeRejected), never silently at run time. nil means the check has
+	// no service dependencies and is wholly unaffected by the services
+	// machinery: a lint check shouldn't block on (or keep warm) a database
+	// it never touches.
 	Needs []string `kdl:"needs"`
 }
 
-// EnvVar is one `env "NAME" "VALUE"` pair set inside a service's container
-// (docs/plans/services.md §1).
+// EnvVar is one `env "NAME" "VALUE"` pair set inside a service's container.
 type EnvVar struct {
 	Name  string `kdl:",arg"`
 	Value string `kdl:",arg"`
 }
 
 // Service is one shared, cached service instance a check may declare a
-// dependency on via Check.Needs (docs/plans/services.md §1, §2). Read from
-// the trial-merged tree same as Check, so a branch that changes a service's
-// image/env/probe is tested against its own declaration.
+// dependency on via Check.Needs. Read from the trial-merged tree same as
+// Check, so a branch that changes a service's image/env/probe is tested
+// against its own declaration.
 //
 // EVERY field participates in the cache key (servicekey.go's ServiceKey):
 // two service declarations differing in any field — including Name itself,
 // so `service "mssql-a"`/`"mssql-b"` with identical bodies stay distinct on
-// purpose — are distinct cache entries by design (services.md §2).
+// purpose — are distinct cache entries by design.
 type Service struct {
 	Name  string   `kdl:",arg"`
 	Image string   `kdl:"image"`
@@ -59,31 +58,29 @@ type Service struct {
 	Env   []EnvVar `kdl:"env,multiple"`
 
 	// ReadyCommand, when set, is run inside the instance (docker exec or
-	// equivalent — services.md §6 review q2) in place of the default probe.
+	// equivalent) in place of the default probe.
 	// Absent (nil) means the default probe applies: a TCP dial of the
 	// resolved endpoint by the daemon.
 	ReadyCommand []string `kdl:"ready-command,child"`
 
 	// ReadyTimeout bounds how long ensure polls the ready probe before
-	// giving up (docs/plans/services.md §3). Zero after parsing means "left
-	// unset" — ParseChecks calls applyServiceDefaults, which fills in
-	// defaultReadyTimeout, BEFORE validate() and before any caller can hash
-	// this struct via ServiceKey. That ordering matters: the default must
-	// participate in the key at its effective value, not as an explicit
-	// zero, so that a future change to the default recycles instances whose
-	// specs relied on it (services.md §2, servicekey.go's ServiceKey doc).
+	// giving up. Zero after parsing means "left unset" — ParseChecks calls
+	// applyServiceDefaults, which fills in defaultReadyTimeout, BEFORE
+	// validate() and before any caller can hash this struct via ServiceKey.
+	// That ordering matters: the default must participate in the key at its
+	// effective value, not as an explicit zero, so that a future change to
+	// the default recycles instances whose specs relied on it (see
+	// servicekey.go's ServiceKey doc).
 	ReadyTimeout time.Duration `kdl:"ready-timeout,format:units"`
 
 	// IdleTTL is how long an instance survives with no in-flight reference
-	// before the reaper destroys it (docs/plans/services.md §3
-	// "Eviction"). Same before-hashing default treatment as ReadyTimeout,
-	// via applyServiceDefaults/defaultIdleTTL.
+	// before the reaper destroys it. Same before-hashing default treatment
+	// as ReadyTimeout, via applyServiceDefaults/defaultIdleTTL.
 	IdleTTL time.Duration `kdl:"idle-ttl,format:units"`
 
 	// Memory is docker/podman's --memory value (e.g. "2g"), passed through
-	// to the runtime verbatim — gauntlet does not interpret or normalize it
-	// (docs/plans/services.md §7 "Resource honesty" phase-B landing). Empty
-	// (the zero value) means no --memory flag is emitted at all: the
+	// to the runtime verbatim — gauntlet does not interpret or normalize it.
+	// Empty (the zero value) means no --memory flag is emitted at all: the
 	// runtime's own default (typically unlimited), never a gauntlet-chosen
 	// one.
 	Memory string `kdl:"memory"`
@@ -105,10 +102,9 @@ var (
 
 // RequiresServices reports whether this spec declares any dependency on the
 // shared-services machinery: at least one Service, or at least one Check
-// with a non-empty Needs. The queue calls this right after ParseChecks
-// (docs/plans/services-impl.md §4.4) to reject, loudly, a spec that wants
-// services on a daemon with no `services` block configured — a spec
-// validation error, like a malformed check (docs/plans/services.md §7),
+// with a non-empty Needs. The queue calls this right after ParseChecks to
+// reject, loudly, a spec that wants services on a daemon with no `services`
+// block configured — a spec validation error, like a malformed check,
 // never a silent no-op.
 func (cs *CheckSpec) RequiresServices() bool {
 	if len(cs.Services) > 0 {
@@ -124,9 +120,8 @@ func (cs *CheckSpec) RequiresServices() bool {
 
 // applyServiceDefaults fills a Service's defaultable fields when left zero
 // by the author. ParseChecks calls this on every declared Service BEFORE
-// validate() and before any caller hashes it via ServiceKey
-// (docs/plans/services-impl.md §2.4) — see Service.ReadyTimeout's doc for
-// why the ordering matters.
+// validate() and before any caller hashes it via ServiceKey — see
+// Service.ReadyTimeout's doc for why the ordering matters.
 func applyServiceDefaults(svc *Service) {
 	if svc.ReadyTimeout == 0 {
 		svc.ReadyTimeout = defaultReadyTimeout
@@ -137,14 +132,13 @@ func applyServiceDefaults(svc *Service) {
 }
 
 // envSafeName upcases name and replaces every non-alphanumeric rune with '_'
-// (docs/plans/services.md §4's GAUNTLET_SVC_<NAME>_HOST/PORT contract) —
-// duplicated from internal/services' function of the same name (pool.go)
-// because config must stay import-free of services; see reservedResultDir
-// in daemon.go for the identical duplication pattern against
-// internal/executor. Keep the two copies in sync: this one exists solely so
-// validate() below can catch two distinct service names that collide once
-// mangled into an env var name (adversarial review BUG 3) — an out-of-sync
-// copy would silently stop catching exactly that.
+// (the GAUNTLET_SVC_<NAME>_HOST/PORT contract) — duplicated from
+// internal/services' function of the same name (pool.go) because config
+// must stay import-free of services; see reservedResultDir in daemon.go
+// for the identical duplication pattern against internal/executor. Keep the
+// two copies in sync: this one exists solely so validate() below can catch
+// two distinct service names that collide once mangled into an env var
+// name — an out-of-sync copy would silently stop catching exactly that.
 func envSafeName(name string) string {
 	var b strings.Builder
 	b.Grow(len(name))
@@ -196,9 +190,9 @@ func (cs *CheckSpec) validate() error {
 		// Two exact-string-distinct names (e.g. "my-db" and "my_db") can
 		// still mangle to the same GAUNTLET_SVC_<NAME>_* pair (envSafeName
 		// above) — the executor's env is a last-wins slice, so one service
-		// would silently shadow the other's endpoint (adversarial review
-		// BUG 3). Caught here, at spec-load time, rather than left for a
-		// check to discover it can only ever reach one of its two needs.
+		// would silently shadow the other's endpoint. Caught here, at
+		// spec-load time, rather than left for a check to discover it can
+		// only ever reach one of its two needs.
 		envName := envSafeName(s.Name)
 		if owner, ok := envNames[envName]; ok {
 			return fmt.Errorf("service %q: collides with service %q under env var name GAUNTLET_SVC_%s_* — rename one", s.Name, owner, envName)
@@ -221,8 +215,8 @@ func (cs *CheckSpec) validate() error {
 		if s.IdleTTL <= 0 {
 			return fmt.Errorf("service %q: idle-ttl must be positive, got %s", s.Name, s.IdleTTL)
 		}
-		// Both optional (zero value = no flag emitted, services.md §7) — only
-		// checked for plausibility when the author actually set one.
+		// Both optional (zero value = no flag emitted) — only checked for
+		// plausibility when the author actually set one.
 		if s.Memory != "" && !memoryPattern.MatchString(s.Memory) {
 			return fmt.Errorf("service %q: memory %q: must match %s (e.g. \"2g\")", s.Name, s.Memory, memoryPattern.String())
 		}

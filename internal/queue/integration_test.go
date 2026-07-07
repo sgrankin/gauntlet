@@ -1,12 +1,10 @@
 // Integration suite: proves DESIGN.md's Invariants hold when the queue
 // drives REAL git (internal/gitx) against real bare-repo remotes
 // (internal/testutil), not the in-memory fake the rest of this package's
-// tests use (daemon_test.go and friends, C6). This is the second of the
-// plan's two test tiers (docs/plans/phase1.md §5): state-machine
-// ordering/aggregation is proven once against fakes; CAS semantics,
-// merge-tree, read-file-from-tree, and crash recovery are proven here
-// against the genuine plumbing, exactly as §5's integration table
-// prescribes. Every test drives the daemon through the public API only
+// tests use (daemon_test.go and friends). State-machine ordering/
+// aggregation is proven once against fakes; CAS semantics, merge-tree,
+// read-file-from-tree, and crash recovery are proven here against the
+// genuine plumbing. Every test drives the daemon through the public API only
 // (queue.New + Daemon.ReconcileOnce); nothing here pokes gitx or executor
 // internals directly except where a row is fundamentally about that
 // boundary (e.g. simulating a mid-land crash by calling the same
@@ -79,9 +77,10 @@ func newIntegrationHarness(t *testing.T, remote *testutil.Remote, exec core.Exec
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// F1 (docs/plans/phase23.md §10): every terminal event must carry a
-	// non-nil RunRecord, asserted across the whole RecordingChannel stream
-	// for every integration test built on this harness.
+	// Every terminal event must carry a non-nil RunRecord (see
+	// docs/design/core.md, "Event model"), asserted across the whole
+	// RecordingChannel stream for every integration test built on this
+	// harness.
 	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })
 	return &integrationHarness{t: t, remote: remote, git: repo, ch: ch, d: d}
 }
@@ -123,7 +122,7 @@ func (h *integrationHarness) currentRunID() string {
 // event" (checkFinishedObserved, daemon_test.go): a speculate window's
 // quiet-tick refill can inject an unrelated event for a DIFFERENT run in
 // the same lane before this release's own result is actually consumed — see
-// release's doc comment (P5-F finding) for the full story.
+// release's doc comment (daemon_test.go) for the full story.
 func (h *integrationHarness) releaseGated(gated *executor.GatedExecutor, runID, name string, result core.CheckResult) {
 	h.t.Helper()
 	before := len(h.ch.Events())

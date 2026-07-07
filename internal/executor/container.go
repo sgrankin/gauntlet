@@ -52,14 +52,14 @@ type Mount struct {
 	ReadOnly bool   // when true, mounted read-only (:ro)
 }
 
-// Params configures a ContainerExecutor. Package-local (§9.5 of
-// docs/plans/phase23.md): this package does not import internal/config;
-// cmd/gauntlet maps config.Executor fields into this struct.
+// Params configures a ContainerExecutor. Package-local: this package does
+// not import internal/config; cmd/gauntlet maps config.Executor fields
+// into this struct.
 type Params struct {
 	// Runtime selects the CLI: "docker", "podman", or "container" (Apple's
 	// container CLI). Empty defaults to "container" per the config default
-	// (docs/plans/phase23.md §3) — this package doesn't require the caller
-	// to have resolved that default itself.
+	// — this package doesn't require the caller to have resolved that
+	// default itself.
 	Runtime string
 
 	// Image is the OCI image every check runs in. Required.
@@ -81,10 +81,10 @@ type Params struct {
 	// ScratchDir is the directory each check's ephemeral host-side result
 	// dir (gauntlet-container-*, bind-mounted into the container at
 	// containerResultDir) is created under via os.MkdirTemp(ScratchDir,
-	// ...) — S16 (phase-6 audit synthesis), the same fix as LocalExecutor's
-	// BaseDir: rooting this under -state/scratch, swept at daemon startup,
-	// closes the gap where it used to escape every sweep by defaulting to
-	// the OS temp dir. Empty preserves the exact prior behavior
+	// ...) — the same fix as LocalExecutor's BaseDir: rooting this under
+	// -state/scratch, swept at daemon startup, closes the gap where it
+	// used to escape every sweep by defaulting to the OS temp dir. Empty
+	// preserves the exact prior behavior
 	// (os.MkdirTemp's own "" -> os.TempDir() fallback). This only changes
 	// the mount's host-side source path — the in-container path
 	// (containerResultDir) and every other mount/flag in runArgs are
@@ -95,23 +95,22 @@ type Params struct {
 	// Token namespaces this daemon's container names
 	// (gauntlet-<Token>-<runID>-<check>, see containerName) so
 	// cmd/gauntlet's startup orphan sweep only ever reaps containers from
-	// its own -state dir (B1, phase-6 B-track review). Without it, the
-	// "gauntlet-" name prefix is host-global — identical for every gauntlet
-	// process on the box — so a daemon restarting against a different
-	// -state dir could `rm -f` a live sibling daemon's in-flight
-	// containers; AcquireLock's flock only guards the -state dir itself,
-	// not this shared naming namespace. Minted once in cmd/gauntlet from a
-	// short hash of the absolute -state path and threaded through to both
-	// this executor and the sweep. Empty preserves the pre-B1 naming
-	// exactly (test compatibility).
+	// its own -state dir. Without it, the "gauntlet-" name prefix is
+	// host-global — identical for every gauntlet process on the box — so
+	// a daemon restarting against a different -state dir could `rm -f` a
+	// live sibling daemon's in-flight containers; AcquireLock's flock only
+	// guards the -state dir itself, not this shared naming namespace.
+	// Minted once in cmd/gauntlet from a short hash of the absolute
+	// -state path and threaded through to both this executor and the
+	// sweep. Empty preserves the unnamespaced naming exactly (test
+	// compatibility).
 	Token string
 }
 
 // runtimeSpec captures the one CLI-shape difference between supported
 // runtimes: the binary name and how to probe whether its backing service is
-// reachable. Flags themselves are docker-compatible across all three
-// (docs/plans/phase23.md Spike C), so RunCheck builds one argv shape for all
-// of them.
+// reachable. Flags themselves are docker-compatible across all three, so
+// RunCheck builds one argv shape for all of them.
 type runtimeSpec struct {
 	Bin       string
 	ProbeArgs []string
@@ -136,8 +135,8 @@ var runtimeSpecs = map[string]runtimeSpec{
 // with the same contract as LocalExecutor: same verdict mapping, same
 // 64KiB tail-capped output, same process-group cancel discipline. The one
 // executor-specific addition is that a missing runtime binary or an
-// unreachable backing service reports CheckResult.Err (a daemon condition,
-// per docs/plans/phase1.md §9.2), never a verdict.
+// unreachable backing service reports CheckResult.Err (a daemon
+// condition), never a verdict.
 type ContainerExecutor struct {
 	spec   runtimeSpec
 	params Params
@@ -172,9 +171,9 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 	}
 
 	// Missing runtime binary or unreachable service is a daemon condition,
-	// not a verdict (docs/plans/phase23.md §4.5) — checked before we ever
-	// invoke `run`, so a nonzero exit from `run` itself can be trusted to
-	// mean "the containerized check command failed", same as LocalExecutor.
+	// not a verdict — checked before we ever invoke `run`, so a nonzero
+	// exit from `run` itself can be trusted to mean "the containerized
+	// check command failed", same as LocalExecutor.
 	if err := probeRuntime(ctx, c.spec); err != nil {
 		return core.CheckResult{
 			Name:     job.Name,
@@ -268,9 +267,8 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			// Nonzero exit is a verdict regardless of the result file
-			// (§5A / §9.2), same as LocalExecutor: the file only splits
-			// the exit-0 case.
+			// Nonzero exit is a verdict regardless of the result file,
+			// same as LocalExecutor: the file only splits the exit-0 case.
 			res := core.CheckResult{
 				Name:     job.Name,
 				Status:   core.CheckFailed,
@@ -287,7 +285,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 			// failed check pays for the extra probe; a passing check
 			// never touches this.
 			if c.checkEmptyMount(ctx, job) == diagMountEmpty {
-				// Same conversion shape as the queue's M1 service-death
+				// Same conversion shape as the queue's mid-run-death
 				// rewrite (internal/queue/reconcile.go: res.Err = ...,
 				// Output/Duration left exactly as RunCheck set them) —
 				// a verdict manufactured by daemon-side plumbing gets
@@ -327,8 +325,8 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 	}
 }
 
-// runArgs builds the full docker-compatible `run` argv (everything after the
-// binary name) for job, per docs/plans/phase23.md §4.5:
+// runArgs builds the full docker-compatible `run` argv (everything after
+// the binary name) for job:
 //
 //	<bin> run --rm --name gauntlet-<runID>-<check> \
 //	  -w <workdir> \
@@ -337,7 +335,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //	  -e GAUNTLET_* (all six)           \
 //	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
 //	  -v <mountHost>:<mountPath>[:ro] ... # operator-configured host bind mounts \
-//	  --network <n> ...                # docs/plans/services-impl.md §4.2: one per job.Networks (ModeNetwork) \
+//	  --network <n> ...                # one per job.Networks (ModeNetwork) \
 //	  -e <kv> ...                      # one per job.ServiceEnv (resolved `needs`) \
 //	  <image> <job.Command...>
 //
@@ -370,8 +368,8 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		}
 		args = append(args, "-v", v)
 	}
-	// Shared-services wiring (docs/plans/services-impl.md §4.2): nil for
-	// checks with no `needs`, so this is a no-op append in the common case.
+	// Shared-services wiring: nil for checks with no `needs`, so this is a
+	// no-op append in the common case.
 	for _, n := range job.Networks {
 		args = append(args, "--network", n)
 	}
@@ -449,22 +447,23 @@ func (c *ContainerExecutor) checkEmptyMount(ctx context.Context, job core.CheckJ
 }
 
 // maxContainerNameLen conservatively caps the assembled container name well
-// below every known runtime's practical limit (B1, phase-6 B-track review).
-// Only the runID+check tail is ever truncated to fit — the "gauntlet-
+// below every known runtime's practical limit. Only the runID+check tail
+// is ever truncated to fit — the "gauntlet-
 // <token>-" prefix is never touched, since cmd/gauntlet/sweep.go's
 // sweepContainerOrphans matches on that exact prefix to scope its kills to
 // this daemon; truncating it would break that scoping.
 const maxContainerNameLen = 200
 
 // containerName derives a docker-compatible container name from a run ID
-// and check name (§2.4 / §4.5: run IDs are unique per-process, and now give
-// container names real collision-avoidance teeth), namespaced by token (B1):
-// "gauntlet-<token>-<runID>-<check>" when token is non-empty, or the pre-B1
-// "gauntlet-<runID>-<check>" when it's empty (test compatibility — see
-// Params.Token's doc for why the namespace exists at all). Both runID and
-// check are sanitized since neither is guaranteed name-safe (check names are
-// free-form config; run IDs embed a trial-tree OID prefix); token is minted
-// in cmd/gauntlet as a hex hash and needs no sanitizing.
+// and check name (run IDs are unique per-process, giving container names
+// real collision-avoidance teeth), namespaced by token:
+// "gauntlet-<token>-<runID>-<check>" when token is non-empty, or the
+// unnamespaced "gauntlet-<runID>-<check>" when it's empty (test
+// compatibility — see Params.Token's doc for why the namespace exists at
+// all). Both runID and check are sanitized since neither is guaranteed
+// name-safe (check names are free-form config; run IDs embed a trial-tree
+// OID prefix); token is minted in cmd/gauntlet as a hex hash and needs no
+// sanitizing.
 func containerName(token, runID, check string) string {
 	prefix := "gauntlet-"
 	if token != "" {
@@ -489,9 +488,9 @@ func sanitizeName(s string) string {
 
 // probeRuntime reports whether spec's CLI is installed and its backing
 // service is reachable. Used both as RunCheck's preflight (missing binary
-// or unreachable service becomes CheckResult.Err, never a verdict — see
-// docs/plans/phase23.md §4.5) and by integration tests deciding whether to
-// skip (§1 Spike C: the runtime's service may simply be down).
+// or unreachable service becomes CheckResult.Err, never a verdict) and by
+// integration tests deciding whether to skip (the runtime's service may
+// simply be down).
 func probeRuntime(ctx context.Context, spec runtimeSpec) error {
 	if _, err := exec.LookPath(spec.Bin); err != nil {
 		return fmt.Errorf("container runtime binary %q not found: %w", spec.Bin, err)

@@ -22,8 +22,8 @@ CREATE TABLE runs (
   started_at   INTEGER NOT NULL,          -- unix millis
   ended_at     INTEGER NOT NULL,
   duration_ms  INTEGER NOT NULL,
-  -- batch_id/position/batch_size (v5+, docs/plans/phase5.md §10 amendment 1):
-  -- batch_id groups the per-member records of one batch run (empty for
+  -- batch_id/position/batch_size (v5+): batch_id groups the per-member
+  -- records of one batch run (empty for
   -- serial and speculate; core.RunRecord.BatchID verbatim). position is this
   -- member's 0-based index within its batch (0 for serial/speculate).
   -- batch_size is the batch's member count (1 otherwise). Together these
@@ -92,7 +92,7 @@ CREATE TABLE queue_depth (
 );
 
 -- retry_intents durably records an operator's most recent retry of a parked
--- (target, ref) (core.EventRetryRequested, S3): upserted on every retry, one
+-- (target, ref) (core.EventRetryRequested): upserted on every retry, one
 -- row per (target, ref) — the latest retry always wins. Read by
 -- LatestTerminalPerRef's seed-park query to suppress re-parking a ref whose
 -- last recorded terminal outcome predates a later retry: without this, a
@@ -108,8 +108,8 @@ CREATE TABLE retry_intents (
 );
 
 -- ignored_refs durably records core.EventIgnoredRef (a well-formed candidate
--- ref whose target segment names no configured target — a misconfiguration,
--- S7c): one row per occurrence, so an operator not watching the log/Slack at
+-- ref whose target segment names no configured target — a misconfiguration):
+-- one row per occurrence, so an operator not watching the log/Slack at
 -- the instant it happened can still discover it after the fact. Keyed by
 -- (at, target, ref) rather than just (target, ref) since the daemon reports
 -- the same (ref, SHA) at most once per SHA (see checkIgnoredRefs,
@@ -124,8 +124,8 @@ CREATE TABLE ignored_refs (
 );
 
 -- hook_runs durably records one landing's post-land hook "owed" state
--- (core.EventHookStarted/EventHookSkipped; S1-C's durable owed/skipped
--- marker, no auto-resume): one row per run_id, written the instant the
+-- (core.EventHookStarted/EventHookSkipped; a durable owed/skipped marker,
+-- no auto-resume): one row per run_id, written the instant the
 -- FIRST EventHookStarted for that landing reaches history — synchronously,
 -- before any hook subprocess even starts — or, for a recovery-synthesized
 -- landing whose hooks were never run at all, by EventHookSkipped instead.

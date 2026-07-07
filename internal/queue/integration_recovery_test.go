@@ -73,10 +73,10 @@ func TestIntegration_CrashBetweenLandAndDelete(t *testing.T) {
 		t.Fatal("no EventLanded emitted for the recovered candidate")
 	}
 
-	// O5 (docs/plans/phase23.md §10): a real-git integration test driving
-	// the daemon's recovery path end to end. F1's fix (a synthesized
-	// RunRecord, not a nil one) must hold here exactly as it does against
-	// the fake git in TestReconcile_IsAncestorRecovery.
+	// A real-git integration test driving the daemon's recovery path end
+	// to end: the synthesized RunRecord (never a nil one — see
+	// docs/design/core.md, "Event model") must hold here exactly as it does
+	// against the fake git in TestReconcile_IsAncestorRecovery.
 	recs := h2.ch.Records()
 	last := recs[len(recs)-1]
 	if last.Outcome != core.OutcomeLanded {

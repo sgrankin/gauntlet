@@ -1,11 +1,11 @@
 // Package ghstatus implements a core.Channel that posts one rollup GitHub
 // commit status per target to the candidate SHA, via the plain REST
-// "statuses" API (see docs/plans/phase23.md §4.3):
+// "statuses" API:
 //
 //	POST {api}/repos/{owner}/{repo}/statuses/{candidate_sha}
 //
-// It is output-only: Commands never yields (§9.5 — no phase-1 channel or
-// this one produces a Command; ghstatus never will, either).
+// It is output-only: Commands never yields — commit-status posting has
+// no inbound command surface, and never will.
 package ghstatus
 
 import (
@@ -25,7 +25,7 @@ import (
 
 var _ core.Channel = (*Channel)(nil)
 
-// Params configures a Channel. It is a package-local struct (§9.5): mapping
+// Params configures a Channel. It is a package-local struct: mapping
 // from parsed config lives only in cmd, so this package never imports
 // internal/config.
 type Params struct {
@@ -97,8 +97,8 @@ func New(p Params) *Channel {
 	}
 }
 
-// Emit maps ev to a GitHub commit status per the table in
-// docs/plans/phase23.md §4.3 and posts it. Events that don't map to a status
+// Emit maps ev to a GitHub commit status (see statusFor) and posts it.
+// Events that don't map to a status
 // (EventSkipped — transient; re-posts pending on the next trial — and any
 // other non-terminal kind) post nothing.
 //
@@ -134,8 +134,8 @@ const (
 	stateError   state = "error"
 )
 
-// statusFor maps ev to the state and description to post, per the table in
-// docs/plans/phase23.md §4.3. ok is false for event kinds that post nothing.
+// statusFor maps ev to the state and description to post. ok is false for
+// event kinds that post nothing.
 func statusFor(ev core.Event) (s state, description string, ok bool) {
 	switch ev.Kind {
 	case core.EventTrialClean:
@@ -149,8 +149,8 @@ func statusFor(ev core.Event) (s state, description string, ok bool) {
 	case core.EventError:
 		return stateError, capDescription(detailOf(ev)), true
 	case core.EventHookFinished:
-		// Deliberately ignored (closing-review FIX 1): the commit status
-		// describes the LANDING, and a post-land hook failure must not
+		// Deliberately ignored: the commit status describes the LANDING,
+		// and a post-land hook failure must not
 		// repaint an already-green landing status red — that's the CD
 		// hand-off boundary (DESIGN.md's decision ledger, "Deployments as
 		// post-land hooks"). A failed hook is Slack's and the log
@@ -234,10 +234,10 @@ func (c *Channel) post(ctx context.Context, ev core.Event, s state, description 
 }
 
 // runURL builds target_url = "<base>/run/<runID>", or "" when base or runID
-// is empty (§4.3: omitted from the posted status unless a dashboard is
+// is empty: omitted from the posted status unless a dashboard is
 // configured; an empty runID would otherwise produce a dangling "<base>/run/"
-// URL — defense in depth now that the queue always mints a RunID before
-// EventTrialClean).
+// URL — defense in depth, since the queue always mints a RunID before
+// EventTrialClean.
 func runURL(base, runID string) string {
 	if base == "" || runID == "" {
 		return ""

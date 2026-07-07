@@ -98,8 +98,8 @@ func TestLocalExecutor_SkippedViaResultFile(t *testing.T) {
 }
 
 func TestLocalExecutor_FailedWinsOverResultFile(t *testing.T) {
-	// A nonzero exit is a verdict regardless of the result file (§5A): the
-	// file only splits the exit-0 case.
+	// A nonzero exit is a verdict regardless of the result file: the file
+	// only splits the exit-0 case.
 	dir := t.TempDir()
 	cmd := script(t, dir, "check.sh", fmt.Sprintf(
 		"#!/bin/sh\nprintf 'skipped' > \"$%s\"\nexit 1\n", core.EnvResultFile))
@@ -293,7 +293,7 @@ sleep 300
 	}
 
 	// The background child (grandchild of the process-group leader) must
-	// be dead too, not just the direct child (§9.5).
+	// be dead too, not just the direct child.
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		err := syscall.Kill(childPID, 0)
@@ -307,9 +307,9 @@ sleep 300
 	}
 }
 
-// TestLocalExecutor_BaseDirRootsScratchDir proves S16's fix (phase-6 audit
-// synthesis): a non-empty BaseDir roots the check's ephemeral scratch dir
-// under it, rather than the OS default temp dir — the property that lets
+// TestLocalExecutor_BaseDirRootsScratchDir proves that a non-empty BaseDir
+// roots the check's ephemeral scratch dir under it, rather than the OS
+// default temp dir — the property that lets
 // cmd/gauntlet's startup sweep of -state/scratch actually catch it. The
 // scratch dir is removed (defer os.RemoveAll) before RunCheck returns, so
 // the check script itself captures its own $GAUNTLET_RESULT_FILE's

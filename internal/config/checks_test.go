@@ -6,12 +6,11 @@ import (
 	"time"
 )
 
-// TestParseChecks_Services is the §2.1 kdl-go grammar spike, turned into a
-// permanent regression test: service/needs/env/ready-command nodes must
+// TestParseChecks_Services confirms service/needs/env/ready-command nodes
 // populate the structs above via the SAME tag shapes checks.go already used
 // for Check.Command (child-node argv) and Check.Name (positional arg) —
-// confirmed against the real kdl-go dependency, not the design doc's
-// illustrative snippet (docs/plans/services-impl.md §2.1).
+// confirmed against the real kdl-go dependency, not just the design doc's
+// illustrative snippet.
 func TestParseChecks_Services(t *testing.T) {
 	data := []byte(`
 service "pg" {

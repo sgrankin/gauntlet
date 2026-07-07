@@ -39,10 +39,10 @@ type statusAPIResponse struct {
 	// they can't be scoped to any target object.
 	IgnoredRefs []statusAPIIgnoredRef `json:"ignoredRefs"`
 
-	// IdleSince mirrors dashboard.statusResponse's own TOP-LEVEL field
-	// (docs/plans/scale.md §2): the RFC3339 instant since which the whole
-	// daemon — every target's queue and post-land hooks — has been idle, ""
-	// when the daemon is busy right now.
+	// IdleSince mirrors dashboard.statusResponse's own TOP-LEVEL field: the
+	// RFC3339 instant since which the whole daemon — every target's queue
+	// and post-land hooks — has been idle, "" when the daemon is busy right
+	// now.
 	IdleSince string `json:"idleSince"`
 }
 
@@ -100,10 +100,10 @@ type statusAPIInFlight struct {
 // statusAPIPipeline mirrors dashboard.pipelineStatus's JSON shape
 // (internal/dashboard/api.go) — see the file doc on why this is a separate
 // type rather than a shared import. One entry per run currently in a
-// target's pipeline (docs/plans/phase5.md §3.4): head first, additive
-// alongside inFlight (which stays the head run, for back-compat) — a
-// target running more than one speculative lane, or a batch of more than
-// one member, only shows up here.
+// target's pipeline: head first, additive alongside inFlight (which stays
+// the head run, for back-compat) — a target running more than one
+// speculative lane, or a batch of more than one member, only shows up
+// here.
 type statusAPIPipeline struct {
 	Members      []statusAPIPipelineMember `json:"members"`
 	ChainTip     string                    `json:"chainTip"`
@@ -234,9 +234,9 @@ func runStatus(args []string) error {
 // renderStatus writes a compact, per-target summary of resp to w: branch
 // and short tip SHA, the in-flight ref and check (if any), the pipeline
 // (one line per run, position + ref/topic + a "(speculated)" marker on a
-// predicted-base run — S10, docs/plans/phase5.md §3.4), the waiting count,
-// and one line per parked ref with its outcome and reason. Pure (no I/O
-// beyond w), so it's testable against canned API JSON without a network.
+// predicted-base run), the waiting count, and one line per parked ref with
+// its outcome and reason. Pure (no I/O beyond w), so it's testable against
+// canned API JSON without a network.
 //
 // svc is the shared-services pool's own separately-fetched response (design
 // §10's tuning instrument, runStatus's doc) — nil when services aren't
@@ -346,10 +346,10 @@ func renderStatus(w io.Writer, resp statusAPIResponse, target string, svc *statu
 		}
 	}
 
-	// Idle signal (docs/plans/scale.md §2): a DAEMON-level line, printed once
-	// at the very end regardless of any -target filter, same convention as
-	// ignored refs/services above — omitted entirely when the daemon isn't
-	// idle right now (resp.IdleSince == "").
+	// Idle signal: a DAEMON-level line, printed once at the very end
+	// regardless of any -target filter, same convention as ignored
+	// refs/services above — omitted entirely when the daemon isn't idle
+	// right now (resp.IdleSince == "").
 	if resp.IdleSince != "" {
 		fmt.Fprintf(w, "idle since %s\n", resp.IdleSince)
 	}

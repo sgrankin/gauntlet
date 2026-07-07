@@ -1,6 +1,6 @@
-// Speculate-mode suite (docs/plans/phase5.md §2.5's speculate refill, §2.1's
-// lane-general validity sweep/bubble/prefix-drain now actually exercised at
-// depth > 1, §3.3's Speculated flag). Built on the fake harness
+// Speculate-mode suite: the speculate refill, the lane-general validity
+// sweep/bubble/prefix-drain exercised at depth > 1, and the Speculated flag
+// (see docs/design/queue-modes.md, "Speculate"). Built on the fake harness
 // (daemon_test.go's testHarness/fakeGitRepo), the same tier batch_test.go's
 // state-machine suite uses — speculate's window-filling, bubble, and
 // invalidation behavior is exactly what the fake proves most cheaply and
@@ -43,8 +43,8 @@ func pushThreeSpeculateCandidates(h *testHarness) (refA, refB, refC string) {
 	return refA, refB, refC
 }
 
-// TestSpeculateRefill_FillsWindowChained proves the basic refill shape
-// (docs/plans/phase5.md §2.5): one tick, window 3, 3 queued candidates ->
+// TestSpeculateRefill_FillsWindowChained proves the basic refill shape: one
+// tick, window 3, 3 queued candidates ->
 // one refill fills the whole window in a single chain, each run's own
 // (mergeOID, baseOID) chaining onto the previous run's chainTip, and the
 // Predicted flag set correctly (false for the head run, true for every
@@ -86,7 +86,7 @@ func TestSpeculateRefill_FillsWindowChained(t *testing.T) {
 		}
 	}
 
-	// RunRecord.Speculated mirrors run.predicted (§3.3).
+	// RunRecord.Speculated mirrors run.predicted.
 	if run0.members[0].rec.Speculated {
 		t.Error("run0's RunRecord.Speculated must be false")
 	}
@@ -96,18 +96,17 @@ func TestSpeculateRefill_FillsWindowChained(t *testing.T) {
 }
 
 // TestSpeculateConflictAgainstPredictedBase_SkipsRequeuesThenParksOnRealRetest
-// proves §2.5's per-candidate conflict handling, UPDATED for the holistic
-// review's F2 extension (docs/plans/phase5.md §Amendments): a candidate that
-// conflicts against a non-head (predicted, unpushed) base is NOT proven
-// against reality — parking it there is the same false-negative park F2
-// already ruled out for a post-merge red at lane index >0. It must Skip
-// unparked instead (Detail still documents the conflict as being against a
-// PREDICTION — "conflicts with in-flight <topic>@<sha> (predicted base)" —
-// not the generic "trial merge conflict" wording serial/batch use, since the
-// base here was never pushed anywhere) and re-queue; window-extension still
-// stops for this tick once that candidate fails (carol never gets picked at
-// all). This test used to be TestSpeculateConflictAgainstPredictedBase_Parks
-// and asserted the immediate park that WAS the bug; it now also proves the
+// proves per-candidate conflict handling: a candidate that conflicts
+// against a non-head (predicted, unpushed) base is NOT proven against
+// reality — parking it there would be the same false-negative park already
+// ruled out for a post-merge red at lane index >0 (see
+// docs/design/queue-modes.md, "Conflict against a predicted base is a skip,
+// not a park"). It must Skip unparked instead (Detail still documents the
+// conflict as being against a PREDICTION — "conflicts with in-flight
+// <topic>@<sha> (predicted base)" — not the generic "trial merge conflict"
+// wording serial/batch use, since the base here was never pushed anywhere)
+// and re-queue; window-extension still stops for this tick once that
+// candidate fails (carol never gets picked at all). It also proves the
 // second half: once the SAME candidate is genuinely retested at lane index 0
 // against the real target tip and still conflicts there, THAT is proven
 // against reality and parks for real.
@@ -225,11 +224,12 @@ func TestSpeculateConflictAgainstPredictedBase_SkipsRequeuesThenParksOnRealRetes
 	_ = refA
 }
 
-// TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands is
-// the holistic review's exact regression scenario (docs/plans/phase5.md
-// §Amendments, F2 extended): window [A,B], B conflicts with A's predicted
-// (unpushed) chainTip, then A itself goes red at head and never lands — so
-// the real target tip never advances to that chainTip at all. B must not
+// TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands
+// proves the regression scenario documented in docs/design/queue-modes.md
+// ("Conflict against a predicted base is a skip, not a park"): window
+// [A,B], B conflicts with A's predicted (unpushed) chainTip, then A itself
+// goes red at head and never lands — so the real target tip never advances
+// to that chainTip at all. B must not
 // stay parked on a base that turned out to never exist; it re-queues,
 // re-forms at lane index 0 against the REAL (unmoved) target tip, and —
 // since B was landable there all along — lands.
@@ -305,33 +305,26 @@ func TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands(t 
 		}
 	}
 	if bobRec == nil || bobRec.Outcome != core.OutcomeLanded {
-		t.Fatalf("bob's final record = %+v, want Outcome Landed — the F2 extension's whole point: a candidate falsely at risk of parking on a stale prediction must land once retested for real", bobRec)
+		t.Fatalf("bob's final record = %+v, want Outcome Landed — a candidate falsely at risk of parking on a stale prediction must land once retested for real", bobRec)
 	}
 
 	_ = refC
 }
 
 // TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest proves
-// §2.1c's bubble step at depth 3 (this is where P5-C built it lane-general
-// but only ever exercised at depth 1), UPDATED for the phase-5 review's F2
-// ruling (Zuul reset semantics).
+// the bubble step at depth 3 (see docs/design/queue-modes.md, "Red bubble:
+// only index 0 parks"): bob's base at lane index 1 is alice's own
+// PREDICTED (unpushed) chainTip, never the real target tip, so a red there
+// proves nothing about bob himself — it could just as easily be alice's
+// eventual fault. Only lane index 0 is tested against reality
+// (runInvalidated's own rule), so only index 0 may park on red; anything
+// red at index >0 must Skip unparked and re-queue, to be retested for real
+// once it actually reaches index 0.
 //
-// F2 background: this test used to be
-// TestSpeculateBubble_CulpritParksSuffixSkipped and asserted that bob (the
-// middle run, lane index 1) parked (Rejected) the instant his check went
-// red — with alice (lane index 0) still in flight ahead of him. That was
-// the bug: bob's base at index 1 is alice's own PREDICTED (unpushed)
-// chainTip, never the real target tip, so a red there proves nothing about
-// bob himself — it could just as easily be alice's eventual fault. Only
-// lane index 0 is tested against reality (runInvalidated's own rule), so
-// only index 0 may park on red; anything red at index >0 must Skip
-// unparked and re-queue, to be retested for real once it actually reaches
-// index 0.
-//
-// This test now proves both halves of that: the middle-red case Skips
-// without parking and everything behind it bubbles too (unchanged from
-// before), AND — new — once bob re-queues and lands at lane index 0 for a
-// genuine retest against the real target tip, a red THERE parks for real.
+// This test proves both halves of that: the middle-red case Skips without
+// parking and everything behind it bubbles too, AND once bob re-queues and
+// lands at lane index 0 for a genuine retest against the real target tip, a
+// red THERE parks for real.
 func TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
 	refA, refB, refC := pushThreeSpeculateCandidates(h)
@@ -449,7 +442,7 @@ func TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest(t *testi
 	}
 }
 
-// TestSpeculateValiditySweep_MemberMoveTruncatesSuffix proves §2.2's
+// TestSpeculateValiditySweep_MemberMoveTruncatesSuffix proves the
 // generalized Invariant-5 test at depth 3: a mid-window member re-push
 // (lane position 1) truncates the suffix from THAT position on — Skipped,
 // unparked, both it and everything behind it — while the predecessor
@@ -498,7 +491,7 @@ func TestSpeculateValiditySweep_MemberMoveTruncatesSuffix(t *testing.T) {
 	}
 }
 
-// TestSpeculateHeadTargetMoved_WholeWindowInvalidated proves §2.2's head-run
+// TestSpeculateHeadTargetMoved_WholeWindowInvalidated proves the head-run
 // rule at depth 3: only lane index 0's baseOID is the live target tip, so a
 // direct push to the target moves it out from under the HEAD run
 // specifically — invalidating the ENTIRE window (every run depends,
@@ -552,13 +545,14 @@ func TestSpeculateHeadTargetMoved_WholeWindowInvalidated(t *testing.T) {
 	}
 }
 
-// TestSpeculateGreenPrefixDrain_MultipleRunsOneTick proves §2.1d's
-// prefix-drain loop lands a whole green prefix in ONE tick (not one land
-// per tick): forcing all three runs green simultaneously (bypassing real
-// check execution — a separate concern the depth-3 race soak below covers)
-// and calling ReconcileOnce exactly once must land all three, each land's
-// CAS old value equal to the PRIOR run's own chainTip (structural FIFO,
-// constraint 5) — never the tick's stale target-tip snapshot.
+// TestSpeculateGreenPrefixDrain_MultipleRunsOneTick proves the prefix-drain
+// loop lands a whole green prefix in ONE tick (not one land per tick):
+// forcing all three runs green simultaneously (bypassing real check
+// execution — a separate concern the depth-3 race soak below covers) and
+// calling ReconcileOnce exactly once must land all three, each land's CAS
+// old value equal to the PRIOR run's own chainTip (see
+// docs/design/queue-modes.md, "FIFO landings, structurally CAS-enforced")
+// — never the tick's stale target-tip snapshot.
 func TestSpeculateGreenPrefixDrain_MultipleRunsOneTick(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
 	pushThreeSpeculateCandidates(h)
@@ -610,14 +604,15 @@ func TestSpeculateGreenPrefixDrain_MultipleRunsOneTick(t *testing.T) {
 	}
 }
 
-// TestSpeculateLand_FIFOCAS is docs/plans/phase5.md §5.3's targeted test:
-// window 3, all green, released in run0/run1/run2 order (a separate tick's
-// worth of check-completion per run, unlike the prefix-drain test above,
-// which forces simultaneity) — land order must be run0,run1,run2, and a
-// FORCED out-of-order land attempt (run1's own CAS, before run0 has landed)
-// must CAS-fail structurally: run1.baseOID is a PREDICTION (run0.chainTip),
-// not yet the live target ref, so nothing can land run1 first no matter
-// what races the daemon (constraint 5).
+// TestSpeculateLand_FIFOCAS proves FIFO landing is structurally
+// CAS-enforced (see docs/design/queue-modes.md, "FIFO landings,
+// structurally CAS-enforced"): window 3, all green, released in
+// run0/run1/run2 order (a separate tick's worth of check-completion per
+// run, unlike the prefix-drain test above, which forces simultaneity) —
+// land order must be run0,run1,run2, and a FORCED out-of-order land attempt
+// (run1's own CAS, before run0 has landed) must CAS-fail structurally:
+// run1.baseOID is a PREDICTION (run0.chainTip), not yet the live target
+// ref, so nothing can land run1 first no matter what races the daemon.
 func TestSpeculateLand_FIFOCAS(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
 	pushThreeSpeculateCandidates(h)
@@ -680,16 +675,17 @@ func TestSpeculateLand_FIFOCAS(t *testing.T) {
 	}
 }
 
-// TestSpeculateCrashRecovery covers §8's speculate crash-recovery
-// walkthrough: a PREFIX of the window landed (target advanced past two
-// members) before a crash interrupted slot deletion, and the un-landed
-// suffix's predicted link (built against what was, at the time, an
-// in-flight prediction) is now unreferenced garbage. A fresh daemon (no
-// in-memory lane state — modeled here, as land_test.go/batch_test.go's own
-// crash-recovery tests do, by reconciling a never-before-used Daemon
-// against hand-crafted ground truth) must: recover the landed members' slots
-// one at a time (head-pick-only per refill, §2.5), with no re-merge; then
-// rebuild the un-landed suffix as a fresh window on the new live tip.
+// TestSpeculateCrashRecovery covers speculate crash-recovery (see
+// docs/design/queue-modes.md, "Crash recovery adds no durable state"): a
+// PREFIX of the window landed (target advanced past two members) before a
+// crash interrupted slot deletion, and the un-landed suffix's predicted
+// link (built against what was, at the time, an in-flight prediction) is
+// now unreferenced garbage. A fresh daemon (no in-memory lane state —
+// modeled here, as land_test.go/batch_test.go's own crash-recovery tests
+// do, by reconciling a never-before-used Daemon against hand-crafted ground
+// truth) must: recover the landed members' slots one at a time
+// (head-pick-only per refill), with no re-merge; then rebuild the
+// un-landed suffix as a fresh window on the new live tip.
 func TestSpeculateCrashRecovery(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
 	base := h.git.seed("main", nil)
@@ -705,14 +701,14 @@ func TestSpeculateCrashRecovery(t *testing.T) {
 	// (alice) and run1 (bob) both landed — the target advanced to bob's
 	// link — before a crash interrupted their slot deletes. carol's link
 	// (chained onto bob's, a PREDICTED base at the time) was built but never
-	// pushed anywhere: an unreferenced, garbage commit, exactly as §8
-	// describes for the un-landed suffix.
+	// pushed anywhere: an unreferenced, garbage commit, exactly what the
+	// un-landed suffix of a crashed window looks like.
 	linkA := h.git.commit(files, base, shaA)
 	linkB := h.git.commit(files, linkA, shaB)
 	_ = h.git.commit(files, linkB, shaC) // carol's stale predicted link: inert garbage post-crash
 	h.git.setRef("refs/heads/main", linkB)
 
-	h.reconcile() // recovers alice's slot only (head-pick-only per refill, §2.5)
+	h.reconcile() // recovers alice's slot only (head-pick-only per refill)
 	if h.git.hasRef(refA) {
 		t.Fatal("alice's slot not recovered on the first tick")
 	}
@@ -768,9 +764,9 @@ func TestSpeculateCrashRecovery(t *testing.T) {
 }
 
 // TestSpeculateDepth3RaceSoak proves the executor gate's (RunID, name) key
-// never collides across distinct concurrently-running runs (docs/plans/
-// phase5.md's "verify the one-goroutine-per-run result plumbing holds at
-// depth N"): window 3, all three runs' checks started (and so their
+// never collides across distinct concurrently-running runs — the
+// one-goroutine-per-run result plumbing holds at depth N, not just depth 1:
+// window 3, all three runs' checks started (and so their
 // executor goroutines all genuinely in flight, concurrently, blocked on
 // their own gate) before any is released, then all three released
 // CONCURRENTLY from separate goroutines — exercising GatedExecutor's

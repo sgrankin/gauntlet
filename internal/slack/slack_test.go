@@ -123,7 +123,7 @@ func waitForStats(t *testing.T, s *Slack, timeout time.Duration, wantRuns, wantR
 	}
 }
 
-// waitForStatsZero is waitForStats(t, s, timeout, 0, 0), plus the same §9.2
+// waitForStatsZero is waitForStats(t, s, timeout, 0, 0), plus the same
 // leak-bound assertion for batchRecs — the third run-tracking map, which
 // must also be empty once every run/batch has fully resolved.
 func waitForStatsZero(t *testing.T, s *Slack, timeout time.Duration) {
@@ -133,7 +133,7 @@ func waitForStatsZero(t *testing.T, s *Slack, timeout time.Duration) {
 	n := len(s.batchRecs)
 	s.mu.Unlock()
 	if n != 0 {
-		t.Fatalf("batchRecs has %d entries after all runs resolved, want 0 (§9.2 leak bound)", n)
+		t.Fatalf("batchRecs has %d entries after all runs resolved, want 0 (leak bound)", n)
 	}
 }
 
@@ -383,7 +383,7 @@ func TestSlack_HookPassedPostsNothing(t *testing.T) {
 	}
 }
 
-// TestSlack_HookFinishedNilCheckPostsNothing is S13's regression test,
+// TestSlack_HookFinishedNilCheckPostsNothing is a regression test,
 // mirroring TestLogChannel_EmitHookFinishedNilCheckOmitsBlock
 // (internal/channel/log_test.go): postHookFinished (slack.go) branches on
 // ev.Check first, before looking at its Status/Err — a nil Check (an
@@ -404,10 +404,9 @@ func TestSlack_HookFinishedNilCheckPostsNothing(t *testing.T) {
 }
 
 // TestSlack_HookStartedPostsNothing confirms EventHookStarted produces no
-// Slack post (N3, phase-6 B-track review: a behavior change from the
-// original S5-surface plan). Live hook-in-progress state is the
-// dashboard/API's job; standalone start+finish messages per hook were ~2N
-// posts per landing, pure noise — mirrors the existing ignored-kind tests
+// Slack post: live hook-in-progress state is the
+// dashboard/API's job; standalone start+finish messages per hook would be
+// ~2N posts per landing, pure noise — mirrors the existing ignored-kind tests
 // (e.g. TestSlack_RetryRequestedPostsNothing) rather than asserting a post.
 func TestSlack_HookStartedPostsNothing(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
@@ -421,7 +420,7 @@ func TestSlack_HookStartedPostsNothing(t *testing.T) {
 }
 
 // TestSlack_HookSkippedPostsStandaloneMessage confirms EventHookSkipped
-// (S1-C: a recovery-skipped landing's hooks never ran at all) posts a
+// (a recovery-skipped landing's hooks never ran at all) posts a
 // standalone message including Detail, distinct from a normal hook result.
 func TestSlack_HookSkippedPostsStandaloneMessage(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
@@ -440,9 +439,9 @@ func TestSlack_HookSkippedPostsStandaloneMessage(t *testing.T) {
 	}
 }
 
-// TestSlack_RetryRequestedPostsNothing confirms EventRetryRequested (S3, a
-// history-only durability signal per the phase-6 B-track plan: "other
-// channels default-ignore it; only history acts") produces no Slack post —
+// TestSlack_RetryRequestedPostsNothing confirms EventRetryRequested (a
+// history-only durability signal: other channels default-ignore it; only
+// history acts on it) produces no Slack post —
 // Slack falls through handleOutbound's switch exactly like any other kind it
 // doesn't render.
 func TestSlack_RetryRequestedPostsNothing(t *testing.T) {
@@ -456,7 +455,7 @@ func TestSlack_RetryRequestedPostsNothing(t *testing.T) {
 	}
 }
 
-// TestSlack_UnknownEventKindPostsNothing is S14's universal contract test
+// TestSlack_UnknownEventKindPostsNothing is the universal contract test
 // for Slack: handleOutbound's switch falls through to no-op for any Kind it
 // doesn't recognize (mirroring core.Channel's "ignore unknown kinds"
 // contract, internal/channel/log.go), so core.EventKind(999) — a future
@@ -695,16 +694,16 @@ func batchMembers() (batchID string, cands []core.Candidate, runIDs []string) {
 	return batchID, cands, runIDs
 }
 
-// TestSlack_BatchLandingPostsOneRootOneEditOneSummary covers §3.3 addendum's
+// TestSlack_BatchLandingPostsOneRootOneEditOneSummary covers the
 // batch-aware join for a green batch: 3 EventTrialClean events (chain
 // building, one per member, all sharing batchID) must post exactly ONE root
-// message — not one per member (postRoot's new idempotency guard) — then 3
+// message — not one per member (postRoot's idempotency guard) — then 3
 // EventLanded terminal events (one per member, each with its own distinct
 // RunID but the shared BatchID) must produce exactly one root edit (at the
 // FIRST member processed) and exactly ONE threaded summary reply (posted
 // once the LAST member, Position == BatchSize-1, arrives) that names every
 // member — not one noisy reply per member — with both run-tracking maps
-// back to zero afterward (§9.2).
+// back to zero afterward.
 func TestSlack_BatchLandingPostsOneRootOneEditOneSummary(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	batchID, cands, runIDs := batchMembers()
@@ -839,16 +838,16 @@ func TestSlack_BatchRedSkippedPostsOneRootOneEditOneSummary(t *testing.T) {
 	}
 }
 
-// TestSlack_BatchSummaryToleratesMiddleMemberHole proves F1a/F1b (the
-// phase-5 review): a batch member's terminal event can be silently lost to
-// Emit's outbox-full drop (§9.2's "if the outbox is full, the event is
-// logged and dropped") — nothing ever re-delivers it. The old
-// summarizeBatch assumed every Position slot was filled and nil-dereferenced
-// on recs[0] the instant any slot was empty (a drainer-goroutine panic,
-// i.e. a process crash). Skipping bob's (Position 1, the middle member's)
-// Emit entirely must not panic; the LAST member's arrival (Position ==
-// BatchSize-1) still triggers the flush, the summary explicitly notes the
-// gap instead of silently omitting bob, and every map still ends up clean.
+// TestSlack_BatchSummaryToleratesMiddleMemberHole proves a batch member's
+// terminal event can be silently lost to Emit's outbox-full drop ("if the
+// outbox is full, the event is logged and dropped") — nothing ever
+// re-delivers it — and summarizeBatch must never assume every Position
+// slot is filled: nil-dereferencing on recs[0] the instant any slot is
+// empty would crash the drainer goroutine. Skipping bob's (Position 1, the
+// middle member's) Emit entirely must not panic; the LAST member's arrival
+// (Position == BatchSize-1) still triggers the flush, the summary
+// explicitly notes the gap instead of silently omitting bob, and every map
+// still ends up clean.
 func TestSlack_BatchSummaryToleratesMiddleMemberHole(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	batchID, cands, runIDs := batchMembers()
@@ -898,11 +897,12 @@ func TestSlack_BatchSummaryToleratesMiddleMemberHole(t *testing.T) {
 	}
 }
 
-// TestSlack_BatchStaleEntryFlushedOnAnotherBatchArrival proves F1c: a batch
+// TestSlack_BatchStaleEntryFlushedOnAnotherBatchArrival proves a batch
 // whose flush-triggering arrival is ITSELF the event Emit dropped (here,
-// carol's Position == BatchSize-1 terminal event, the old code's ONLY flush
-// trigger) would buffer — and leak its runRoot/roots/batchRecs entries —
-// forever without the staleness sweep. The sweep runs opportunistically, on
+// carol's Position == BatchSize-1 terminal event, which a Position-only
+// flush trigger would depend on exclusively) would buffer — and leak its
+// runRoot/roots/batchRecs entries — forever without the staleness sweep.
+// The sweep runs opportunistically, on
 // some OTHER batch's terminal arrival (no dedicated goroutine or timer): a
 // second, unrelated batch's own first terminal event, arriving more than
 // batchStaleTimeout after the stuck batch was last touched, force-flushes
@@ -1004,14 +1004,13 @@ func TestSlack_BatchStaleEntryFlushedOnAnotherBatchArrival(t *testing.T) {
 	}
 }
 
-// TestSlack_SingleMemberBatchRendersLikeSerial proves the live-Slack
-// addendum to F1 (the phase-5 review): a batch formed with exactly one
-// member — max-batch 1, or a queue that only ever offered one candidate;
-// §4.1 promises this "degrades to serial behavior" byte for byte — must
-// render its root headline edit and threaded summary IDENTICALLY to a
-// genuine serial run's own messages, not "batch <runID> (1 members) →
-// target" (the live bug: broken grammar, and it drops the topic/user
-// entirely). This drives the exact same candidate/checks/outcome through
+// TestSlack_SingleMemberBatchRendersLikeSerial proves that a batch formed
+// with exactly one member — max-batch 1, or a queue that only ever offered
+// one candidate — degrades to serial behavior byte for byte in Slack too:
+// its root headline edit and threaded summary must render IDENTICALLY to a
+// genuine serial run's own messages, never "batch <runID> (1 members) →
+// target", which would have broken grammar and drop the topic/user
+// entirely. This drives the exact same candidate/checks/outcome through
 // both the serial path (BatchID == "") and the batch-of-one path (BatchID
 // set, Position 0, BatchSize 1) on two independent Slack instances, and
 // diffs the resulting message text byte for byte.
@@ -1062,12 +1061,12 @@ func TestSlack_SingleMemberBatchRendersLikeSerial(t *testing.T) {
 }
 
 // TestSlack_ReactionAfterTerminationMintsCommandViaMetadataFetchAndAcks is
-// the load-bearing proof of this whole redesign: live verification found
-// reaction-retry never worked end-to-end, because roots/runRoot are
-// (correctly) forgotten the instant a run terminates (§9.2's leak-bound
-// cleanup), while a human reacting to a terminal ❌ root does so AFTER that
-// point — never mid-run, the only case the in-memory map's fast path can
-// resolve. This drives a run all the way to a forgotten, rejected terminal
+// the load-bearing proof that reaction-retry works end-to-end even though
+// roots/runRoot are (correctly) forgotten the instant a run terminates
+// (the leak-bound cleanup), while a human reacting to a terminal ❌ root
+// does so AFTER that point — never mid-run, the only case the in-memory
+// map's fast path can resolve. This drives a run all the way to a
+// forgotten, rejected terminal
 // state, THEN reacts on its (now-untracked) root, and checks the command is
 // still minted — via the conversations.history metadata fetch, not the
 // roots map — and the reaction is acknowledged with a 👀 (eyes) reaction.
@@ -1084,7 +1083,7 @@ func TestSlack_ReactionAfterTerminationMintsCommandViaMetadataFetchAndAcks(t *te
 	fake.waitForPosts(3, testTimeout) // root, terminal edit, summary
 
 	// The run is now fully terminal: both run-tracking maps have forgotten
-	// it (§9.2) — exactly the shape a real, unattended ❌ root has by the
+	// it — exactly the shape a real, unattended ❌ root has by the
 	// time a human gets around to reacting to it.
 	waitForStatsZero(t, s, testTimeout)
 

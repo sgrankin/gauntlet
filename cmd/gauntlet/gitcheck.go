@@ -1,9 +1,9 @@
-// F3 (docs/plans/phase23.md §10): the daemon's entire trial-merge mechanism
-// rests on `git merge-tree --write-tree`, which only exists from git 2.38
-// onward. Older/missing git doesn't fail cleanly at first use — it fails
-// confusingly, deep inside gitx, well after the daemon has already started
-// logging as if everything were fine. Probing once at startup turns that
-// into one loud, named error before anything else runs.
+// The daemon's entire trial-merge mechanism rests on `git merge-tree
+// --write-tree`, which only exists from git 2.38 onward. Older/missing git
+// doesn't fail cleanly at first use — it fails confusingly, deep inside
+// gitx, well after the daemon has already started logging as if everything
+// were fine. Probing once at startup turns that into one loud, named error
+// before anything else runs.
 package main
 
 import (

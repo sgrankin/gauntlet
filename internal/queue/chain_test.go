@@ -2,12 +2,11 @@
 // against REAL git (internal/gitx + internal/testutil), the same tier as
 // integration_test.go (see that file's package doc). These tests call
 // buildChainLink directly, repeatedly, with the base advancing to the prior
-// call's mergeOID — exactly the shape docs/plans/phase5.md §2.5's refillLane
-// (batch/speculate, P5-E/F) will drive it in, ahead of those callers
-// existing. Nothing here goes through ReconcileOnce/reconcileTarget: no
-// run/lane is ever created, no ref is ever mutated, matching the plan's
-// framing of the chain as pure trial-merge/commit-tree plumbing that exists
-// before any run does.
+// call's mergeOID — exactly the shape batch and speculate drive it in (see
+// docs/design/queue-modes.md, "The merge-commit chain"). Nothing here goes
+// through ReconcileOnce/reconcileTarget: no run/lane is ever created, no ref
+// is ever mutated — the chain is pure trial-merge/commit-tree plumbing that
+// exists before any run does.
 package queue
 
 import (
@@ -27,8 +26,8 @@ import (
 // newChainHarness builds a Daemon wired to a real gitx.Repo, mirroring
 // newIntegrationHarness (integration_test.go), additionally returning the
 // local bare clone's directory. Chain links built by buildChainLink are
-// unreferenced commits (docs/plans/phase5.md §1.1) that live only as loose
-// objects in this local clone until a land push — a test asserting
+// unreferenced commits that live only as loose objects in this local clone
+// until a land push — a test asserting
 // --first-parent history on one of them (never pushed anywhere, and never
 // will be here) must inspect this directory directly with raw git, which
 // newIntegrationHarness's harness type has no need to expose. remote may be
@@ -93,13 +92,12 @@ func firstParentChain(t *testing.T, gitDir, tip string, n int) []chainCommit {
 }
 
 // TestChainBuild_TipTreeIsCumulative builds a 3-link chain via repeated
-// buildChainLink calls, each one's base the previous call's mergeOID
-// (docs/plans/phase5.md §5.3): the tip tree must contain every member's
-// file (plus the pre-chain content), and --first-parent from the tip must
-// show exactly one merge per member, each merge's parent[1] equal to that
-// member's candidate SHA verbatim (Invariant 1/6 for the whole chain — the
-// §1.1 spike's exact property, now proved through buildChainLink itself
-// rather than raw git).
+// buildChainLink calls, each one's base the previous call's mergeOID: the
+// tip tree must contain every member's file (plus the pre-chain content),
+// and --first-parent from the tip must show exactly one merge per member,
+// each merge's parent[1] equal to that member's candidate SHA verbatim
+// (Invariant 1/6 for the whole chain, proved here through buildChainLink
+// itself rather than raw git).
 func TestChainBuild_TipTreeIsCumulative(t *testing.T) {
 	ctx := context.Background()
 	d, repo, dir, remote := newChainHarness(t, nil, nil)
@@ -177,9 +175,9 @@ func TestChainBuild_TipTreeIsCumulative(t *testing.T) {
 
 // TestChainConflictAborts builds a first link cleanly, then a second member
 // whose change to the same file conflicts with the first member's — the
-// UNPUSHED first link's tree, not the real target tip. Per docs/plans/
-// phase5.md §1.1 finding 2, MergeTree must detect this identically against
-// the chained base: buildChainLink returns a zero chainLink and
+// UNPUSHED first link's tree, not the real target tip. MergeTree must
+// detect this identically against the chained base as it would against a
+// real ref: buildChainLink returns a zero chainLink and
 // trial.Clean == false (a conflict is data, not an error — nil err), and
 // nothing lands (buildChainLink itself never mutates any ref; the CAS land
 // is always a separate, later step, which never gets a chance to run here).
@@ -268,9 +266,10 @@ func TestSpecChanged(t *testing.T) {
 
 // TestChainBuild_MergeBodyCalledPerLinkWithChainedBase is the chained-base
 // MergeBody sanity case: buildChainLink invokes Config.MergeBody once per
-// call (docs/plans/phase5.md §9, constraint 9), so building a chain via N
-// buildChainLink calls must invoke it exactly N times, each with that
-// link's own candidate and its own (possibly chained, unpushed) base —
+// call (see docs/design/queue-modes.md, "Merge-body cost"), so building a
+// chain via N buildChainLink calls must invoke it exactly N times, each
+// with that link's own candidate and its own (possibly chained, unpushed)
+// base —
 // proving the second call's base is genuinely link1.mergeOID, not the
 // real target tip.
 func TestChainBuild_MergeBodyCalledPerLinkWithChainedBase(t *testing.T) {

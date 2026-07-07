@@ -106,9 +106,9 @@ func testSnapshot() *queue.Snapshot {
 }
 
 // pipelineSnapshot builds a queue.Snapshot for target "spec" with a
-// depth-3 speculative pipeline (docs/plans/phase5.md §3.4, §10 amendment
-// 5): run 0 is the head (Predicted false — its base is the real target
-// tip), runs 1 and 2 are downstream window members built on a predicted
+// depth-3 speculative pipeline: run 0 is the head (Predicted false — its
+// base is the real target tip), runs 1 and 2 are downstream window members
+// built on a predicted
 // (unpushed) base. Each run has exactly one member with a distinct topic,
 // so pipeline order is independently verifiable in a rendered page.
 func pipelineSnapshot() *queue.Snapshot {
@@ -144,7 +144,7 @@ func pipelineSnapshot() *queue.Snapshot {
 }
 
 // batchSnapshot builds a queue.Snapshot for target "rel" with a single
-// batch run of 3 members (docs/plans/phase5.md §3.4, §10 amendment 5).
+// batch run of 3 members.
 func batchSnapshot() *queue.Snapshot {
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	members := []core.Candidate{
@@ -172,8 +172,7 @@ func batchSnapshot() *queue.Snapshot {
 
 // TestTarget_RendersDepth3Pipeline confirms the target page renders a
 // multi-run pipeline as a stacked list, head first, with the predicted
-// badge only on downstream (non-head) runs (chunk P5-H, docs/plans/
-// phase5.md §3.4).
+// badge only on downstream (non-head) runs.
 func TestTarget_RendersDepth3Pipeline(t *testing.T) {
 	snap := pipelineSnapshot()
 	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
@@ -209,7 +208,7 @@ func TestTarget_RendersDepth3Pipeline(t *testing.T) {
 
 // TestTarget_RendersBatchRun confirms a single run with multiple members
 // renders every member (topic/user, short SHA) plus a "batch of N" badge,
-// even though the pipeline itself has depth 1 (chunk P5-H).
+// even though the pipeline itself has depth 1.
 func TestTarget_RendersBatchRun(t *testing.T) {
 	snap := batchSnapshot()
 	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
@@ -231,7 +230,7 @@ func TestTarget_RendersBatchRun(t *testing.T) {
 
 // TestIndex_PipelineDepthShowsNInFlight confirms the index card's in-flight
 // cell becomes "N in flight" (rather than the head candidate's user/topic)
-// once pipeline depth exceeds 1 (chunk P5-H).
+// once pipeline depth exceeds 1.
 func TestIndex_PipelineDepthShowsNInFlight(t *testing.T) {
 	snap := pipelineSnapshot()
 	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
@@ -389,10 +388,9 @@ func emitHook(t *testing.T, s *history.Store, runID, name string, cr core.CheckR
 }
 
 // TestRun_RendersHooksSection confirms /run/{id} gains a "Hooks" section
-// (chunk P5-B, log/history parity with checks) whenever the run has hook
-// rows: a passed hook and a failed one, same status/duration/output
-// treatment as Checks — the failed hook's output must render already
-// expanded.
+// (log/history parity with checks) whenever the run has hook rows: a
+// passed hook and a failed one, same status/duration/output treatment as
+// Checks — the failed hook's output must render already expanded.
 func TestRun_RendersHooksSection(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, sampleRecord("run-hooks-1", "main"))
@@ -424,7 +422,7 @@ func TestRun_RendersHooksSection(t *testing.T) {
 // TestRun_OmitsHooksSectionWhenNone confirms an ordinary run with no hook
 // rows at all (no target hooks configured, or the run never reached hooks)
 // renders no "Hooks" heading — the section requirement is "only when rows
-// exist" (chunk P5-B), not "always, empty".
+// exist", not "always, empty".
 func TestRun_OmitsHooksSectionWhenNone(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, sampleRecord("run-no-hooks", "main"))
@@ -717,10 +715,10 @@ func TestRun_ShowsCommandEchoAboveOutput(t *testing.T) {
 	}
 }
 
-// --- batch identity (docs/plans/phase5.md §10 amendment 1) --------------------
+// --- batch identity -----------------------------------------------------------
 
 // batchMemberRecord builds one member's RunRecord of a 3-member batch sharing
-// batchID, mirroring queue/reconcile.go's per-member RunRecords (§3.3): same
+// batchID, mirroring queue/reconcile.go's per-member RunRecords: same
 // shape as sampleRecord, but with BatchID/Position/BatchSize set.
 func batchMemberRecord(runID, target, batchID string, position int) *core.RunRecord {
 	rec := sampleRecord(runID, target)
@@ -873,7 +871,7 @@ func TestBatch_UnknownID404(t *testing.T) {
 	}
 }
 
-// --- post-land hooks + ignored refs (S5-surface, S7c) -------------------------
+// --- post-land hooks + ignored refs --------------------------------------------
 
 // TestTarget_RendersLiveHookSection confirms the target page's "Post-land
 // hooks" section renders a running hook's progress when WithHookSnapshot
@@ -910,7 +908,7 @@ func TestTarget_NoHookSnapshotShowsIdle(t *testing.T) {
 }
 
 // TestTarget_RendersDurableHookRuns confirms the target page renders the
-// durable hook-run ledger (history.Store.HookRunSummaries, S1-C/S5) when a
+// durable hook-run ledger (history.Store.HookRunSummaries) when a
 // store is configured, seeded through the store's real Emit path: a terminal
 // run (the runs row hook_runs FK-references), one EventHookStarted with
 // HookCount=2 (owed=2), and one EventHookFinished (done=1) — owed>done and
@@ -945,8 +943,8 @@ func TestTarget_RendersDurableHookRuns(t *testing.T) {
 }
 
 // TestIndex_RendersIgnoredRefs confirms the index page renders the
-// daemon-level "Recently ignored refs" section (history.Store.IgnoredRefs,
-// S7c) when a store holds ignored-ref rows — seeded through the store's real
+// daemon-level "Recently ignored refs" section (history.Store.IgnoredRefs)
+// when a store holds ignored-ref rows — seeded through the store's real
 // Emit path with the UNCONFIGURED target name ("nope"), exactly as
 // reconcile's checkIgnoredRefs emits it. The section is daemon-level
 // because an ignored ref's defining property is that its target segment
@@ -1012,8 +1010,8 @@ func testServicesStatus() dashboard.ServicesStatus {
 }
 
 // TestIndex_RendersServicesSection confirms the index page renders the
-// daemon-level "Services" section (design §10's tuning instrument) when
-// WithServicesSnapshot is wired up: one row per live instance (name, image,
+// daemon-level "Services" section when WithServicesSnapshot is wired up:
+// one row per live instance (name, image,
 // keyhash12, endpoint, refcount, hits), plus the pool's pending/max-instances
 // summary line.
 func TestIndex_RendersServicesSection(t *testing.T) {
@@ -1073,10 +1071,9 @@ func TestIndex_ServicesSectionNoLiveInstances(t *testing.T) {
 }
 
 // TestIndex_BatchedRunGetsChipBatchedClass confirms the recent-runs chip
-// strip's trivial visual grouping (docs/plans/phase5.md §10 amendment 1,
-// "shared left-border/badge is enough"): a batch member's chip gets the
-// chip-batched CSS class layered on top of its outcome class, a serial run's
-// does not.
+// strip's trivial visual grouping (a shared left-border/badge is enough): a
+// batch member's chip gets the chip-batched CSS class layered on top of its
+// outcome class, a serial run's does not.
 func TestIndex_BatchedRunGetsChipBatchedClass(t *testing.T) {
 	store := openTestStore(t)
 	emitRun(t, store, batchMemberRecord("batch-run-0", "main", "batch-xyz", 0))
@@ -1122,12 +1119,13 @@ func TestStatic_ServesIdiomorph(t *testing.T) {
 }
 
 // TestRefreshPages_CarryFetchMorphPolling confirms a live page (/, /t/main)
-// carries the whole auto-refresh apparatus this phase replaced meta-refresh
-// with: the no-JS <noscript> fallback, the vendored idiomorph <script src>,
-// the inline poller (Idiomorph.morph/setInterval) and its in-flight guard
-// (the busy flag, so a slow response can't morph stale state over a fresher
-// one) — and that the old bare <meta http-equiv="refresh"> (a full reload,
-// no noscript guard) is gone.
+// carries the whole auto-refresh apparatus: the no-JS <noscript> fallback,
+// the vendored idiomorph <script src>, the inline poller
+// (Idiomorph.morph/setInterval) and its in-flight guard (the busy flag, so
+// a slow response can't morph stale state over a fresher one) — and that a
+// bare <meta http-equiv="refresh"> (a full reload, no noscript guard) never
+// appears, since a full-page reload would discard the in-flight guard's
+// state on every tick.
 func TestRefreshPages_CarryFetchMorphPolling(t *testing.T) {
 	snap := testSnapshot()
 	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
@@ -1178,7 +1176,7 @@ func TestNonRefreshPages_NoPolling(t *testing.T) {
 	}
 }
 
-// --- index: idle signal (docs/plans/scale.md §2) ----------------------------
+// --- index: idle signal --------------------------------------------------------
 
 // TestIndex_RendersIdleSinceLine confirms the index page shows the muted
 // "idle since ..." line near the footer when the daemon (queue and hooks) is

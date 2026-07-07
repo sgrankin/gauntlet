@@ -1,7 +1,7 @@
 package dashboard_test
 
 // Tests for GET /run/{runID}/log/{checkName} (DESIGN.md "Full per-check log
-// files", chunk F-b): serving a check's full, uncapped log file from disk,
+// files"): serving a check's full, uncapped log file from disk,
 // containment-checked under dashboard.WithLogRoot.
 
 import (
@@ -399,7 +399,7 @@ func TestRunPage_OmitsFullLogLinkWhenNoLogPathStored(t *testing.T) {
 	}
 }
 
-// --- hook log serving (log/history parity, chunk P5-B) ----------------------
+// --- hook log serving (log/history parity) -----------------------------------
 
 // TestRunLog_ServesHookLog confirms GET /run/{id}/log/{name} also matches
 // hook rows, not just checks: handleRunLog looks the name up in checks

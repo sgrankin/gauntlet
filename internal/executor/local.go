@@ -17,21 +17,20 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// outputCap bounds the combined stdout+stderr kept per check, per
-// docs/plans/phase1.md §9.6. When output exceeds this, the head is
-// discarded and the tail is kept.
+// outputCap bounds the combined stdout+stderr kept per check. When output
+// exceeds this, the head is discarded and the tail is kept.
 const outputCap = 64 * 1024
 
 // LocalExecutor runs checks as local OS processes: job.Command as argv (no
-// shell), in job.Dir, with the check environment contract
-// (docs/plans/phase1.md §5A) exported alongside the inherited environment.
+// shell), in job.Dir, with the check environment contract exported
+// alongside the inherited environment.
 type LocalExecutor struct {
 	// BaseDir is the directory each check's ephemeral scratch dir
 	// (gauntlet-check-*, holding only the result file) is created under via
-	// os.MkdirTemp(BaseDir, ...) — S16 (phase-6 audit synthesis): rooting
-	// this under -state/scratch, swept at daemon startup exactly like the
-	// trial-tree export dir, closes the gap where these dirs used to escape
-	// every sweep by defaulting to the OS temp dir. Empty preserves that
+	// os.MkdirTemp(BaseDir, ...) — rooting this under -state/scratch, swept
+	// at daemon startup exactly like the trial-tree export dir, closes the
+	// gap where these dirs used to escape every sweep by defaulting to the
+	// OS temp dir. Empty preserves that
 	// exact prior behavior (os.MkdirTemp's own "" -> os.TempDir()
 	// fallback), which every existing caller/test that never sets this
 	// field still gets unchanged.
@@ -71,10 +70,10 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		core.EnvResultFile+"="+resultFile,
 		core.EnvRunID+"="+job.RunID,
 	)
-	// Shared-services env (docs/plans/services-impl.md §4.2): appended
-	// after the six built-ins, nil for checks with no `needs`. Networks is
-	// ModeNetwork-only (a shared runtime network) and has no meaning for a
-	// local subprocess, so it's deliberately ignored here.
+	// Shared-services env: appended after the six built-ins, nil for
+	// checks with no `needs`. Networks is ModeNetwork-only (a shared
+	// runtime network) and has no meaning for a local subprocess, so it's
+	// deliberately ignored here.
 	cmd.Env = append(cmd.Env, job.ServiceEnv...)
 
 	out := &tailBuffer{cap: outputCap}
@@ -93,9 +92,8 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 	cmd.Stdout = combined
 	cmd.Stderr = combined
 
-	// Own process group so a cancel can kill the whole tree (§9.5): a
-	// cancelled check must not leave grandchildren holding the export dir
-	// open.
+	// Own process group so a cancel can kill the whole tree: a cancelled
+	// check must not leave grandchildren holding the export dir open.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -132,9 +130,9 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			// Nonzero exit is a verdict regardless of the result file
-			// (§5A): the file only splits the exit-0 case, it is not an
-			// exit-code convention.
+			// Nonzero exit is a verdict regardless of the result file: the
+			// file only splits the exit-0 case, it is not an exit-code
+			// convention.
 			return core.CheckResult{
 				Name:     job.Name,
 				Status:   core.CheckFailed,
@@ -144,7 +142,7 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 			}
 		}
 		// Exec-start failure (command missing/not executable/etc.): a
-		// verdict, not Err (§9.2) — it's the check spec's problem to fix.
+		// verdict, not Err — it's the check spec's problem to fix.
 		output := out.String()
 		if output != "" {
 			output += "\n"

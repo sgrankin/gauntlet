@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-// TestSweepAndRecreate_RemovesOrphanScratchDirs proves S16's scratch-dir
-// sweep (phase-6 audit synthesis): orphaned gauntlet-check-*/
-// gauntlet-container-* dirs left under -state/scratch by a prior crashed
-// daemon must be gone after the sweep, and the directory itself must exist
-// (empty) afterward so executors can create fresh scratch dirs under it
-// immediately.
+// TestSweepAndRecreate_RemovesOrphanScratchDirs proves the scratch-dir
+// sweep: orphaned gauntlet-check-*/gauntlet-container-* dirs left under
+// -state/scratch by a prior crashed daemon must be gone after the sweep,
+// and the directory itself must exist (empty) afterward so executors can
+// create fresh scratch dirs under it immediately.
 func TestSweepAndRecreate_RemovesOrphanScratchDirs(t *testing.T) {
 	state := t.TempDir()
 	scratch := filepath.Join(state, "scratch")

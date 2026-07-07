@@ -7,7 +7,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// The daemon-side infra-failure paths in tryStartTrial share one policy
+// The daemon-side infra-failure paths in startRun share one policy
 // (reconcile.go): OutcomeError + park + EventError, uniformly. These tests
 // pin that for each injectable failure point and prove the park prevents a
 // retry-every-tick spin even after the failure clears.

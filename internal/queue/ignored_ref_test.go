@@ -6,10 +6,10 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// TestReconcile_IgnoredRefEmittedOnce covers O4 (docs/plans/phase23.md §10):
-// a well-formed candidate ref naming a target that isn't configured must
-// produce exactly one core.EventIgnoredRef per (ref, SHA) — not one every
-// tick.
+// TestReconcile_IgnoredRefEmittedOnce covers checkIgnoredRefs (see
+// docs/design/core.md, "Candidate ref grammar"): a well-formed candidate
+// ref naming a target that isn't configured must produce exactly one
+// core.EventIgnoredRef per (ref, SHA) — not one every tick.
 func TestReconcile_IgnoredRefEmittedOnce(t *testing.T) {
 	h := newHarness(t) // configures only "main"
 	h.git.seed("main", nil)

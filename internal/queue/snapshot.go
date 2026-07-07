@@ -1,8 +1,8 @@
 package queue
 
 // This file holds the published, read-only view of the reconcile loop's
-// live state (docs/plans/phase23.md §2.1): the dashboard (D2) and the
-// history store's depth sampler (D1) both read Daemon.Snapshot() instead of
+// live state: the dashboard and the
+// history store's depth sampler both read Daemon.Snapshot() instead of
 // poking the reconcile loop's internals, keeping the queue ignorant of
 // either (Invariant 8).
 
@@ -27,9 +27,9 @@ type Snapshot struct {
 	// IdleSince is the instant the QUEUE (every target, this package's own
 	// view) most recently became idle — no waiting candidates and no
 	// in-flight pipeline runs, anywhere — or the zero time if the queue is
-	// busy right now (docs/plans/scale.md §2, the parked-builder autoscaling
-	// signal). Parked candidates don't count: they're dormant, not being
-	// worked on.
+	// busy right now (the park-the-builder idle signal; see
+	// docs/design/scaling.md, "Axis 2 — park the builder"). Parked
+	// candidates don't count: they're dormant, not being worked on.
 	//
 	// This is QUEUE idleness only. The daemon's post-land hooks
 	// (internal/hooks) live outside this package by design (Invariant 8: the
@@ -51,7 +51,7 @@ type TargetSnapshot struct {
 
 	// Pipeline is every in-flight run for this target, head first: nil/empty
 	// when the lane is idle; at most one element for serial and batch; up to
-	// Target.Window elements for speculate (docs/plans/phase5.md §3.4).
+	// Target.Window elements for speculate.
 	Pipeline []RunSnapshot
 
 	Waiting []WaitingEntry // FIFO order; excludes in-flight and parked refs
@@ -65,8 +65,8 @@ type RunSnapshot struct {
 	Candidate core.Candidate
 
 	// Members is every candidate chained into this run: len 1 for
-	// serial/speculate, up to max-batch for batch (docs/plans/phase5.md
-	// §3.4). Candidate == Members[0] always.
+	// serial/speculate, up to max-batch for batch. Candidate == Members[0]
+	// always.
 	Members []core.Candidate
 
 	RunID   string
@@ -103,9 +103,9 @@ type WaitingEntry struct {
 	Seq       int64 // FIFO sequence (Daemon.order); lower = earlier
 }
 
-// ParkedEntry is a candidate parked at its current SHA (docs/plans/phase1.md
-// §9.1): it will not be re-tested until the ref's SHA changes, the ref
-// vanishes, or a CommandRetry clears it.
+// ParkedEntry is a candidate parked at its current SHA: it will not be
+// re-tested until the ref's SHA changes, the ref vanishes, or a
+// CommandRetry clears it.
 type ParkedEntry struct {
 	Candidate core.Candidate
 	Outcome   core.Outcome // why it parked (rejected/conflict/error)
@@ -151,7 +151,7 @@ func (d *Daemon) buildSnapshot(refs map[string]string) *Snapshot {
 
 // queueIdle reports whether every target has no waiting candidates and no
 // in-flight pipeline runs — the queue half of the daemon idleness signal
-// (Snapshot.IdleSince's doc; docs/plans/scale.md §2). Parked candidates
+// (Snapshot.IdleSince's doc). Parked candidates
 // don't count: they're dormant, not being worked on.
 func queueIdle(targets []TargetSnapshot) bool {
 	for _, ts := range targets {
@@ -171,8 +171,8 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		TargetTip: refs[targetRefName(t)],
 	}
 
-	// Pipeline is every in-flight run for this target, head first
-	// (docs/plans/phase5.md §3.4); InFlight mirrors its head element for
+	// Pipeline is every in-flight run for this target, head first;
+	// InFlight mirrors its head element for
 	// back-compat. Serial and batch hold at most one run, so Pipeline has at
 	// most one element for those modes; speculate grows it up to
 	// Target.Window.
@@ -190,13 +190,12 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 	done := d.done[t.Name]
 
 	// inFlightRefs is every member of every run already captured in
-	// ts.Pipeline above, not just the head run's own head member (F3 fix,
-	// docs/plans/phase5.md review): a filled speculation window or a
-	// multi-member batch has members beyond ts.InFlight.Candidate that were
-	// still being double-counted as Waiting before this fix, inflating
-	// Waiting's count (and the depth series it feeds, this phase's own
-	// tuning instrument) by however many other in-flight members the
-	// pipeline happened to hold.
+	// ts.Pipeline above, not just the head run's own head member: a filled
+	// speculation window or a multi-member batch has members beyond
+	// ts.InFlight.Candidate, and those must not be double-counted as
+	// Waiting — that would inflate Waiting's count (and the depth series it
+	// feeds, the tuning instrument for batch/speculate sizing) by however
+	// many other in-flight members the pipeline happened to hold.
 	inFlightRefs := make(map[string]bool)
 	for _, r := range ts.Pipeline {
 		for _, m := range r.Members {
@@ -268,7 +267,7 @@ func buildRunSnapshot(r *run) *RunSnapshot {
 		Members:   members,
 		RunID:     r.runID,
 		BaseOID:   r.baseOID,
-		ChainTip:  r.chainTip, // ChainTip == MergeSHA (back-compat, §3.4)
+		ChainTip:  r.chainTip, // ChainTip == MergeSHA (back-compat)
 		MergeSHA:  r.chainTip,
 		Predicted: r.predicted, // true iff this run's base is a predicted, unpushed predecessor chainTip (speculate, non-head)
 		BatchID:   r.batchID,   // "" unless part of a batch

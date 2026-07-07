@@ -69,7 +69,7 @@ type casCall struct {
 type fakeCommit struct {
 	tree    string
 	parents []string
-	message string // captured verbatim, for tests asserting on merge-message shape (e.g. phase-4's optional body)
+	message string // captured verbatim, for tests asserting on merge-message shape (e.g. the optional body)
 }
 
 func newFakeGitRepo() *fakeGitRepo {
@@ -142,10 +142,10 @@ func (f *fakeGitRepo) ReadFileFromTree(ctx context.Context, tree, path string) (
 		// tree may be a commit-ish rather than a literal tree OID: real
 		// git's ReadFileFromTree accepts either (it shells out to
 		// "cat-file -p <commit-or-tree>:<path>"), a contract specChanged's
-		// batch callers rely on directly (docs/plans/phase5.md §10
-		// amendment 3 passes the target tip's own commit OID as the
-		// "before" side for a batch's first member) — resolve a commit OID
-		// to its tree before giving up.
+		// batch callers rely on directly (the batch boundary check passes
+		// the target tip's own commit OID as the "before" side for a
+		// batch's first member) — resolve a commit OID to its tree before
+		// giving up.
 		if c, isCommit := f.commits[tree]; isCommit {
 			files, ok = f.trees[c.tree]
 		}
@@ -320,8 +320,7 @@ func (f *fakeGitRepo) deleteCandidate(ref string) {
 // that checkout rather than an empty one): a speculate scenario that
 // direct-pushes twice — once to seed a check spec, again later to simulate a
 // human push racing the target — needs the second push to preserve the
-// first's content (docs/plans/phase5.md §5.2's speculate_head_target_moved
-// row), exactly as it would against a real remote.
+// first's content, exactly as it would against a real remote.
 func (f *fakeGitRepo) directPush(branch string, files map[string]string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -383,7 +382,7 @@ func (f *fakeGitRepo) hasRef(ref string) bool {
 }
 
 // commitMessage returns the exact message CommitTree was given for oid, for
-// tests asserting on merge-message shape (e.g. phase-4's optional body).
+// tests asserting on merge-message shape (e.g. the optional body).
 func (f *fakeGitRepo) commitMessage(oid string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

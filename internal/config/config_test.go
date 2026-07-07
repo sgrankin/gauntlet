@@ -9,8 +9,8 @@ import (
 )
 
 // exampleDaemonPath and exampleChecksPath point at the fixtures that double
-// as the repo's example config files (docs/plans/phase1.md §4). Both live
-// at the repo root, two levels up from this package.
+// as the repo's example config files. Both live at the repo root, two
+// levels up from this package.
 const (
 	exampleDaemonPath = "../../gauntlet.kdl"
 	exampleChecksPath = "../../.gauntlet.kdl"
@@ -54,7 +54,7 @@ func TestLoadDaemon_Example(t *testing.T) {
 		}
 	}
 
-	// phase-2/3 sections (docs/plans/phase23.md §3).
+	// Optional sections.
 	if d.History.Path != "/var/lib/gauntlet/history.db" {
 		t.Errorf("History.Path = %q", d.History.Path)
 	}
@@ -180,7 +180,7 @@ target "main" branch="main"
 		t.Errorf("CheckSpec = %q, want default %q", d.CheckSpec, defaultCheckSpec)
 	}
 	// LogRetention defaults unconditionally (no "section absent" state to
-	// preserve, unlike the phase-2/3 sections below) — 30 days even though
+	// preserve, unlike the optional sections below) — 30 days even though
 	// the "log-retention" node is absent from this config.
 	if d.LogRetention != defaultLogRetention {
 		t.Errorf("LogRetention = %v, want default %v", d.LogRetention, defaultLogRetention)
@@ -191,7 +191,7 @@ target "main" branch="main"
 		t.Errorf("AutoRetryErrors = %v, want default true", d.AutoRetryErrors)
 	}
 
-	// All phase-2/3 sections are absent from this config; each should come
+	// All optional sections are absent from this config; each should come
 	// back disabled (zero-valued) except Executor.Kind, which always
 	// defaults to "local" regardless of whether the "executor" node is
 	// present at all.
@@ -454,9 +454,9 @@ target "main" branch="main" {
 	}
 }
 
-// TestLoadDaemon_TargetMode_Example covers the docs/plans/phase5.md §4.3
-// three-mode example (serial default, batch, speculate) parsing with
-// explicit knob values round-tripping unchanged.
+// TestLoadDaemon_TargetMode_Example covers the three-mode example (serial
+// default, batch, speculate) parsing with explicit knob values
+// round-tripping unchanged.
 func TestLoadDaemon_TargetMode_Example(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/gauntlet.kdl"
@@ -527,8 +527,7 @@ target "staging" branch="staging" {
 
 // TestLoadDaemon_TargetMode_Defaults covers MaxBatch/Window/OnBatchRed
 // defaulting only within their own mode when left unset in the config
-// (docs/plans/phase5.md §4.1: MaxBatch defaults to 8, Window to 4,
-// OnBatchRed to "serial").
+// (MaxBatch defaults to 8, Window to 4, OnBatchRed to "serial").
 func TestLoadDaemon_TargetMode_Defaults(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/gauntlet.kdl"
@@ -565,9 +564,8 @@ target "speculate-target" branch="s" {
 	}
 }
 
-// TestLoadDaemon_Services covers the §2.6 chunk-1 daemon test-matrix row:
-// `services { allow "container" }` parses, and MaxInstances/Runtime default
-// as documented (docs/plans/services-impl.md §2.3, §Amendments A3).
+// TestLoadDaemon_Services covers `services { allow "container" }` parsing,
+// and MaxInstances/Runtime defaulting as documented.
 func TestLoadDaemon_Services(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/gauntlet.kdl"
@@ -1330,8 +1328,7 @@ summarize {
 			wantErr: "summarize",
 		},
 		{
-			// docs/plans/phase5.md §4.1: window is only legal with
-			// mode "speculate".
+			// window is only legal with mode "speculate".
 			name: "window set on a serial (default-mode) target",
 			kdl: `
 remote "https://example.com/repo.git"
@@ -1391,8 +1388,8 @@ target "main" branch="main" {
 		},
 		{
 			// on-batch-red "bisect" is validated (a legal enum value) but
-			// rejected at construction — a documented growth path, not yet
-			// implemented (docs/plans/phase5.md §2.6, §9).
+			// rejected at construction — a reserved growth path, not yet
+			// implemented.
 			name: "on-batch-red bisect rejected at construction",
 			kdl: `
 remote "https://example.com/repo.git"
@@ -1828,7 +1825,7 @@ check "test" {
 			// duplicate-name check above) but both mangle to
 			// GAUNTLET_SVC_MY_DB_* via envSafeName — the executor's env is a
 			// last-wins slice, so one would silently shadow the other's
-			// endpoint (adversarial review BUG 3) without this check.
+			// endpoint without this check.
 			name: "service names collide under env-var name transform",
 			kdl: `
 service "my-db" {

@@ -1,10 +1,9 @@
 # Batch member re-pushed mid-check: bob (member 2 of 3) is force-updated
 # while the batch's combined check is still gated in flight. The whole
-# batch is invalidated — Skipped, NOT parked (§2.2's generalized Invariant
+# batch is invalidated — Skipped, NOT parked (the generalized Invariant
 # 5: any member move invalidates the whole run, since a batch is one tested
 # tree, it cannot partially invalidate) — and re-forms on the NEXT tick with
-# bob's new content (constraint 3). Ports docs/plans/phase5.md §5.2's
-# batch_member_repush_reforms row.
+# bob's new content.
 
 set-mode main batch 8
 

@@ -6,8 +6,8 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// TestCommand_RetryClearsParkAndRetests covers docs/plans/phase23.md §2.2:
-// a CommandRetry for a parked (target, ref) clears the park and re-tests
+// TestCommand_RetryClearsParkAndRetests proves that a CommandRetry for a
+// parked (target, ref) clears the park and re-tests
 // the same SHA on the very reconcile pass that drains it — drainCommands
 // runs before syncBookkeeping/pickHead within one ReconcileOnce, so the
 // park is gone before the target loop looks for a head to pick.

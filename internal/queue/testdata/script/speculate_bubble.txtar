@@ -1,19 +1,17 @@
 # Speculate bubble: window 3, the MIDDLE run (bob, lane position 1) goes
-# red. Ports docs/plans/phase5.md §5.2's speculate_bubble row, UPDATED for
-# the phase-5 review's F2 ruling (Zuul reset semantics): a red at lane index
-# i>0 is tested against a PREDICTED base (a predecessor's own chainTip, not
-# the real target tip) — its predecessor might be the one actually at fault
-# — so only lane index 0 (proven against reality) parks on red. Bob at index
-# 1 instead Skips WITHOUT parking and re-queues; carol (behind him) also
-# Skips unparked via the usual suffix invalidation; alice (ahead of bob) is
-# untouched and keeps running toward landing.
+# red. A red at lane index i>0 is tested against a PREDICTED base (a
+# predecessor's own chainTip, not the real target tip) — its predecessor
+# might be the one actually at fault — so only lane index 0 (proven against
+# reality) parks on red. Bob at index 1 instead Skips WITHOUT parking and
+# re-queues; carol (behind him) also Skips unparked via the usual suffix
+# invalidation; alice (ahead of bob) is untouched and keeps running toward
+# landing.
 #
-# This file used to assert bob parked (Rejected) right here, at lane index
-# 1, with alice still in flight ahead of him — exactly the false-negative
-# park F2 fixes: bob's red was never actually proven against the real target
-# tip at that point, only against alice's still-unlanded, predicted
-# chainTip. The scenario below now runs the story all the way through: bob
-# re-queues, retests once he's genuinely at lane index 0 (alice having
+# Parking bob here, at lane index 1 with alice still in flight ahead of him,
+# would be a false-negative park: bob's red is never actually proven against
+# the real target tip at that point, only against alice's still-unlanded,
+# predicted chainTip. So the scenario runs the story all the way through:
+# bob re-queues, retests once he's genuinely at lane index 0 (alice having
 # landed and the window rebuilt from the real tip), and THEN — only once
 # proven red against reality — parks for real.
 

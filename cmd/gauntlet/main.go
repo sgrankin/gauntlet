@@ -4,8 +4,8 @@
 // fixed poll interval until asked to stop.
 //
 // This file is wiring only — flags, config load, dependency construction,
-// and the run loop — per docs/plans/phase1.md §1/§6 (work chunk C8). All
-// behavior lives in the internal packages it wires together.
+// and the run loop. All behavior lives in the internal packages it wires
+// together.
 package main
 
 import (
@@ -110,23 +110,21 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// F3 (docs/plans/phase23.md §10): fail loudly, before touching any git
-	// plumbing, if the git on $PATH is missing or too old for `git
-	// merge-tree --write-tree`, which the trial-merge mechanism rests on.
+	// Fail loudly, before touching any git plumbing, if the git on $PATH is
+	// missing or too old for `git merge-tree --write-tree`, which the
+	// trial-merge mechanism rests on.
 	if err := checkGitVersion(); err != nil {
 		return fmt.Errorf("git version check: %w", err)
 	}
 
-	// S2 (phase-6 audit synthesis, lifecycle #1): acquire an exclusive
-	// advisory lock on -state before touching anything else in it — every
-	// sweep below (trials, hooks, and, as of S16, scratch) used to simply
-	// assert "always safe" in a comment with nothing enforcing the
-	// single-daemon-per-state-dir precondition that assertion depended on.
-	// AcquireLock turns that assumption into an actual, enforced
-	// precondition: a second gauntlet process started against this same
-	// -state now fails fast right here, before it can sweep the first,
-	// still-running process's in-flight trial/hook/scratch exports out from
-	// under it. Held for the rest of the process's life (deferred Close).
+	// Acquire an exclusive advisory lock on -state before touching anything
+	// else in it: every sweep below (trials, hooks, and scratch) depends on
+	// being the only daemon touching this state directory. AcquireLock
+	// enforces that precondition: a second gauntlet process started
+	// against this same -state fails fast right here, before it can sweep
+	// the first, still-running process's in-flight trial/hook/scratch
+	// exports out from under it. Held for the rest of the process's life
+	// (deferred Close).
 	lock, err := AcquireLock(*statePath)
 	if err != nil {
 		return err
@@ -158,66 +156,64 @@ func run() error {
 		return fmt.Errorf("open repo at %s: %w", repoDir, err)
 	}
 
-	// F2 (docs/plans/phase23.md §10): the trials dir only ever holds
-	// ephemeral trial-tree exports for the run currently in flight, never
-	// anything that needs to survive a restart, so sweeping it at startup
-	// cleans up anything orphaned by a prior crash. This is safe
-	// unconditionally now that AcquireLock (S2) above guarantees no other
-	// gauntlet daemon can be using -state concurrently — a claim this
-	// comment used to just assert.
+	// The trials dir only ever holds ephemeral trial-tree exports for the
+	// run currently in flight, never anything that needs to survive a
+	// restart, so sweeping it at startup cleans up anything orphaned by a
+	// prior crash. This is safe unconditionally because AcquireLock above
+	// guarantees no other gauntlet daemon can be using -state concurrently.
 	trialsDir := filepath.Join(*statePath, "trials")
 	if err := sweepAndRecreate(trialsDir); err != nil {
 		return fmt.Errorf("sweep trials dir: %w", err)
 	}
 
-	// S16 (phase-6 audit synthesis, lifecycle #5): executor scratch dirs
-	// (LocalExecutor's gauntlet-check-* and ContainerExecutor's
-	// gauntlet-container-* result dirs) used to default to the OS temp
-	// dir, escaping this sweep and every other one entirely. Rooting them
-	// under -state/scratch (threaded into buildExecutor below) and
-	// sweeping it here at startup — exactly like trialsDir above, and safe
-	// for the same reason (the lock above) — closes that gap.
+	// Executor scratch dirs (LocalExecutor's gauntlet-check-* and
+	// ContainerExecutor's gauntlet-container-* result dirs) are rooted
+	// under -state/scratch (threaded into buildExecutor below) rather than
+	// the OS temp dir, specifically so they fall under this same startup
+	// sweep — exactly like trialsDir above, and safe for the same reason
+	// (the lock above).
 	scratchDir := filepath.Join(*statePath, "scratch")
 	if err := sweepAndRecreate(scratchDir); err != nil {
 		return fmt.Errorf("sweep scratch dir: %w", err)
 	}
 
-	// F-b (DESIGN.md "Full per-check log files"): unlike trials/, logsDir
-	// holds durable state (log files meant to survive restarts, up to
-	// cfg.LogRetention) — never swept unconditionally. Wired into
-	// queue.Config.LogDir below regardless of which optional sections
-	// (history, dashboard, ...) are configured, so full logs are always
-	// captured; a startup prune sweep here catches anything past retention
-	// from before this process started, and startLogPruner repeats it
-	// periodically for the rest of this process's lifetime.
+	// Unlike trials/, logsDir holds durable state (log files meant to
+	// survive restarts, up to cfg.LogRetention — see DESIGN.md's decision
+	// ledger, "Full per-check log files") — never swept unconditionally.
+	// Wired into queue.Config.LogDir below regardless of which optional
+	// sections (history, dashboard, ...) are configured, so full logs are
+	// always captured; a startup prune sweep here catches anything past
+	// retention from before this process started, and startLogPruner
+	// repeats it periodically for the rest of this process's lifetime.
 	logsDir := filepath.Join(*statePath, "logs")
 	if err := pruneLogFiles(logsDir, time.Now().Add(-cfg.LogRetention)); err != nil {
 		return fmt.Errorf("sweep logs dir %s: %w", logsDir, err)
 	}
 
-	// B1 (phase-6 B-track review): a short, stable hash of this daemon's own
-	// absolute -state path, namespacing its container names
-	// (executor.Params.Token) distinctly from any sibling gauntlet daemon
-	// on the same box pointed at a different -state dir. See stateToken's
-	// doc for why AcquireLock's flock alone doesn't cover this.
+	// A short, stable hash of this daemon's own absolute -state path,
+	// namespacing its container names (executor.Params.Token) distinctly
+	// from any sibling gauntlet daemon on the same box pointed at a
+	// different -state dir. See stateToken's doc for why AcquireLock's
+	// flock alone doesn't cover this.
 	token, err := stateToken(*statePath)
 	if err != nil {
 		return fmt.Errorf("derive state token: %w", err)
 	}
 
-	// Shared services (docs/plans/services-impl.md §4.5, Amendments A3):
-	// pool construction, adoption, and (below, once wg exists) the reaper
-	// are all gated on the daemon capability block (services.md §7) —
-	// len(cfg.Services.Allow)==0 leaves pool nil, and queue.Config.Services
-	// stays nil too (byte-identical behavior for every daemon that never
-	// opts in).
+	// Shared services: pool construction, adoption, and (below, once wg
+	// exists) the reaper are all gated on the daemon capability block —
+	// see docs/design/services.md ("The model: a cache entry, not a
+	// supervised unit") for why the allow list is what permits any service
+	// to run at all. len(cfg.Services.Allow)==0 leaves pool nil, and
+	// queue.Config.Services stays nil too (byte-identical behavior for
+	// every daemon that never opts in).
 	var pool *services.Pool
 	if len(cfg.Services.Allow) > 0 {
-		// Mode/runtime derivation (A3): the container executor's own
-		// runtime wins (it must already be docker/podman for phase A —
-		// Apple's is the hard-fail below); the local executor has no
-		// runtime of its own, so cfg.Services.Runtime (validated
-		// docker/podman by config.Daemon.validate) supplies it instead.
+		// Mode/runtime derivation: the container executor's own runtime
+		// wins (see docs/design/services.md, "Reachability mode", for the
+		// runtime-selection rule); the local executor has no runtime of
+		// its own, so cfg.Services.Runtime (validated docker/podman by
+		// config.Daemon.validate) supplies it instead.
 		mode := services.ModePublish
 		runtime := cfg.Services.Runtime
 		if cfg.Executor.Kind == "container" {
@@ -225,7 +221,11 @@ func run() error {
 			runtime = cfg.Executor.Runtime
 		}
 		if mode == services.ModeNetwork && runtime == "container" {
-			return fmt.Errorf("services require docker or podman in phase A; Apple container networking is deferred (docs/plans/services.md §9)")
+			// NOTE: Apple's container CLI is deliberately unsupported here
+			// — it has no docker-style shared user network for a service
+			// and a sibling check container to reach each other over. See
+			// docs/design/services.md ("Reachability mode").
+			return fmt.Errorf("services require docker or podman; Apple's container CLI lacks the shared container network services need")
 		}
 
 		svcStateDir := filepath.Join(*statePath, "services")
@@ -256,19 +256,19 @@ func run() error {
 		return fmt.Errorf("build executor: %w", err)
 	}
 
-	// S16 (phase-6 audit synthesis): sweep containers orphaned by a prior
-	// gauntlet process that crashed mid-check, before its own --rm cleanup
-	// ran. Only attempted when a container executor is actually configured.
-	// AcquireLock (S2) above guarantees no other gauntlet daemon can be
-	// using THIS -state dir concurrently, but that alone is not sufficient
-	// here: container names live in a host-global namespace shared by every
-	// gauntlet daemon on the box, regardless of -state dir, so a live
-	// sibling daemon pointed at a *different* -state dir could otherwise
-	// have its in-flight containers mistaken for orphans. token (above)
-	// closes that gap — sweepContainerOrphans only ever matches this
-	// daemon's own "gauntlet-<token>-" prefix (B1, phase-6 B-track review).
-	// Tolerant of the runtime binary being entirely absent (logs and
-	// continues — see sweepContainerOrphans' doc).
+	// Sweep containers orphaned by a prior gauntlet process that crashed
+	// mid-check, before its own --rm cleanup ran. Only attempted when a
+	// container executor is actually configured. AcquireLock above
+	// guarantees no other gauntlet daemon can be using THIS -state dir
+	// concurrently, but that alone is not sufficient here: container names
+	// live in a host-global namespace shared by every gauntlet daemon on
+	// the box, regardless of -state dir, so a live sibling daemon pointed
+	// at a *different* -state dir could otherwise have its in-flight
+	// containers mistaken for orphans. token (above) closes that gap —
+	// sweepContainerOrphans only ever matches this daemon's own
+	// "gauntlet-<token>-" prefix. Tolerant of the runtime binary being
+	// entirely absent (logs and continues — see sweepContainerOrphans'
+	// doc).
 	if cfg.Executor.Kind == "container" {
 		runtime := cfg.Executor.Runtime
 		if runtime == "" {
@@ -278,25 +278,24 @@ func run() error {
 	}
 
 	// Channels: log always first (it's the one output every deployment
-	// gets, config or no config), then the optional phase-2/3 channels in
+	// gets, config or no config), then the optional channels in
 	// config-field order.
 	chans := []core.Channel{channel.NewLogChannel(os.Stderr)}
 
-	// LOAD-BEARING ORDER (S1, phase-6 B-track review): store must be
-	// registered in chans before the hooks Runner hr is (further down,
-	// where hr is appended after buildHooksRunner). hook_runs.run_id
-	// REFERENCES runs(run_id), FK-enforced (store.go's DSN), so a
-	// writeHookStarted/writeHookSkipped insert only succeeds once the
-	// landing's runs row already exists. That row is written by
-	// history.Store.Emit — a synchronous sqlite write — on EventLanded;
-	// queue.Daemon.emit (internal/queue/daemon.go) fans EventLanded out to
-	// d.chans strictly in registration order, so history's write completing
-	// before hr even dequeues the landing (its own Emit just enqueues,
-	// asynchronously) depends entirely on history sitting earlier in this
-	// slice than hr. Reorder them and every owed/skipped hook_runs write
-	// FK-violates — now logged (S1's daemon.go fix) rather than silently
-	// dropped, but still a correctness regression for S1-C's
-	// crash-discoverability guarantee. Don't move hr's append above this.
+	// LOAD-BEARING ORDER: store must be registered in chans before the
+	// hooks Runner hr is (further down, where hr is appended after
+	// buildHooksRunner). hook_runs.run_id REFERENCES runs(run_id),
+	// FK-enforced (store.go's DSN), so a writeHookStarted/writeHookSkipped
+	// insert only succeeds once the landing's runs row already exists. That
+	// row is written by history.Store.Emit — a synchronous sqlite write —
+	// on EventLanded; queue.Daemon.emit (internal/queue/daemon.go) fans
+	// EventLanded out to d.chans strictly in registration order, so
+	// history's write completing before hr even dequeues the landing (its
+	// own Emit just enqueues, asynchronously) depends entirely on history
+	// sitting earlier in this slice than hr. Reorder them and every
+	// owed/skipped hook_runs write FK-violates (logged, not silently
+	// dropped, but still a correctness regression for crash-discoverability
+	// of hook runs). Don't move hr's append above this.
 	store, err := buildHistoryStore(cfg)
 	if err != nil {
 		return fmt.Errorf("build history store: %w", err)
@@ -337,12 +336,12 @@ func run() error {
 	// ahead of them and store.Close() out from under an in-flight write.
 	var wg sync.WaitGroup
 
-	// Services reaper (docs/plans/services-impl.md §4.5): a dedicated 30s
-	// ticker, no config knob in phase A, destroying instances idle past
-	// their IdleTTL. No-op until pool.ArmReaper is called (queue.Daemon
-	// calls it once, after the first full ReconcileOnce pass — review q3),
-	// so this can start immediately without racing boot adoption. Joined by
-	// wg like every other background goroutine here.
+	// Services reaper: a dedicated 30s ticker, no config knob today,
+	// destroying instances idle past their IdleTTL. No-op until
+	// pool.ArmReaper is called (queue.Daemon calls it once, after the first
+	// full ReconcileOnce pass), so this can start immediately without
+	// racing boot adoption. Joined by wg like every other background
+	// goroutine here.
 	if pool != nil {
 		wg.Add(1)
 		go func() {
@@ -418,11 +417,10 @@ func run() error {
 		}()
 	}
 
-	// hookSnapshot is the wiring half of S5 (phase-6 audit synthesis):
-	// threads hr's live-hook-state accessor into the dashboard/MCP
-	// surfaces, nil-safely, mirroring hookCancel above exactly — nil when
-	// hooks aren't configured, in which case both surfaces simply omit
-	// live hook state.
+	// hookSnapshot threads hr's live-hook-state accessor into the
+	// dashboard/MCP surfaces, nil-safely, mirroring hookCancel above
+	// exactly — nil when hooks aren't configured, in which case both
+	// surfaces simply omit live hook state.
 	var hookSnapshot func(target string) (hooks.LiveState, bool)
 	if hr != nil {
 		hookSnapshot = hr.Snapshot
@@ -498,10 +496,8 @@ func run() error {
 	// may still be querying or writing store (or, for the pruner, logsDir)
 	// after d.Run returns on ctx cancellation. Waiting on wg before
 	// store.Close() runs (deferred above) keeps that Close from racing any
-	// of them (cmd wiring review, docs/plans/phase23.md): Slack/hooks/
-	// sampler/pruner exit, the dashboard's graceful Shutdown completes,
-	// then — only then — the store closes.
-	//
+	// of them: Slack/hooks/sampler/pruner exit, the dashboard's graceful
+	// Shutdown completes, then — only then — the store closes.
 	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
@@ -529,16 +525,15 @@ func remoteKey(remote string) string {
 
 // stateToken derives a short, stable token (the first 8 hex chars of a
 // sha256 of the absolute -state directory path) that namespaces this
-// daemon's container names (B1, phase-6 B-track review). The "gauntlet-"
-// container-name prefix is host-global — identical for every gauntlet
-// process on the box — while AcquireLock's flock only guards this
-// process's own -state dir. Without a further namespace, a daemon
-// restarting against a different -state dir could `rm -f` a live sibling
-// daemon's in-flight containers during its startup orphan sweep; two
-// daemons on different -state dirs get distinct tokens, so each one's
-// sweep only ever matches its own containers. Threaded into both
-// executor.Params.Token (which names containers) and sweepContainerOrphans
-// (which filters on the same prefix).
+// daemon's container names. The "gauntlet-" container-name prefix is
+// host-global — identical for every gauntlet process on the box — while
+// AcquireLock's flock only guards this process's own -state dir. Without a
+// further namespace, a daemon restarting against a different -state dir
+// could `rm -f` a live sibling daemon's in-flight containers during its
+// startup orphan sweep; two daemons on different -state dirs get distinct
+// tokens, so each one's sweep only ever matches its own containers.
+// Threaded into both executor.Params.Token (which names containers) and
+// sweepContainerOrphans (which filters on the same prefix).
 func stateToken(stateDir string) (string, error) {
 	abs, err := filepath.Abs(stateDir)
 	if err != nil {

@@ -19,9 +19,8 @@ import (
 
 // TestContainerDriverLive exercises containerDriver end-to-end in
 // ModePublish: create, the ready-command probe path, probe-alive, list,
-// inspect-key, log tailing, and destroy (docs/plans/services-impl.md §3.7's
-// "container driver" row). Skipped cleanly, not failed, when no runtime is
-// reachable.
+// inspect-key, log tailing, and destroy. Skipped cleanly, not failed, when
+// no runtime is reachable.
 func TestContainerDriverLive(t *testing.T) {
 	bin := requireRuntime(t)
 	d := newContainerDriver(bin, "livetest")

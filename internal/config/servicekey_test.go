@@ -35,7 +35,7 @@ func TestServiceKey_EnvReorder(t *testing.T) {
 func TestServiceKey_Whitespace(t *testing.T) {
 	// Two KDL documents differing only in indentation/blank lines/comments,
 	// parsed through ParseChecks, must hash identically — the key hashes
-	// the parsed struct, never raw bytes (review m1).
+	// the parsed struct, never raw bytes.
 	tight := []byte(`
 service "pg" {
     image "postgres:16-alpine"

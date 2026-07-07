@@ -314,10 +314,9 @@ func TestLogChannel_EmitHookFinishedNilCheckOmitsBlock(t *testing.T) {
 	}
 }
 
-// TestLogChannel_EmitHookStarted confirms EventHookStarted (S5-surface, the
-// "surfaced everywhere" half of S1-C's discoverability requirement) renders
-// its own distinct greppable marker line, in addition to formatEvent's
-// generic kind=/target=/check= fields.
+// TestLogChannel_EmitHookStarted confirms EventHookStarted renders its own
+// distinct greppable marker line, in addition to formatEvent's generic
+// kind=/target=/check= fields.
 func TestLogChannel_EmitHookStarted(t *testing.T) {
 	ev := core.Event{Kind: core.EventHookStarted, Target: "main", RunID: "run-1", CheckName: "deploy"}
 
@@ -334,7 +333,7 @@ func TestLogChannel_EmitHookStarted(t *testing.T) {
 	}
 }
 
-// TestLogChannel_EmitHookSkipped confirms EventHookSkipped (S1-C: a
+// TestLogChannel_EmitHookSkipped confirms EventHookSkipped (a
 // recovery-skipped landing's hooks never ran at all) renders a distinct
 // marker line including Detail.
 func TestLogChannel_EmitHookSkipped(t *testing.T) {
@@ -353,9 +352,9 @@ func TestLogChannel_EmitHookSkipped(t *testing.T) {
 	}
 }
 
-// TestLogChannel_EmitRetryRequested confirms EventRetryRequested (S3, a
-// history-only durability signal per the phase-6 B-track plan) still renders
-// via formatEvent's generic fields — LogChannel logs every event
+// TestLogChannel_EmitRetryRequested confirms EventRetryRequested (a
+// history-only durability signal) still renders via formatEvent's generic
+// fields — LogChannel logs every event
 // unconditionally (unlike Slack, which filters), so no special-case block is
 // needed beyond the eventKindString name.
 func TestLogChannel_EmitRetryRequested(t *testing.T) {

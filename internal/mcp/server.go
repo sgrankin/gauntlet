@@ -1,9 +1,8 @@
 // Package mcp exposes gauntlet's live queue state and run history to AI
-// agents over the Model Context Protocol (chunk E5): nine tools — status,
-// runs, run, retry, cancel, hook_cancel, batch, checks, services — mounted
-// at /mcp on the daemon's existing dashboard HTTP port, right alongside the
-// read-only HTML dashboard and its JSON API (internal/dashboard/api.go,
-// chunk E4).
+// agents over the Model Context Protocol: nine tools — status, runs, run,
+// retry, cancel, hook_cancel, batch, checks, services — mounted at /mcp on
+// the daemon's existing dashboard HTTP port, right alongside the read-only
+// HTML dashboard and its JSON API (internal/dashboard/api.go).
 //
 // This package deliberately does not import internal/dashboard: its Params
 // are the same two read sources (a live queue.Snapshot and an optional
@@ -71,9 +70,8 @@ type Params struct {
 	Retry func(core.Command) bool
 
 	// Cancel enqueues a cancel command for (Command.Target, Command.Ref)
-	// (Feature 1, manual operator cancellation) and reports whether it was
-	// accepted, same backpressure contract as Retry. Nil disables the
-	// cancel tool.
+	// (manual operator cancellation) and reports whether it was accepted,
+	// same backpressure contract as Retry. Nil disables the cancel tool.
 	Cancel func(core.Command) bool
 
 	// HookCancel cancels a target's currently-running post-land hook
@@ -253,7 +251,7 @@ type statusOut struct {
 	Targets    []targetStatus `json:"targets"`
 
 	// IgnoredRefs mirrors dashboard/api.go's statusResponse.IgnoredRefs: a
-	// TOP-LEVEL, daemon-wide list (S7c), not per-target — an ignored ref's
+	// TOP-LEVEL, daemon-wide list, not per-target — an ignored ref's
 	// defining property is that its target segment names no configured
 	// target, so a per-configured-target list could never match anything.
 	// Each entry's target field carries the unconfigured name for display.
@@ -262,13 +260,13 @@ type statusOut struct {
 
 	// IdleSince mirrors dashboard/api.go's statusResponse.IdleSince
 	// field-for-field: the RFC3339 instant since which the WHOLE daemon has
-	// been idle — every target's queue AND every target's post-land hooks —
-	// per docs/plans/scale.md §2. Always computed over EVERY target
-	// regardless of in.Target's filter, since the signal is daemon-wide by
-	// definition (an agent asking about one target still gets the whole
-	// daemon's idle state, same as dashboard.statusResponse.IdleSince isn't
-	// scoped by any target filter either — this endpoint has none). Omitted
-	// whenever the daemon isn't idle right now.
+	// been idle — every target's queue AND every target's post-land hooks.
+	// Always computed over EVERY target regardless of in.Target's filter,
+	// since the signal is daemon-wide by definition (an agent asking about
+	// one target still gets the whole daemon's idle state, same as
+	// dashboard.statusResponse.IdleSince isn't scoped by any target filter
+	// either — this endpoint has none). Omitted whenever the daemon isn't
+	// idle right now.
 	IdleSince string `json:"idleSince,omitempty"`
 }
 
@@ -286,7 +284,7 @@ type targetStatus struct {
 	Parked   []parkedStatus   `json:"parked"`
 
 	// LiveHook and HookRuns mirror dashboard/api.go's own targetStatus
-	// additions field-for-field (S5-surface): live post-land hook progress
+	// additions field-for-field: live post-land hook progress
 	// (Params.HookSnapshot) and the durable hook-run ledger (Store.
 	// HookRunSummaries) — both omitted (not present, not just empty) when
 	// their respective data source is unavailable. Ignored refs live at
@@ -402,8 +400,8 @@ func handleStatus(p Params, in statusIn) statusOut {
 }
 
 // idleSince mirrors dashboard/api.go's dash.idleSince: composes queue
-// idleness (snap.IdleSince, docs/plans/scale.md §2) with hook idleness
-// (p.HookSnapshot) into the one daemon-wide idle instant. Always evaluated
+// idleness (snap.IdleSince) with hook idleness (p.HookSnapshot) into the
+// one daemon-wide idle instant. Always evaluated
 // over every target in snap, never a caller-filtered subset — handleStatus's
 // in.Target only narrows what's DISPLAYED in out.Targets, not what decides
 // daemon-wide idleness. p.HookSnapshot nil (hooks not configured) means
@@ -550,11 +548,11 @@ type runSummary struct {
 	EndedAt    string `json:"endedAt"`
 	DurationMs int64  `json:"durationMs"`
 
-	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
-	// §10 amendment 1) as-is, mirroring dashboard/api.go's runSummaryJSON:
-	// omitted entirely for a serial or speculate run (BatchID == ""), present
-	// for a batch member. See that type's doc for the omitempty/position-0
-	// caveat (batchId's presence is the real batch-membership signal).
+	// BatchID/Position/BatchSize surface batch identity as-is, mirroring
+	// dashboard/api.go's runSummaryJSON: omitted entirely for a serial or
+	// speculate run (BatchID == ""), present for a batch member. See that
+	// type's doc for the omitempty/position-0 caveat (batchId's presence
+	// is the real batch-membership signal).
 	BatchID   string `json:"batchId,omitempty"`
 	Position  int    `json:"position,omitempty"`
 	BatchSize int    `json:"batchSize,omitempty"`
@@ -624,11 +622,10 @@ type runOut struct {
 	// Always present as an array (possibly empty, never omitted).
 	Hooks []checkDetail `json:"hooks"`
 
-	// BatchID/Position/BatchSize surface batch identity (docs/plans/phase5.md
-	// §10 amendment 1) as-is, mirroring dashboard/api.go's runDetailResponse:
-	// omitted entirely for a serial or speculate run (BatchID == ""), present
-	// for a batch member. See runSummary's doc for the omitempty/position-0
-	// caveat.
+	// BatchID/Position/BatchSize surface batch identity as-is, mirroring
+	// dashboard/api.go's runDetailResponse: omitted entirely for a serial
+	// or speculate run (BatchID == ""), present for a batch member. See
+	// runSummary's doc for the omitempty/position-0 caveat.
 	BatchID   string `json:"batchId,omitempty"`
 	Position  int    `json:"position,omitempty"`
 	BatchSize int    `json:"batchSize,omitempty"`
@@ -800,7 +797,7 @@ func handleHookCancel(p Params, in hookCancelIn) (hookCancelOut, error) {
 	return hookCancelOut{Status: "no-op"}, nil
 }
 
-// --- batch (S7a) ----------------------------------------------------------
+// --- batch ------------------------------------------------------------------
 
 type batchIn struct {
 	BatchID string `json:"batch_id" jsonschema:"the batch ID to list members for (see a run's batchId field)"`
@@ -856,7 +853,7 @@ func handleBatch(p Params, in batchIn) (batchOut, error) {
 	return out, nil
 }
 
-// --- checks (S7b) -----------------------------------------------------------
+// --- checks -------------------------------------------------------------------
 
 type checksIn struct {
 	Target string `json:"target" jsonschema:"the target name to compute check stats/depth for"`
@@ -925,14 +922,15 @@ func handleChecks(p Params, in checksIn) (checksOut, error) {
 	return out, nil
 }
 
-// --- services (design §10's tuning instrument) -------------------------------
+// --- services -------------------------------------------------------------------
 
 type servicesIn struct{}
 
 // serviceInstance mirrors dashboard/api.go's serviceInstanceJSON
-// field-for-field. Key carries the full key (services.md §2 review m2/m6 —
-// only the full key is guaranteed collision-free); KeyHash12 is the same
-// truncation the dashboard HTML table shows for compact display.
+// field-for-field. Key carries the full key (see docs/design/services.md,
+// "Full key versus name" — only the full key is guaranteed collision-free);
+// KeyHash12 is the same truncation the dashboard HTML table shows for
+// compact display.
 type serviceInstance struct {
 	Service   string `json:"service"`
 	Image     string `json:"image"`

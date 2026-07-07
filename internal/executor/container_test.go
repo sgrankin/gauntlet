@@ -116,8 +116,8 @@ func TestParams_RunArgs_EnvVarsAllSix(t *testing.T) {
 }
 
 func TestParams_RunArgs_TrialTreeMountReadWrite(t *testing.T) {
-	// §4.5: the trial tree is bind-mounted RW at workdir (matches
-	// LocalExecutor — no :ro suffix, since export is ephemeral).
+	// The trial tree is bind-mounted RW at workdir (matches LocalExecutor
+	// — no :ro suffix, since export is ephemeral).
 	p := Params{Workdir: "/workspace", Image: "img"}
 	job := containerJob([]string{"true"})
 
@@ -468,16 +468,16 @@ func TestContainerExecutor_CtxAlreadyCancelled_Err(t *testing.T) {
 }
 
 // --- RunCheck: ScratchDir roots the host-side result-dir mount. ---
-// Uses a fake runtime script on PATH rather than a real container runtime
-// (S16, phase-6 audit synthesis: this only proves resultDir's location, not
-// anything about real container behavior — CAUTION per the plan: verify the
-// actual mount still works against the demo box's real `container` CLI).
+// Uses a fake runtime script on PATH rather than a real container runtime:
+// this only proves resultDir's location, not anything about real
+// container behavior — verify the actual mount still works against a real
+// `container` CLI separately.
 
-// TestContainerExecutor_ScratchDirRootsResultDirMount proves the host-side
-// half of S16's fix: a non-empty Params.ScratchDir roots the ephemeral
-// result-dir (bind-mounted at containerResultDir) under it instead of the
-// OS default temp dir, without changing anything else about the `run`
-// invocation — same mount count, same flags, same in-container path.
+// TestContainerExecutor_ScratchDirRootsResultDirMount proves that a
+// non-empty Params.ScratchDir roots the ephemeral result-dir
+// (bind-mounted at containerResultDir) under it instead of the OS default
+// temp dir, without changing anything else about the `run` invocation —
+// same mount count, same flags, same in-container path.
 func TestContainerExecutor_ScratchDirRootsResultDirMount(t *testing.T) {
 	scratch := t.TempDir()
 	binDir := t.TempDir()
@@ -733,10 +733,10 @@ exit 1
 
 // --- integration tests against the real runtime, if usable. ---
 //
-// Per docs/plans/phase23.md §1 Spike C, this machine has only Apple
-// `container` installed, and its backing service may be down
-// ("apiserver is not running and not registered with launchd"). These tests
-// probe first and skip cleanly rather than failing when that's the case.
+// A machine with only Apple's `container` installed may have its backing
+// service down ("apiserver is not running and not registered with
+// launchd"). These tests probe first and skip cleanly rather than failing
+// when that's the case.
 
 const testRuntime = "container"
 

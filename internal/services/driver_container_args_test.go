@@ -7,11 +7,10 @@ import (
 )
 
 // TestCreateArgs_Resources confirms --memory/--cpus are emitted verbatim
-// when set on the spec and omitted entirely when left zero (services.md §7
-// "Resource honesty" phase-B landing) — no gauntlet-chosen flag fills in for
-// an author who left these unset. Unlike the rest of Create, this is
-// unit-testable without a real docker/podman daemon since createArgs
-// (driver_container.go) is pure.
+// when set on the spec and omitted entirely when left zero — no
+// gauntlet-chosen flag fills in for an author who left these unset.
+// Unlike the rest of Create, this is unit-testable without a real
+// docker/podman daemon since createArgs (driver_container.go) is pure.
 func TestCreateArgs_Resources(t *testing.T) {
 	base := InstanceSpec{
 		Key:  "somekey",

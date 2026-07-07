@@ -76,9 +76,9 @@ func TestReconcile_CandidateDeletedMidCheck(t *testing.T) {
 }
 
 // TestReconcile_TargetMovedMidCheck covers the early-cancel path (distinct
-// from a stale CAS at land time, docs/plans/phase1.md §5 delta): a target
-// branch that moves out from under a run mid-check is detected at the very
-// start of the tick, before the check's verdict is even looked at.
+// from a stale CAS at land time): a target branch that moves out from
+// under a run mid-check is detected at the very start of the tick, before
+// the check's verdict is even looked at.
 func TestReconcile_TargetMovedMidCheck(t *testing.T) {
 	h := newHarness(t)
 	h.git.seed("main", nil)

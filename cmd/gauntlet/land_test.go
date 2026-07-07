@@ -2,8 +2,8 @@ package main
 
 import "testing"
 
-// Argv/refspec construction only — no exec, no git, no network (per
-// docs/plans/phase23.md §6 chunk D8: tests must not run git for real).
+// Argv/refspec construction only — no exec, no git, no network: tests must
+// not run git for real.
 
 func TestLandRefspec(t *testing.T) {
 	got := landRefspec("main", "alice", "feat/foo")

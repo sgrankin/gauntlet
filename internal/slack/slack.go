@@ -1,13 +1,12 @@
 // Package slack implements a duplex core.Channel over Slack's socket-mode
-// protocol (docs/plans/phase23.md §4.4): outbound, it threads one root
-// message per run, threaded replies for each check, and edits the root to
-// its final verdict; inbound, it turns a ":recycle:" reaction on an owned
-// root message into a core.Command{Kind: core.CommandRetry}, and an ":x:"
-// reaction into a core.Command{Kind: core.CommandCancel} (Feature 1, manual
-// operator cancellation).
+// protocol: outbound, it threads one root message per run, threaded
+// replies for each check, and edits the root to its final verdict;
+// inbound, it turns a ":recycle:" reaction on an owned root message into a
+// core.Command{Kind: core.CommandRetry}, and an ":x:" reaction into a
+// core.Command{Kind: core.CommandCancel} (manual operator cancellation).
 //
 // Ownership of a root message is durable across process restarts and across
-// the in-memory roots map's own cleanup (§9.2 forgets both run-tracking map
+// the in-memory roots map's own cleanup (forgetting both run-tracking map
 // entries the instant a run terminates — and a human reacting to a ❌ root
 // overwhelmingly happens AFTER that point, not during the run, which is the
 // only case the in-memory map can answer). Every root post attaches Slack
@@ -27,8 +26,8 @@
 // "apps.connections.open"), a bot token drives the Web API calls
 // (chat.postMessage / chat.update / conversations.history / reactions.add /
 // auth.test). Both routes go through the same *slack.Client, so a single
-// slack.OptionAPIURL(...) reroutes everything to a fake server in tests (§1
-// Spike B; verified against the slack-go v0.27.0 source: apps.connections.open
+// slack.OptionAPIURL(...) reroutes everything to a fake server in tests
+// (verified against the slack-go v0.27.0 source: apps.connections.open
 // uses Client.endpoint exactly like every other Web API call, and
 // socketmode.Client embeds a copy of that Client, so it inherits the same
 // endpoint — no separate socket-mode URL override exists or is needed).
@@ -52,9 +51,9 @@ import (
 
 var _ core.Channel = (*Slack)(nil)
 
-// Params configures a Slack channel. It is a package-local struct (§9.5):
-// mapping from parsed config lives only in cmd, so this package never
-// imports internal/config.
+// Params configures a Slack channel. It is a package-local struct: mapping
+// from parsed config lives only in cmd, so this package never imports
+// internal/config.
 type Params struct {
 	// Channel is the Slack channel ID to post into (e.g. "C0123456789").
 	Channel string
@@ -84,7 +83,7 @@ type Params struct {
 	AllowedUsers []string
 }
 
-// Bounds on Slack's internal channels (§9.2: never leak, never block).
+// Bounds on Slack's internal channels: never leak, never block.
 const (
 	// outboxBuffer bounds Emit's internal queue. Emit never blocks the
 	// reconcile loop: once this is full, further events are logged and
@@ -101,7 +100,7 @@ const (
 // so an owned reaction can be turned back into a retry Command. Populated
 // for both single-run and batch roots identically — the in-memory fast path
 // (handleSocketEvent's roots-map hit) is unchanged by durable ownership
-// (§4.4 doc comment): it always resolves to whatever candidate's ref
+// (see the package doc above): it always resolves to whatever candidate's ref
 // postRoot recorded when the root was first posted, batch or not. Only the
 // metadata-fetch fallback (used once this entry has been forgotten, at
 // terminal) distinguishes a batch root from a single-run one, by the
@@ -115,8 +114,8 @@ type rootInfo struct {
 // every root post (single-run and batch alike), so a reaction arriving after
 // the in-memory roots map has forgotten the run can still be traced back to
 // its owning (target, ref) — the fix for reaction-retry never having worked
-// end-to-end: humans react to a terminal ❌ root, by which point §9.2's
-// cleanup has already deleted the roots/runRoot entries.
+// end-to-end: humans react to a terminal ❌ root, by which point the
+// run-tracking maps' own cleanup has already deleted the roots/runRoot entries.
 const gauntletRunEventType = "gauntlet_run"
 
 // Reaction-add emoji used to acknowledge an inbound reaction:
@@ -155,10 +154,9 @@ type refRetryEntry struct {
 // operator abandoned it) must not pin its root's identity forever.
 const refRetryTTL = time.Hour
 
-// Slack is a duplex core.Channel implementing docs/plans/phase23.md §4.4.
-// Emit only ever enqueues to outbox; the actual Slack calls happen on the
-// drainer goroutine started by Run, so Emit itself never blocks and never
-// fails the reconcile loop.
+// Slack is a duplex core.Channel. Emit only ever enqueues to outbox; the
+// actual Slack calls happen on the drainer goroutine started by Run, so
+// Emit itself never blocks and never fails the reconcile loop.
 type Slack struct {
 	channel string
 	api     *goslack.Client
@@ -170,7 +168,7 @@ type Slack struct {
 	outbox chan core.Event
 	cmds   chan core.Command
 
-	// mu guards the two run-tracking maps (§9.2 — bounded: every terminal
+	// mu guards the two run-tracking maps (bounded: every terminal
 	// event deletes both entries for its run) and notify, a
 	// closed-and-replaced-on-every-processed-event channel tests use to
 	// synchronize without wall-clock sleeps, mirroring
@@ -211,16 +209,15 @@ type Slack struct {
 	botID     string
 
 	// batchRecs buffers a batch's per-member terminal records, keyed by
-	// BatchID, until a flush is triggered (docs/plans/phase5.md §3.3
-	// addendum, hardened by the phase-5 review's F1): a batch posts ONE
+	// BatchID, until a flush is triggered: a batch posts ONE
 	// final threaded summary listing every member, not one reply per member.
 	// Each entry is deleted once that summary is posted, so — like
-	// runRoot/roots — this never leaks an entry per finished batch (§9.2),
+	// runRoot/roots — this never leaks an entry per finished batch,
 	// modulo the bounded staleness-sweep window documented on batchEntry.
 	batchRecs map[string]*batchEntry
 
 	// now returns the current time; overridden in tests (batchEntry's
-	// staleness sweep, F1(c)) so the ~10-minute window can be exercised
+	// staleness sweep) so the ~10-minute window can be exercised
 	// without a real wall-clock wait. Defaults to time.Now.
 	now func() time.Time
 
@@ -230,20 +227,19 @@ type Slack struct {
 	allowedUsers map[string]struct{}
 }
 
-// batchEntry is one in-flight batch's buffered per-member terminal records
-// (F1, the phase-5 review). recs is indexed by Position; Emit's outbox-full
-// drop (§9.2 — "if the outbox is full, the event is logged and dropped") can
-// silently lose ANY one member's terminal event, leaving a nil hole at that
-// index — summarizeBatch tolerates that (F1a). arrived counts every member
-// terminal event actually recorded so far, independent of which Position
-// arrived: postBatchTerminal used to flush only when the record at
-// Position == BatchSize-1 arrived, which both nil-dereferences on a hole
-// before that point (a dropped middle member: summarizeBatch's own fix
-// handles that) AND never fires at all if THAT particular event is the one
-// dropped, leaking this entry (and runRoot/roots) forever (F1b — fixed by
-// flushing on arrived == BatchSize as an alternative trigger). lastTouched
-// is refreshed on every arrival and read by the staleness sweep
-// (collectStaleBatchesLocked, F1c): an entry that never receives its
+// batchEntry is one in-flight batch's buffered per-member terminal records.
+// recs is indexed by Position; Emit's outbox-full drop ("if the outbox is
+// full, the event is logged and dropped") can silently lose ANY one
+// member's terminal event, leaving a nil hole at that index —
+// summarizeBatch tolerates that. arrived counts every member terminal
+// event actually recorded so far, independent of which Position arrived:
+// flushing only when the record at Position == BatchSize-1 arrives would
+// both nil-dereference on a hole before that point (a dropped middle
+// member) AND never fire at all if THAT particular event is the one
+// dropped, leaking this entry (and runRoot/roots) forever — flushing on
+// arrived == BatchSize as an alternative trigger closes both gaps.
+// lastTouched is refreshed on every arrival and read by the staleness sweep
+// (collectStaleBatchesLocked): an entry that never receives its
 // flush-triggering arrival (because that, too, was dropped) is force-flushed
 // with holes once it's older than batchStaleTimeout, so it can't buffer
 // forever even in that doubly-unlucky case. The sweep only runs
@@ -263,7 +259,7 @@ type batchEntry struct {
 
 // batchStaleTimeout bounds how long a batch's buffered per-member records
 // wait for a flush-triggering arrival before the staleness sweep
-// (collectStaleBatchesLocked) force-flushes it anyway (F1c). Comfortably
+// (collectStaleBatchesLocked) force-flushes it anyway. Comfortably
 // longer than any real check suite's per-batch window.
 const batchStaleTimeout = 10 * time.Minute
 
@@ -340,9 +336,8 @@ func (s *Slack) Commands() <-chan core.Command {
 }
 
 // Stats reports the current size of the run-tracking maps. Exported for
-// tests to assert the maps are bounded (docs/plans/phase23.md §9.2): both
-// must return to zero after every terminal event, however long the daemon
-// runs.
+// tests to assert the maps are bounded: both must return to zero after
+// every terminal event, however long the daemon runs.
 func (s *Slack) Stats() (runs, roots int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -397,7 +392,7 @@ func (s *Slack) Run(ctx context.Context) error {
 // --- outbound ---------------------------------------------------------
 
 // drainOutbox is the Run(ctx)-started goroutine that performs every actual
-// Slack Web API call, so Emit itself never blocks (§4.4).
+// Slack Web API call, so Emit itself never blocks.
 func (s *Slack) drainOutbox(ctx context.Context) {
 	for {
 		select {
@@ -414,8 +409,9 @@ func (s *Slack) drainOutbox(ctx context.Context) {
 // (Record != nil) are handled uniformly regardless of Kind, matching the
 // terminal-event contract documented on core.Event; EventQueued and any
 // event kind this channel doesn't recognize are silently ignored, per
-// core.Channel's "ignore unknown kinds" contract (internal/channel/log.go)
-// and §4.4's "don't spam the channel" guidance for low-value events.
+// core.Channel's "ignore unknown kinds" contract (internal/channel/log.go);
+// low-value event kinds are deliberately dropped rather than posted, so the
+// channel doesn't spam.
 func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 	switch {
 	case ev.Record != nil:
@@ -430,19 +426,17 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 		s.postHookFinished(ctx, ev)
 	case ev.Kind == core.EventHookSkipped:
 		s.postHookSkipped(ctx, ev)
-		// EventHookStarted is deliberately a no-op here (N3, phase-6 B-track
-		// review, a behavior change from the phase-6 B-track plan): live
-		// hook-in-progress state is the dashboard/API's job (S5's
-		// hooks.LiveState surface), not Slack's. Posting a standalone
-		// top-level message per hook start, on top of postHookFinished's
-		// per-hook post, was ~2N standalone channel messages for every
-		// N-hook landing — noise nobody acted on. EventHookSkipped (above)
-		// stays: it's rare and load-bearing (S1-C's crash-recovery
-		// discoverability), unlike routine hook-start chatter.
+		// EventHookStarted is deliberately a no-op here: live hook-in-progress
+		// state is the dashboard/API's job (hooks.LiveState's surface), not
+		// Slack's. A standalone top-level message per hook start, on top of
+		// postHookFinished's per-hook post, would be ~2N standalone channel
+		// messages for every N-hook landing — noise nobody acts on.
+		// EventHookSkipped (above) stays: it's rare and load-bearing for
+		// crash-recovery discoverability, unlike routine hook-start chatter.
 		//
-		// EventRetryRequested is a history-only durability signal (S3, phase-6
-		// B-track plan): "Other channels default-ignore it; only history acts."
-		// Falling through here (no case) is deliberate, not an oversight.
+		// EventRetryRequested is a history-only durability signal: other
+		// channels default-ignore it, only history acts on it. Falling
+		// through here (no case) is deliberate, not an oversight.
 	}
 }
 
@@ -457,7 +451,7 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 // post 3 separate "⏳ testing..." root messages, each silently orphaning the
 // previous one's roots[] entry (never forgotten, since forget only ever
 // removes the CURRENT ts). One root per run, posted at the first
-// EventTrialClean, keeps both non-batch behavior and the map's §9.2 bound
+// EventTrialClean, keeps both non-batch behavior and the map's bound
 // unchanged.
 func (s *Slack) postRoot(ctx context.Context, ev core.Event) {
 	s.mu.Lock()
@@ -538,7 +532,7 @@ func (s *Slack) postRetryRoot(ctx context.Context, ev core.Event, rootTS string)
 
 // postCheckReply posts a terse threaded reply for a check starting or
 // finishing. A check-started event carries only the check's name (nothing
-// else is known yet). A check-finished event now carries ev.Check (F-a,
+// else is known yet). A check-finished event now carries ev.Check (see
 // DESIGN.md "Full per-check log files") — the just-finished CheckResult —
 // so its reply can show the verdict and duration immediately instead of
 // waiting for the run's terminal threaded summary (postTerminal); ev.Check
@@ -568,13 +562,14 @@ func (s *Slack) postCheckReply(ctx context.Context, ev core.Event) {
 }
 
 // postTerminal edits the root message to its final verdict, posts a final
-// threaded summary, and then deletes both map entries for this run (§9.2 —
-// a long-running daemon must not leak an entry per run).
+// threaded summary, and then deletes both map entries for this run — a
+// long-running daemon must not leak an entry per run.
 //
-// Batch-aware (docs/plans/phase5.md §3.3 addendum): a batch's per-member
-// records now carry distinct RunIDs (queue's memberRunID fix for the
-// history PRIMARY KEY collision), but the root was posted — and is tracked
-// in runRoot/roots — under the batch's shared BatchID (== the bare RunID
+// Batch-aware: a batch's per-member records each carry a distinct RunID
+// (see docs/design/queue-modes.md, "Member run identity" — memberRunID
+// keeps history's runs table from clobbering N-1 of N members' rows), but
+// the root was posted — and is tracked in runRoot/roots — under the batch's
+// shared BatchID (== the bare RunID
 // EventTrialClean carried at chain-build time, postRoot's tracking key).
 // So the root lookup here joins on rec.BatchID when it's set, falling back
 // to ev.RunID (== rec.RunID) otherwise — byte-identical to before for every
@@ -619,7 +614,7 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 }
 
 // postBatchTerminal handles one member's terminal event within a batch
-// (postTerminal's batch branch, docs/plans/phase5.md §3.3 addendum). Every
+// (postTerminal's batch branch). Every
 // member of a batch shares the same Outcome by construction — landRun/
 // finishRun/finishBatchRed/rejectBatch all assign one outcome to the whole
 // batch, never singling out a member's own verdict (a genuine per-member
@@ -627,27 +622,26 @@ func (s *Slack) postTerminal(ctx context.Context, ev core.Event) {
 //
 // Rather than one noisy threaded reply per member, each member's record is
 // buffered (keyed by BatchID, indexed by Position) in a batchEntry until a
-// flush triggers (F1b): either every member has actually arrived
+// flush triggers: either every member has actually arrived
 // (be.arrived == rec.BatchSize) or the nominal last member (Position ==
 // BatchSize-1) has arrived — tracking arrived separately from "did the
 // Position-(BatchSize-1) event show up" means a dropped LAST member (which
-// would never satisfy the old Position-only check) still flushes once every
+// a Position-only check would never satisfy) still flushes once every
 // OTHER member is in, and a dropped MIDDLE member still flushes at the real
 // last position instead of blocking forever on a count a drop makes
 // unreachable. The root's headline edit and the one threaded summary reply
 // are both produced together at flush time (finishBatch), from whichever
-// members have actually arrived by then (nil holes tolerated, F1a) — a
-// live-Slack follow-up to F1: the headline used to update eagerly at
-// Position 0's own arrival, using only that one member's info, which is
-// exactly why a batch of one member rendered as "batch <runID> (1 members)
-// → target" instead of the normal single-run phrasing, and a multi-member
-// batch's headline never got to name any of its members. Deferring to
-// flush time fixes both: batchHeadline (below) renders a size-1 batch
+// members have actually arrived by then (nil holes tolerated) — deliberately
+// not updated eagerly at Position 0's own arrival: an eager update using
+// only that one member's info would render a single-member batch with
+// broken grammar (dropping the topic/user entirely) and could never let a
+// multi-member headline name any of its members. Deferring to
+// flush time avoids both: batchHeadline (below) renders a size-1 batch
 // identically to a serial run, and a size>1 batch's headline lists every
 // member topic that's arrived by flush time. Once flushed, both
-// run-tracking maps — plus this batch's buffered records — are cleaned up
-// (§9.2). Every arrival also opportunistically sweeps for any OTHER batch
-// stuck long enough to be stale (F1c) and flushes those too, so a batch
+// run-tracking maps — plus this batch's buffered records — are cleaned up.
+// Every arrival also opportunistically sweeps for any OTHER batch
+// stuck long enough to be stale and flushes those too, so a batch
 // whose own flush-triggering arrival was itself dropped doesn't buffer
 // forever either.
 func (s *Slack) postBatchTerminal(ctx context.Context, ev core.Event, rec *core.RunRecord, rootTS string) {
@@ -678,7 +672,7 @@ func (s *Slack) postBatchTerminal(ctx context.Context, ev core.Event, rec *core.
 
 // staleBatch is one collectStaleBatchesLocked result: a batch whose
 // buffered records have sat past batchStaleTimeout without a
-// flush-triggering arrival (F1c).
+// flush-triggering arrival.
 type staleBatch struct {
 	batchID string
 	rootTS  string // "" if no root is known (defensive; see collectStaleBatchesLocked)
@@ -711,7 +705,7 @@ func (s *Slack) collectStaleBatchesLocked(excludeBatchID string) []staleBatch {
 
 // finishBatch posts batchID's final root headline edit and threaded summary
 // (both skipped if rootTS is unknown — nothing to edit or reply to) and
-// forgets every trace of it: batchRecs, runRoot, and roots (§9.2).
+// forgets every trace of it: batchRecs, runRoot, and roots.
 func (s *Slack) finishBatch(ctx context.Context, batchID, rootTS, target string, recs []*core.RunRecord) {
 	if rootTS != "" {
 		headline := batchHeadline(target, recs)
@@ -721,8 +715,8 @@ func (s *Slack) finishBatch(ctx context.Context, batchID, rootTS, target string,
 		// shape check (ref present/absent) is what tells a fetched batch
 		// root apart from a single-run one after termination. A batch of
 		// exactly one member is the one exception (mirroring batchHeadline/
-		// summarizeBatch's own "degrades to serial behavior byte for byte",
-		// §4.1): there's no ambiguity about which member a reaction means,
+		// summarizeBatch's own "degrades to serial behavior byte for byte"):
+		// there's no ambiguity about which member a reaction means,
 		// so it gets the single-run shape (ref included) too, same as a
 		// genuine serial run.
 		meta := goslack.SlackMetadata{EventType: gauntletRunEventType, EventPayload: map[string]any{"target": target}}
@@ -748,7 +742,7 @@ func (s *Slack) finishBatch(ctx context.Context, batchID, rootTS, target string,
 }
 
 // postHookFinished posts a standalone (non-threaded) channel message for a
-// failed post-land hook (closing-review FIX 1). By hook time the run's root
+// failed post-land hook. By hook time the run's root
 // ts is already forgotten — postTerminal's forget call runs at landing time,
 // before any hook has even started, and that cleanup is correct as-is — so
 // there is no thread to reply on; this posts a fresh top-level message
@@ -771,11 +765,11 @@ func (s *Slack) postHookFinished(ctx context.Context, ev core.Event) {
 }
 
 // postHookSkipped posts a standalone channel message when a recovery-skipped
-// landing's hooks never ran at all (S1-C discoverability): a crash-recovered
+// landing's hooks never ran at all: a crash-recovered
 // landing has no merge SHA to export a tree from
 // (hooks.Runner.runLanding's "recovered landing, skipping hooks" doc), so its
-// hooks are skipped entirely — this is the whole point of S1-C's durable,
-// surfaced-everywhere marker.
+// hooks are skipped entirely — this marker exists precisely so that's
+// surfaced rather than silently invisible.
 func (s *Slack) postHookSkipped(ctx context.Context, ev core.Event) {
 	text := fmt.Sprintf("⚠ hooks skipped (recovery) → %s", ev.Target)
 	if ev.Detail != "" {
@@ -794,7 +788,7 @@ func (s *Slack) lookupRoot(runID string) (string, bool) {
 	return ts, ok
 }
 
-// forget deletes both map entries for a finished run (§9.2).
+// forget deletes both map entries for a finished run.
 func (s *Slack) forget(runID, rootTS string) {
 	s.mu.Lock()
 	delete(s.runRoot, runID)
@@ -846,10 +840,10 @@ func summarizeRun(rec *core.RunRecord) string {
 }
 
 // firstBatchRec returns the first non-nil record in recs, or nil if every
-// slot is a hole (F1a, the phase-5 review: Emit's outbox-full drop, §9.2,
-// can lose any one member's terminal event). Shared by summarizeBatch and
-// batchHeadline — both need "a representative member" for the fields every
-// member of a batch shares by construction (Outcome, Checks; §3.3).
+// slot is a hole (Emit's outbox-full drop can lose any one member's
+// terminal event). Shared by summarizeBatch and batchHeadline — both need
+// "a representative member" for the fields every member of a batch shares
+// by construction (Outcome, Checks).
 func firstBatchRec(recs []*core.RunRecord) *core.RunRecord {
 	for _, r := range recs {
 		if r != nil {
@@ -860,15 +854,14 @@ func firstBatchRec(recs []*core.RunRecord) *core.RunRecord {
 }
 
 // batchHeadline renders the root message's final-verdict chat.update text
-// for a batch (F1's live-Slack follow-up, the phase-5 review): a batch
-// formed with exactly one member — max-batch 1, or a queue that only ever
-// offered one candidate; §4.1 promises this "degrades to serial behavior"
-// byte for byte — now renders IDENTICALLY to a serial run's own headline
-// (postTerminal's, below), not "batch <runID> (1 members) → target" (the
-// live bug report: broken grammar, and it drops the topic/user entirely). A
+// for a batch: a batch formed with exactly one member — max-batch 1, or a
+// queue that only ever offered one candidate — degrades to serial behavior
+// byte for byte, rendering IDENTICALLY to a serial run's own headline
+// (postTerminal's, below), never "batch <runID> (1 members) → target",
+// which would have broken grammar and drop the topic/user entirely. A
 // genuine multi-member batch instead says "batch of N", naming whichever
 // member topics have actually arrived by flush time (recs may have nil
-// holes — F1a; "reasonable" effort, not a guarantee of completeness, since a
+// holes; "reasonable" effort, not a guarantee of completeness, since a
 // dropped middle member's own topic is simply unknown here). The doubly
 // unlucky all-holes case (every member's event dropped — only reachable via
 // the staleness sweep, since a flush trigger requires at least one arrival
@@ -892,18 +885,17 @@ func batchHeadline(target string, recs []*core.RunRecord) string {
 	return fmt.Sprintf("%s batch of %d (%s) → %s", outcomeEmoji(head.Outcome), len(recs), strings.Join(topics, ", "), target)
 }
 
-// summarizeBatch renders the ONE final threaded reply for a whole batch
-// (§3.3 addendum: "one reply per member is noisy"). A batch of exactly one
-// member renders identically to a serial run's own summary — the same
-// summarizeRun, on the same RunRecord shape (F1's live-Slack follow-up:
-// §4.1's "degrades to serial behavior" byte for byte, extended to Slack's
-// rendering). A genuine multi-member batch's checks are duplicated onto
-// every member's record (§3.3's own documented shape — the suite ran once,
-// against the chain tip), so the outcome label and check-verdict lines
+// summarizeBatch renders the ONE final threaded reply for a whole batch:
+// one reply per member would be noisy. A batch of exactly one member
+// renders identically to a serial run's own summary — the same
+// summarizeRun, on the same RunRecord shape, extending "degrades to serial
+// behavior byte for byte" to Slack's rendering. A genuine multi-member
+// batch's checks are duplicated onto every member's record (the suite ran
+// once, against the chain tip), so the outcome label and check-verdict lines
 // render once, from the first non-nil member found (head, firstBatchRec —
-// recs is indexed by Position, but a slot may be nil, F1a); each present
-// member then gets its own line naming it and its own (now-distinct,
-// post-fix) RunID, plus its own Detail when non-empty — landRun's per-member
+// recs is indexed by Position, but a slot may be nil); each present
+// member then gets its own line naming it and its own (distinct)
+// RunID, plus its own Detail when non-empty — landRun's per-member
 // slot-delete CAS can genuinely differ member to member (a stale delete vs.
 // a clean one), even though Outcome itself never does. Any nil hole is
 // counted and surfaced as one trailing "…and K member(s) whose events were
@@ -961,8 +953,8 @@ func displayUser(user string) string {
 	return user
 }
 
-// outcomeEmoji maps a run's outcome to the root-message glyph (§4.4:
-// "chat.update the root to ✅/❌/⚠").
+// outcomeEmoji maps a run's outcome to the root-message glyph
+// chat.update sets the root to (✅/❌/⚠).
 func outcomeEmoji(o core.Outcome) string {
 	switch o {
 	case core.OutcomeLanded:
@@ -1096,9 +1088,9 @@ func (s *Slack) handleSocketEvent(ctx context.Context, evt socketmode.Event) {
 		return
 	}
 
-	// Miss: either a reaction on someone else's message, or — the bug this
-	// design fixes — a reaction on OUR OWN root after its run has already
-	// terminated and §9.2's cleanup forgot it. Fetch the reacted message
+	// Miss: either a reaction on someone else's message, or a reaction on
+	// OUR OWN root after its run has already terminated and the
+	// run-tracking maps' own cleanup forgot it. Fetch the reacted message
 	// (with metadata) and verify ownership before trusting anything in it.
 	s.handleForeignReaction(ctx, reaction.Item.Channel, ts, kind)
 }
@@ -1127,8 +1119,8 @@ func reactionCommandKind(name string) (kind string, ok bool) {
 // minting a command looks identical regardless of which path found its
 // owner.
 //
-// Ordering is load-bearing (fresh-context review, F1): the refRetry record
-// is written BEFORE the channel send. The daemon consuming s.cmds can act on
+// Ordering is load-bearing: the refRetry record is written BEFORE the
+// channel send. The daemon consuming s.cmds can act on
 // a retry immediately — re-queue the ref, run its trial merge, and Emit the
 // resulting EventTrialClean — and Go's memory model only orders writes made
 // before a channel send against that receiver; recording after the send

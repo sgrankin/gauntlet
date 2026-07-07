@@ -93,14 +93,14 @@ func TestShouldRecord(t *testing.T) {
 }
 
 // TestBuildDepthTuple_InFlightIsPipelineDepth exercises the depth sampler's
-// tuple extraction (docs/plans/phase5.md §10 amendment 5, chunk P5-H): the
-// InFlight component is len(TargetSnapshot.Pipeline), not a 0/1
-// InFlight!=nil flag. Today (before speculation/batching land elsewhere)
-// Pipeline never exceeds 1 element, so the idle (0) and serial-busy (1)
-// cases must come out byte-identical to the sampler's old InFlight!=nil
-// values — no series discontinuity — while a hand-built depth-3 pipeline
-// (a fixture standing in for what speculate mode will publish) proves the
-// tuple now reflects actual pipeline occupancy rather than a boolean.
+// tuple extraction (see docs/design/queue-modes.md, "Snapshot and pipeline
+// view"): the InFlight component is len(TargetSnapshot.Pipeline), not a 0/1
+// InFlight!=nil flag. For a serial-mode target Pipeline never exceeds 1
+// element, so the idle (0) and serial-busy (1) cases must come out
+// byte-identical to the sampler's old InFlight!=nil values — no series
+// discontinuity — while a hand-built depth-3 pipeline (standing in for what
+// a batch or speculate target publishes) proves the tuple reflects actual
+// pipeline occupancy rather than a boolean.
 func TestBuildDepthTuple_InFlightIsPipelineDepth(t *testing.T) {
 	cases := []struct {
 		name string

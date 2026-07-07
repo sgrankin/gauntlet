@@ -1,7 +1,7 @@
-// Phase-B auto-retry-once suite (DESIGN.md decision ledger, "Auto-retry
-// once on infra-error parks"; docs/plans/scale.md §5): an OutcomeError park
-// — the CheckResult.Err path (executor unreachable, service-ensure
-// failure, a service dying mid-run; services.md §7) — is auto-requeued
+// Auto-retry-once suite (DESIGN.md decision ledger, "Auto-retry once on
+// infra-error parks"): an OutcomeError park — the CheckResult.Err path
+// (executor unreachable, service-ensure failure, a service dying mid-run;
+// see docs/design/services.md "Failure semantics") — is auto-requeued
 // exactly once per (ref, SHA) when Config.AutoRetryErrors is set, using the
 // exact same clear+emit machinery command_test.go's TestCommand_Retry*
 // suite exercises for an operator's CommandRetry. These tests set

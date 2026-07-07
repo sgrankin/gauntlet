@@ -9,10 +9,9 @@ import (
 )
 
 // ServiceKey returns the full cache key for svc under repo remote: the hex
-// SHA-256 over a canonical, target-independent encoding of (remote, svc)
-// (docs/plans/services.md §2; docs/plans/services-impl.md §2.5). The key
-// hashes the PARSED, DEFAULTED struct — never raw KDL bytes (review m1) —
-// so reordering env lines or reflowing whitespace never recycles an
+// SHA-256 over a canonical, target-independent encoding of (remote, svc).
+// The key hashes the PARSED, DEFAULTED struct — never raw KDL bytes — so
+// reordering env lines or reflowing whitespace never recycles an
 // instance, while a future change to a default (applyServiceDefaults) DOES
 // recycle instances whose specs relied on the old value, because
 // ParseChecks applies defaults before this or any caller ever sees the
@@ -29,8 +28,8 @@ import (
 //
 // Returns the full 64-hex digest. Truncation to a 12-hex alias (key[:12])
 // is the services pool's job, for container/network names meant for humans
-// — records and boot adoption must match on the FULL key (review m2/m6),
-// never the truncated alias.
+// — records and boot adoption must match on the FULL key, never the
+// truncated alias.
 //
 // Extending this encoding — as Memory/CPUs just did — changes EVERY existing
 // key the moment the new binary parses a spec, old or new: an instance
@@ -42,8 +41,7 @@ import (
 // ever ask for its key again, so it just ages out via IdleTTL like any
 // abandoned instance, while every check gets a fresh instance under the new
 // key. Net effect: a one-time, slower-but-correct full pool recycle after
-// upgrade, never a wrong answer (docs/plans/services-impl.md §2.5/A6 —
-// Env's count prefix landed under the identical tradeoff).
+// upgrade, never a wrong answer.
 func ServiceKey(remote string, svc Service) string {
 	h := sha256.New()
 	writeString(h, remote)
@@ -52,7 +50,7 @@ func ServiceKey(remote string, svc Service) string {
 	writeUint64(h, uint64(svc.Port))
 
 	// Sorted by name so two declarations differing only in env line order
-	// hash identically (review m1) — a copy, since svc is passed by value
+	// hash identically — a copy, since svc is passed by value
 	// but Env is a slice header sharing the caller's backing array; sorting
 	// in place would be an observable side effect on the caller's Service.
 	// Count-prefixed like ReadyCommand below: without it, the env region's

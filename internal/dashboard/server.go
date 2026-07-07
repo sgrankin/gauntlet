@@ -1,13 +1,13 @@
-// Package dashboard implements gauntlet's read-only web dashboard
-// (docs/plans/phase23.md §4.2): stdlib net/http + html/template over two
-// data sources — a live queue.Snapshot published by the reconcile loop, and
-// a *history.Store for run history. Both sources are optional at the type
-// level: snapshot may return nil (no reconcile pass has completed yet) and
-// store may be nil (history disabled); every route degrades to a friendly
-// message rather than panicking or 500ing in either case.
+// Package dashboard implements gauntlet's read-only web dashboard: stdlib
+// net/http + html/template over two data sources — a live queue.Snapshot
+// published by the reconcile loop, and a *history.Store for run history.
+// Both sources are optional at the type level: snapshot may return nil (no
+// reconcile pass has completed yet) and store may be nil (history
+// disabled); every route degrades to a friendly message rather than
+// panicking or 500ing in either case.
 //
-// Every HTML route in this file only reads. api.go (work chunk E4) adds a
-// JSON API beside it, mounted on the same handler, with one mutating route
+// Every HTML route in this file only reads. api.go adds a JSON API beside
+// it, mounted on the same handler, with one mutating route
 // (POST /api/v1/retry) that injects a core.Command the same way a Slack
 // ":recycle:" reaction does — see api.go's Channel doc for how that's
 // wired. Auth is out of scope (documented in DESIGN.md); bind to a trusted
@@ -135,14 +135,15 @@ type dash struct {
 	// hookSnapshot is nil unless New was called with WithHookSnapshot: both
 	// GET /api/v1/status's per-target liveHook field and the target page's
 	// "Post-land hooks" live section simply omit live-hook data in that case
-	// (S5-surface, api.go's WithHookSnapshot doc).
+	// (api.go's WithHookSnapshot doc).
 	hookSnapshot func(target string) (LiveHook, bool)
 
 	// servicesSnapshot is nil unless New was called with
 	// WithServicesSnapshot: the index page's "Services" section and GET
 	// /api/v1/services both treat the shared-services pool as absent in
-	// that case (design §10's tuning instrument, api.go's
-	// WithServicesSnapshot doc).
+	// that case — see docs/design/services.md ("The hit counter") for what
+	// this pool's tuning surface is for, and api.go's
+	// WithServicesSnapshot doc.
 	servicesSnapshot func() ServicesStatus
 }
 
@@ -173,7 +174,7 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 		data.Targets = append(data.Targets, card)
 	}
 
-	// Recently ignored refs (S7c): a DAEMON-level section, not per-target —
+	// Recently ignored refs: a DAEMON-level section, not per-target —
 	// an ignored ref's defining property is that its target segment names no
 	// configured target (that's why it was ignored), so it can't belong to
 	// any target page. A query error degrades to "no section" (logged),
@@ -188,19 +189,20 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Shared-services pool (design §10's tuning instrument): a DAEMON-level
-	// section, like ignored refs above — the pool is per-daemon, not scoped
-	// to any one target. Nil (WithServicesSnapshot never wired up, e.g. no
-	// services configured) omits the section entirely, mirroring
-	// IgnoredRefs' own "no section" degradation.
+	// Shared-services pool (docs/design/services.md, "The hit counter"'s
+	// tuning surface): a DAEMON-level section, like ignored refs above —
+	// the pool is per-daemon, not scoped to any one target. Nil
+	// (WithServicesSnapshot never wired up, e.g. no services configured)
+	// omits the section entirely, mirroring IgnoredRefs' own "no section"
+	// degradation.
 	if d.servicesSnapshot != nil {
 		data.Services = buildServicesView(d.servicesSnapshot(), snap.At)
 	}
 
-	// Idle signal (docs/plans/scale.md §2): a DAEMON-level line near the
-	// footer, like Services/IgnoredRefs above, present only while the whole
-	// daemon (queue + hooks) is idle right now — see d.idleSince (api.go)
-	// for the composition.
+	// Idle signal: a DAEMON-level line near the footer, like
+	// Services/IgnoredRefs above, present only while the whole daemon
+	// (queue + hooks) is idle right now — see d.idleSince (api.go) for the
+	// composition.
 	if since := d.idleSince(snap); !since.IsZero() {
 		data.IdleSince = &idleSinceView{Since: formatTime(since), Elapsed: formatDuration(snap.At.Sub(since))}
 	}
@@ -237,8 +239,8 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 		data.InFlight = buildInFlight(ts.InFlight, snap.At)
 	}
 
-	// Render the stacked pipeline view (docs/plans/phase5.md §3.4, §10
-	// amendment 5's "P5-H" chunk) only when there's something a single
+	// Render the stacked pipeline view (docs/design/queue-modes.md,
+	// "Snapshot and pipeline view") only when there's something a single
 	// InFlight card can't show: more than one run in flight (speculation)
 	// or the head run has more than one member (batch). A single-run,
 	// single-member lane — today's only shape and every existing serial
@@ -268,7 +270,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 
 	data.RecentRuns, data.StoreEnabled = d.recentRuns(ts.Name, 25, snap.At)
 
-	// Post-land hooks (S5-surface): live state comes from the hookSnapshot
+	// Post-land hooks: live state comes from the hookSnapshot
 	// closure (nil-safe, WithHookSnapshot), durable state from the history
 	// store (nil-safe; a query error degrades to "log and omit" rather than
 	// failing the whole page — same convention as recentRuns/Hooks above).
@@ -362,8 +364,8 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	// "no hooks" rather than failing the whole page — the run row and its
 	// checks already rendered successfully above, and a hooks-table hiccup
 	// shouldn't take that down with it. run.html only renders the Hooks
-	// section at all when data.Hooks is non-empty (chunk P5-B requirement:
-	// "rendered only when rows exist").
+	// section at all when data.Hooks is non-empty — rendered only when rows
+	// exist.
 	hooks, err := d.store.Hooks(runID)
 	if err != nil {
 		log.Printf("dashboard: run %s: hooks: %v", runID, err)
@@ -552,8 +554,8 @@ func notFoundPrunedOrMissing(w http.ResponseWriter) {
 //  2. symlink-resolved root vs. symlink-resolved storedPath — catches a
 //     path that only escapes logRoot via a symlink component.
 //
-// per DESIGN.md/the work order, "reject any stored path that, after
-// filepath.Clean/EvalSymlinks, does not live under LogRoot". Resolving only
+// The requirement: reject any stored path that, after
+// filepath.Clean/EvalSymlinks, does not live under LogRoot. Resolving only
 // one side (e.g. comparing a symlink-resolved root against an unresolved
 // storedPath) would misfire on any host where the root itself sits behind a
 // symlink — notably macOS, where t.TempDir()/os.TempDir() live under
@@ -624,11 +626,11 @@ func pathUnder(root, path string) bool {
 
 // --- /batch/{batchID} ---------------------------------------------------------
 
-// handleBatch renders the members of one batch run (docs/plans/phase5.md
-// §10 amendment 1): the link from /run/{id}'s "landed in batch <id> (k of
-// n)" line. Each member is its own history row (§3.3: per-member RunRecords
-// sharing a BatchID), so this is a small listing over history.BatchMembers,
-// not a new data source.
+// handleBatch renders the members of one batch run (see
+// docs/design/queue-modes.md, "Member run identity"): the link from
+// /run/{id}'s "landed in batch <id> (k of n)" line. Each member is its own
+// history row (per-member RunRecords sharing a BatchID), so this is a small
+// listing over history.BatchMembers, not a new data source.
 func (d *dash) handleBatch(w http.ResponseWriter, r *http.Request) {
 	batchID := r.PathValue("batchID")
 	if d.store == nil {
@@ -904,8 +906,9 @@ func buildInFlight(rs *queue.RunSnapshot, at time.Time) *inFlightView {
 }
 
 // buildPipelineRun builds one pipelineRunView from a RunSnapshot for the
-// target page's stacked pipeline list (docs/plans/phase5.md §3.4): every
-// member (topic/user, short SHA), the predicted/batch badges the template
+// target page's stacked pipeline list (docs/design/queue-modes.md,
+// "Snapshot and pipeline view"): every member (topic/user, short SHA), the
+// predicted/batch badges the template
 // renders from Predicted/len(Members), and the same per-run check-progress
 // fields buildInFlight already computes for the single-run case.
 func buildPipelineRun(rs *queue.RunSnapshot, at time.Time) pipelineRunView {
@@ -949,7 +952,7 @@ func buildLiveHookView(lh LiveHook, at time.Time) *liveHookView {
 
 // buildHookRunView builds one hookRunView from a history.HookRunSummary row,
 // computing Incomplete the same way api.go's hookRunStatus does (OwedCount >
-// DoneCount && !Skipped — a crash-incomplete hook chain, S1-C).
+// DoneCount && !Skipped — a crash-incomplete hook chain).
 func buildHookRunView(hr history.HookRunSummary) hookRunView {
 	return hookRunView{
 		RunID: hr.RunID, Owed: hr.OwedCount, Done: hr.DoneCount,
@@ -959,8 +962,9 @@ func buildHookRunView(hr history.HookRunSummary) hookRunView {
 }
 
 // buildServicesView builds index.html's view of the shared-services pool
-// (design §10's tuning instrument) from a ServicesStatus snapshot. at is the
-// queue snapshot's "now" (snap.At), the same reference point buildInFlight/
+// (docs/design/services.md, "The hit counter") from a ServicesStatus
+// snapshot. at is the queue snapshot's "now" (snap.At), the same reference
+// point buildInFlight/
 // buildPipelineRun use for their own elapsed-time fields — Age is computed
 // against it rather than time.Now() so a page render is internally
 // consistent with every other relative time on it.
@@ -1206,23 +1210,24 @@ type indexData struct {
 	Targets []targetCard
 
 	// IgnoredRefs is recently pushed refs naming no configured target
-	// (history.Store.IgnoredRefs, S7c), newest first, daemon-wide — a
+	// (history.Store.IgnoredRefs), newest first, daemon-wide — a
 	// daemon-level section on the index page, not per-target, since an
 	// ignored ref by definition belongs to no configured target. Nil when
 	// history is disabled or the query errors (logged, degraded to "no
 	// section").
 	IgnoredRefs []ignoredRefView
 
-	// Services is the shared-services pool (design §10's tuning instrument),
-	// another daemon-level section like IgnoredRefs — the pool isn't scoped
-	// to any one target either. Nil when WithServicesSnapshot was never
-	// wired up (no services configured for this daemon).
+	// Services is the shared-services pool (docs/design/services.md, "The
+	// hit counter"'s tuning surface), another daemon-level section like
+	// IgnoredRefs — the pool isn't scoped to any one target either. Nil
+	// when WithServicesSnapshot was never wired up (no services configured
+	// for this daemon).
 	Services *servicesView
 
-	// IdleSince is the parked-builder autoscaling signal (docs/plans/
-	// scale.md §2, d.idleSince's doc): nil whenever the daemon isn't idle
-	// right now, in which case the template renders nothing — there is no
-	// "recently busy" line, only "idle since T" or absent.
+	// IdleSince is the parked-builder autoscaling signal (d.idleSince's
+	// doc): nil whenever the daemon isn't idle right now, in which case the
+	// template renders nothing — there is no "recently busy" line, only
+	// "idle since T" or absent.
 	IdleSince *idleSinceView
 }
 
@@ -1237,9 +1242,9 @@ type idleSinceView struct {
 }
 
 // servicesView is index.html's view of the shared-services pool
-// (ServicesStatus, design §10's tuning instrument): the pool's own tuning
-// knobs (MaxInstances/Pending) plus one serviceInstanceView per live
-// instance.
+// (ServicesStatus; docs/design/services.md, "The hit counter"): the pool's
+// own tuning knobs (MaxInstances/Pending) plus one serviceInstanceView per
+// live instance.
 type servicesView struct {
 	MaxInstances int
 	Pending      int
@@ -1247,8 +1252,8 @@ type servicesView struct {
 }
 
 // serviceInstanceView is one row of the Services table: KeyHash12 (not the
-// full key) for compact display — services.md §2's "key material vs name
-// material" split, the same truncation the API/MCP surfaces carry the full
+// full key) for compact display — see docs/design/services.md ("Full key
+// versus name"); the same truncation the API/MCP surfaces carry the full
 // Key alongside. Age is elapsed-since-CreatedAt (formatDuration, like a
 // check's duration); LastUsed gets the existing formatTime <time> treatment
 // (an instant, not a duration) so its tooltip carries the machine-readable
@@ -1271,10 +1276,10 @@ type targetCard struct {
 	RecentRuns                []runSummary
 
 	// PipelineDepth is len(TargetSnapshot.Pipeline): 0 when idle, 1 for
-	// today's ordinary single in-flight run, >1 once speculation lands
-	// (docs/plans/phase5.md §3.4). index.html only changes its rendering
-	// (the in-flight cell becomes "N in flight") when this is >1 — a
-	// single in-flight run renders exactly as before.
+	// today's ordinary single in-flight run, >1 once speculation lands.
+	// index.html only changes its rendering (the in-flight cell becomes "N
+	// in flight") when this is >1 — a single in-flight run renders exactly
+	// as before.
 	PipelineDepth int
 }
 
@@ -1286,9 +1291,9 @@ type inFlightView struct {
 	RunElapsed                  string
 }
 
-// pipelineRunView is one run within a target's stacked pipeline list
-// (docs/plans/phase5.md §3.4): target.html renders one of these per element
-// of targetData.Pipeline, head first. Predicted/len(Members) drive the
+// pipelineRunView is one run within a target's stacked pipeline list:
+// target.html renders one of these per element of targetData.Pipeline,
+// head first. Predicted/len(Members) drive the
 // "on predicted base" / "batch of N" badges directly in the template.
 type pipelineRunView struct {
 	RunID, BaseOID, ChainTip string
@@ -1380,19 +1385,19 @@ type targetData struct {
 	RecentRuns              []runSummary
 
 	// Pipeline is non-nil only when there's more than one in-flight run or
-	// the head run has more than one member (docs/plans/phase5.md §3.4):
-	// see handleTarget's doc. target.html renders this stacked list instead
-	// of the plain .InFlight card when it's set; a single-run single-member
-	// lane leaves this nil and renders exactly as before.
+	// the head run has more than one member: see handleTarget's doc.
+	// target.html renders this stacked list instead of the plain .InFlight
+	// card when it's set; a single-run single-member lane leaves this nil
+	// and renders exactly as before.
 	Pipeline []pipelineRunView
 
 	// LiveHook is this target's current post-land hook progress
 	// (WithHookSnapshot), nil when no hook is running right now or
-	// WithHookSnapshot was never wired up (S5-surface).
+	// WithHookSnapshot was never wired up.
 	LiveHook *liveHookView
 
 	// HookRuns is the durable hook-run ledger (history.Store.
-	// HookRunSummaries, S1-C/S5), newest first, nil when history is disabled
+	// HookRunSummaries), newest first, nil when history is disabled
 	// or the query errors (logged, degraded to "none" — matching
 	// RecentRuns/Hooks's own error-handling convention). Ignored refs are
 	// NOT here: they're a daemon-level index-page section (indexData.
@@ -1488,8 +1493,8 @@ type runSummaryFull struct {
 	Recovered  bool
 }
 
-// batchData is /batch/{id}'s view model: the members of one batch run
-// (docs/plans/phase5.md §10 amendment 1), linked from /run/{id}.
+// batchData is /batch/{id}'s view model: the members of one batch run,
+// linked from /run/{id}.
 type batchData struct {
 	baseData
 	BatchID      string

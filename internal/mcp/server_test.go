@@ -1,6 +1,6 @@
 package mcp_test
 
-// Exercises internal/mcp's Streamable HTTP handler (chunk E5) the way a real
+// Exercises internal/mcp's Streamable HTTP handler the way a real
 // MCP client would: over httptest, using the SDK's own client and
 // StreamableClientTransport rather than calling handleXxx directly, so a
 // wire-protocol regression (a schema the SDK rejects, a tool the client
@@ -65,11 +65,10 @@ func testSnapshot() *queue.Snapshot {
 }
 
 // pipelineSnapshot builds a queue.Snapshot for target "spec" with a
-// depth-2 pipeline (docs/plans/phase5.md §3.4, chunk P5-H): run 0 is the
-// head (Predicted false), run 1 is a downstream window member built on a
-// predicted base. Mirrors internal/dashboard's own pipelineSnapshot test
-// helper in shape, not value, since this package can't import that
-// unexported helper.
+// depth-2 pipeline: run 0 is the head (Predicted false), run 1 is a
+// downstream window member built on a predicted base. Mirrors
+// internal/dashboard's own pipelineSnapshot test helper in shape, not
+// value, since this package can't import that unexported helper.
 func pipelineSnapshot() *queue.Snapshot {
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	mkRun := func(i int, predicted bool) queue.RunSnapshot {
@@ -236,10 +235,9 @@ func TestStatus_NoTargetFilter_ReturnsAll(t *testing.T) {
 }
 
 // TestStatus_PipelineFieldMirrorsAPI confirms the status tool's "pipeline"
-// array (docs/plans/phase5.md §3.4, chunk P5-H) mirrors dashboard/api.go's
-// field-for-field: members, chainTip, predicted, batchId, checksDone,
-// currentCheck, startedAt, present per run, head first, while inFlight stays
-// the head run for back-compat.
+// array mirrors dashboard/api.go's field-for-field: members, chainTip,
+// predicted, batchId, checksDone, currentCheck, startedAt, present per
+// run, head first, while inFlight stays the head run for back-compat.
 func TestStatus_PipelineFieldMirrorsAPI(t *testing.T) {
 	snap := pipelineSnapshot()
 	session := connect(t, mcpsrv.Params{Snapshot: func() *queue.Snapshot { return snap }})
@@ -294,9 +292,8 @@ func TestRun_OutputIncluded(t *testing.T) {
 }
 
 // batchMemberRecord builds one member's RunRecord of a 3-member batch
-// sharing batchID, mirroring queue/reconcile.go's per-member RunRecords
-// (§3.3): same shape as sampleRecord, but with BatchID/Position/BatchSize
-// set (docs/plans/phase5.md §10 amendment 1).
+// sharing batchID, mirroring queue/reconcile.go's per-member RunRecords:
+// same shape as sampleRecord, but with BatchID/Position/BatchSize set.
 func batchMemberRecord(runID, batchID string, position int) *core.RunRecord {
 	rec := sampleRecord(runID, "main")
 	rec.BatchID = batchID
@@ -306,8 +303,7 @@ func batchMemberRecord(runID, batchID string, position int) *core.RunRecord {
 }
 
 // TestRun_BatchFieldsIncludedForBatchMember confirms the run tool mirrors
-// batchId/position/batchSize (docs/plans/phase5.md §10 amendment 1) for a
-// batch member.
+// batchId/position/batchSize for a batch member.
 func TestRun_BatchFieldsIncludedForBatchMember(t *testing.T) {
 	store := openTestStore(t)
 	if err := store.Emit(context.Background(), core.Event{Record: batchMemberRecord("batch-run-2", "batch-xyz", 2)}); err != nil {
@@ -418,7 +414,7 @@ func TestRuns_BatchFieldsIncludedForBatchMember(t *testing.T) {
 }
 
 // logRecord builds a run record with one check carrying a non-empty
-// LogPath, for exercising the run tool's logPath/logUrl fields (chunk F-b).
+// LogPath, for exercising the run tool's logPath/logUrl fields.
 func logRecord(runID string) *core.RunRecord {
 	started := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
 	return &core.RunRecord{
@@ -440,7 +436,7 @@ func logRecord(runID string) *core.RunRecord {
 // TestRun_LogFieldsIncludedWhenLogRootConfigured confirms the run tool's
 // checks carry logPath (verbatim from history) and logUrl (only when
 // Params.LogRoot is set) — mirroring dashboard/api.go's GET /api/v1/run/{id}
-// field additions (chunk F-b).
+// field additions.
 func TestRun_LogFieldsIncludedWhenLogRootConfigured(t *testing.T) {
 	store := openTestStore(t)
 	if err := store.Emit(context.Background(), core.Event{Record: logRecord("run-log-mcp")}); err != nil {
@@ -503,9 +499,9 @@ func emitHook(t *testing.T, s *history.Store, runID, name string, cr core.CheckR
 }
 
 // TestRun_HooksFieldIncluded confirms the run tool gains a "hooks" array
-// alongside "checks" (chunk P5-B, log/history parity): present (even if
-// empty) and populated with the same field shape a check gets, including
-// captured Output for an agent debugging a failed hook.
+// alongside "checks" (log/history parity): present (even if empty) and
+// populated with the same field shape a check gets, including captured
+// Output for an agent debugging a failed hook.
 func TestRun_HooksFieldIncluded(t *testing.T) {
 	store := openTestStore(t)
 	if err := store.Emit(context.Background(), core.Event{Record: sampleRecord("run-hooks-mcp-1", "main")}); err != nil {
@@ -642,7 +638,7 @@ func TestRetry_BufferFull_ErrorResult(t *testing.T) {
 	}
 }
 
-// --- cancel (Feature 1: manual operator cancellation) ----------------------
+// --- cancel (manual operator cancellation) ----------------------------------
 // Mirrors the retry suite above exactly: same wiring, same request/response
 // shape, differing only in core.Command.Kind.
 
@@ -747,7 +743,7 @@ func TestHookCancel_NilHookCancelFunc_ErrorResult(t *testing.T) {
 	}
 }
 
-// --- status: liveHook/hookRuns/ignoredRefs (S5-surface, S7c) -----------------
+// --- status: liveHook/hookRuns/ignoredRefs -----------------------------------
 
 func TestStatus_LiveHookFieldFromHookSnapshotClosure(t *testing.T) {
 	snap := testSnapshot()
@@ -782,7 +778,7 @@ func TestStatus_NoHookSnapshotOmitsLiveHook(t *testing.T) {
 	}
 }
 
-// --- status: idleSince (docs/plans/scale.md §2) ------------------------------
+// --- status: idleSince --------------------------------------------------------
 //
 // Mirrors internal/dashboard/api_test.go's own idleSince coverage — the two
 // packages compose the exact same signal from the exact same inputs
@@ -862,10 +858,10 @@ func TestStatus_IdleSinceCoversEveryTargetDespiteFilter(t *testing.T) {
 }
 
 // TestStatus_HookRunsAndIgnoredRefsFromStore confirms the status tool
-// surfaces the durable hook-run ledger per target (S1-C/S5) and
-// recently-ignored refs at the TOP level (S7c, daemon-wide — an ignored
-// ref's target segment names no configured target, so it can't be scoped to
-// one) when a store is configured — seeded through the store's real Emit
+// surfaces the durable hook-run ledger per target and recently-ignored
+// refs at the TOP level (daemon-wide — an ignored ref's target segment
+// names no configured target, so it can't be scoped to one) when a store
+// is configured — seeded through the store's real Emit
 // path: a terminal run first (the runs row hook_runs FK-references), one
 // EventHookStarted with HookCount=2 (owed=2), one EventHookFinished
 // (done=1 ⇒ crash-incomplete), and one EventIgnoredRef under the
@@ -926,7 +922,7 @@ func TestStatus_NoStoreOmitsHookRunsAndIgnoredRefs(t *testing.T) {
 	}
 }
 
-// --- batch (S7a) --------------------------------------------------------------
+// --- batch ----------------------------------------------------------------------
 
 func TestBatch_Shape(t *testing.T) {
 	store := openTestStore(t)
@@ -975,7 +971,7 @@ func TestBatch_NilStore_ErrorResult(t *testing.T) {
 	}
 }
 
-// --- checks (S7b) --------------------------------------------------------------
+// --- checks ---------------------------------------------------------------------
 
 func TestChecks_Shape(t *testing.T) {
 	store := openTestStore(t)
@@ -1023,7 +1019,7 @@ func TestChecks_NilStore_ErrorResult(t *testing.T) {
 	}
 }
 
-// --- services (design §10's tuning instrument) -------------------------------
+// --- services -------------------------------------------------------------------
 
 // testServicesStatus builds a small mcpsrv.ServicesStatus, mirroring
 // internal/dashboard's own test fixture in shape (one live instance, one
@@ -1049,7 +1045,7 @@ func testServicesStatus() mcpsrv.ServicesStatus {
 // TestServices_Shape confirms the services tool's JSON mirrors GET
 // /api/v1/services field-for-field: the pool's tuning knobs (maxInstances,
 // pending) plus the full key (not just keyHash12 — an agent debugging reuse
-// needs to correlate exactly, services.md §2 review m2/m6) per instance.
+// needs to correlate exactly) per instance.
 func TestServices_Shape(t *testing.T) {
 	ss := testServicesStatus()
 	session := connect(t, mcpsrv.Params{

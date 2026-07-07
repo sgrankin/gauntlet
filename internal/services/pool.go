@@ -1,8 +1,7 @@
 // Package services implements the shared-services cache: a per-daemon pool
-// of container instances keyed by hash(remote, canonical spec)
-// (docs/plans/services.md, docs/plans/services-impl.md §3). The pool holds
-// no correctness state — destroy every instance and record and the next
-// runs are merely slower (services.md §0).
+// of container instances keyed by hash(remote, canonical spec). The pool
+// holds no correctness state — destroy every instance and record and the
+// next runs are merely slower.
 package services
 
 import (
@@ -25,12 +24,12 @@ import (
 // for a value that isn't itself a clock read.
 var readyPollInterval = 500 * time.Millisecond
 
-// Config configures a Pool (docs/plans/services-impl.md §3.1).
+// Config configures a Pool.
 type Config struct {
-	Remote       string // the daemon's remote URL — key material (services.md §2, M5)
+	Remote       string // the daemon's remote URL — key material
 	Token        string // state-dir token; namespaces names/network (== cmd's stateToken)
-	Mode         Mode   // derived from executor kind (cmd wiring, §4.5)
-	Runtime      string // "docker" | "podman"; "container" (Apple) REJECTED in phase A
+	Mode         Mode   // derived from executor kind at cmd wiring
+	Runtime      string // "docker" | "podman"; "container" (Apple) is rejected — no shared user-defined network to reach a service from a sibling check container
 	StateDir     string // <state>/services lives here (records)
 	MaxInstances int
 	Now          func() time.Time // injectable clock (tests); nil means time.Now
@@ -49,17 +48,16 @@ type Config struct {
 // Ensured is EnsureAll's output: env+networks to reach the resolved
 // services, plus an opaque handle for Release/AnyDead. keys is unexported
 // deliberately — callers (the queue) hold it opaquely and hand it back
-// unmodified, never inspecting or reconstructing it (docs/plans/
-// services-impl.md §3.2's "keys arrive opaque" framing, Amendment A6).
+// unmodified, never inspecting or reconstructing it.
 type Ensured struct {
 	Env      []string // ["GAUNTLET_SVC_MSSQL_HOST=…","GAUNTLET_SVC_MSSQL_PORT=…"]
 	Networks []string // ["gauntlet-svc-<token>"] in ModeNetwork; nil in ModePublish
 	keys     []string
 }
 
-// Pool is the per-daemon cache of shared service instances (services.md §0,
-// §3). It holds no correctness state: destroy every instance and record and
-// the next runs are merely slower.
+// Pool is the per-daemon cache of shared service instances. It holds no
+// correctness state: destroy every instance and record and the next runs
+// are merely slower.
 //
 // The zero value is not usable; construct with New (wires the real
 // containerDriver) or newPool (an injected Driver — what every unit test in
@@ -71,20 +69,20 @@ type Pool struct {
 	mu          sync.Mutex
 	instances   map[string]Instance      // key -> live/adopted instance
 	refcount    map[string]int           // key -> in-flight reference count
-	lastUsed    map[string]time.Time     // key -> M3 idle clock
+	lastUsed    map[string]time.Time     // key -> idle clock (advanced by Release and at create, never on a reuse hit)
 	createdAt   map[string]time.Time     // key -> when the live instance was created/adopted (Snapshot's tuning surface)
 	hits        map[string]int           // key -> warm resolutions (one per alive+ready reuse, NOT per EnsureAll call: single-flight piggybackers coalesce to the leader's one; Snapshot's "is reuse happening" signal)
 	inflight    map[string]*inflightCall // key -> in-progress ensure, single-flight
 	reaperArmed bool
-	pending     int // in-flight creates that reserved a slot but haven't landed in instances yet (review BUG 2)
+	pending     int // in-flight creates that reserved a slot but haven't landed in instances yet
 
 	logMu sync.Mutex // guards writes to cfg.Log (create/evict/reap/adopt all run on different goroutines)
 }
 
 // inflightCall is one in-progress ensure, shared by every concurrent caller
-// resolving the same key (docs/plans/services-impl.md §3.6 — a homegrown
-// per-key single-flight, deliberately not golang.org/x/sync/singleflight,
-// to keep the direct-dependency list unchanged for ~25 lines of benefit).
+// resolving the same key — a homegrown per-key single-flight, deliberately
+// not golang.org/x/sync/singleflight, to keep the direct-dependency list
+// unchanged for ~25 lines of benefit.
 type inflightCall struct {
 	done chan struct{}
 	inst Instance
@@ -92,11 +90,16 @@ type inflightCall struct {
 }
 
 // New validates cfg and returns a ready Pool backed by the real container
-// driver. Rejects Runtime=="container" (Apple) — deferred in phase A
-// (services.md §9; services-impl.md §4.5's hard fail at cmd-wiring time).
+// driver. Rejects Runtime=="container" (Apple): it lacks the shared
+// container network services require.
 func New(cfg Config) (*Pool, error) {
+	// NOTE: Apple's container runtime is deliberately unsupported for
+	// services — it has no docker-style shared user network, so a service
+	// container and a check container have no verified way to reach each
+	// other. Rejected loudly here rather than silently limping.
+	// See docs/design/services.md ("Reachability mode").
 	if cfg.Runtime == "container" {
-		return nil, fmt.Errorf("services: runtime %q not supported in phase A; Apple container networking is deferred (docs/plans/services.md §9)", cfg.Runtime)
+		return nil, fmt.Errorf("services: runtime %q is not supported: services require docker or podman (Apple's container CLI lacks the shared container network services need)", cfg.Runtime)
 	}
 	if cfg.Runtime != "docker" && cfg.Runtime != "podman" {
 		return nil, fmt.Errorf("services: unknown runtime %q (want docker or podman)", cfg.Runtime)
@@ -118,8 +121,7 @@ func New(cfg Config) (*Pool, error) {
 
 // newPool builds a Pool over an arbitrary Driver — New's shared plumbing,
 // and the seam every test in this package uses to run against a fake
-// Driver instead of a real container runtime (docs/plans/services-impl.md
-// §3, no docker required).
+// Driver instead of a real container runtime (no docker required).
 func newPool(cfg Config, driver Driver) *Pool {
 	return &Pool{
 		cfg:       cfg,
@@ -157,8 +159,8 @@ func (p *Pool) logf(format string, args ...any) {
 }
 
 // networkName is the one shared network every ModeNetwork instance this
-// pool creates joins (services.md §5) — a single per-daemon network, not
-// one per service, so N services coexist as N aliases on it.
+// pool creates joins — a single per-daemon network, not one per service,
+// so N services coexist as N aliases on it.
 func (p *Pool) networkName() string {
 	return "gauntlet-svc-" + p.cfg.Token
 }
@@ -166,14 +168,13 @@ func (p *Pool) networkName() string {
 // namePrefix is the namespace Adopt/List filter against — mirrors
 // cmd/gauntlet/sweep.go's containerNamePrefix shape but with the "svc-"
 // infix that keeps the check-container sweep and the service pool
-// structurally disjoint (services.md §3 "Adoption at boot, not reaping").
+// structurally disjoint.
 func (p *Pool) namePrefix() string {
 	return "gauntlet-svc-" + p.cfg.Token + "-"
 }
 
 // instanceName derives the one naming scheme every service instance uses:
-// gauntlet-svc-<token>-<keyhash12> (services.md §2 "key material vs name
-// material"). A single helper (review NIT 3) so create's naming and
+// gauntlet-svc-<token>-<keyhash12>. A single helper so create's naming and
 // namePrefix's independent reconstruction of the same prefix can't drift
 // apart on a future rename.
 func (p *Pool) instanceName(key string) string {
@@ -182,20 +183,18 @@ func (p *Pool) instanceName(key string) string {
 
 // EnsureAll resolves every name in needs against svcs to a ready instance
 // and returns the env+networks a check needs to reach them. BLOCKING
-// (create + up-to-ReadyTimeout ready-poll) and SINGLE-FLIGHT per key
-// (docs/plans/services-impl.md §3.2) — callers MUST invoke this only from a
-// check-execution goroutine, NEVER the reconcile goroutine (review F1): a
-// single cold service would otherwise stall every target's reconciliation
-// on one blocking call.
+// (create + up-to-ReadyTimeout ready-poll) and SINGLE-FLIGHT per key —
+// callers MUST invoke this only from a check-execution goroutine, NEVER the
+// reconcile goroutine: a single cold service would otherwise stall every
+// target's reconciliation on one blocking call.
 //
 // Each resolved need increments that instance's refcount (decremented by
-// Release). On any failure — a needs name with no matching Service (plan
-// Amendment A4: defensive against a contract violation chunk 1's spec
-// validation should already prevent, but the pool must not panic on it),
-// create failure, not-ready-in-time, or max-instances exceeded on a miss —
-// EnsureAll releases whatever it already ensured for this call before
-// returning the error, so a caller that only calls Release on success never
-// leaks a partial ensure.
+// Release). On any failure — a needs name with no matching Service
+// (defensive: spec validation should already reject this, but the pool
+// must not panic on it), create failure, not-ready-in-time, or
+// max-instances exceeded on a miss — EnsureAll releases whatever it
+// already ensured for this call before returning the error, so a caller
+// that only calls Release on success never leaks a partial ensure.
 func (p *Pool) EnsureAll(ctx context.Context, svcs []config.Service, needs []string) (Ensured, error) {
 	byName := make(map[string]config.Service, len(svcs))
 	for _, s := range svcs {
@@ -234,11 +233,11 @@ func (p *Pool) EnsureAll(ctx context.Context, svcs []config.Service, needs []str
 }
 
 // ensureOne resolves key/svc to a ready Instance, coalescing concurrent
-// callers for the same key into one underlying doEnsure call
-// (services-impl.md §3.6). Every caller — whether it ran doEnsure itself or
-// piggybacked on someone else's inflight call — gets its own refcount
-// increment on success; refcount is deliberately NOT touched inside
-// doEnsure, so a coalesced hit still counts as N references for N callers.
+// callers for the same key into one underlying doEnsure call. Every caller
+// — whether it ran doEnsure itself or piggybacked on someone else's
+// inflight call — gets its own refcount increment on success; refcount is
+// deliberately NOT touched inside doEnsure, so a coalesced hit still counts
+// as N references for N callers.
 func (p *Pool) ensureOne(ctx context.Context, key string, svc config.Service) (Instance, error) {
 	p.mu.Lock()
 	if call, ok := p.inflight[key]; ok {
@@ -269,13 +268,12 @@ func (p *Pool) ensureOne(ctx context.Context, key string, svc config.Service) (I
 	return inst, err
 }
 
-// doEnsure runs the registry-hit-or-create algorithm for key (services.md
-// §3 "The ensure algorithm"), always inside the single per-key inflight
-// call ensureOne coalesces onto. Does NOT touch refcount — see ensureOne's
-// doc — and does NOT touch lastUsed on a hit: M3 pins the idle clock to
-// Release, not ensure, so a reused instance's lastUsed is left exactly as
-// Release last set it (or as this function set it at creation, if never
-// released yet).
+// doEnsure runs the registry-hit-or-create algorithm for key, always
+// inside the single per-key inflight call ensureOne coalesces onto. Does
+// NOT touch refcount — see ensureOne's doc — and does NOT touch lastUsed
+// on a hit: the idle clock is pinned to Release, not ensure, so a reused
+// instance's lastUsed is left exactly as Release last set it (or as this
+// function set it at creation, if never released yet).
 func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (Instance, error) {
 	p.mu.Lock()
 	inst, ok := p.instances[key]
@@ -284,32 +282,31 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 	if ok {
 		if alive, err := p.driver.ProbeAlive(ctx, inst); err == nil && alive {
 			if err := p.driver.ProbeReady(ctx, inst); err == nil {
-				// Snapshot's hit counter (S5-surface, design §10 tuning
-				// instrument): this is the one true "reuse, not create" path —
-				// a concurrent caller that instead coalesces onto this
-				// key's inflight call (ensureOne) never reaches doEnsure at
-				// all, so it's not double-counted here.
+				// Snapshot's hit counter: this is the one true "reuse, not
+				// create" path — a concurrent caller that instead
+				// coalesces onto this key's inflight call (ensureOne)
+				// never reaches doEnsure at all, so it's not
+				// double-counted here.
 				p.mu.Lock()
 				p.hits[key]++
 				p.mu.Unlock()
 				return inst, nil
 			}
 		}
-		// services.md §3 step 3: a supposedly-live instance that fails its
-		// probe is evicted and falls through to creation, once; a second
-		// failure below (in create) is reported as an ordinary ensure
-		// error (§7 "Ensure-time failure").
+		// A supposedly-live instance that fails its probe is evicted and
+		// falls through to creation, once; a second failure below (in
+		// create) is reported as an ordinary ensure error.
 		p.logf("evict %s key=%s instance=%s reason=probe-failed", svc.Name, key[:12], inst.Name)
 		p.evict(ctx, key, inst)
 	}
 
 	// Reuse (the `ok` branch above) never counts against the cap — only a
-	// miss that would grow the live set does (services-impl.md §3.6).
-	// reserveSlot/releaseSlot count in-flight creates too, not just
-	// p.instances, so two concurrent misses on DIFFERENT keys can't both
-	// pass the gate before either lands (review BUG 2: a plain
-	// check-then-create on p.instances alone is a TOCTOU race that lets
-	// the "hard" cap overshoot under concurrent distinct-key misses).
+	// miss that would grow the live set does. reserveSlot/releaseSlot count
+	// in-flight creates too, not just p.instances, so two concurrent misses
+	// on DIFFERENT keys can't both pass the gate before either lands: a
+	// plain check-then-create on p.instances alone would be a TOCTOU race
+	// that lets the "hard" cap overshoot under concurrent distinct-key
+	// misses.
 	if !p.reserveSlot() {
 		return Instance{}, fmt.Errorf("max-instances (%d) reached", p.cfg.MaxInstances)
 	}
@@ -346,10 +343,10 @@ func (p *Pool) doEnsure(ctx context.Context, key string, svc config.Service) (In
 
 // reserveSlot atomically reserves one instance slot against MaxInstances,
 // counting both already-live instances and other creates currently in
-// flight (review BUG 2). Returns false, reserving nothing, if the cap is
-// already reached. Paired with releaseSlot, which every reserveSlot caller
-// must defer regardless of outcome — pending is bookkeeping only, never a
-// substitute for the authoritative p.instances count once a create lands.
+// flight. Returns false, reserving nothing, if the cap is already reached.
+// Paired with releaseSlot, which every reserveSlot caller must defer
+// regardless of outcome — pending is bookkeeping only, never a substitute
+// for the authoritative p.instances count once a create lands.
 func (p *Pool) reserveSlot() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -367,8 +364,8 @@ func (p *Pool) releaseSlot() {
 }
 
 // create runs one driver Create + ready-poll for key/svc, tearing the
-// instance back down (log tail then destroy — review m5) if it never
-// becomes ready within svc.ReadyTimeout.
+// instance back down (log tail then destroy) if it never becomes ready
+// within svc.ReadyTimeout.
 func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Instance, error) {
 	is := InstanceSpec{
 		Key:   key,
@@ -388,21 +385,21 @@ func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Inst
 	if err != nil {
 		return Instance{}, fmt.Errorf("create %s: %w", svc.Name, err)
 	}
-	inst.Spec = svc // A1: reasserted defensively even though Create should already set it
+	inst.Spec = svc // reasserted defensively even though Create should already set it
 
 	if err := p.pollReady(ctx, inst, svc.ReadyTimeout); err != nil {
-		// review BUG 1: cleanup MUST NOT run on ctx — if ctx is what just
-		// got canceled (e.g. a superseded run canceling mid-poll),
-		// exec.CommandContext on an already-canceled context never starts
-		// the subprocess at all, so Destroy would silently no-op, leaking
-		// the half-created container under its deterministic name AND
-		// leaving it untracked (this create never reached doEnsure's
-		// instances-map insert or record write) — every future ensure of
-		// this key then fails "name already in use" until the next
-		// restart's Adopt cleans it up. cleanupContext detaches so the
-		// teardown itself still actually runs.
+		// cleanup MUST NOT run on ctx — if ctx is what just got canceled
+		// (e.g. a superseded run canceling mid-poll), exec.CommandContext
+		// on an already-canceled context never starts the subprocess at
+		// all, so Destroy would silently no-op, leaking the half-created
+		// container under its deterministic name AND leaving it untracked
+		// (this create never reached doEnsure's instances-map insert or
+		// record write) — every future ensure of this key then fails "name
+		// already in use" until the next restart's Adopt cleans it up.
+		// cleanupContext detaches so the teardown itself still actually
+		// runs.
 		cctx, cancel := cleanupContext(ctx)
-		logs := p.driver.TailLogs(cctx, inst) // review m5: capture before destroy
+		logs := p.driver.TailLogs(cctx, inst) // capture before destroy
 		p.driver.Destroy(cctx, inst)
 		cancel()
 		// The tail lands on the pool's own logger too, not just the error
@@ -418,8 +415,8 @@ func (p *Pool) create(ctx context.Context, key string, svc config.Service) (Inst
 
 // cleanupContext returns a context detached from ctx's own cancellation
 // (context.WithoutCancel) but still time-bounded, for driver calls that
-// must run to completion even when ctx is exactly what just got canceled
-// (review BUG 1) — teardown after a canceled ensure, not the ensure itself.
+// must run to completion even when ctx is exactly what just got canceled —
+// teardown after a canceled ensure, not the ensure itself.
 func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 }
@@ -452,11 +449,11 @@ func (p *Pool) pollReady(ctx context.Context, inst Instance, timeout time.Durati
 }
 
 // Release drops one reference per key ensured by e and touches last-used =
-// now on each (review M3 — the idle clock starts when the LAST reference
-// drops, not at ensure). Never destroys; Reap does. Safe to call with an
-// empty/zero Ensured (e.g. after EnsureAll's own partial-failure cleanup
-// already released these keys) — decrementing an already-zero refcount is a
-// no-op, not an underflow.
+// now on each (the idle clock starts when the LAST reference drops, not at
+// ensure). Never destroys; Reap does. Safe to call with an empty/zero
+// Ensured (e.g. after EnsureAll's own partial-failure cleanup already
+// released these keys) — decrementing an already-zero refcount is a no-op,
+// not an underflow.
 func (p *Pool) Release(e Ensured) {
 	p.releaseKeys(e.keys)
 }
@@ -471,12 +468,12 @@ func (p *Pool) releaseKeys(keys []string) {
 		if p.refcount[key] > 0 {
 			p.refcount[key]--
 		}
-		// Guard on the instance still being tracked (review NIT 1): a key
-		// AnyDead already evicted (mid-run death, M1) has no instances
-		// entry, and this unconditional write used to re-add a lastUsed
-		// entry for it anyway — Reap only ever ranges p.instances, so that
-		// entry was permanently unreachable, a slow leak keyed by every
-		// service that ever died mid-run.
+		// Guard on the instance still being tracked: a key AnyDead already
+		// evicted (mid-run death) has no instances entry, and this
+		// unconditional write used to re-add a lastUsed entry for it
+		// anyway — Reap only ever ranges p.instances, so that entry was
+		// permanently unreachable, a slow leak keyed by every service that
+		// ever died mid-run.
 		if _, ok := p.instances[key]; ok {
 			p.lastUsed[key] = now
 		}
@@ -491,11 +488,11 @@ func (p *Pool) releaseKeys(keys []string) {
 }
 
 // AnyDead probe-alives every instance referenced by e and reports whether
-// any is dead (review M1). BLOCKING; callers MUST call this only from the
-// check goroutine, and only on a FAILED check (services-impl.md §4.3) — a
-// passing check never re-probes. Every dead instance found is evicted here
-// so the next EnsureAll re-creates it; a key this Pool no longer tracks at
-// all (e.g. already evicted by a racing caller) counts as dead too.
+// any is dead. BLOCKING; callers MUST call this only from the check
+// goroutine, and only on a FAILED check — a passing check never re-probes.
+// Every dead instance found is evicted here so the next EnsureAll
+// re-creates it; a key this Pool no longer tracks at all (e.g. already
+// evicted by a racing caller) counts as dead too.
 func (p *Pool) AnyDead(ctx context.Context, e Ensured) bool {
 	dead := false
 	for _, key := range e.keys {
@@ -519,19 +516,19 @@ func (p *Pool) AnyDead(ctx context.Context, e Ensured) bool {
 // driver) and its on-disk record. Called on a failed liveness/ready probe
 // (doEnsure step 3, AnyDead) and during Adopt for anything unmatchable.
 //
-// p.hits is deliberately NOT cleared here: key is spec identity (services.md
-// §2), so a hit count earned before an evict+recreate cycle is still a true
-// count of how often this exact spec has been reused over the Pool's
-// lifetime — Snapshot's "is reuse actually happening" signal is more useful
-// cumulative than reset to zero by an incidental eviction. Reap, by
-// contrast, DOES drop the counter (see its doc): a TTL'd-out key is
-// abandoned, not mid-cycle, and hits was otherwise the one per-key map with
-// no cleanup path at all (phase-B review NIT-1).
+// p.hits is deliberately NOT cleared here: key is spec identity, so a hit
+// count earned before an evict+recreate cycle is still a true count of how
+// often this exact spec has been reused over the Pool's lifetime —
+// Snapshot's "is reuse actually happening" signal is more useful cumulative
+// than reset to zero by an incidental eviction. Reap, by contrast, DOES
+// drop the counter (see its doc): a TTL'd-out key is abandoned, not
+// mid-cycle, and hits was otherwise the one per-key map with no cleanup
+// path at all.
 //
-// Destroy runs on a detached cleanup context, not ctx (review BUG 1, same
-// reasoning as create's doc): AnyDead and the doEnsure reuse-probe-failure
-// path both call evict with the live ensure/check ctx, which can be exactly
-// what's canceling right now — an already-canceled ctx would make
+// Destroy runs on a detached cleanup context, not ctx (same reasoning as
+// create's doc): AnyDead and the doEnsure reuse-probe-failure path both
+// call evict with the live ensure/check ctx, which can be exactly what's
+// canceling right now — an already-canceled ctx would make
 // exec.CommandContext silently skip starting `rm` at all.
 func (p *Pool) evict(ctx context.Context, key string, inst Instance) {
 	p.mu.Lock()
@@ -550,11 +547,10 @@ func (p *Pool) evict(ctx context.Context, key string, inst Instance) {
 
 // Adopt lists every live gauntlet-svc-<token>-* instance and matches each
 // against pool records BY FULL KEY IN THE INSTANCE LABEL — never by name,
-// which carries only a 12-hex truncation (services.md §2 review m2, m6). A
-// match is re-checked against the current recorded Mode (review M2) and
-// probed ready; anything unmatchable, unready, mode-mismatched, or beyond
-// its IdleTTL is destroyed. Called once at boot, before any check goroutine
-// or the reaper.
+// which carries only a 12-hex truncation. A match is re-checked against
+// the current recorded Mode and probed ready; anything unmatchable,
+// unready, mode-mismatched, or beyond its IdleTTL is destroyed. Called
+// once at boot, before any check goroutine or the reaper.
 func (p *Pool) Adopt(ctx context.Context) error {
 	names, err := p.driver.List(ctx)
 	if err != nil {
@@ -592,9 +588,9 @@ func (p *Pool) Adopt(ctx context.Context) error {
 			continue
 		}
 		if rec.Mode != p.cfg.Mode.String() {
-			// M2: an operator who switched executor kind (and so Mode)
-			// since the last run gets a cold, correct pool here, never a
-			// warm instance whose endpoint nothing can reach.
+			// An operator who switched executor kind (and so Mode) since
+			// the last run gets a cold, correct pool here, never a warm
+			// instance whose endpoint nothing can reach.
 			p.logf("adopt reject %s key=%s instance=%s reason=mode-mismatch", rec.Spec.Name, key[:12], name)
 			_ = p.driver.Destroy(ctx, Instance{Name: name, Key: key})
 			removeRecord(p.cfg.StateDir, key)
@@ -644,7 +640,7 @@ func (p *Pool) Adopt(ctx context.Context) error {
 // ArmReaper marks the reaper live (idempotent). The in-memory refcount is
 // lost on restart, so the reaper must not run until the queue's first full
 // reconcile pass has re-ensured (and so refcounted) everything still in
-// flight (review q3) — cmd calls this once, after that pass completes.
+// flight — cmd calls this once, after that pass completes.
 func (p *Pool) ArmReaper() {
 	p.mu.Lock()
 	p.reaperArmed = true
@@ -652,9 +648,9 @@ func (p *Pool) ArmReaper() {
 }
 
 // Reap destroys every instance whose (now - last-used) exceeds its
-// Spec.IdleTTL and whose refcount is 0. No-op until ArmReaper (review q3).
-// BLOCKING destroys — callers MUST run this on its own goroutine (cmd's
-// reaper ticker), never the reconcile loop.
+// Spec.IdleTTL and whose refcount is 0. No-op until ArmReaper. BLOCKING
+// destroys — callers MUST run this on its own goroutine (cmd's reaper
+// ticker), never the reconcile loop.
 func (p *Pool) Reap(ctx context.Context) {
 	p.mu.Lock()
 	if !p.reaperArmed {
@@ -689,22 +685,21 @@ func (p *Pool) Reap(ctx context.Context) {
 		// reuse-probe failure), where the same key is usually recreated on
 		// the next run and the cumulative count stays meaningful (evict's
 		// doc). Without this, hits would be the one per-key map that never
-		// shrinks (phase-B review NIT-1) — every retired spec, including
-		// every pre-upgrade key after a canonical-encoding change, would
-		// hold an entry for the daemon's lifetime.
+		// shrinks — every retired spec, including every pre-upgrade key
+		// after a canonical-encoding change, would hold an entry for the
+		// daemon's lifetime.
 		p.mu.Lock()
 		delete(p.hits, key)
 		p.mu.Unlock()
 	}
 }
 
-// InstanceStatus is one live instance's observability view (design §10's
-// tuning instrument: an operator sizing idle-ttl/max-instances needs to SEE
-// the pool, not just poke it blind). KeyHash12 is the same truncation
-// instanceName uses for container names/network aliases — safe for compact
-// display; Key is the full key, carried for a caller (the JSON API, MCP)
-// that wants to correlate exactly, since only the full key is guaranteed
-// collision-free (services.md §2 review m2/m6).
+// InstanceStatus is one live instance's observability view — an operator
+// sizing idle-ttl/max-instances needs to SEE the pool, not just poke it
+// blind. KeyHash12 is the same truncation instanceName uses for container
+// names/network aliases — safe for compact display; Key is the full key,
+// carried for a caller (the JSON API, MCP) that wants to correlate
+// exactly, since only the full key is guaranteed collision-free.
 type InstanceStatus struct {
 	Service    string // config.Service.Name
 	Image      string
@@ -736,11 +731,11 @@ type PoolStatus struct {
 }
 
 // Snapshot returns a point-in-time view of the whole pool for the
-// dashboard/API/MCP tuning surface (design §10; S5's hard parity ruling —
-// every operator-visible fact appears on all three surfaces). Instances is
-// sorted by (service name, key) — p.instances is a map, so iteration order
-// is otherwise undefined, and a stable order is what makes the dashboard
-// table (and a diff between two snapshots) readable.
+// dashboard/API/MCP tuning surface — every operator-visible fact appears
+// on all three surfaces. Instances is sorted by (service name, key) —
+// p.instances is a map, so iteration order is otherwise undefined, and a
+// stable order is what makes the dashboard table (and a diff between two
+// snapshots) readable.
 func (p *Pool) Snapshot() PoolStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -773,12 +768,12 @@ func (p *Pool) Snapshot() PoolStatus {
 }
 
 // envSafeName upcases name and replaces every non-alphanumeric rune with
-// '_' (services.md §4's GAUNTLET_SVC_<NAME>_HOST/PORT contract).
+// '_' for the GAUNTLET_SVC_<NAME>_HOST/PORT contract.
 // internal/config/checks.go duplicates this exact transform (also named
 // envSafeName) so CheckSpec.validate() can reject two service names that
-// collide once mangled (adversarial review BUG 3) — config can't import
-// this package, same reservedResultDir-style split as daemon.go/
-// internal/executor. Keep both copies byte-for-byte identical.
+// collide once mangled — config can't import this package, same
+// reservedResultDir-style split as daemon.go/internal/executor. Keep both
+// copies byte-for-byte identical.
 func envSafeName(name string) string {
 	var b strings.Builder
 	b.Grow(len(name))

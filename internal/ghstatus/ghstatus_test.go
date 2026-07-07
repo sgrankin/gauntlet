@@ -245,7 +245,7 @@ func TestChannel_SkippedDoesNotPost(t *testing.T) {
 	}
 }
 
-// TestChannel_NonMappedEventKindsDoNotPost also covers S14's universal
+// TestChannel_NonMappedEventKindsDoNotPost also covers the universal
 // contract: core.EventKind(999) (a future kind statusFor's switch has never
 // heard of) must fall into the same default "no post" case as any other
 // non-mapped kind, not panic or otherwise misbehave.
@@ -334,9 +334,9 @@ func TestChannel_EmitDropsUnreachableServerErrors(t *testing.T) {
 	}
 }
 
-// A post-land hook failure must not repaint an already-green landing status
-// (closing-review FIX 1): EventHookFinished is deliberately ignored, so Emit
-// must never issue an HTTP request for it, pass or fail.
+// A post-land hook failure must not repaint an already-green landing
+// status: EventHookFinished is deliberately ignored, so Emit must never
+// issue an HTTP request for it, pass or fail.
 func TestChannel_HookFinishedDoesNotPost(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)

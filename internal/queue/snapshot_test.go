@@ -6,12 +6,11 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// TestSnapshot_MidRun covers docs/plans/phase23.md §2.1: a Snapshot taken
-// while a check is running shows the in-flight run's shape — its identity,
-// the checks finished so far (none yet), and the currently running check —
-// and advances as checks complete. It also pins the deep-copy discipline
-// the plan calls for: mutating the returned Done slice must not corrupt the
-// daemon's own live RunRecord.
+// TestSnapshot_MidRun: a Snapshot taken while a check is running shows the
+// in-flight run's shape — its identity, the checks finished so far (none
+// yet), and the currently running check — and advances as checks complete.
+// It also pins the deep-copy discipline: mutating the returned Done slice
+// must not corrupt the daemon's own live RunRecord.
 func TestSnapshot_MidRun(t *testing.T) {
 	h := newHarness(t)
 	base := h.git.seed("main", nil)
@@ -63,9 +62,8 @@ func TestSnapshot_MidRun(t *testing.T) {
 	if ts.InFlight.Current.StartedAt.IsZero() {
 		t.Error("InFlight.Current.StartedAt is zero")
 	}
-	// docs/plans/phase5.md §3.4: today's serial-only code degenerately
-	// populates Pipeline as a single-element mirror of InFlight, and
-	// Members as the one candidate.
+	// Serial mode degenerately populates Pipeline as a single-element
+	// mirror of InFlight, and Members as the one candidate.
 	if len(ts.Pipeline) != 1 {
 		t.Fatalf("Pipeline = %+v, want exactly 1 (serial-only degenerate population)", ts.Pipeline)
 	}
@@ -189,13 +187,14 @@ func TestSnapshot_ParkedWithReason(t *testing.T) {
 	}
 }
 
-// TestSnapshot_WaitingExcludesEveryPipelineMember proves the F3 fix (the
-// phase-5 review): buildTargetSnapshot's old Waiting filter excluded only
-// ts.InFlight.Candidate.Ref — the HEAD run's head member — so a filled
-// speculation window double-counted every OTHER in-flight member as
-// Waiting too, inflating the queue-depth metric this phase's own tuning
-// relies on. A window filled to depth 3 with exactly 3 queued candidates
-// must show all 3 as Pipeline and NONE as Waiting.
+// TestSnapshot_WaitingExcludesEveryPipelineMember proves
+// buildTargetSnapshot's Waiting filter excludes every in-flight pipeline
+// member's ref, not just the head run's head member
+// (ts.InFlight.Candidate.Ref) — otherwise a filled speculation window would
+// double-count every non-head in-flight member as Waiting too, inflating
+// the queue-depth metric tuning relies on. A window filled to depth 3 with
+// exactly 3 queued candidates must show all 3 as Pipeline and NONE as
+// Waiting.
 func TestSnapshot_WaitingExcludesEveryPipelineMember(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
 	pushThreeSpeculateCandidates(h)
@@ -208,7 +207,7 @@ func TestSnapshot_WaitingExcludesEveryPipelineMember(t *testing.T) {
 		t.Fatalf("Pipeline = %+v, want exactly 3 (window fully filled)", ts.Pipeline)
 	}
 	if len(ts.Waiting) != 0 {
-		t.Fatalf("Waiting = %+v, want none (F3: every pipeline member, not just the head run's, must be excluded)", ts.Waiting)
+		t.Fatalf("Waiting = %+v, want none (every pipeline member, not just the head run's, must be excluded)", ts.Waiting)
 	}
 }
 
@@ -234,12 +233,13 @@ func TestSnapshot_WaitingExcludesBatchMembers(t *testing.T) {
 		t.Fatalf("Pipeline = %+v, want exactly 1 run with 3 chained members", ts.Pipeline)
 	}
 	if len(ts.Waiting) != 0 {
-		t.Fatalf("Waiting = %+v, want none (F3: a batch's non-head members must not double-count as waiting)", ts.Waiting)
+		t.Fatalf("Waiting = %+v, want none (a batch's non-head members must not double-count as waiting)", ts.Waiting)
 	}
 }
 
-// TestSnapshot_IdleSince covers the queue-idleness signal (docs/plans/
-// scale.md §2): an idle repo stamps IdleSince on its very first pass, holds
+// TestSnapshot_IdleSince covers the queue-idleness signal (see
+// docs/design/core.md, "Snapshot and the idle signal"): an idle repo
+// stamps IdleSince on its very first pass, holds
 // that instant steady across further idle passes, zeroes it the instant a
 // candidate arrives, and stamps a FRESH instant (not the original) once the
 // queue drains back to idle.

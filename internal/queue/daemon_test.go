@@ -19,18 +19,17 @@ const testCheckSpecPath = ".gauntlet.kdl"
 
 var testCommitter = core.Identity{Name: "Gauntlet", Email: "gauntlet@example.com"}
 
-// runIDPattern matches the §9.4-shaped run-ID scheme, sharpened by
-// docs/plans/phase23.md §2.4's monotonic counter: a UTC timestamp, a
-// hyphen, the per-process sequence number, a hyphen, and 12 hex characters
-// taken from an OID (the trial tree's for a run that got one; the
-// candidate's own SHA for pre-trial outcomes and for the IsAncestor
-// recovery stand-in — see tryStartTrial's, rejectPreMerge's, and
+// runIDPattern matches the run-ID scheme (see docs/design/core.md, "Run
+// identity"): a UTC timestamp, a hyphen, the per-process sequence number, a
+// hyphen, and 12 hex characters taken from an OID (the trial tree's for a
+// run that got one; the candidate's own SHA for pre-trial outcomes and for
+// the IsAncestor recovery stand-in — see rejectPreMerge's and
 // recoverLanded's run-ID comments in reconcile.go).
 var runIDPattern = regexp.MustCompile(`^\d{8}T\d{6}Z-\d+-[0-9a-f]{12}$`)
 
 // gatedExecutor is the subset of *executor.GatedExecutor that testHarness's
 // own helpers (release, awaitStarted) actually need, narrowed to an
-// interface (docs/plans/services-impl.md §4.6) so a wrapping test double —
+// interface so a wrapping test double —
 // services_test.go's recordingGatedExecutor, which additionally captures
 // every core.CheckJob RunCheck received, so tests can assert what the queue
 // wrapper actually handed the executor — can stand in for a plain
@@ -60,7 +59,7 @@ func newHarness(t *testing.T, targets ...config.Target) *testHarness {
 }
 
 // newHarnessWithServices is newHarness, but wires svc into Config.Services
-// (docs/plans/services-impl.md §4.4) — for tests whose check spec declares
+// — for tests whose check spec declares
 // `needs` and need a Daemon whose service ensure/release/dead-check calls
 // are scriptable. nil behaves exactly like newHarness (services disabled).
 func newHarnessWithServices(t *testing.T, svc ServicePool, targets ...config.Target) *testHarness {
@@ -98,16 +97,16 @@ func newHarnessWithExecutor(t *testing.T, exec interface {
 		t.Fatalf("New: %v", err)
 	}
 	h.d = d
-	// F1 (docs/plans/phase23.md §10): every terminal event must carry a
-	// non-nil RunRecord. Enforced across every test built on this harness,
-	// for free, rather than repeating the assertion per test.
+	// Every terminal event must carry a non-nil RunRecord (see
+	// docs/design/core.md, "Event model"). Enforced across every test built
+	// on this harness, for free, rather than repeating the assertion per test.
 	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })
 	return h
 }
 
 // assertAllTerminalEventsHaveRecords fails t if any terminal-kind event in
-// events carries a nil Record (F1, docs/plans/phase23.md §10): a property
-// every emit site — present and future — must uphold.
+// events carries a nil Record (see docs/design/core.md, "Event model"): a
+// property every emit site — present and future — must uphold.
 func assertAllTerminalEventsHaveRecords(t *testing.T, events []core.Event) {
 	t.Helper()
 	for _, e := range events {
@@ -163,19 +162,18 @@ func (h *testHarness) reconcile() {
 // and simply observe "still running" — not a logic bug, just two
 // independently-scheduled goroutines with no rendezvous between them.
 //
-// P5-F finding: waiting for "at least one new event" (this helper's
-// pre-speculate condition) is unsound once a target's lane can hold more
-// than one run. A speculate window refills on every quiet tick (§2.5), so
-// the very tick that finally delivers this release's result can race
-// against — and lose to — an unrelated refill for a DIFFERENT run in the
-// same lane, which appears as a new event first (EventTrialClean/
+// Waiting for "at least one new event" would be unsound for a target whose
+// lane can hold more than one run: a speculate window refills on every
+// quiet tick, so the very tick that finally delivers this release's result
+// can race against — and lose to — an unrelated refill for a DIFFERENT run
+// in the same lane, which appears as a new event first (EventTrialClean/
 // EventCheckStarted for the newly-chained candidate) and would satisfy a
 // bare "len(events) > before" check without this release's own check having
 // resolved at all. Waiting specifically for (runID, name)'s own
 // EventCheckFinished — checkFinishedObserved, below — is precise regardless
-// of what else the lane does concurrently, and is a strict tightening of
-// the old condition for serial/batch (there, the very next event was always
-// this one anyway, since only one run/check was ever in flight).
+// of what else the lane does concurrently, and degrades to the same
+// condition for serial/batch (there, the very next event is always this one
+// anyway, since only one run/check is ever in flight).
 func (h *testHarness) release(runID, name string, result core.CheckResult) {
 	h.t.Helper()
 	before := len(h.ch.Events())
@@ -457,13 +455,12 @@ func TestReconcile_EventsPerTransition(t *testing.T) {
 		}
 	}
 
-	// The contract-level assertion that would have caught the ship-blocker
-	// (docs/plans/phase23.md §10 review): every event from EventTrialClean
-	// onward — including EventTrialClean itself — must carry a non-empty
-	// RunID, and it must be the SAME RunID throughout the run. Channels
-	// (Slack threading, ghstatus target_url) join a run's events by RunID;
-	// an EventTrialClean minted without one breaks that join for the run's
-	// entire lifetime even though every later event still carries one.
+	// Every event from EventTrialClean onward — including EventTrialClean
+	// itself — must carry a non-empty RunID, and it must be the SAME RunID
+	// throughout the run. Channels (Slack threading, ghstatus target_url)
+	// join a run's events by RunID; an EventTrialClean minted without one
+	// breaks that join for the run's entire lifetime even though every later
+	// event still carries one.
 	events := h.ch.Events()
 	for i, e := range events {
 		if kinds[i] == core.EventQueued {

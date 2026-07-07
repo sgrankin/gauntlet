@@ -1,10 +1,9 @@
 package queue
 
-// This file is the command drain (docs/plans/phase23.md §2.2): the first
-// consumer of core.Channel.Commands(), and the sanctioned phase-2 mechanism
-// for clearing a park explicitly (phase1 §9.1: "a channel `retry` command
-// will clear parks explicitly"), extended by Feature 1 (manual operator
-// cancellation, core.CommandCancel).
+// This file is the command drain: the first consumer of
+// core.Channel.Commands(), and the sanctioned mechanism for clearing a park
+// explicitly (a channel `retry` command clears parks explicitly), extended
+// with manual operator cancellation (core.CommandCancel).
 
 import (
 	"context"
@@ -63,7 +62,7 @@ func (d *Daemon) applyCommand(ctx context.Context, cmd core.Command, refs map[st
 
 // applyRetry clears the park for (cmd.Target, cmd.Ref) at its current SHA,
 // if one exists, and emits EventQueued with detail "retry: park cleared" so
-// the next pick re-tests it, plus EventRetryRequested (S3: persisted retry
+// the next pick re-tests it, plus EventRetryRequested (a persisted retry
 // intent) so history.Store can durably record that this retry happened —
 // see that event's own doc and history.Store.LatestTerminalPerRef's
 // seed-park query for why: without it, a daemon crash between this retry
@@ -77,9 +76,9 @@ func (d *Daemon) applyCommand(ctx context.Context, cmd core.Command, refs map[st
 // emitted, since clearParkAndRetry returns early in that case).
 //
 // The actual clear+emit is clearParkAndRetry (below), shared verbatim with
-// the phase-B automatic retry (maybeAutoRetry, autoretry.go) — this
-// operator path's own Detail strings ("retry: park cleared" on EventQueued,
-// unset on EventRetryRequested) are unchanged from before that sharing.
+// the automatic retry (maybeAutoRetry, autoretry.go) — this operator
+// path's own Detail strings ("retry: park cleared" on EventQueued, unset on
+// EventRetryRequested) stay distinguishable from that automatic path's.
 func (d *Daemon) applyRetry(ctx context.Context, cmd core.Command) {
 	d.clearParkAndRetry(ctx, cmd.Target, cmd.Ref, "retry: park cleared", "")
 }
@@ -87,7 +86,7 @@ func (d *Daemon) applyRetry(ctx context.Context, cmd core.Command) {
 // clearParkAndRetry clears (target, ref)'s park, if one currently exists,
 // and emits EventQueued (carrying queuedDetail) plus EventRetryRequested
 // (carrying retryDetail) — the shared machinery behind both an operator's
-// explicit CommandRetry (applyRetry, above) and the phase-B automatic retry
+// explicit CommandRetry (applyRetry, above) and the automatic retry
 // (maybeAutoRetry, autoretry.go), so Slack threading, history's
 // retry_intents-based stale-park suppression, and the dashboard all treat
 // the two identically; only the Detail text on the two events tells them
@@ -129,8 +128,8 @@ func (d *Daemon) clearParkAndRetry(ctx context.Context, target, ref, queuedDetai
 // cancellation apart from a genuine check failure or infra error.
 const cancelDetail = "cancelled by operator"
 
-// applyCancel implements manual operator cancellation (Feature 1,
-// core.CommandCancel): stop whatever is currently happening to
+// applyCancel implements manual operator cancellation (core.CommandCancel):
+// stop whatever is currently happening to
 // (cmd.Target, cmd.Ref) and park it at its current SHA, exactly like a red
 // verdict — using the same park machinery a rejection uses (d.park +
 // eventKindForOutcome), just with cancelDetail distinguishing the cause.
@@ -164,19 +163,18 @@ func (d *Daemon) applyCancel(ctx context.Context, cmd core.Command, refs map[str
 }
 
 // cancelInFlight cancels lane.runs[i] — which is currently testing ref, one
-// of its members — and parks/re-queues per mode (Feature 1). Mirrors
-// advanceLane's bubble step (§2.1c) almost exactly, but with an
-// operator-chosen park instead of a real verdict's:
+// of its members — and parks/re-queues per mode. Mirrors advanceLane's
+// bubble step almost exactly, but with an operator-chosen park instead of a
+// real verdict's:
 //
 //   - serial/speculate (len(members)==1, the only shape either mode ever
 //     builds): the run's sole member parks at its current SHA
 //     (OutcomeRejected, cancelDetail) via finishRun's normal park=true path.
 //   - batch (len(members)>1): cancelBatchMember parks ONLY the named
-//     member; every other member of the run Skips unparked and re-queues
-//     (§10's own "batch member cancelled" wording) — unlike finishBatchRed,
-//     there is no ambiguity about who's guilty here (the operator named the
-//     ref explicitly), so there is no reason to force serial fallback the
-//     way a genuine batch-red verdict does.
+//     member; every other member of the run Skips unparked and re-queues —
+//     unlike finishBatchRed, there is no ambiguity about who's guilty here
+//     (the operator named the ref explicitly), so there is no reason to
+//     force serial fallback the way a genuine batch-red verdict does.
 //
 // Either way, any run behind this one in the lane (a speculation window's
 // suffix, built on this run's now-invalid predicted chainTip) bubbles via
@@ -209,8 +207,8 @@ func (d *Daemon) cancelInFlight(ctx context.Context, t config.Target, lane *lane
 	lane.runs = lane.runs[:i]
 }
 
-// cancelBatchMember finishes r — a genuine multi-member batch run (§2.6) —
-// after ref was cancelled mid-run: ref's own member parks at its current SHA
+// cancelBatchMember finishes r — a genuine multi-member batch run — after
+// ref was cancelled mid-run: ref's own member parks at its current SHA
 // (OutcomeRejected, cancelDetail); every OTHER member Skips unparked with a
 // batch-scoped detail naming ref, so it re-queues on the very next refill,
 // FIFO order preserved. This mirrors finishBatchRed's per-member-record

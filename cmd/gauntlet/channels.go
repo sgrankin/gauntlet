@@ -1,7 +1,7 @@
-// Config -> package-local Params mapping for the phase-2/3 channels lives
-// here, per docs/plans/phase23.md §9.5: history, ghstatus, and slack all
-// take package-local params structs so those packages never import
-// internal/config; cmd is the sole place that bridges the two.
+// Config -> package-local Params mapping for the channels lives here:
+// history, ghstatus, and slack all take package-local params structs so
+// those packages never import internal/config; cmd is the sole place that
+// bridges the two.
 package main
 
 import (

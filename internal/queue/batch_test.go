@@ -1,6 +1,6 @@
-// Batch-mode suite (docs/plans/phase5.md §2.5's batch refill, §2.6/§10
-// amendment 2's red serial-fallback, §10 amendment 3's spec-change batch
-// boundary, §3.3's per-member RunRecord shape). Built on the fake harness
+// Batch-mode suite: batch refill, red serial-fallback, the spec-change
+// batch boundary, and the per-member RunRecord shape (see
+// docs/design/queue-modes.md, "Batch"). Built on the fake harness
 // (daemon_test.go's testHarness/fakeGitRepo), the same tier
 // TestReconcile_GreenMultiCheckLand and land_test.go's IsAncestor-recovery
 // test use — batch's state-machine behavior (which member chains, which
@@ -24,7 +24,7 @@ func batchTarget(maxBatch int) config.Target {
 	return config.Target{Name: "main", Branch: "main", Mode: "batch", MaxBatch: maxBatch}
 }
 
-// TestBatchLand_OnePushNDeletes proves §2.4's one-push-N-deletes land shape
+// TestBatchLand_OnePushNDeletes proves the one-push-N-deletes land shape
 // for a genuine 3-member batch: exactly one CAS push to the target ref,
 // followed by exactly one CAS delete per member's slot, in FIFO order, and
 // the target tip lands byte-identical to the chain tip that was actually
@@ -33,9 +33,9 @@ func TestBatchLand_OnePushNDeletes(t *testing.T) {
 	h := newHarness(t, batchTarget(8))
 	// The base already carries the check spec (unlike a single-candidate
 	// serial test, which can introduce it via the one candidate's own
-	// merge): a batch's specChanged boundary (§10 amendment 3) would
-	// otherwise see every member "introduce" the spec from absent to
-	// present and terminate the batch after member 0 every time.
+	// merge): a batch's specChanged boundary would otherwise see every
+	// member "introduce" the spec from absent to present and terminate the
+	// batch after member 0 every time.
 	h.git.seed("main", checkSpecFile("test"))
 	refA := candidateRef("main", "alice", "a")
 	refB := candidateRef("main", "bob", "b")
@@ -97,7 +97,7 @@ func TestBatchLand_OnePushNDeletes(t *testing.T) {
 	}
 }
 
-// TestBatchMemberRecords_ShareBatchID proves §3.3's per-member RunRecord
+// TestBatchMemberRecords_ShareBatchID proves the per-member RunRecord
 // shape: a batch of 3 lands with 3 separate RunRecords, all sharing one
 // non-empty BatchID, Position 0..2, BatchSize 3, each with its own distinct
 // MergeSHA (its own chain link) — and the shared check's result duplicated
@@ -164,7 +164,7 @@ func TestBatchMemberRecords_ShareBatchID(t *testing.T) {
 			t.Errorf("record %d Outcome = %v, want Landed", i, r.Outcome)
 		}
 		if len(r.Checks) != 1 || r.Checks[0].Name != "test" || r.Checks[0].Status != core.CheckPassed {
-			t.Errorf("record %d Checks = %+v, want the shared 'test' result duplicated onto it (§3.3)", i, r.Checks)
+			t.Errorf("record %d Checks = %+v, want the shared 'test' result duplicated onto it", i, r.Checks)
 		}
 		if r.MergeSHA == "" || seenMerge[r.MergeSHA] {
 			t.Errorf("record %d MergeSHA = %q, want its own distinct chain link", i, r.MergeSHA)
@@ -183,11 +183,12 @@ func TestBatchMemberRecords_ShareBatchID(t *testing.T) {
 	}
 }
 
-// TestBatchCrashRecovery covers §8's batch crash-recovery walkthrough: the
-// chain already landed (target tip contains all three members' commits)
-// but the candidate slots were never deleted — the crash-before-slot-delete
-// window. Each member recovers independently, head-pick-only per refill
-// (§2.5), with no re-merge and no re-test (Invariant 4).
+// TestBatchCrashRecovery covers batch crash-recovery: the chain already
+// landed (target tip contains all three members' commits) but the
+// candidate slots were never deleted — the crash-before-slot-delete
+// window. Each member recovers independently, head-pick-only per refill,
+// with no re-merge and no re-test (Invariant 4). See
+// docs/design/queue-modes.md ("Crash recovery adds no durable state").
 func TestBatchCrashRecovery(t *testing.T) {
 	h := newHarness(t, batchTarget(8))
 	base := h.git.seed("main", nil)
@@ -212,7 +213,7 @@ func TestBatchCrashRecovery(t *testing.T) {
 		t.Fatal("alice's slot not recovered on the first tick")
 	}
 	if !h.git.hasRef(refB) || !h.git.hasRef(refC) {
-		t.Fatal("bob/carol recovered too early; recovery must be head-pick-only per refill (§2.5)")
+		t.Fatal("bob/carol recovered too early; recovery must be head-pick-only per refill")
 	}
 
 	h.reconcile() // recovers bob
@@ -252,8 +253,9 @@ func TestBatchCrashRecovery(t *testing.T) {
 	}
 }
 
-// TestBatchSpecChangeBoundary covers §10 amendment 3: 3 queued candidates,
-// the MIDDLE one (bob) modifies the check spec. The batch must form from
+// TestBatchSpecChangeBoundary covers the spec-change batch boundary: 3
+// queued candidates, the MIDDLE one (bob) modifies the check spec. The
+// batch must form from
 // alice+bob only (bob included, batch ends there); carol waits for the
 // next batch, formed on a later refill.
 func TestBatchSpecChangeBoundary(t *testing.T) {
@@ -311,8 +313,8 @@ func TestBatchSpecChangeBoundary(t *testing.T) {
 // records carry distinct RunIDs (member 0 bare, member 1 "<batchID>-m1")
 // sharing one BatchID, so history keeps a row per member here too.
 //
-// Trigger: bob's push corrupts the check spec. The §10 amendment 3
-// spec-change boundary ends the batch at bob (alice+bob chained, carol
+// Trigger: bob's push corrupts the check spec. The spec-change boundary
+// ends the batch at bob (alice+bob chained, carol
 // untouched), then finishBatchStart's ParseChecks on the tip tree fails,
 // routing both chained members through rejectBatch.
 func TestBatchRejectedRecordsHaveDistinctRunIDs(t *testing.T) {
@@ -377,8 +379,8 @@ func TestBatchRejectedRecordsHaveDistinctRunIDs(t *testing.T) {
 	}
 }
 
-// TestBatchRedEmitsPerMemberSkipped covers §2.6, overridden by §10
-// amendment 2: a batch of 3 whose combined check suite fails must NOT park
+// TestBatchRedEmitsPerMemberSkipped covers batch red-recovery: a batch of
+// 3 whose combined check suite fails must NOT park
 // anyone and must NOT emit EventRejected — every member gets its own
 // EventSkipped (Outcome Skipped, the shared failed check duplicated onto
 // it, a Detail naming the batch and the failing check), and batch-red
@@ -410,7 +412,7 @@ func TestBatchRedEmitsPerMemberSkipped(t *testing.T) {
 			skipped = append(skipped, e.Record)
 		}
 		if e.Kind == core.EventRejected {
-			t.Fatal("no EventRejected should fire from the batch's own red verdict (§10 amendment 2)")
+			t.Fatal("no EventRejected should fire from the batch's own red verdict")
 		}
 	}
 	if len(skipped) != 3 {

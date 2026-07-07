@@ -211,9 +211,9 @@ func TestRunner_RunsHooksInOrderWithLandedCoordinates(t *testing.T) {
 		t.Fatalf("ExportTree called with %v, want [merge-sha] once", got)
 	}
 
-	// Every hook now also fires an EventHookStarted immediately before its
-	// EventHookFinished (S1-C/S5); filter down to just the Finished events
-	// for this assertion's original per-hook-outcome shape.
+	// Every hook fires an EventHookStarted immediately before its
+	// EventHookFinished; filter down to just the Finished events for
+	// this assertion's per-hook-outcome check.
 	var finished []core.Event
 	for _, ev := range emit.snapshot() {
 		if ev.Kind == core.EventHookFinished {
@@ -241,7 +241,7 @@ func TestRunner_RunsHooksInOrderWithLandedCoordinates(t *testing.T) {
 	}
 }
 
-// TestRunner_EmitsHookStartedBeforeEachHook is S1-C/S5's producer-side
+// TestRunner_EmitsHookStartedBeforeEachHook verifies the producer-side
 // contract: EventHookStarted must fire, in order, immediately before each
 // hook's RunCheck — interleaved with the existing EventHookFinished per
 // hook, not batched at the start or end. HookIndex/HookCount must be
@@ -297,7 +297,7 @@ func TestRunner_EmitsHookStartedBeforeEachHook(t *testing.T) {
 }
 
 // TestRunner_RecoveredLandingEmitsHookSkipped confirms the Recovered
-// recovery branch emits EventHookSkipped (S1-C's durable marker) carrying
+// recovery branch emits EventHookSkipped (a durable marker) carrying
 // Detail and HookCount, in addition to (not instead of) the existing
 // stderr log line, and never calls RunCheck.
 func TestRunner_RecoveredLandingEmitsHookSkipped(t *testing.T) {
@@ -378,7 +378,7 @@ func TestRunner_FailureStopsRemainingHooks(t *testing.T) {
 	}
 
 	// deploy fires both EventHookStarted (before RunCheck) and
-	// EventHookFinished (S1-C/S5); notify never runs at all since deploy
+	// EventHookFinished; notify never runs at all since deploy
 	// failed, so it fires neither.
 	events := emit.snapshot()
 	if len(events) != 2 {
@@ -392,11 +392,11 @@ func TestRunner_FailureStopsRemainingHooks(t *testing.T) {
 	}
 }
 
-// TestRunner_NonLandedEventsIgnored also covers S14's universal contract —
-// core.EventKind(999) (a future kind this version of Runner has never heard
-// of) must be ignored exactly like any other non-landing event, not panic
-// or otherwise misbehave (internal/channel/log.go's "channels ignore
-// unknown kinds" contract, which Runner.Emit's own doc cites).
+// TestRunner_NonLandedEventsIgnored covers the universal "channels ignore
+// unknown kinds" contract (internal/channel/log.go, which Runner.Emit's own
+// doc cites): core.EventKind(999) (a future kind this version of Runner has
+// never heard of) must be ignored exactly like any other non-landing event,
+// not panic or otherwise misbehave.
 func TestRunner_NonLandedEventsIgnored(t *testing.T) {
 	r := New(Params{
 		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
@@ -410,7 +410,7 @@ func TestRunner_NonLandedEventsIgnored(t *testing.T) {
 		{Kind: core.EventQueued, Target: "main"},
 		{Kind: core.EventCheckFinished, Target: "main", Record: nil},
 		{Kind: core.EventRejected, Target: "main", Record: &core.RunRecord{}}, // terminal, but not a landing
-		{Kind: core.EventKind(999), Target: "main"},                           // unrecognized kind (S14)
+		{Kind: core.EventKind(999), Target: "main"},                           // unrecognized kind
 	}
 	for _, ev := range cases {
 		if err := r.Emit(context.Background(), ev); err != nil {
@@ -522,8 +522,7 @@ func TestRunner_RecoveredLandingWithoutMergeSHASkipped(t *testing.T) {
 	}
 }
 
-// TestRunner_RecoveredLandingWithMergeSHAStillSkipped is the regression case
-// for the gap this MergeSHA-capture phase actually opened: recoverLanded now
+// TestRunner_RecoveredLandingWithMergeSHAStillSkipped: recoverLanded
 // often CAN populate MergeSHA on a Recovered record (FindLandingMerge, for
 // history/manual-re-run purposes). Gating runLanding's skip-vs-run decision
 // on MergeSHA emptiness would have made a recovered landing with a found
@@ -1114,7 +1113,7 @@ func TestRunner_CancelPolicy_CancelsRunningLandingMidHook(t *testing.T) {
 		}
 	}
 
-	// EventHookStarted (S1-C) also carries RunID=run-1/CheckName=deploy, so
+	// EventHookStarted also carries RunID=run-1/CheckName=deploy, so
 	// filter specifically for the Finished event rather than any match.
 	events := emit.snapshot()
 	var run1Deploy *core.Event
@@ -1154,9 +1153,9 @@ func TestRunner_CancelPolicy_CancelsRunningLandingMidHook(t *testing.T) {
 }
 
 // TestRunner_CancelCurrent_CancelsRunningLandingMidHook drives Runner for
-// PolicyCancel and cancels run-1's in-flight hook via CancelCurrent
-// (Feature 1's operator-triggered counterpart to PolicyCancel's own
-// automatic supersede-cancel) instead of a superseding landing: the blocked
+// PolicyCancel and cancels run-1's in-flight hook via CancelCurrent (the
+// operator-triggered counterpart to PolicyCancel's own automatic
+// supersede-cancel) instead of a superseding landing: the blocked
 // "deploy" hook must be interrupted immediately (mid-hook), its remaining
 // "notify" hook must never run, and its EventHookFinished must carry the
 // Err the executor returns on cancellation plus a Detail naming the
@@ -1208,8 +1207,8 @@ func TestRunner_CancelCurrent_CancelsRunningLandingMidHook(t *testing.T) {
 	// the Run loop's own parent context would race the causality chain this
 	// test is verifying: inbox send -> supersede send -> execLanding's own
 	// per-landing cancel -> RunCheck unblocks -> runLanding reads supersede),
-	// and NOT a bare RunID+CheckName match (S1-C's EventHookStarted now also
-	// carries RunID=run-1/CheckName=deploy, and fires BEFORE RunCheck even
+	// and NOT a bare RunID+CheckName match (EventHookStarted also carries
+	// RunID=run-1/CheckName=deploy, and fires BEFORE RunCheck even
 	// blocks — it would already be present the instant exec.started closes,
 	// proving nothing about the cancellation). Waiting for the Finished
 	// event specifically is the one signal that's synchronized with
@@ -1330,7 +1329,7 @@ func TestRunner_CancelCurrent_NonCancelPolicyIsFalse(t *testing.T) {
 	}
 }
 
-// --- live state (S5) ------------------------------------------------------
+// --- live state -----------------------------------------------------------
 
 // TestRunner_Snapshot_NoLandingRunningIsFalse covers the common idle case:
 // no landing has ever run for target, so Snapshot reports false with a

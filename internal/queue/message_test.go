@@ -62,9 +62,8 @@ func TestBuildMergeMessage_InvalidTemplate(t *testing.T) {
 }
 
 // TestBuildMergeMessage_EmptyBodyMatchesPriorShape locks in that an empty
-// body (Config.MergeBody nil, or returning "") produces byte-for-byte the
-// same message phase-1/2/3 always produced: subject, blank line, trailers,
-// nothing else in between.
+// body (Config.MergeBody nil, or returning "") produces byte-for-byte:
+// subject, blank line, trailers, nothing else in between.
 func TestBuildMergeMessage_EmptyBodyMatchesPriorShape(t *testing.T) {
 	f := messageFields{Topic: "widget", User: "alice", Ref: "refs/heads/for/main/alice/widget", RunID: "run1", Target: "main"}
 	got, err := buildMergeMessage("", f, "")
@@ -77,8 +76,8 @@ func TestBuildMergeMessage_EmptyBodyMatchesPriorShape(t *testing.T) {
 	}
 }
 
-// TestBuildMergeMessage_BodyBetweenSubjectAndTrailers is the phase-4
-// contract: a non-empty body lands between the subject and the trailers,
+// TestBuildMergeMessage_BodyBetweenSubjectAndTrailers is the contract: a
+// non-empty body lands between the subject and the trailers,
 // each blank-line separated (standard git message shape), and the
 // trailers still parse (still the last two lines, still "Key: value").
 func TestBuildMergeMessage_BodyBetweenSubjectAndTrailers(t *testing.T) {

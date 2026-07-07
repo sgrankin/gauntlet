@@ -32,7 +32,7 @@ func emitRun(t *testing.T, s *Store, runID, target, ref, sha string, outcome cor
 }
 
 // TestStore_LatestTerminalPerRef_Interleaved is the interleaved-history test
-// Feature 2 (park persistence across restarts) rests on: LatestTerminalPerRef
+// that park persistence across restarts depends on: LatestTerminalPerRef
 // must return exactly one row per ref — the MOST RECENT by started_at — no
 // matter what shape that ref's history takes.
 func TestStore_LatestTerminalPerRef_Interleaved(t *testing.T) {

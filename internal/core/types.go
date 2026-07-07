@@ -13,7 +13,7 @@ import "time"
 //
 // Ref has the form "refs/heads/for/<target>/<user>/<topic>". User may be ""
 // for solo setups where the ref is "refs/heads/for/<target>/<topic>"; see the
-// ref grammar in docs/plans/phase1.md §9.3.
+// ref grammar in docs/design/core.md ("Candidate ref grammar").
 type Candidate struct {
 	Ref    string
 	Target string
@@ -66,15 +66,20 @@ type CheckJob struct {
 
 	Candidate Candidate
 
-	// Clean is reserved for the phase-4 clean-build escape hatch (Invariant
-	// 7: a cache-poisoning workaround). Always false in phase 1.
+	// NOTE: Clean is reserved for a future clean-build escape hatch
+	// (Invariant 7: a cache-poisoning workaround) — architected for, not
+	// triggerable, in the core loop itself. Always false today. See
+	// docs/design/core.md ("Deliberately not built").
 	Clean bool
 
 	// ServiceEnv is extra environment (GAUNTLET_SVC_<NAME>_HOST/PORT) for
-	// this check's resolved `needs` (docs/plans/services.md §4), appended
-	// after the six built-in GAUNTLET_* vars by every executor. nil for
-	// checks with no needs and for hooks (internal/hooks builds CheckJob
-	// with no needs grammar at all — services.md §5, v1 pinned "no").
+	// this check's resolved `needs`, appended after the six built-in
+	// GAUNTLET_* vars by every executor. nil for checks with no needs and
+	// for hooks.
+	//
+	// NOTE: hooks cannot declare `needs` at all — internal/hooks builds
+	// CheckJob with no needs grammar — a deliberate scope decision. See
+	// docs/design/services.md ("Deliberately not built").
 	ServiceEnv []string
 
 	// Networks are container networks the check must join to reach its
@@ -129,8 +134,7 @@ type CheckResult struct {
 
 	Status CheckStatus
 
-	// Output is the check's captured output, tail-capped (64 KiB in phase
-	// 1; see docs/plans/phase1.md §9.6).
+	// Output is the check's captured output, tail-capped (64 KiB).
 	Output string
 
 	// LogPath is set iff the executor actually wrote the full,
@@ -217,8 +221,8 @@ const (
 
 // RunRecord is the single structured fact produced by one run: a stable ID,
 // the merge tested, and the per-check verdicts. It is the source of truth
-// that both the OTel span tree (phase 1) and a future SQLite writer / OTLP
-// exporter (phase 3) build from, unchanged.
+// that both the OTel span tree and the SQLite writer / OTLP exporter build
+// from, unchanged.
 type RunRecord struct {
 	RunID     string
 	Target    string
@@ -307,10 +311,11 @@ const (
 	EventError
 
 	// EventIgnoredRef reports a well-formed candidate ref (the for/...
-	// grammar) whose target segment names no configured target — a
-	// misconfiguration phase 1 silently dropped (docs/plans/phase23.md §10,
-	// O4). Emitted once per (ref, SHA), not every tick. Not terminal: it
-	// carries no RunRecord, since no run was ever attempted. Channel
+	// grammar) whose target segment names no configured target — a common
+	// misconfiguration (a typo, or a target retired from config while
+	// stale refs linger), surfaced explicitly rather than silently
+	// dropped. Emitted once per (ref, SHA), not every tick. Not terminal:
+	// it carries no RunRecord, since no run was ever attempted. Channel
 	// implementations must ignore EventKind values they don't recognize
 	// (this one included) rather than erroring — new kinds are always
 	// additive.
@@ -324,16 +329,16 @@ const (
 	EventHookFinished
 
 	// EventHookStarted reports that one post-land hook is about to run
-	// (internal/hooks; S1-C's durable owed/skipped marker + S5's live
-	// observability rider): Target, Candidate, and RunID identify the
+	// (internal/hooks's durable owed/skipped marker and live
+	// observability): Target, Candidate, and RunID identify the
 	// landing; CheckName is the hook's name; HookIndex is its 0-based
 	// position within this landing's configured hook order and HookCount is
 	// the landing's total configured hook count (see Event's HookIndex/
 	// HookCount doc — meaningful only on hook events, zero on every other
 	// kind). Emitted once per hook, immediately before that hook's
 	// core.Executor.RunCheck call, on hooks.Runner's single execution
-	// goroutine (S25: hook execution stays globally serial — this never
-	// fires from more than one goroutine at a time). history.Store upserts a
+	// goroutine (hook execution stays globally serial — this never fires
+	// from more than one goroutine at a time). history.Store upserts a
 	// durable "owed" row (hook_runs) the first time this fires for a given
 	// RunID — before any hook subprocess actually starts — so a crash
 	// mid-chain leaves owed_count > (COUNT of finished hooks), discoverable
@@ -354,14 +359,14 @@ const (
 	// doc). history.Store persists this as a durable hook_runs row with
 	// skipped=1/skip_reason=Detail, so the landing's hooks read as
 	// "skipped (recovery)" on every surface rather than being silently
-	// mistaken for a stalled or crashed chain (S1-C's discoverability, no
+	// mistaken for a stalled or crashed chain (discoverability, no
 	// auto-resume). Additive like EventIgnoredRef — channel implementations
 	// must ignore EventKind values they don't recognize rather than
 	// erroring.
 	EventHookSkipped
 
 	// EventRetryRequested reports an operator's explicit retry of a parked
-	// (ref, SHA) (queue/command.go's applyRetry, S3's persisted retry
+	// (ref, SHA) (queue/command.go's applyRetry, a persisted retry
 	// intent): Target and Candidate (Ref, SHA set; User/Topic as parsed)
 	// identify what was retried, At is when. history.Store upserts a
 	// retry_intents row (target, ref) -> (sha, at), latest retry wins, so a
@@ -418,7 +423,7 @@ type Event struct {
 
 // Command is an inbound instruction from a Channel (e.g. a Slack reaction
 // meaning "retry"). It exists for Invariant 8 (the core is
-// executor/channel-agnostic and defines the command vocabulary); no phase-1
+// executor/channel-agnostic and defines the command vocabulary); no built-in
 // channel produces one.
 type Command struct {
 	Kind   string

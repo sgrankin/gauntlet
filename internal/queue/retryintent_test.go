@@ -166,7 +166,7 @@ func TestRetryIntent_SurvivesRestart_NotReParked(t *testing.T) {
 	mustReconcile(t, d2)
 
 	if entry, ok := d2.done["main"][ref]; ok {
-		t.Fatalf("d2.done[main][%s] = %+v, want NOT parked (S3: the retry must suppress the stale pre-retry rejection across restart)", ref, entry)
+		t.Fatalf("d2.done[main][%s] = %+v, want NOT parked (the retry must suppress the stale pre-retry rejection across restart)", ref, entry)
 	}
 	if git.mergeTreeCalls == 0 {
 		t.Error("mergeTreeCalls = 0 after restart, want at least 1 (the ref must be picked up for a fresh trial, not left parked)")

@@ -10,11 +10,11 @@ import (
 	"github.com/sgrankin/gauntlet/internal/executor"
 )
 
-// TestNewRunID_DistinctForIdenticalTimeAndOID is the direct unit test for
-// docs/plans/phase23.md §2.4: the phase-1 review (C7) found that two trials
-// sharing an identical trial tree, minted within the same UTC second,
-// produced identical run IDs under the timestamp+OID-prefix scheme alone.
-// The monotonic per-process counter folded in here must keep them distinct
+// TestNewRunID_DistinctForIdenticalTimeAndOID proves the direct unit-level
+// case behind runIDCounter (reconcile.go): two trials sharing an identical
+// trial tree, minted within the same UTC second, would otherwise produce
+// identical run IDs under the timestamp+OID-prefix scheme alone. The
+// monotonic per-process counter folded in here must keep them distinct
 // even when both time and oid are held fixed.
 func TestNewRunID_DistinctForIdenticalTimeAndOID(t *testing.T) {
 	fixed := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)

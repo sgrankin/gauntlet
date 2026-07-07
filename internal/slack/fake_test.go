@@ -23,13 +23,12 @@ const fakeBotUserID = "UBOTFAKE"
 // fakeBotID is the companion B… bot id (auth.test's bot_id). The fake
 // serves bot-posted messages back through conversations.history in the REAL
 // bot_message shape — bot_id set, NO top-level user — because that is what
-// live Slack does and trusting the wrong field here is exactly the
-// green-in-CI/broken-live trap this suite exists to prevent (fresh-context
-// review of the metadata-ownership commit, finding 1).
+// live Slack does, and trusting the wrong field here is exactly the
+// green-in-CI/broken-live trap this suite exists to prevent.
 const fakeBotID = "BBOTFAKE"
 
 // fakeSlack is an httptest-backed fake of just enough of Slack's socket-mode
-// + Web API surface to exercise Slack end-to-end (docs/plans/phase23.md §5):
+// + Web API surface to exercise Slack end-to-end:
 //
 //   - POST /apps.connections.open -> returns a "url" pointing back at this
 //     same server's websocket endpoint (verified against slack-go v0.27.0
@@ -311,8 +310,8 @@ func (f *fakeSlack) handleConversationsHistory(w http.ResponseWriter, r *http.Re
 }
 
 // handleReactionsAdd serves reactions.add: records the (channel, ts, emoji)
-// triple so tests can assert an inbound reaction was acknowledged (design
-// §3), and wakes anything blocked in waitForReactions.
+// triple so tests can assert an inbound reaction was acknowledged, and
+// wakes anything blocked in waitForReactions.
 func (f *fakeSlack) handleReactionsAdd(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		f.t.Errorf("parse form for reactions.add: %v", err)

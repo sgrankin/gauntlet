@@ -1,7 +1,7 @@
 // Package channel implements gauntlet's core.Channel: the duplex event/command
-// surface between the queue and the outside world. Phase 1 ships one real
-// implementation, LogChannel, plus RecordingChannel, a test double used by
-// queue and integration tests.
+// surface between the queue and the outside world. LogChannel is the one
+// real implementation shipped here; RecordingChannel is a test double used
+// by queue and integration tests.
 package channel
 
 import (
@@ -17,13 +17,13 @@ import (
 
 var _ core.Channel = (*LogChannel)(nil)
 
-// LogChannel is the phase-1 core.Channel implementation. It renders every
-// Event as one structured, greppable line (key=value pairs), and for
-// terminal events additionally renders the carried RunRecord as a compact
-// summary line. It is output-only: Commands never yields.
+// LogChannel is the core.Channel implementation. It renders every Event as
+// one structured, greppable line (key=value pairs), and for terminal events
+// additionally renders the carried RunRecord as a compact summary line. It
+// is output-only: Commands never yields.
 //
-// New core.EventKind values are additive (e.g. core.EventIgnoredRef, phase
-// 2): eventKindString's default case renders any kind it doesn't recognize
+// New core.EventKind values are additive (e.g. core.EventIgnoredRef):
+// eventKindString's default case renders any kind it doesn't recognize
 // as "unknown(N)" rather than panicking or dropping the line, and every
 // core.Channel implementation is expected to hold the same contract —
 // ignore event kinds it doesn't understand, never fail Emit over one.
@@ -58,11 +58,9 @@ func (c *LogChannel) Emit(ctx context.Context, ev core.Event) error {
 			line += "\n" + block
 		}
 	}
-	// EventHookStarted/EventHookSkipped (S5-surface, the "surfaced
-	// everywhere" half of S1-C's discoverability requirement): a distinct,
-	// greppable marker line beyond formatEvent's generic kind=/target=/
-	// check=/detail= rendering (which already covers every field these two
-	// kinds carry).
+	// EventHookStarted/EventHookSkipped: a distinct, greppable marker line
+	// beyond formatEvent's generic kind=/target=/check=/detail= rendering
+	// (which already covers every field these two kinds carry).
 	switch ev.Kind {
 	case core.EventHookStarted:
 		line += fmt.Sprintf("\n  ▶ hook %s", ev.CheckName)
@@ -153,8 +151,8 @@ func formatEvent(ev core.Event) string {
 	if ev.CheckName != "" {
 		fmt.Fprintf(&b, " check=%s", ev.CheckName)
 	}
-	// Check is populated on EventCheckFinished (F-a, DESIGN.md "Full
-	// per-check log files") — nil-checked since older events, and any
+	// Check is populated on EventCheckFinished (DESIGN.md "Full per-check
+	// log files") — nil-checked since older events, and any
 	// event kind that doesn't carry one, must still render correctly.
 	if ev.Check != nil {
 		fmt.Fprintf(&b, " status=%s duration=%s", checkStatusString(ev.Check.Status), ev.Check.Duration)

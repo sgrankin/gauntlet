@@ -29,8 +29,8 @@ INSERT OR REPLACE INTO queue_depth (at, target, waiting, in_flight, parked)
 VALUES (?, ?, ?, ?, ?)`
 
 	// upsertRetryIntentSQL, insertIgnoredRefSQL, upsertHookRunStartedSQL, and
-	// upsertHookRunSkippedSQL back the v6 durability rows (S3, S7c, S1-C) —
-	// see Store.writeRetryIntent/writeIgnoredRef/writeHookStarted/
+	// upsertHookRunSkippedSQL back the v6 durability rows — see
+	// Store.writeRetryIntent/writeIgnoredRef/writeHookStarted/
 	// writeHookSkipped for the upsert-vs-append reasoning behind each.
 	upsertRetryIntentSQL = `
 INSERT INTO retry_intents (target, ref, sha, at) VALUES (?, ?, ?, ?)
@@ -69,8 +69,8 @@ type RunRow struct {
 
 	// BatchID groups this run with its sibling per-member run rows when it
 	// landed as part of a batch (empty for serial and speculate runs;
-	// core.RunRecord.BatchID verbatim — docs/plans/phase5.md §10 amendment
-	// 1). Position is this member's 0-based index within its batch (0 for
+	// core.RunRecord.BatchID verbatim). Position is this member's 0-based
+	// index within its batch (0 for
 	// serial/speculate). BatchSize is the batch's member count, normalized
 	// to at least 1 on write (batchSizeOrDefault) so a serial run's row
 	// always reads BatchSize == 1 rather than 0.
@@ -224,8 +224,8 @@ ORDER BY started_at DESC LIMIT ?`,
 }
 
 // BatchMembers returns every run row sharing batchID, ordered by position —
-// the dashboard's "landed in batch <id> (k of n)" link on /run/{id}
-// (docs/plans/phase5.md §10 amendment 1). Empty batchID (never a real
+// the dashboard's "landed in batch <id> (k of n)" link on /run/{id}. Empty
+// batchID (never a real
 // batch_id value; schema.sql's column default) returns an empty result
 // rather than every serial/speculate run in the database, since those all
 // share the same "" batch_id.
@@ -323,9 +323,9 @@ func (s *Store) Hooks(runID string) ([]HookRow, error) {
 // CheckStats summarizes per-check red-rate and duration across target's
 // runs started at or after since.
 //
-// Batch-aware (docs/plans/phase5.md §10 amendment 1): a batch run's check
-// results are duplicated verbatim onto every member's RunRecord (§3.3), so
-// naively joining checks to runs would count a green batch of N suites as N
+// Batch-aware: a batch run's check results are duplicated verbatim onto
+// every member's RunRecord, so naively joining checks to runs would count a
+// green batch of N suites as N
 // (deflating red-rate) and a red batch's duplicated failures as N (inflating
 // it). Instead this counts one suite per distinct suite key — batch_id when
 // set, run_id otherwise (COALESCE(NULLIF(batch_id, empty string), run_id) in
@@ -413,8 +413,8 @@ func (s *Store) DepthSeries(target string, since time.Time) ([]DepthPoint, error
 }
 
 // RefVerdict is one candidate ref's most recent terminal run outcome for a
-// target (LatestTerminalPerRef) — the read side of Feature 2's boot-time
-// park seeding (queue.Config.SeedParks): Outcome is the raw stored string
+// target (LatestTerminalPerRef) — the read side of boot-time park seeding
+// (queue.Config.SeedParks): Outcome is the raw stored string
 // (outcomeString's vocabulary: landed|rejected|conflict|skipped|error), left
 // unparsed here since history never imports internal/core (cmd's SeedParks
 // closure, the sole caller, maps it back to core.Outcome).
@@ -449,26 +449,26 @@ type RefVerdict struct {
 // result as a park seed — this method itself returns every ref's latest
 // verdict regardless of outcome, landed included.
 //
-// S3 read-side (the retry-intent seed-park fix): a ref's latest terminal row
-// is additionally suppressed — omitted from the result entirely — when a
+// Retry-intent read-side suppression: a ref's latest terminal row is
+// additionally suppressed — omitted from the result entirely — when a
 // retry_intents row for the same (target, ref) is newer than that row's
 // ended_at (LEFT JOIN retry_intents ... WHERE ri.at IS NULL OR ri.at <=
 // ended_at). Net effect: an operator's retry (core.EventRetryRequested,
 // internal/queue/command.go's applyRetry) that hasn't yet been superseded by
 // a fresh terminal outcome means "don't re-seed a park from the stale
-// pre-retry verdict" — the exact bug S3 closes (a daemon crash between the
-// retry and the retried run's own terminal event no longer silently
-// re-parks the ref at its old rejection on restart). If the retried run
-// later produces its OWN newer terminal row (e.g. it rejects again), that
-// row's ended_at is newer than the retry, the join condition is satisfied
-// again, and the ref re-parks correctly with the new reason.
+// pre-retry verdict" — a daemon crash between the retry and the retried
+// run's own terminal event no longer silently re-parks the ref at its old
+// rejection on restart. If the retried run later produces its OWN newer
+// terminal row (e.g. it rejects again), that row's ended_at is newer than
+// the retry, the join condition is satisfied again, and the ref re-parks
+// correctly with the new reason.
 //
-// Accepted millisecond-tie (N1, phase-6 B-track review): both ri.at and
-// ended_at are millisecond-truncated (.UnixMilli()), and the join uses <=,
-// so a retry landing in the SAME millisecond as the terminal it's retrying
+// Accepted millisecond-tie: both ri.at and ended_at are
+// millisecond-truncated (.UnixMilli()), and the join uses <=, so a retry
+// landing in the SAME millisecond as the terminal it's retrying
 // away from (an automated immediate-retry, or a coarse/fixed test clock)
 // still satisfies ri.at <= ended_at — the park is kept, and the operator's
-// retry is silently discarded on restart, exactly the narrow-window S3 bug
+// retry is silently discarded on restart, exactly the narrow-window bug
 // this method otherwise closes. This can't be fixed by flipping to a strict
 // <: the retried run's own newer terminal, landing at ended_at == ri.at
 // (its natural case when the retry and its own outcome are timestamped
@@ -517,7 +517,7 @@ WHERE t.rn = 1 AND (ri.at IS NULL OR ri.at <= t.ended_at)`, target, target)
 	return out, nil
 }
 
-// IgnoredRef is one recorded occurrence of core.EventIgnoredRef (S7c): a
+// IgnoredRef is one recorded occurrence of core.EventIgnoredRef: a
 // well-formed candidate ref whose target segment named no configured
 // target, as read back for the dashboard/MCP "recently ignored refs"
 // section (internal/queue/reconcile.go's checkIgnoredRefs is the sole
@@ -530,14 +530,14 @@ type IgnoredRef struct {
 }
 
 // IgnoredRefs returns the most recently ignored refs across the whole
-// daemon, newest first, capped at limit — the read side of S7c's durable
+// daemon, newest first, capped at limit — the read side of the durable
 // misconfig capture: an operator not watching the log/Slack at the instant
 // a misnamed/misconfigured ref was pushed can still discover it here after
 // the fact.
 //
-// Deliberately NOT filtered by target (integration finding, phase-6
-// B-track): an ignored ref's defining property is that its target segment
-// names NO configured target — checkIgnoredRefs emits it under that
+// Deliberately NOT filtered by target: an ignored ref's defining property
+// is that its target segment names NO configured target — checkIgnoredRefs
+// emits it under that
 // unconfigured name — so a per-configured-target query would never match
 // anything. The IgnoredRef.Target field carries the unconfigured name for
 // display ("for/nope/… — target \"nope\" is not configured").
@@ -568,7 +568,7 @@ func (s *Store) IgnoredRefs(limit int) ([]IgnoredRef, error) {
 }
 
 // HookRunSummary is one landing's durable post-land hook "owed" state
-// (core.EventHookStarted/EventHookSkipped -> hook_runs; S1-C), as read back
+// (core.EventHookStarted/EventHookSkipped -> hook_runs), as read back
 // for the dashboard/MCP: OwedCount is the target's configured hook count at
 // the moment the first hook of this landing started (or, for a skipped
 // landing, at skip time); DoneCount is derived from COUNT(*) of this run's
@@ -579,7 +579,7 @@ func (s *Store) IgnoredRefs(limit int) ([]IgnoredRef, error) {
 // "stale" threshold the caller chooses — this method carries no opinion on
 // it, since it has no notion of "now"), as "this landing's hook chain
 // crashed mid-way and will never finish on its own" — the crash-incomplete
-// signal S1-C exists to surface, discoverable without gauntlet ever
+// signal this exists to surface, discoverable without gauntlet ever
 // auto-resuming a hook.
 type HookRunSummary struct {
 	RunID      string

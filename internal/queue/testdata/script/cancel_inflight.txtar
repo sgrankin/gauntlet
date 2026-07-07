@@ -1,5 +1,5 @@
-# Manual operator cancellation of an in-flight run (Feature 1,
-# core.CommandCancel): cancelling the candidate currently being tested
+# Manual operator cancellation of an in-flight run (core.CommandCancel):
+# cancelling the candidate currently being tested
 # cancels its check and parks it at its current SHA (Rejected, "cancelled by
 # operator") — the same park machinery a real rejection uses, distinguished
 # only by Detail. Unlike a red verdict or a re-push, the ref itself is never

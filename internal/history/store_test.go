@@ -669,8 +669,8 @@ func TestMigrate_V4ToV5(t *testing.T) {
 	}
 }
 
-// schemaV5SQL is schema.sql as it existed before chunk 1 (phase 6) added the
-// retry_intents/ignored_refs/hook_runs tables: runs/checks/hooks/queue_depth
+// schemaV5SQL is schema.sql as it existed before the retry_intents/
+// ignored_refs/hook_runs tables were added: runs/checks/hooks/queue_depth
 // exist with every column through the batch columns, but none of the v6
 // durability tables exist yet. Kept here, verbatim, so TestMigrate_V5ToV6
 // can build a genuine v5 database by hand and prove the running code
@@ -859,8 +859,8 @@ func TestMigrate_V5ToV6(t *testing.T) {
 	}
 }
 
-// schemaV6SQL is schema.sql as it existed before chunk 2 (phase 6) added the
-// runs.speculated/runs.recovered columns: every v6 table/column is present
+// schemaV6SQL is schema.sql as it existed before the runs.speculated/
+// runs.recovered columns were added: every v6 table/column is present
 // (through hook_runs), but runs has neither speculated nor recovered. Kept
 // here, verbatim, so TestMigrate_V6ToV7 can build a genuine v6 database by
 // hand and prove the running code migrates it forward correctly.
@@ -1224,7 +1224,7 @@ func TestStore_Emit_IgnoresNonTerminalEvents(t *testing.T) {
 		{Kind: core.EventTrialClean, Target: "main"},
 		{Kind: core.EventCheckStarted, Target: "main", RunID: "run-1", CheckName: "lint"},
 		{Kind: core.EventCheckFinished, Target: "main", RunID: "run-1", CheckName: "lint"},
-		{Kind: core.EventKind(999), Target: "main"}, // unrecognized kind (S14)
+		{Kind: core.EventKind(999), Target: "main"}, // unrecognized kind
 	}
 	for _, ev := range nonTerminal {
 		if err := s.Emit(ctx, ev); err != nil {
@@ -1545,7 +1545,7 @@ func TestStore_Hooks_EmptyForRunWithNoHooks(t *testing.T) {
 	}
 }
 
-// --- v6 durability rows: retry_intents, ignored_refs, hook_runs (S3, S7c, S1-C) ---
+// --- v6 durability rows: retry_intents, ignored_refs, hook_runs ---
 
 // TestStore_Emit_RetryIntent_UpsertsLatest confirms writeRetryIntent's
 // upsert: a second EventRetryRequested for the same (target, ref) replaces
@@ -1591,8 +1591,8 @@ func TestStore_Emit_RetryIntent_UpsertsLatest(t *testing.T) {
 }
 
 // TestStore_LatestTerminalPerRef_RetrySuppressesStalePark is the store-level
-// proof of S3's exact fix: a ref's most recent terminal outcome is a
-// rejection, but an operator's retry (EventRetryRequested) landed AFTER that
+// proof that a ref's most recent terminal outcome, a rejection, is
+// suppressed when an operator's retry (EventRetryRequested) landed AFTER that
 // rejection's ended_at — simulating a daemon crash between the retry and the
 // retried run's own terminal event. LatestTerminalPerRef must omit this ref
 // entirely (not just report it differently): the stale rejection must never
@@ -1646,7 +1646,7 @@ func TestStore_LatestTerminalPerRef_RetrySuppressesStalePark(t *testing.T) {
 	}
 }
 
-// TestStore_HookRunSummaries_OwedGreaterThanDoneIsCrashIncomplete is S1-C's
+// TestStore_HookRunSummaries_OwedGreaterThanDoneIsCrashIncomplete is the
 // crash-timing acceptance criterion at the store layer: a landing whose
 // hook_runs row records owed_count=3 (EventHookStarted fired for hook 0)
 // but only 1 hooks row exists (the chain never got further — a simulated
@@ -1926,11 +1926,11 @@ func TestStore_CheckStats(t *testing.T) {
 	}
 }
 
-// TestStore_CheckStats_DedupesBatchMembers is the statistical-honesty test
-// for docs/plans/phase5.md §10 amendment 1: a batch of 3 member RunRecords
-// sharing one BatchID, each carrying the *same* duplicated check results
-// (the batch's checks ran once against the chain tip and were duplicated
-// onto every member's record, §3.3) must count as ONE suite in CheckStats,
+// TestStore_CheckStats_DedupesBatchMembers is the statistical-honesty test:
+// a batch of 3 member RunRecords sharing one BatchID, each carrying the
+// *same* duplicated check results (the batch's checks ran once against the
+// chain tip and were duplicated onto every member's record) must count as
+// ONE suite in CheckStats,
 // not three — otherwise a green batch of N deflates the red-rate and a red
 // batch's duplicated failures inflate it. A fourth, unrelated serial run
 // (its own distinct check result, no BatchID) must still count as its own
@@ -2140,8 +2140,8 @@ func TestStore_BatchMembers_RedSkipped(t *testing.T) {
 }
 
 // TestStore_ConcurrentReadsDontBlockWrites is the sanity check for raising
-// SetMaxOpenConns from 1 to 4 (docs/plans/phase23.md review): Emit runs
-// inline on the reconcile goroutine in production, so a dashboard read must
+// SetMaxOpenConns from 1 to 4: Emit runs inline on the reconcile goroutine
+// in production, so a dashboard read must
 // never serialize behind it (or vice versa). This drives a batch of Emits
 // concurrently with a batch of read-side queries (RecentRuns, CheckStats —
 // the JOIN query called out as the risk) against one Store, under -race, and
@@ -2317,8 +2317,8 @@ func TestStore_PruneDepth(t *testing.T) {
 	}
 }
 
-// TestStore_PruneIgnoredRefs confirms PruneIgnoredRefs (S2, phase-6 B-track
-// review) deletes only ignored_refs rows strictly older than its cutoff,
+// TestStore_PruneIgnoredRefs confirms PruneIgnoredRefs deletes only
+// ignored_refs rows strictly older than its cutoff,
 // leaving rows at or after the cutoff untouched — same boundary semantics
 // as TestStore_PruneDepth — and never touches runs/checks.
 func TestStore_PruneIgnoredRefs(t *testing.T) {

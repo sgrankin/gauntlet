@@ -1,4 +1,4 @@
-// Manual operator cancellation suite (Feature 1, core.CommandCancel):
+// Manual operator cancellation suite (core.CommandCancel):
 // command.go's applyCancel, cancelInFlight, cancelBatchMember, cancelWaiting.
 // Built on the fake harness (daemon_test.go's testHarness/fakeGitRepo), the
 // same tier command_test.go's retry suite uses — this is the sibling
@@ -13,7 +13,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// TestCommand_CancelInFlightSerialParks covers serial mode (Feature 1): a
+// TestCommand_CancelInFlightSerialParks covers serial mode: a
 // cancel for the ref currently in flight aborts its run and parks it at its
 // current SHA (OutcomeRejected, "cancelled by operator") — the same park
 // machinery a real rejection uses. Also covers idempotency: cancelling an
@@ -67,8 +67,8 @@ func TestCommand_CancelInFlightSerialParks(t *testing.T) {
 }
 
 // TestCommand_CancelWaitingParksBeforePickup covers the "queued but not yet
-// picked" half of Feature 1: a cancel for a ref that's WAITING (not
-// in-flight) parks it directly at its current SHA — cancel-before-start, so
+// picked" half of manual cancellation: a cancel for a ref that's WAITING
+// (not in-flight) parks it directly at its current SHA — cancel-before-start, so
 // it is never trial-merged at all — while the actually in-flight candidate
 // is left completely undisturbed.
 func TestCommand_CancelWaitingParksBeforePickup(t *testing.T) {
@@ -152,7 +152,7 @@ func TestCommand_CancelUnknownRefIsNoop(t *testing.T) {
 // The re-batch happens in the very SAME reconcile pass that drains the
 // cancel, not a tick later: unlike a real bubble or a land (which mutate
 // git refs the tick's own cands/targetTip snapshot would then be stale
-// against, docs/plans/phase5.md §2's reconcileTarget doc), a cancel only
+// against, see reconcileTarget's own doc comment), a cancel only
 // touches in-memory bookkeeping, so refillLane immediately re-picking the
 // now-unparked siblings against the very same snapshot is entirely safe —
 // there is nothing for a deferred tick to protect against here.
@@ -233,8 +233,8 @@ func containsRef(refs []string, ref string) bool {
 	return false
 }
 
-// TestCommand_CancelSpeculateHeadBubblesSuffix covers speculate mode
-// (Feature 1): cancelling the HEAD run (lane position 0) parks its own
+// TestCommand_CancelSpeculateHeadBubblesSuffix covers speculate mode:
+// cancelling the HEAD run (lane position 0) parks its own
 // member and bubbles every run behind it in the window (Skipped, unparked —
 // their predicted base, "the cancelled run's chain tip", is no longer
 // valid), exactly as a real head-run verdict would via invalidateSuffix.

@@ -42,7 +42,7 @@ const dashboardShutdownTimeout = 5 * time.Second
 // disabled), released once each goroutine actually exits. main waits on wg
 // before closing the history store, so a query still in flight against store
 // (via the dashboard's or MCP server's history-backed views) can never race
-// a Close (cmd wiring review, docs/plans/phase23.md).
+// a Close.
 //
 // logDir is the same directory passed as queue.Config.LogDir (main.go's
 // logsDir) — wired here as both dashboard.WithLogRoot and
@@ -214,15 +214,13 @@ const depthHeartbeat = 10 * time.Minute
 // change-only sampling: (waiting, in-flight, parked) for one target. Two
 // samples with an equal tuple carry no new information regardless of At.
 //
-// InFlight is len(TargetSnapshot.Pipeline) — the lane's pipeline depth
-// (docs/plans/phase5.md §10 amendment 5), not a 0/1 "is something running"
-// flag: today, before speculation/batching land, Pipeline has at most one
-// element (mirroring InFlight != nil), so this is 0 when idle and 1 when
-// serial-busy, byte-identical to the tuple this sampler recorded before —
-// no series discontinuity. Once a target runs in speculate mode, this
-// becomes the queue-depth series' actual pipeline-occupancy signal, which is
-// the whole point of sampling it: the dashboard's tuning instrument for
-// sizing `window`.
+// InFlight is len(TargetSnapshot.Pipeline) — the lane's pipeline depth (see
+// docs/design/queue-modes.md, "Snapshot and pipeline view"), not a 0/1 "is
+// something running" flag: for a serial-mode target Pipeline never exceeds
+// one element (mirroring the old InFlight != nil), so this reads 0 when
+// idle and 1 when busy; for a batch or speculate target it reflects actual
+// pipeline occupancy, which is the whole point of sampling it: the
+// dashboard's tuning instrument for sizing `window`.
 type depthTuple struct {
 	Waiting, InFlight, Parked int
 }
@@ -259,9 +257,8 @@ func shouldRecord(last, current depthTuple, lastAt, now time.Time) bool {
 }
 
 // startDepthSampler starts the goroutine that periodically samples queue
-// depth into store, per docs/plans/phase23.md §4.8: every cfg.History.
-// SampleEvery tick, read snapshot() and consider recording one queue_depth
-// row per target. Nil snapshots (no reconcile pass has completed yet) are
+// depth into store: every cfg.History.SampleEvery tick, read snapshot()
+// and consider recording one queue_depth row per target. Nil snapshots (no reconcile pass has completed yet) are
 // skipped rather than recorded as zero, so an idle-startup gap doesn't read
 // as "an empty queue" in the depth series.
 //
@@ -277,9 +274,9 @@ func shouldRecord(last, current depthTuple, lastAt, now time.Time) bool {
 // and checks are never pruned; see PruneDepth's doc for why only the depth
 // series gets a retention bound.
 //
-// S2 (phase-6 B-track review): ignored_refs gets the same retention
-// treatment, piggybacking on this same tick with the same cutoff — see
-// Store.PruneIgnoredRefs' doc for why it needed one too.
+// ignored_refs gets the same retention treatment, piggybacking on this
+// same tick with the same cutoff — see Store.PruneIgnoredRefs' doc for why
+// it needed one too.
 //
 // Only called when store != nil. wg gains one count, released once this
 // goroutine exits on ctx.Done() — see startDashboard's doc for why main
@@ -320,9 +317,8 @@ func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() 
 					if err := store.PruneDepth(cutoff); err != nil {
 						fmt.Fprintf(os.Stderr, "gauntlet: history: prune depth: %v\n", err)
 					}
-					// S2 (phase-6 B-track review): same cutoff, same tick —
-					// see PruneIgnoredRefs' doc for why ignored_refs needed
-					// a retention bound too.
+					// Same cutoff, same tick — see PruneIgnoredRefs' doc for
+					// why ignored_refs needed a retention bound too.
 					if err := store.PruneIgnoredRefs(cutoff); err != nil {
 						fmt.Fprintf(os.Stderr, "gauntlet: history: prune ignored refs: %v\n", err)
 					}

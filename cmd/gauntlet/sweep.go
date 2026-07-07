@@ -12,12 +12,10 @@ import (
 
 // sweepAndRecreate removes dir and everything in it, then recreates it
 // empty. Used for every directory under -state that holds only ephemeral,
-// process-lifetime state — trialsDir and hooksDir (main.go, pre-existing)
-// and, as of S16 (phase-6 audit synthesis), executor scratch dirs. This is
-// only safe unconditionally now that AcquireLock (S2) guarantees no other
-// gauntlet daemon can be using dir concurrently: main.go must call this (or
-// the equivalent inline sweep it already had for trials/hooks) only after
-// AcquireLock has succeeded.
+// process-lifetime state — trialsDir, hooksDir, and executor scratch dirs
+// (main.go). This is only safe unconditionally because AcquireLock
+// guarantees no other gauntlet daemon can be using dir concurrently:
+// main.go must call this only after AcquireLock has succeeded.
 func sweepAndRecreate(dir string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("sweep %s: %w", dir, err)
@@ -42,23 +40,22 @@ func containerNamePrefix(token string) string {
 
 // sweepContainerOrphans removes containers left behind by a prior gauntlet
 // process that crashed (or was killed) before the container runtime's own
-// `--rm` cleanup ran for a check still in flight (S16, folded into S2's
-// lock-first fix per lifecycle #5's ruling in the audit synthesis).
+// `--rm` cleanup ran for a check still in flight.
 //
 // token scopes the sweep to containers this daemon itself could plausibly
-// have created (B1, phase-6 B-track review). AcquireLock (S2) only takes an
-// advisory lock on THIS process's -state directory — it says nothing about
-// the container-name namespace, which is host-global: two gauntlet daemons
-// pointed at different -state dirs each acquire their own lock and both
-// start successfully, but without this scoping, daemon B's startup sweep
-// would `ps`/`ls`-match and `rm -f` daemon A's live, in-flight check
-// containers, since both mint names under the same bare "gauntlet-" prefix.
-// Filtering on "gauntlet-<token>-" (token is a hash of this daemon's own
-// absolute -state path, minted in main.go and threaded into both this sweep
-// and executor.Params.Token, which names this daemon's own containers) is
-// what actually closes that gap: the flock guards the state dir, the token
+// have created. AcquireLock only takes an advisory lock on THIS process's
+// -state directory — it says nothing about the container-name namespace,
+// which is host-global: two gauntlet daemons pointed at different -state
+// dirs each acquire their own lock and both start successfully, but
+// without this scoping, daemon B's startup sweep would `ps`/`ls`-match and
+// `rm -f` daemon A's live, in-flight check containers, since both mint
+// names under the same bare "gauntlet-" prefix. Filtering on
+// "gauntlet-<token>-" (token is a hash of this daemon's own absolute
+// -state path, minted in main.go and threaded into both this sweep and
+// executor.Params.Token, which names this daemon's own containers) is what
+// actually closes that gap: the flock guards the state dir, the token
 // guards the container namespace — two independent scopes, both required.
-// Empty token preserves the pre-B1 host-global "gauntlet-" match exactly.
+// Empty token falls back to the host-global "gauntlet-" match.
 //
 // runtime == "" (no container executor configured) is a no-op. A missing
 // runtime binary, or any failure listing/removing containers, is logged to
@@ -82,16 +79,14 @@ func sweepContainerOrphans(ctx context.Context, runtime, token string, log io.Wr
 
 	prefix := containerNamePrefix(token)
 	for _, name := range names {
-		// Service instances (gauntlet-svc-<token>-<keyhash12>,
-		// internal/services) are a structurally disjoint namespace this
-		// sweep must never touch: they're meant to survive a restart, and
-		// internal/services.Pool.Adopt (called at boot, before this sweep
-		// would ever run concurrently with it) owns their entire
-		// adopt-or-destroy lifecycle instead (docs/plans/services.md §3
-		// "Adoption at boot, not reaping"; services-impl.md §4.5). Guarded
-		// explicitly, not just left to the token-prefix check below, so a
-		// future naming change to either namespace can't silently regress
-		// this split into a kill.
+		// Service instances (gauntlet-svc-<token>-<keyhash12>, internal/services)
+		// are a structurally disjoint namespace this sweep must never touch:
+		// they're meant to survive a restart, and internal/services.Pool.Adopt
+		// (called at boot, before this sweep would ever run concurrently with
+		// it) owns their entire adopt-or-destroy lifecycle instead — see
+		// docs/design/services.md ("Boot adoption"). Guarded explicitly, not
+		// just left to the token-prefix check below, so a future naming change
+		// to either namespace can't silently regress this split into a kill.
 		if strings.HasPrefix(name, "gauntlet-svc-") {
 			continue
 		}
@@ -110,14 +105,13 @@ func sweepContainerOrphans(ctx context.Context, runtime, token string, log io.Wr
 //
 // This deliberately never asks the runtime itself to filter by name: docker
 // and podman support `ps --filter name=...`, but Apple's `container` CLI has
-// no `ps` subcommand at all (its listing command is `list`/`ls`) — live
-// finding, phase-6 B-track review: `container ps --filter name=... --format
-// {{.Names}}` (the invocation this code used before) exits 64 ("Plugin
-// 'container-ps' not found"), which silently degraded the whole sweep to a
-// no-op via the log-and-continue error path below. Doing one plain listing
-// call per runtime and filtering by prefix in Go afterward, instead of
-// leaning on a per-runtime filter flag, is the one shape verified to work
-// identically across all three runtimes.
+// no `ps` subcommand at all (its listing command is `list`/`ls`). Asking it
+// for `container ps --filter name=... --format {{.Names}}` exits 64
+// ("Plugin 'container-ps' not found"), which would silently degrade the
+// whole sweep to a no-op via the log-and-continue error path below. Doing
+// one plain listing call per runtime and filtering by prefix in Go
+// afterward, instead of leaning on a per-runtime filter flag, is the one
+// shape verified to work identically across all three runtimes.
 func listContainerNames(ctx context.Context, runtime string) ([]string, error) {
 	if runtime == "container" {
 		out, err := exec.CommandContext(ctx, runtime, "ls", "-a", "--format", "json").Output()
@@ -136,10 +130,10 @@ func listContainerNames(ctx context.Context, runtime string) ([]string, error) {
 
 // parseContainerLSNames extracts container names from `container ls --format
 // json`'s output: an array of objects each carrying the --name value in a
-// top-level "id" field. Live-verified against `container` CLI 1.0.0 (phase-6
-// B-track review): `container run --name foo ... && container ls -a --format
-// json` emits `[{"id":"foo","configuration":{"id":"foo",...},...}]` — "id" at
-// the top level is what this parses; every other field is ignored.
+// top-level "id" field. Verified against `container` CLI 1.0.0: `container
+// run --name foo ... && container ls -a --format json` emits
+// `[{"id":"foo","configuration":{"id":"foo",...},...}]` — "id" at the top
+// level is what this parses; every other field is ignored.
 func parseContainerLSNames(out []byte) ([]string, error) {
 	var entries []struct {
 		ID string `json:"id"`

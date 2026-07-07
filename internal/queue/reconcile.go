@@ -20,11 +20,11 @@ import (
 	"github.com/sgrankin/gauntlet/internal/obs"
 )
 
-// candidatePrefix is the fixed portion of the candidate ref grammar
-// (docs/plans/phase1.md §9.3): "refs/heads/for/<target>/<rest>".
+// candidatePrefix is the fixed portion of the candidate ref grammar:
+// "refs/heads/for/<target>/<rest>".
 const candidatePrefix = "refs/heads/for/"
 
-// parseCandidateRef parses a candidate ref's grammar (§9.3). If <rest> (the
+// parseCandidateRef parses a candidate ref's grammar. If <rest> (the
 // portion after the target segment) has two or more slash-separated
 // segments, the first is user and the remainder — slashes allowed — is
 // topic (e.g. "for/main/alice/feat/foo" -> target "main", user "alice",
@@ -75,10 +75,9 @@ func discoverCandidates(target string, refs map[string]string) map[string]core.C
 func targetRefName(t config.Target) string { return "refs/heads/" + t.Branch }
 
 // checkIgnoredRefs scans refs for well-formed candidate refs (the for/...
-// grammar, §9.3) whose target segment names no configured target — a common
+// grammar) whose target segment names no configured target — a common
 // misconfiguration (a typo'd target name, or a target retired from config
-// while stale for/ refs linger) that phase 1 silently dropped
-// (docs/plans/phase23.md §10, O4). Emits core.EventIgnoredRef once per
+// while stale for/ refs linger). Emits core.EventIgnoredRef once per
 // (ref, SHA), not every tick, via d.ignoredRefs — pruned here of any ref no
 // longer present, so it can't grow unboundedly over a long-running
 // daemon's lifetime.
@@ -114,10 +113,10 @@ func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
 	}
 }
 
-// reconcileTarget runs one tick's worth of the per-target state machine
-// (docs/plans/phase1.md §3, generalized to a pipeline by
-// docs/plans/phase5.md §2): snapshot bookkeeping, then either advance the
-// target's lane or (if it's idle) try to refill it.
+// reconcileTarget runs one tick's worth of the per-target state machine:
+// snapshot bookkeeping, then either advance the target's lane or (if it's
+// idle) try to refill it. See docs/design/queue-modes.md ("The per-target
+// tick") for the mechanism in full.
 //
 // A lane holding any run at the start of the tick claims the whole tick —
 // even if every run in it concludes (lands, parks, or skips) during this
@@ -129,24 +128,21 @@ func (d *Daemon) checkIgnoredRefs(ctx context.Context, refs map[string]string) {
 // following tick, which re-Fetches/re-ListRefs, avoids that staleness
 // entirely; the cost is at most one idle tick of latency per conclusion,
 // negligible next to the poll interval already inherent to the loop.
-// P5-F (docs/plans/phase5.md §2): dispatch matches the plan's pseudocode
-// exactly now that a lane can hold more than one run. advanceLane's return
-// means "something structural concluded this tick" (a land, a park, a
-// suffix invalidation) — reconcileTarget defers refill to the next tick's
-// fresh Fetch/ListRefs in that case, exactly as before. Otherwise — lane
+//
+// advanceLane's return means "something structural concluded this tick" (a
+// land, a park, a suffix invalidation) — reconcileTarget defers refill to
+// the next tick's fresh Fetch/ListRefs in that case. Otherwise — lane
 // empty, OR lane non-empty but nothing concluded (a "quiet" tick: every
 // surviving run is still mid-check) — refillLane runs too. For serial and
 // batch this is a no-op whenever the lane already holds a run (refillLane's
-// own per-mode "busy" guard, §2.5): those modes hold at most one run, so a
+// own per-mode "busy" guard): those modes hold at most one run, so a
 // quiet tick with a non-empty lane never has room to refill anyway. Only
 // speculate's window actually tops up on a quiet tick with runs still
-// in flight — the one behavioral change this chunk makes to the dispatch
-// itself.
+// in flight.
 func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[string]string) {
-	// seedParksOnce runs earlier now, in ReconcileOnce before drainCommands
-	// (O1, the phase-5 review): a first-tick operator cancel must not have
-	// its "cancelled by operator" provenance silently overwritten by a
-	// same-tick seed for the same ref.
+	// seedParksOnce runs in ReconcileOnce before drainCommands: a first-tick
+	// operator cancel must not have its "cancelled by operator" provenance
+	// silently overwritten by a same-tick seed for the same ref.
 	targetTip := refs[targetRefName(t)]
 	cands := discoverCandidates(t.Name, refs)
 	d.syncBookkeeping(ctx, t, cands)
@@ -159,15 +155,15 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 	d.refillLane(ctx, t, targetTip, cands)
 }
 
-// syncBookkeeping updates order and done against this tick's candidates
-// (§9.1): drops entries for refs that vanished, clears park entries whose
-// SHA changed (a re-push), and assigns a fresh sequence number to every ref
+// syncBookkeeping updates order and done against this tick's candidates:
+// drops entries for refs that vanished, clears park entries whose SHA
+// changed (a re-push), and assigns a fresh sequence number to every ref
 // seen for the first time — emitting EventQueued for it, unless it is
 // already parked at its current SHA (same test pickHead uses below): a ref
-// seeded straight into done at boot (Feature 2, SeedParks) is "seen for the
-// first time" from order's perspective on the very next tick, but it was
-// never actually queued just now, so announcing it as freshly queued would
-// be cosmetic noise, not a real transition. The sequence number is still
+// seeded straight into done at boot (SeedParks) is "seen for the first
+// time" from order's perspective on the very next tick, but it was never
+// actually queued just now, so announcing it as freshly queued would be
+// cosmetic noise, not a real transition. The sequence number is still
 // assigned unconditionally — order must track every candidate regardless of
 // park state, only the event is gated.
 func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map[string]core.Candidate) {
@@ -224,7 +220,7 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 }
 
 // seedParksOnce consults Config.SeedParks for target exactly once per
-// Daemon lifetime (Feature 2, "park persistence across restarts"): every
+// Daemon lifetime (park persistence across restarts): every
 // later call for this target (ReconcileOnce calls it once per target, every
 // tick) returns immediately via d.seeded. Seeds are written straight into
 // d.done — the very next step for this target, syncBookkeeping (called from
@@ -254,8 +250,8 @@ func (d *Daemon) seedParksOnce(target string) {
 }
 
 // isRedOutcome reports whether o is one of the park-worthy "red family"
-// outcomes (matching the script DSL's cmdAssertSlotParked and §9.1's own
-// park semantics): a ref parks on Rejected, Conflict, or Error, never on
+// outcomes (matching the script DSL's cmdAssertSlotParked and park's own
+// semantics, below): a ref parks on Rejected, Conflict, or Error, never on
 // Landed or Skipped.
 func isRedOutcome(o core.Outcome) bool {
 	switch o {
@@ -267,8 +263,8 @@ func isRedOutcome(o core.Outcome) bool {
 }
 
 // pickHead returns the queue head: the candidate with the smallest order
-// (tie-broken lexically by ref) whose current SHA is not parked in done
-// (§9.1). ok is false if every candidate is parked or none exist.
+// (tie-broken lexically by ref) whose current SHA is not parked in done.
+// ok is false if every candidate is parked or none exist.
 func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.Candidate, bool) {
 	order := d.order[target]
 	done := d.done[target]
@@ -294,9 +290,9 @@ func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.
 
 // pickUpTo returns up to n candidates in the same FIFO order as pickHead
 // (smallest order, lexical ref tie-break), excluding parked (ref, SHA)
-// entries and any ref in inFlight (docs/plans/phase5.md §2.5's
-// pickHead-generalized "pickNext (one, excluding in-flight) + pickUpTo (N)").
-// inFlight may be nil (batch's own refill: the lane is always empty when
+// entries and any ref in inFlight — pickHead generalized to "pickNext (one,
+// excluding in-flight) + pickUpTo (N)". inFlight may be nil (batch's own
+// refill: the lane is always empty when
 // refillLane runs, so nothing is ever already in flight). refillSpeculate
 // (via pickNext, this function's n==1 specialization) is the caller that
 // actually needs a non-nil inFlight: its window can hold several runs at
@@ -334,8 +330,8 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 }
 
 // pickNext returns the single next queued candidate in FIFO order
-// (pickUpTo's one-result specialization, docs/plans/phase5.md §2.5):
-// excludes parked (ref, SHA) entries and any ref already in inFlight. ok is
+// (pickUpTo's one-result specialization): excludes parked (ref, SHA)
+// entries and any ref already in inFlight. ok is
 // false if nothing is left to pick (queue drained or every remaining
 // candidate is parked/in-flight). Speculate's refill (refillSpeculate)
 // calls this once per window slot, growing inFlight as each pick chains in.
@@ -347,12 +343,12 @@ func (d *Daemon) pickNext(target string, cands map[string]core.Candidate, inFlig
 	return picked[0], true
 }
 
-// runInvalidated is the generalized Invariant-5 test (docs/plans/phase5.md
-// §2.2): true (with a human-readable reason) iff any member's candidate
+// runInvalidated is the generalized Invariant-5 test: true (with a
+// human-readable reason) iff any member's candidate
 // ref moved or vanished, or — for the lane's head run (laneIndex==0) only —
 // the real target tip moved out from under baseOID. laneIndex is always 0
-// for serial/batch (lane.runs has at most one element, matching phase-1's
-// unconditional baseOID==targetTip check). A speculation window's non-head
+// for serial/batch (lane.runs has at most one element), so the tip-moved
+// check applies to their every run unconditionally. A speculation window's non-head
 // runs (laneIndex > 0) have a *predicted* baseOID — a predecessor's
 // chainTip, never a real ref — so their validity is transitive through the
 // predecessor instead: if index p-1 invalidates, invalidateSuffix already
@@ -373,9 +369,9 @@ func runInvalidated(r *run, laneIndex int, targetTip string, cands map[string]co
 // runRejectOutcome derives the terminal Outcome and Detail for a run whose
 // verdict just turned red (verdictRejected/verdictErrored) from the last
 // check result recorded against its head member — exactly the run whose
-// result set the verdict, since both terminal verdicts short-circuit
-// (docs/plans/phase5.md §2.3): no further check ever starts once one
-// fails or errors, so rec.Checks' last entry is always the culprit.
+// result set the verdict, since both terminal verdicts short-circuit: no
+// further check ever starts once one fails or errors, so rec.Checks' last
+// entry is always the culprit.
 func runRejectOutcome(r *run) (core.Outcome, string) {
 	checks := r.members[0].rec.Checks
 	last := checks[len(checks)-1]
@@ -385,9 +381,8 @@ func runRejectOutcome(r *run) (core.Outcome, string) {
 	return core.OutcomeRejected, fmt.Sprintf("check %q failed", last.Name)
 }
 
-// advanceLane walks lane's pipeline front to back for one tick
-// (docs/plans/phase5.md §2.1): a validity sweep first — a move must be
-// caught before a stale verdict is consumed, exactly reconcileInFlight's
+// advanceLane walks lane's pipeline front to back for one tick: a validity
+// sweep first — a move must be caught before a stale verdict is consumed,
 // move-then-result order — then each surviving run's checks advance once,
 // then a bubble check (a run that just went red parks; anything behind it
 // in the lane is invalidated unparked), then the contiguous green prefix
@@ -398,16 +393,15 @@ func runRejectOutcome(r *run) (core.Outcome, string) {
 // Degenerate for serial/batch: lane.runs has at most one element there, so
 // the bubble step's "suffix behind the culprit" is always empty and the
 // prefix-land loop runs at most once per tick. Speculate is where this
-// generalizes for real (P5-F): lane.runs can be up to Target.Window deep, so
-// a validity-sweep or bubble truncation can strand a genuine suffix (Skipped
+// generalizes for real: lane.runs can be up to Target.Window deep, so a
+// validity-sweep or bubble truncation can strand a genuine suffix (Skipped
 // unparked, re-queuing next tick), and the prefix-land loop can drain
 // several already-green runs in one tick, each land's CAS base equal to the
-// prior run's own chainTip (constraint 5's structural FIFO) — this function
-// itself needed no change to support either; P5-C already built it
-// lane-general, proven only at depth 1 until now.
+// prior run's own chainTip — see docs/design/queue-modes.md ("FIFO
+// landings, structurally CAS-enforced") for why that's always safe.
 func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, lane *lane) bool {
-	// (a) Validity sweep — before consuming any check result, exactly
-	// reconcileInFlight's move-then-result order.
+	// (a) Validity sweep — before consuming any check result, a move must
+	// be caught before a stale verdict is consumed.
 	for i, r := range lane.runs {
 		if bad, reason := runInvalidated(r, i, targetTip, cands); bad {
 			d.invalidateSuffix(ctx, t, lane, i, reason)
@@ -416,31 +410,30 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 	}
 
 	// (b) Advance each surviving run's current check (non-blocking; each
-	// run steps its own checks sequentially, unchanged from phase 1).
+	// run steps its own checks sequentially).
 	for _, r := range lane.runs {
 		d.advanceChecks(ctx, t, r)
 	}
 
-	// (c) Bubble: a run that just went red. Zuul reset semantics (F2, the
-	// phase-5 review): only lane index 0 parks on a red verdict — its base
-	// is the REAL target tip (runInvalidated's own rule), so a red there is
-	// proven against reality. A red at index i>0 has a PREDICTED base (a
-	// predecessor's own chainTip, never a real ref, per refillSpeculate) —
-	// that predecessor might itself be the one at fault, so parking index i
-	// here would risk sticking a possibly-innocent candidate with a false
-	// rejection. Instead it Skips unparked with a Detail saying so
-	// explicitly, and re-queues; it re-forms at the front of a future
-	// window and, if it's STILL red once it's actually testing against the
-	// real target tip (index 0), parks for real at that point via this same
-	// branch.
+	// (c) Bubble: a run that just went red. Only lane index 0 parks on a red
+	// verdict — its base is the REAL target tip (runInvalidated's own
+	// rule), so a red there is proven against reality. A red at index i>0
+	// has a PREDICTED base (a predecessor's own chainTip, never a real ref,
+	// per refillSpeculate) — that predecessor might itself be the one at
+	// fault, so parking index i here would risk sticking a possibly-innocent
+	// candidate with a false rejection. Instead it Skips unparked with a
+	// Detail saying so explicitly, and re-queues; it re-forms at the front
+	// of a future window and, if it's STILL red once it's actually testing
+	// against the real target tip (index 0), parks for real at that point
+	// via this same branch. See docs/design/queue-modes.md ("Red bubble:
+	// only index 0 parks") for the full rationale.
 	//
-	// A genuine multi-member batch (len(members) > 1) instead takes §10
-	// amendment 2's serial-fallback path (finishBatchRed): we don't know
-	// which member is guilty, so nothing parks there either — a batch
-	// formed with exactly one member (max-batch 1, or a queue that only
-	// offered one candidate) is NOT a "batch" for this purpose and takes the
-	// normal single-culprit park, since §4.1 promises max-batch 1 "degrades
-	// to serial behavior" byte for byte.
+	// A genuine multi-member batch (len(members) > 1) instead takes the
+	// serial-fallback path (finishBatchRed): we don't know which member is
+	// guilty, so nothing parks there either — a batch formed with exactly
+	// one member (max-batch 1, or a queue that only offered one candidate)
+	// is NOT a "batch" for this purpose and takes the normal single-culprit
+	// park, since max-batch 1 degrades to serial behavior byte for byte.
 	//
 	// Invariant, load-bearing for the index-0-only-parks rule below: a
 	// genuine multi-member batch run is always at lane index 0, because
@@ -482,11 +475,12 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 }
 
 // invalidateSuffix cancels and Skips (unparked) every run in
-// lane.runs[i:] — the suffix invalidated by a validity-sweep failure
-// (§2.1a) or a pipeline bubble (§2.1c) — then truncates lane.runs to
-// lane.runs[:i]. Degenerate on today's ≤1-run lane: i is 0 from the
+// lane.runs[i:] — the suffix invalidated by a validity-sweep failure or a
+// pipeline bubble — then truncates lane.runs to lane.runs[:i]. Degenerate
+// for serial/batch (lane.runs has at most one run): i is 0 from the
 // validity sweep (the lane's one run invalidates) or len(lane.runs) from
 // the bubble step (nothing behind index 0 to invalidate — a no-op slice).
+// Speculate is where a real suffix behind index i gets truncated.
 func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *lane, i int, reason string) {
 	for _, r := range lane.runs[i:] {
 		d.cancelRun(r)
@@ -495,11 +489,10 @@ func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *la
 	lane.runs = lane.runs[:i]
 }
 
-// advanceChecks is one run's check-advance step for one tick
-// (docs/plans/phase5.md §2.3): structurally identical to phase-1
-// reconcileInFlight's check-advance tail, minus the move/target checks
-// (hoisted into advanceLane's validity sweep) and minus the inline land
-// (now advanceLane's prefix-drain step). A non-blocking read of
+// advanceChecks is one run's check-advance step for one tick. Move/target
+// checks live in advanceLane's validity sweep, and landing lives in
+// advanceLane's prefix-drain step; this function only ever advances checks.
+// A non-blocking read of
 // r.cur.result that finds nothing yet leaves r.verdict at verdictNone (r
 // stays in flight). A result ends the check span, appends it to the head
 // member's run record, emits EventCheckFinished, then sets r.verdict:
@@ -509,22 +502,21 @@ func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *la
 // itself lands, parks, or finishes the run — those stay centralized in
 // advanceLane's bubble/land steps.
 //
-// P5-F multi-run generality fix: r.cur is nil once r's verdict is fully
-// determined (green/rejected/errored) and no further check was started —
-// exactly the steady state of a run waiting its turn to land behind a
-// still-in-flight predecessor. At lane-depth 1 this state is never
-// observed by a SECOND call to advanceChecks: a run can only go green while
-// sitting at lane.runs[0] (the only position that exists), and
-// advanceLane's prefix-drain step lands it that very same tick, before the
-// lane is ever revisited. At depth > 1, a non-head run can resolve (either
-// verdict) before its predecessor does, and then sit one or more further
-// ticks with cur==nil while advanceChecks keeps being called on it every
-// tick regardless (advanceLane's loop iterates every surviving run
-// unconditionally) — a bare `<-r.cur.result` there dereferences a nil
-// *checkInFlight and panics. Discovered via TestSpeculateDepth3RaceSoak
-// (concurrent releases can resolve a non-head run first); guarding here is
-// a no-op for every already-passing serial/batch/speculate case, since none
-// of them previously reached this function with r.cur == nil.
+// r.cur is nil once r's verdict is fully determined (green/rejected/errored)
+// and no further check was started — the steady state of a run waiting its
+// turn to land behind a still-in-flight predecessor. At lane-depth 1 this
+// state is never observed by a SECOND call to advanceChecks: a run can only
+// go green while sitting at lane.runs[0] (the only position that exists),
+// and advanceLane's prefix-drain step lands it that very same tick, before
+// the lane is ever revisited. At depth > 1, a non-head run can resolve
+// (either verdict) before its predecessor does, and then sit one or more
+// further ticks with cur==nil while advanceChecks keeps being called on it
+// every tick regardless (advanceLane's loop iterates every surviving run
+// unconditionally) — a bare `<-r.cur.result` there would dereference a nil
+// *checkInFlight and panic (TestSpeculateDepth3RaceSoak: concurrent
+// releases can resolve a non-head run first). The guard above is a no-op
+// at depth 1, since that case never reaches this function with
+// r.cur == nil.
 func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	if r.cur == nil {
 		return // verdict already determined; waiting its turn behind a predecessor (see doc comment)
@@ -532,7 +524,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	select {
 	case res := <-r.cur.result:
 		obs.EndCheck(r.cur.span, res)
-		// §3.3: a batch's checks run once against the chain tip's tree, but
+		// A batch's checks run once against the chain tip's tree, but
 		// the result is duplicated onto every member's own RunRecord — each
 		// landed/skipped row stays self-contained ("did this land green?"
 		// needs no join), and BatchID/Position/BatchSize carry the "tested
@@ -542,13 +534,11 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		for i := range r.members {
 			r.members[i].rec.Checks = append(r.members[i].rec.Checks, res)
 		}
-		// Check is the just-finished result itself (docs/plans/phase23.md
-		// F-a: "Event additionally carries the finished *CheckResult on
-		// check-finished events"), so channels can render a per-check
-		// verdict mid-run instead of waiting for the run's terminal event.
-		// Candidate attribution is the run's head member (documented
-		// decision, docs/plans/phase5.md P5-E): one event per check per run,
-		// not one per member per check, matching startCheck's own choice
+		// Check is the just-finished result itself, so channels can render
+		// a per-check verdict mid-run instead of waiting for the run's
+		// terminal event. Candidate attribution is the run's head member:
+		// one event per check per run, not one per member per check,
+		// matching startCheck's own choice
 		// below and keeping channel noise independent of batch size — the
 		// per-member terminal event (EventLanded/EventSkipped/EventRejected)
 		// carries each member's own duplicated Checks slice regardless.
@@ -560,7 +550,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 			r.verdict = verdictErrored
 		case res.Status == core.CheckFailed:
 			r.verdict = verdictRejected
-		default: // CheckPassed or CheckSkipped: both count as green (§5A)
+		default: // CheckPassed or CheckSkipped: both count as green
 			if r.idx+1 < len(r.checks) {
 				r.idx++
 				d.startCheck(ctx, r)
@@ -590,10 +580,10 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 		BaseSHA:   r.baseOID,
 		MergeSHA:  r.chainTip,
 		Candidate: r.members[0].cand,
-		Clean:     false, // reserved for the phase-4 clean-build escape hatch
+		Clean:     false, // reserved for a future clean-build cache escape hatch; see docs/design/core.md ("Deliberately not built")
 	}
-	// F-a (DESIGN.md "Full per-check log files"): LogDir == "" preserves
-	// the exact pre-F-a behavior (job.LogPath stays ""). The check name is
+	// LogDir == "" disables per-check log files entirely (job.LogPath stays
+	// ""); see DESIGN.md ("Full per-check log files"). The check name is
 	// free-form config, so it's sanitized the same way container names are
 	// (core.SanitizeName) before becoming a path component — the trailing
 	// ".log.zst" suffix additionally guarantees the sanitized name can
@@ -602,8 +592,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	// history's per-check seq column: two check names that sanitize to the
 	// same string (e.g. "lint go" and "lint/go", both -> "lint-go") would
 	// otherwise alias onto the same O_TRUNC'd file, with both checks'
-	// history rows pointing at whichever happened to write last
-	// (closing-review FIX 3).
+	// history rows pointing at whichever happened to write last.
 	//
 	// ".log.zst": the executor writes this file as a single zstd stream
 	// (internal/executor/logfile.go's openCheckLog) — the suffix is what
@@ -616,11 +605,11 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 
 	result := make(chan core.CheckResult, 1)
 	start := d.now()
-	// Shared-services ensure/release/re-probe (docs/plans/services-impl.md
-	// §4.3, the load-bearing change): ALL blocking service work — EnsureAll
-	// and the M1 re-probe — happens here, inside this check's own
-	// goroutine, never on the reconcile goroutine (review F1). needs/svcs
-	// are captured by value into the closure so a later mutation of r (none
+	// ALL blocking service work — EnsureAll and the mid-run liveness
+	// re-probe — happens here, inside this check's own goroutine, never on
+	// the reconcile goroutine; see docs/design/services.md ("Lifecycle:
+	// ensure, release, reap") for why that's load-bearing. needs/svcs are
+	// captured by value into the closure so a later mutation of r (none
 	// happens, but defensively) can't race this goroutine.
 	needs := check.Needs
 	svcs := r.services
@@ -636,22 +625,22 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 			result <- res
 			return
 		}
-		ens, err := d.cfg.Services.EnsureAll(spanCtx, svcs, needs) // BLOCKING, off the reconcile loop (F1)
+		ens, err := d.cfg.Services.EnsureAll(spanCtx, svcs, needs) // BLOCKING, off the reconcile loop
 		if err != nil {
 			result <- core.CheckResult{Name: check.Name, Command: job.Command, Err: fmt.Errorf("service ensure: %w", err)}
-			return // -> verdictErrored -> OutcomeError, park-as-error (services.md §7)
+			return // -> verdictErrored -> OutcomeError, park-as-error (see docs/design/services.md "Failure semantics")
 		}
-		defer d.cfg.Services.Release(ens) // refcount--, touch last-used (M3)
+		defer d.cfg.Services.Release(ens) // refcount--; last-used is touched on release, not ensure
 		job.ServiceEnv, job.Networks = ens.Env, ens.Networks
 		res := d.exec.RunCheck(spanCtx, job)
 		res.Command = job.Command
 		if res.Err == nil && res.Status == core.CheckFailed {
-			// M1: only a genuinely red verdict re-probes — a passing check
+			// Only a genuinely red verdict re-probes — a passing check
 			// never touches AnyDead.
 			if d.cfg.Services.AnyDead(spanCtx, ens) {
 				res.Err = fmt.Errorf("service died mid-run (park-as-error); check output retained above")
 				// res.Output/LogPath are left exactly as RunCheck set them,
-				// for the skeptical (services.md §7).
+				// for the skeptical.
 			}
 		}
 		result <- res
@@ -663,7 +652,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 
 // cancelRun aborts r's current check, if any (Invariant 5): cancels its
 // context (the executor is responsible for killing the underlying process
-// group, §9.5) and ends its span without waiting for the executor goroutine,
+// group) and ends its span without waiting for the executor goroutine,
 // which reports into a buffered channel nobody needs to read anymore.
 func (d *Daemon) cancelRun(r *run) {
 	if r.cur == nil {
@@ -674,13 +663,13 @@ func (d *Daemon) cancelRun(r *run) {
 	r.cur = nil
 }
 
-// chainLink is one candidate's link in the merge-commit chain
-// (docs/plans/phase5.md §1.2): the --no-ff merge commit itself, the tree it
-// was tested against, and the candidate it links in. len(lane.runs[*].members)
-// is 1 for serial/speculate; batch (P5-E, landed) chains up to Target.MaxBatch
-// links via repeated buildChainLink calls (startBatchRun), each one's base
-// the previous call's mergeOID — chain_test.go proves the underlying
-// mechanics against real git independent of any caller.
+// chainLink is one candidate's link in the merge-commit chain (see
+// docs/design/queue-modes.md, "The merge-commit chain"): the --no-ff merge
+// commit itself, the tree it was tested against, and the candidate it links
+// in. len(lane.runs[*].members) is 1 for serial/speculate; batch chains up
+// to Target.MaxBatch links via repeated buildChainLink calls (startBatchRun),
+// each one's base the previous call's mergeOID — chain_test.go proves the
+// underlying mechanics against real git independent of any caller.
 type chainLink struct {
 	mergeOID string
 	treeOID  string
@@ -688,40 +677,38 @@ type chainLink struct {
 }
 
 // buildChainLink trial-merges cand onto base and, if the trial is clean,
-// builds cand's --no-ff merge commit (docs/plans/phase5.md §1.2): this is
-// tryStartTrial's merge+message+commit logic, factored out of the pick/
-// recovery logic that now lives in refillLane/startRun so batch and
-// speculate can each call it once per chain link.
+// builds cand's --no-ff merge commit (see docs/design/queue-modes.md, "The
+// merge-commit chain"): the merge+message+commit logic shared by
+// refillLane/startRun so batch and speculate can each call it once per
+// chain link.
 //
 // onClean, if trial.Clean, is invoked exactly once, immediately after the
 // clean trial is confirmed and before any message/commit work begins — the
-// same point tryStartTrial minted the run ID (from trial.TreeOID) and
-// emitted EventTrialClean, before MergeBody/CommitTree ran. Its return is
-// the run ID embedded in the merge message's Gauntlet-Run trailer.
-// MergeBody is invoked here, per candidate, exactly as tryStartTrial did
-// (constraint 9). err is any daemon-side infra failure (MergeTree,
-// merge-message template, CommitTree), pre-formatted with the same stage
-// prefix tryStartTrial used as its Detail string. A conflict is signalled
-// by trial.Clean == false with a zero link and nil err — the caller
-// distinguishes that case itself (a conflict is data, not an error).
+// same point a run's ID is minted (from trial.TreeOID) and EventTrialClean
+// emitted, before MergeBody/CommitTree run. Its return is the run ID
+// embedded in the merge message's Gauntlet-Run trailer. MergeBody is
+// invoked here, once per candidate. err is any daemon-side infra failure
+// (MergeTree, merge-message template, CommitTree), pre-formatted with a
+// stage prefix for use as the caller's Detail string. A conflict is
+// signalled by trial.Clean == false with a zero link and nil err — the
+// caller distinguishes that case itself (a conflict is data, not an error).
 //
 // base need not be a real ref: it may be a prior chain link's mergeOID — an
-// unpushed commit that exists only as a loose object in the local repo
-// (docs/plans/phase5.md §1.1's spike finding, and P5-D's chain_test.go: both
+// unpushed commit that exists only as a loose object in the local repo.
 // MergeTree and CommitTree resolve any commit-ish from the object store
 // regardless of refs, and MergeTree detects a conflict against a chained
-// base identically to one against a real ref). No change was needed in this
-// function itself to support that — startBatchRun builds one multi-link
-// chain per batch run; refillSpeculate (via startRun, one member at a time)
-// builds one chain per window, each call's base the previous call's
-// mergeOID exactly the same way.
+// base identically to one against a real ref (chain_test.go proves this
+// against real git). startBatchRun builds one multi-link chain per batch
+// run; refillSpeculate (via startRun, one member at a time) builds one
+// chain per window, each call's base the previous call's mergeOID exactly
+// the same way.
 func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
 	return d.buildChainLinkPrecomputed(ctx, rootCtx, targetName, base, cand, onClean, nil)
 }
 
 // buildChainLinkPrecomputed is buildChainLink, plus an optional precomputed
-// merge-body lookup (S6, phase-6 audit synthesis): precomputed, if non-nil,
-// is consulted instead of calling Config.MergeBody inline, keyed by cand.SHA
+// merge-body lookup: precomputed, if non-nil, is consulted instead of
+// calling Config.MergeBody inline, keyed by cand.SHA
 // (precomputeMergeBodies' return) — a nil-map entry (found or not) is used
 // verbatim, "" included, matching MergeBody's own best-effort contract
 // exactly. precomputed == nil (every caller except startBatchRun's
@@ -775,14 +762,14 @@ func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetN
 }
 
 // specChanged reports whether cfg.CheckSpec's content differs between
-// prevTree and newTree — the §10 amendment-3 batch-boundary test
-// (docs/plans/phase5.md): while chaining, a member whose merge changes the
-// check-spec content relative to the chain's tree *before* that member's
-// link terminates the batch there (the member is included, tested under its
-// own change; later picks start the next batch, P5-E). prevTree/newTree may
-// be any tree-ish (a commit or a tree) — exactly ReadFileFromTree's own
-// contract; the intended callers pass a link's base and its resulting
-// trial.TreeOID.
+// prevTree and newTree — the batch-boundary test (see
+// docs/design/queue-modes.md, "Chain formation and boundaries"): while
+// chaining, a member whose merge changes the check-spec content relative to
+// the chain's tree *before* that member's link terminates the batch there
+// (the member is included, tested under its own change; later picks start
+// the next batch). prevTree/newTree may be any tree-ish (a commit or a
+// tree) — exactly ReadFileFromTree's own contract; the intended callers
+// pass a link's base and its resulting trial.TreeOID.
 //
 // This compares file *content*, not a blob OID: ReadFileFromTree returns
 // bytes, not an object ID, and content comparison is what the plan calls
@@ -815,24 +802,21 @@ func (d *Daemon) specChanged(ctx context.Context, prevTree, newTree string) bool
 	}
 }
 
-// refillLane tries to fill an idle lane for one tick (docs/plans/phase5.md
-// §2.5): reconcileTarget only calls this when the lane started the tick
-// empty, so there's no separate "lane busy" check here — that precondition
-// is enforced by the caller, exactly as tryStartTrial's implicit
-// precondition was pre-refactor.
+// refillLane tries to fill an idle lane for one tick: reconcileTarget only
+// calls this for a target whose lane started the tick empty, or (speculate
+// only) with room in its window, so there's no separate "lane busy" check
+// needed here for most modes — that precondition is enforced by the caller.
 //
-// Dispatches on t.Mode: "speculate" tops up the window (refillSpeculate,
-// P5-F) — the one mode whose refill runs even when the lane already holds
-// runs (reconcileTarget calls refillLane on every quiet tick now, not just
-// an empty-lane one; see its own doc comment). Every other mode holds at
-// most one run, so its branch below re-asserts that "lane busy" precondition
-// explicitly rather than relying on the caller to have never called it with
-// runs in flight (true pre-P5-F, no longer true once speculate exists).
-// "batch" then forms a chained multi-candidate run (refillBatch) UNLESS this
-// target is in batch-red serial fallback (§2.6, overridden by §10 amendment
-// 2 for the event vocabulary; d.batchFallback), in which case — and for
-// "serial"/"" the default — refillSerialOne runs instead, exactly
-// tryStartTrial's pick-head step.
+// Dispatches on t.Mode: "speculate" tops up the window (refillSpeculate) —
+// the one mode whose refill runs even when the lane already holds runs
+// (reconcileTarget calls refillLane on every quiet tick, not just an
+// empty-lane one; see its own doc comment). Every other mode holds at most
+// one run, so its branch below re-asserts that "lane busy" precondition
+// explicitly. "batch" then forms a chained multi-candidate run
+// (refillBatch) UNLESS this target is in batch-red serial fallback
+// (d.batchFallback; see docs/design/queue-modes.md, "Red-recovery: serial
+// fallback"), in which case — and for "serial"/"" the default —
+// refillSerialOne runs instead, picking one candidate at a time.
 func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
 	l := d.lanes[t.Name]
 
@@ -852,14 +836,15 @@ func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip stri
 }
 
 // refillSerialOne is the one-candidate-at-a-time refill: serial mode's own
-// refill, AND — while d.batchFallback[t.Name] is set (§2.6, §10 amendment
-// 2) — batch mode's red-recovery fallback. It deliberately is NOT "a
-// size-1 batch": running through this exact path (not startBatchRun with a
-// single picked candidate) means a red verdict here takes the normal
-// single-culprit park + EventRejected treatment (finishRun's plain branch
-// in advanceLane's bubble step, since len(members)==1), not batch-red's
-// no-park EventSkipped treatment — the culprit's true rejection must come
-// from a genuine serial round, per §10 amendment 2's own reasoning.
+// refill, AND — while d.batchFallback[t.Name] is set — batch mode's
+// red-recovery fallback (see docs/design/queue-modes.md, "Red-recovery:
+// serial fallback"). It deliberately is NOT "a size-1 batch": running
+// through this exact path (not startBatchRun with a single picked
+// candidate) means a red verdict here takes the normal single-culprit park
+// + EventRejected treatment (finishRun's plain branch in advanceLane's
+// bubble step, since len(members)==1), not batch-red's no-park
+// EventSkipped treatment — the culprit's true rejection must come from a
+// genuine serial round.
 func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
 	cand, ok := d.pickHead(t.Name, cands)
 	if !ok {
@@ -879,14 +864,14 @@ func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip
 	d.startRun(ctx, t, targetTip, cand, false, "")
 }
 
-// refillBatch fills an idle lane in batch mode (docs/plans/phase5.md §2.5):
-// picks up to t.MaxBatch queued candidates FIFO (pickUpTo; nothing is ever
-// "in flight" to exclude here, since batch holds at most one run and
-// refillLane only runs when the lane is idle), then chains them via
-// startBatchRun. IsAncestor recovery (Invariant 4) is checked on the head
-// pick only, exactly as serial's own refill: a mid-chain member that's
-// somehow already landed is caught the same way once it becomes a future
-// refill's head (§8's per-member recovery walkthrough).
+// refillBatch fills an idle lane in batch mode: picks up to t.MaxBatch
+// queued candidates FIFO (pickUpTo; nothing is ever "in flight" to exclude
+// here, since batch holds at most one run and refillLane only runs when
+// the lane is idle), then chains them via startBatchRun. IsAncestor
+// recovery (Invariant 4) is checked on the head pick only, exactly as
+// serial's own refill: a mid-chain member that's somehow already landed is
+// caught the same way once it becomes a future refill's head (see
+// recoverLanded's doc comment for the per-member recovery walkthrough).
 func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
 	maxBatch := t.MaxBatch
 	if maxBatch < 1 {
@@ -918,38 +903,36 @@ func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip str
 }
 
 // startBatchRun chains picked's candidates into one --no-ff merge chain
-// (§1.2's buildChainLink, advancing the base to each new link) and, if at
-// least the head candidate chains cleanly, starts one run testing the chain
-// tip's tree against every chained member (§2.4's one-check-suite-per-batch
-// shape).
+// (buildChainLink, advancing the base to each new link) and, if at least
+// the head candidate chains cleanly, starts one run testing the chain
+// tip's tree against every chained member — one check suite per batch (see
+// docs/design/queue-modes.md, "Batch").
 //
 // Chaining stops — without failing the whole batch — at the first member
 // that either conflicts against the chain built so far, or hits a
 // daemon-side infra failure building its link: that member parks via the
 // normal per-candidate machinery (rejectPreMerge, a conflict or infra error
 // before any run exists) and the batch forms from whatever chained cleanly
-// before it (decide-and-document: park-and-stop, not
-// park-and-skip-and-continue — simplest, and preserves FIFO, since the
-// members after the parked one are never touched and simply wait for the
-// next refill). If the very first candidate fails this way, no batch forms
-// at all — byte-for-byte serial's own rejectPreMerge path.
+// before it. This is park-and-stop, not park-and-skip-and-continue —
+// simplest, and preserves FIFO, since the members after the parked one are
+// never touched and simply wait for the next refill. If the very first
+// candidate fails this way, no batch forms at all — byte-for-byte serial's
+// own rejectPreMerge path.
 //
 // A member whose link changes the check spec's content relative to the
 // chain built before it (specChanged) terminates the batch AFTER that
-// member (§10 amendment 3, overriding §9's "future refinement" framing):
-// the member is included, tested under its own change; later picks start
-// the next batch.
+// member: the member is included, tested under its own change; later picks
+// start the next batch.
 func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip string, picked []core.Candidate) {
-	// F4 (docs/plans/phase23.md §10): the root span starts here, before any
-	// trial-merge, exactly as serial's startRun — one shared span for the
-	// batch's single run.
+	// The root span starts here, before any trial-merge, exactly as
+	// serial's startRun — one shared span for the batch's single run.
 	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, picked[0], "")
 
-	// S6 (phase-6 audit synthesis): precompute every picked member's
-	// merge-commit body concurrently, before the chain loop below runs any
-	// trial merge, so the reconcile loop's wall clock for minting an
-	// N-member batch drops from N*cfg.Summarize.Timeout (one MergeBody call
-	// per link, serially, inline in the loop) to roughly one timeout total.
+	// Precompute every picked member's merge-commit body concurrently,
+	// before the chain loop below runs any trial merge, so the reconcile
+	// loop's wall clock for minting an N-member batch drops from
+	// N*cfg.Summarize.Timeout (one MergeBody call per link, serially,
+	// inline in the loop) to roughly one timeout total.
 	// Every request uses targetTip, not each link's own chained base — see
 	// precomputeMergeBodies' doc for why that's equivalent for what
 	// Config.MergeBody actually reads, and required since a link's real
@@ -977,8 +960,7 @@ chain:
 			if runID == "" {
 				// Minted from the FIRST member's trial tree, exactly as
 				// serial's startRun mints its single run ID — reused
-				// verbatim as the batch's BatchID (§3.2: "<runID> reuse is
-				// fine").
+				// verbatim as the batch's BatchID.
 				runID = newRunID(d.now(), trial.TreeOID)
 				rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
 			}
@@ -1011,7 +993,7 @@ chain:
 		changed := d.specChanged(ctx, specTree, trial.TreeOID)
 		specTree = trial.TreeOID
 		if changed {
-			break chain // §10 amendment 3: member included, batch ends here
+			break chain // member included, batch ends here (the spec-change boundary)
 		}
 	}
 
@@ -1026,13 +1008,13 @@ chain:
 	d.finishBatchStart(ctx, t, targetTip, runID, links, trials, rootCtx, rootSpan)
 }
 
-// finishBatchStart is startBatchRun's back half (§2.5, §3.3): once the
-// chain has at least one link, read and parse the check spec from the
-// chain TIP's tree (the batch's one-check-suite-over-the-combined-tree
-// shape — §9's documented "tested by the tip's own definition" caveat,
-// narrowed by §10 amendment 3's spec-change boundary above), export the
-// tip's tree, and produce one run whose members carry per-member
-// RunRecords sharing runID as BatchID (Position/BatchSize per §3.3).
+// finishBatchStart is startBatchRun's back half: once the chain has at
+// least one link, read and parse the check spec from the chain TIP's tree
+// (the batch's one-check-suite-over-the-combined-tree shape, narrowed by
+// the spec-change boundary above — see docs/design/queue-modes.md, "Chain
+// formation and boundaries"), export the tip's tree, and produce one run
+// whose members carry per-member RunRecords sharing runID as BatchID
+// (Position/BatchSize alongside it).
 //
 // Every daemon-side infra failure here (missing/invalid check spec, export
 // failure) parks every already-chained member (rejectBatch) — there's no
@@ -1054,10 +1036,10 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
-	// Capability gating (services.md §7 "loud like a malformed check",
-	// services-impl.md §4.4): a spec that declares service/needs on a
-	// daemon with no services block is a spec validation error, never a
-	// silent no-op.
+	// Capability gating: a spec that declares service/needs on a daemon
+	// with no services block is a spec validation error, never a silent
+	// no-op — loud like a malformed check (see docs/design/services.md,
+	// "The model: a cache entry, not a supervised unit").
 	if spec.RequiresServices() && d.cfg.Services == nil {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
 		return
@@ -1123,8 +1105,8 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 
 // rejectBatch parks every member in links and emits its own terminal event
 // for a batch-wide pre-check failure discovered after the chain was fully
-// built (§3.3's per-member-record shape, applied to a failure path rather
-// than a verdict): unlike batch-red (§10 amendment 2, finishBatchRed), this
+// built (the per-member-record shape, applied to a failure path rather
+// than a verdict): unlike batch-red (finishBatchRed), this
 // isn't "a check failed and we don't know who's guilty" — it's "the
 // combined tree these members were chained onto can't even be
 // read/parsed/exported", which is nobody's individual fault but blocks
@@ -1159,20 +1141,19 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 			Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 			Candidate: link.cand, RunID: rec.RunID, Record: rec, Detail: detail,
 		})
-		d.maybeAutoRetry(ctx, t.Name, link.cand, outcome) // phase-B amendment, autoretry.go
+		d.maybeAutoRetry(ctx, t.Name, link.cand, outcome) // see autoretry.go
 	}
 	obs.EndRun(rootSpan, lastRec)
 }
 
 // finishBatchRed handles a genuine multi-member batch run (len(r.members) >
-// 1) whose combined check suite went red (§2.6, overridden by §10 amendment
-// 2 for the event vocabulary): we don't know which member is guilty, so
+// 1) whose combined check suite went red (see docs/design/queue-modes.md,
+// "Red-recovery: serial fallback"): we don't know which member is guilty, so
 // nothing parks. Every member gets its own terminal record — Outcome
 // Skipped, the shared failing checks already duplicated onto it by
-// advanceChecks — and its own EventSkipped, in member order (constraint
-// 10's per-candidate event contract, generalized), with a Detail naming the
-// batch and the failing check. batchFallback[target] is then set so the
-// next refillLane for this target walks candidates one at a time
+// advanceChecks — and its own EventSkipped, in member order, with a Detail
+// naming the batch and the failing check. batchFallback[target] is then
+// set so the next refillLane for this target walks candidates one at a time
 // (refillSerialOne) until a landing clears it (landRun): the culprit's
 // genuine EventRejected + park comes from ITS serial round, keeping park
 // semantics honest (only a proven-red SHA ever parks) and channel rendering
@@ -1215,9 +1196,9 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 	d.batchFallback[t.Name] = true
 }
 
-// refillSpeculate tops up target's speculation window for one tick
-// (docs/plans/phase5.md §2.5): unlike serial/batch, this runs whenever the
-// window has room, whether the lane started the tick empty or already held
+// refillSpeculate tops up target's speculation window for one tick: unlike
+// serial/batch, this runs whenever the window has room, whether the lane
+// started the tick empty or already held
 // some runs (reconcileTarget calls refillLane on every quiet tick, not just
 // an empty-lane one — this is the mode that actually needs that). Each new
 // run's base is the previous run's chainTip — an unpushed, PREDICTED
@@ -1231,9 +1212,10 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 // base is the live target tip) that candidate parks via startRun's normal
 // rejectPreMerge path, exactly as serial/batch. At a non-head position
 // (predicted==true, base is a predecessor's own unpushed chainTip) it does
-// NOT park (F2 extended, docs/plans/phase5.md §Amendments — a conflict
-// against a mere prediction proves nothing about the candidate, since that
-// predecessor might itself never land): startRun's skipPreMergePredicted
+// NOT park (see docs/design/queue-modes.md, "Conflict against a predicted
+// base is a skip, not a park" — a conflict against a mere prediction proves
+// nothing about the candidate, since that predecessor might itself never
+// land): startRun's skipPreMergePredicted
 // Skips it unparked instead, with a Detail that still says the conflict was
 // against a PREDICTION — "conflicts with in-flight <topic>@<sha> (predicted
 // base)" — rather than the generic "trial merge conflict" wording
@@ -1286,8 +1268,8 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 		if len(runs) == 0 {
 			// IsAncestor recovery (Invariant 4) only applies to a fresh,
 			// wholly empty lane — exactly serial/batch's own head-pick-only
-			// rule (§2.5): a mid-window member that's somehow already landed
-			// is caught the same way once it becomes the head of a future
+			// rule: a mid-window member that's somehow already landed is
+			// caught the same way once it becomes the head of a future
 			// empty-lane refill.
 			landed, err := d.git.IsAncestor(ctx, cand.SHA, targetTip)
 			if err != nil {
@@ -1308,10 +1290,9 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 		r, ok := d.startRun(ctx, t, base, cand, predicted, conflictDetail)
 		if !ok {
 			// conflict or infra error: at the head (predicted==false) this
-			// candidate parked; at a predicted position (F2 extended,
-			// docs/plans/phase5.md §Amendments) it Skipped unparked and will
-			// re-queue instead. Either way, stop extending the window this
-			// tick.
+			// candidate parked; at a predicted position it Skipped unparked
+			// and will re-queue instead. Either way, stop extending the
+			// window this tick.
 			return
 		}
 
@@ -1326,23 +1307,21 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 
 // startRun builds cand's chain link (via buildChainLink) and, on a clean
 // merge, reads and parses its check spec and exports its tree, producing a
-// new one-run, one-member lane entry (docs/plans/phase5.md §3.2) — the
-// rest of tryStartTrial's §3 step 3. Every daemon-side infra failure in
+// new one-run, one-member lane entry. Every daemon-side infra failure in
 // this path (MergeTree, message template, CommitTree, ReadFileFromTree,
 // ParseChecks, MkdirTemp, ExportTree) is handled uniformly: OutcomeError +
 // park + EventError (OutcomeRejected for a missing/invalid check spec).
-// Parking prevents an unbounded retry-every-tick loop (§9.2's explicit
-// phase-1 ruling: backoff/auto-retry is phase 2), and the distinct
+// Parking prevents an unbounded retry-every-tick loop, and the distinct
 // EventError lets operators tell infra from red; a restart, a re-push, or
 // a CommandRetry clears the park.
 //
-// predicted (P5-F) marks whether base is a predicted, unpushed predecessor
+// predicted marks whether base is a predicted, unpushed predecessor
 // chainTip rather than the live target tip — a speculation window's non-head
-// member. It threads onto both run.predicted (RunSnapshot.Predicted, §3.4)
-// and RunRecord.Speculated (§3.3), purely informational for the dashboard;
-// the landed commit is the tested commit either way (Invariant 1). Every
-// caller but refillSpeculate passes false (base is always the real target
-// tip for serial's one-run lane).
+// member. It threads onto both run.predicted (RunSnapshot.Predicted) and
+// RunRecord.Speculated, purely informational for the dashboard; the landed
+// commit is the tested commit either way (Invariant 1). Every caller but
+// refillSpeculate passes false (base is always the real target tip for
+// serial's one-run lane).
 //
 // conflictDetail, if non-empty, replaces the default "trial merge conflict:
 // ..." message on a trial-merge conflict. refillSpeculate uses it to
@@ -1350,23 +1329,20 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 // conflicts with the chain built so far is conflicting with in-flight,
 // not-yet-landed work, which is a materially different situation from a
 // real conflict against the pushed target tip, and its park Detail must say
-// so (docs/plans/phase5.md §2.5).
+// so.
 //
 // ok reports whether a run was started; false covers every
 // terminal-without-a-run outcome (conflict or any infra error) — the
 // caller's signal to stop extending a window/re-pick. When predicted is
 // false the candidate that failed has already been parked by this call
-// (unchanged, real-tip behavior, via rejectPreMerge); when predicted is true
-// it has instead been Skipped unparked and will re-queue (F2 extended to
-// pre-merge failures against a predicted base, docs/plans/phase5.md
-// §Amendments — see skipPreMergePredicted below) — either way the caller
-// must stop, but only the former is a park.
+// (real-tip behavior, via rejectPreMerge); when predicted is true it has
+// instead been Skipped unparked and will re-queue (see skipPreMergePredicted
+// below) — either way the caller must stop, but only the former is a park.
 func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, cand core.Candidate, predicted bool, conflictDetail string) (*run, bool) {
-	// F4 (docs/plans/phase23.md §10): the run's root span starts here,
-	// before MergeTree, so trial-merge is correctly parented as its child
-	// instead of being orphaned under ctx (phase 1's bug: the root span
-	// used to start only once a merge commit existed). run.id and
-	// merge.sha aren't known yet — StartRun gets empty placeholders — and
+	// The run's root span starts here, before MergeTree, so trial-merge is
+	// correctly parented as its child rather than orphaned under ctx.
+	// run.id and merge.sha aren't known yet — StartRun gets empty
+	// placeholders — and
 	// are backfilled onto the very same span via SetAttributes once each is
 	// minted below; span.SetAttributes updating an already-set key is
 	// standard OTel behavior, so no obs API change is needed for this.
@@ -1375,20 +1351,10 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	var runID string
 	link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
 		// Run ID from the trial *tree* OID, not the merge commit OID — a
-		// deliberate deviation from §9.4's letter. The merge commit's
-		// message must carry a Gauntlet-Run trailer containing the run ID
-		// (§3), and a commit's OID is a hash over its own message, so a
-		// run ID containing mergeOID[:12] is a genuine circular dependency
-		// — no commit can embed (a prefix of) its own hash. The trial
-		// tree's OID is known before any commit exists, is
-		// content-addressed to exactly what the checks test, and stays
-		// human-correlatable (`git log --format='%H %T'` on the target
-		// ties each merge commit to its tree). §9.4's other property —
-		// uniqueness across restarts with no persistence — comes from the
-		// timestamp, sharpened in phase 2/3 by a monotonic per-process
-		// counter (§2.4) since same-second identical-tree trials would
-		// otherwise mint identical IDs. Commit-to-run correlation is the
-		// trailer's job; run-to-commit is RunRecord.MergeSHA's.
+		// commit OID hashes its own message, and the message must carry
+		// this run ID in its Gauntlet-Run trailer, so an ID derived from
+		// the commit OID would be circular. See docs/design/core.md ("Run
+		// identity") for the full three-part ID scheme.
 		//
 		// Minted here, before EventTrialClean, and reused verbatim for the
 		// rest of the run: channels join every event for a run by RunID
@@ -1401,15 +1367,16 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		return runID
 	})
 	if err != nil {
-		// F2 extended (docs/plans/phase5.md §Amendments): buildChainLink's
-		// error here (MergeTree or CommitTree failing outright, before any
-		// trial tree/merge commit exists) against a PREDICTED base proves
-		// nothing about cand — same false-negative-park risk a trial
-		// CONFLICT has below, and the same category advanceLane's bubble
-		// step already folds into its predicted-base no-park branch for a
-		// post-merge check ERROR (verdictErrored treated identically to
-		// verdictRejected at lane index >0). Skip unparked instead of
-		// parking on an unproven base.
+		// buildChainLink's error here (MergeTree or CommitTree failing
+		// outright, before any trial tree/merge commit exists) against a
+		// PREDICTED base proves nothing about cand — same false-negative-park
+		// risk a trial CONFLICT has below, and the same category
+		// advanceLane's bubble step already folds into its predicted-base
+		// no-park branch for a post-merge check ERROR (verdictErrored
+		// treated identically to verdictRejected at lane index >0). Skip
+		// unparked instead of parking on an unproven base. See
+		// docs/design/queue-modes.md ("Conflict against a predicted base is
+		// a skip, not a park").
 		if predicted {
 			d.skipPreMergePredicted(ctx, t, cand, "predicted-base build error (retesting once real): "+err.Error(), rootSpan)
 			return nil, false
@@ -1422,18 +1389,16 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		if conflictDetail != "" {
 			detail = conflictDetail + ": " + strings.Join(trial.Conflicts, ", ")
 		}
-		// F2 extended (docs/plans/phase5.md §Amendments): a trial CONFLICT
-		// against a PREDICTED base (refillSpeculate's non-head window
-		// members — base is a predecessor's own unpushed chainTip, never a
-		// real ref) is a prediction-derived verdict in exactly the sense F2
-		// already covers for a post-merge red at lane index >0
-		// (advanceLane's bubble step): the predecessor might be at fault, or
-		// might never even land, so this base might never become real.
-		// Parking cand here is the same false-negative park F2 fixed for
-		// reds. Skip unparked instead — cand re-queues and re-forms in a
-		// later window; if it's STILL conflicting once it actually reaches
-		// lane index 0 against the REAL target tip, it parks there for
-		// real, exactly as today.
+		// A trial CONFLICT against a PREDICTED base (refillSpeculate's
+		// non-head window members — base is a predecessor's own unpushed
+		// chainTip, never a real ref) is a prediction-derived verdict in
+		// exactly the sense already covered for a post-merge red at lane
+		// index >0 (advanceLane's bubble step): the predecessor might be at
+		// fault, or might never even land, so this base might never become
+		// real. Parking cand here would be the same false-negative park.
+		// Skip unparked instead — cand re-queues and re-forms in a later
+		// window; if it's STILL conflicting once it actually reaches lane
+		// index 0 against the REAL target tip, it parks there for real.
 		if predicted {
 			d.skipPreMergePredicted(ctx, t, cand, detail+"; re-queuing for retest against the real tip", rootSpan)
 			return nil, false
@@ -1453,20 +1418,19 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return nil, false
 	}
-	// Capability gating (services.md §7 "loud like a malformed check",
-	// services-impl.md §4.4): a spec that declares service/needs on a
-	// daemon with no services block is a spec validation error, never a
-	// silent no-op.
+	// Capability gating: a spec that declares service/needs on a daemon
+	// with no services block is a spec validation error, never a silent
+	// no-op — loud like a malformed check (see docs/design/services.md,
+	// "The model: a cache entry, not a supervised unit").
 	if spec.RequiresServices() && d.cfg.Services == nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
 		return nil, false
 	}
 
-	// F2 (docs/plans/phase23.md §10): trial-tree export dirs are created
-	// under cfg.WorkDir when it's set. os.MkdirTemp treats an empty dir
-	// argument as "use the OS default temp dir" already, so this is a strict
-	// superset of the phase-1 behavior; sweeping WorkDir at startup (the
-	// other half of F2) is cmd's job, not the queue's (D7).
+	// Trial-tree export dirs are created under cfg.WorkDir when it's set.
+	// os.MkdirTemp treats an empty dir argument as "use the OS default temp
+	// dir" already; sweeping WorkDir at startup is cmd's job, not the
+	// queue's.
 	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
@@ -1514,11 +1478,11 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	return r, true
 }
 
-// landRun is the generalized land (docs/plans/phase5.md §2.4): one CAS push
-// lands the whole chain, then a per-member slot delete + terminal event,
-// FIFO. len(r.members)==1 for serial/speculate: exactly phase-1's land, one
-// push one delete one event. A batch run (P5-E, landed) has N members: one
-// push, N deletes, N EventLanded — one per candidate, in FIFO order.
+// landRun is the generalized land: one CAS push lands the whole chain, then
+// a per-member slot delete + terminal event, FIFO. len(r.members)==1 for
+// serial/speculate: one push, one delete, one event. A batch run has N
+// members: one push, N deletes, N EventLanded — one per candidate, in FIFO
+// order.
 //
 // A stale target CAS means the target moved between trial and land — Skip,
 // keep every member's slot, retry next tick (Invariant 2). A stale
@@ -1549,8 +1513,8 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		return
 	}
 
-	// §2.6/§10 amendment 2: any successful landing for this target clears
-	// batch-red serial fallback, resuming batching on the next refill —
+	// Any successful landing for this target clears batch-red serial
+	// fallback, resuming batching on the next refill —
 	// whether this landing is an ordinary batch, or one round of the
 	// fallback's own one-at-a-time walk. delete is a no-op when the flag
 	// was never set (every non-batch mode, or a batch target that never
@@ -1583,8 +1547,8 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	// Deliberate ordering exception vs. the other terminal paths: finishRun
 	// finalizes (root-span end, export-dir removal) *before* emitting its
 	// terminal event, but here each member's EventLanded is emitted above,
-	// before finalizeRun runs — §2.4's delete-then-emit-per-member FIFO
-	// shape. Unobservable today (no event or record carries the dir path,
+	// before finalizeRun runs — the delete-then-emit-per-member FIFO shape.
+	// Unobservable today (no event or record carries the dir path,
 	// and spans are no-op), but don't write a consumer — or a batch-chunk
 	// extension — that assumes the dir is gone by EventLanded time.
 	obs.EndSpan(landSpan, nil) // the land itself (target push) succeeded regardless of any slot-delete outcome
@@ -1600,7 +1564,7 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 // this loop is a one-element loop in every case except a move/target
 // invalidation of a genuine multi-member batch (invalidateSuffix, park
 // always false there): every member of an invalidated batch must Skip and
-// re-queue, none of them singled out (§2.2).
+// re-queue, none of them singled out.
 func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome core.Outcome, detail string, park bool) {
 	for i := range r.members {
 		m := &r.members[i]
@@ -1626,7 +1590,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 			Record:    m.rec,
 			Detail:    detail,
 		})
-		// Phase-B amendment (autoretry.go): only a member that was actually
+		// See autoretry.go: only a member that was actually
 		// just parked (park==true) is eligible — maybeAutoRetry itself
 		// no-ops for anything but OutcomeError, but gating on park here too
 		// avoids ever consulting/clearing a stale, unrelated park entry for
@@ -1639,8 +1603,8 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 }
 
 // finalizeRun performs the once-per-run cleanup that must happen exactly
-// once regardless of member count (docs/plans/phase5.md §3.2): ends the
-// root span (its summary attributes/status come from the head member's
+// once regardless of member count: ends the root span (its summary
+// attributes/status come from the head member's
 // RunRecord — the representative summary for a batch's shared span; each
 // member's own full record is still what's emitted per terminal event) and
 // removes the exported trial dir. Per-check log files
@@ -1661,34 +1625,33 @@ func (d *Daemon) finalizeRun(r *run) {
 // recoverLanded implements Invariant 4's crash-recovery branch: cand.SHA is
 // already an ancestor of the target tip, meaning some earlier run landed it
 // before a crash (or this daemon's own previous pass) interrupted slot
-// cleanup. No trial ran and no check ran, but F1 (docs/plans/phase23.md
-// §10) requires every terminal event to still carry a complete, non-nil
-// RunRecord, so one is synthesized here: a run-ID stand-in derived from the
-// candidate SHA (phase1 §9.4's stand-in rule, minted through the same
+// cleanup. No trial ran and no check ran, but every terminal event must
+// still carry a complete, non-nil RunRecord, so one is synthesized here: a
+// run-ID stand-in derived from the candidate SHA (minted through the same
 // counter as a real run ID so it can never collide with one), zero checks,
-// OutcomeLanded, and a Detail explaining that checks were not re-run. As
-// before, this is a pure recovery action, not a run: no merge ever happens
-// here, so BaseOID/Trial stay zero-valued, matching the other pre-merge
-// synthesized records (rejectPreMerge). MergeSHA, however, IS filled in
-// (below) — the landing merge already exists, it's simply looked up rather
-// than created.
+// OutcomeLanded, and a Detail explaining that checks were not re-run. This
+// is a pure recovery action, not a run: no merge ever happens here, so
+// BaseOID/Trial stay zero-valued, matching the other pre-merge synthesized
+// records (rejectPreMerge). MergeSHA, however, IS filled in (below) — the
+// landing merge already exists, it's simply looked up rather than created.
 //
-// O2 (docs/plans/phase5.md §8): called per member (refillBatch/refillSpeculate
-// each check their own head pick with it, same as refillSerialOne), so a
-// batch that crashed between its land push and its slot deletes recovers as
-// N independent serial-shaped landings — each member gets its own
-// synthesized RunRecord here, with BatchID/Position/BatchSize left at their
-// zero values, not the batch identity the original (pre-crash) run had. That
-// is correct for recovery purposes (Invariant 4 only needs each ref's slot
-// cleaned up and a Landed event emitted), but it means the batch grouping
-// itself is NOT reconstructed: the dashboard/Slack will render these as
-// separate landings, not as one batch summary, for any batch that crashes in
-// this window.
+// Called per member: refillBatch/refillSpeculate each check their own head
+// pick with it, same as refillSerialOne, so a batch that crashed between
+// its land push and its slot deletes recovers as N independent
+// serial-shaped landings — each member gets its own synthesized RunRecord
+// here, with BatchID/Position/BatchSize left at their zero values, not the
+// batch identity the original (pre-crash) run had. That is correct for
+// recovery purposes (Invariant 4 only needs each ref's slot cleaned up and
+// a Landed event emitted), but it means the batch grouping itself is NOT
+// reconstructed: the dashboard/Slack will render these as separate
+// landings, not as one batch summary, for any batch that crashes in this
+// window (see docs/design/queue-modes.md, "Crash recovery adds no durable
+// state").
 //
-// MergeSHA is looked up via core.GitRepo.FindLandingMerge (phase-6 audit
-// synthesis, flag #5: "operator retries explicitly" needs the actual landed
-// merge commit to re-run recovery-skipped hooks against) — per-candidate,
-// since a wrong guess (e.g. "the current target tip", targetTip itself) is
+// MergeSHA is looked up via core.GitRepo.FindLandingMerge — an operator
+// retrying explicitly needs the actual landed merge commit to re-run
+// recovery-skipped hooks against — per-candidate, since a wrong guess
+// (e.g. "the current target tip", targetTip itself) is
 // actively misleading for any but the single head-of-chain member: see
 // TestBatchCrashRecovery, where bob/carol's own merge commits are NOT the
 // target tip at the moment their own recovery runs. FindLandingMerge's
@@ -1726,9 +1689,9 @@ func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.C
 // decided before any merge commit exists (a trial-merge conflict, or an
 // infra error before CommitTree succeeds): no check ever ran and no run
 // object was ever created, so there's nothing to cancel. rootSpan is the
-// run's root span if one was already started (F4 starts it before
+// run's root span if one was already started (startRun starts it before
 // MergeTree) — nil for the one outcome that precedes even that (an
-// IsAncestor infra error, before tryStartTrial knows a trial will even be
+// IsAncestor infra error, before it's known whether a trial will even be
 // attempted).
 func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.Candidate, outcome core.Outcome, detail string, rootSpan trace.Span) {
 	now := d.now()
@@ -1750,27 +1713,27 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 		Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
 	})
-	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // phase-B amendment, autoretry.go
+	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // see autoretry.go
 }
 
-// skipPreMergePredicted is rejectPreMerge's F2-extended twin (F2, the
-// phase-5 adversarial review's Zuul-reset ruling, extended to pre-merge
-// failures by docs/plans/phase5.md §Amendments) for startRun's two pre-merge
-// failure branches — a trial CONFLICT or a buildChainLink infra ERROR —
-// when predicted is true: the base being tested against is a predecessor's
-// own unpushed chainTip, never the real target tip, so the verdict proves
-// nothing about cand itself (the predecessor might be at fault, or might
-// never even land). Parking here would be exactly the false-negative park
-// F2 already fixed for a post-merge red at lane index >0 (advanceLane's
-// bubble step, reconcile.go ~463-466) — this mirrors that branch's shape
-// precisely: no park, RunRecord.Outcome is OutcomeSkipped (not the raw
-// conflict/error outcome), EventSkipped (not EventTrialConflict/EventError),
-// and no maybeAutoRetry call (finishRun's own park==true gate has the same
-// effect for its callers; there is simply no park here to gate on). cand's
-// slot is untouched by this call, so it re-queues and re-forms in a later
-// window; if it's still bad once it genuinely reaches lane index 0 against
-// the REAL target tip, it parks there for real via rejectPreMerge, same as
-// today.
+// skipPreMergePredicted is rejectPreMerge's twin for startRun's two
+// pre-merge failure branches — a trial CONFLICT or a buildChainLink infra
+// ERROR — when predicted is true: the base being tested against is a
+// predecessor's own unpushed chainTip, never the real target tip, so the
+// verdict proves nothing about cand itself (the predecessor might be at
+// fault, or might never even land). Parking here would be exactly the
+// false-negative park already avoided for a post-merge red at lane index >0
+// (advanceLane's bubble step) — this mirrors that branch's shape precisely:
+// no park, RunRecord.Outcome is OutcomeSkipped (not the raw conflict/error
+// outcome), EventSkipped (not EventTrialConflict/EventError), and no
+// maybeAutoRetry call (finishRun's own park==true gate has the same effect
+// for its callers; there is simply no park here to gate on). cand's slot is
+// untouched by this call, so it re-queues and re-forms in a later window;
+// if it's still bad once it genuinely reaches lane index 0 against the REAL
+// target tip, it parks there for real via rejectPreMerge. See
+// docs/design/queue-modes.md ("Red bubble: only index 0 parks" and
+// "Conflict against a predicted base is a skip, not a park") for the
+// rationale this generalizes.
 func (d *Daemon) skipPreMergePredicted(ctx context.Context, t config.Target, cand core.Candidate, detail string, rootSpan trace.Span) {
 	now := d.now()
 	runID := newRunID(now, cand.SHA)
@@ -1808,13 +1771,12 @@ func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candi
 		Kind: eventKindForOutcome(outcome), At: now, Target: t.Name,
 		Candidate: cand, RunID: runID, Record: rec, Detail: detail,
 	})
-	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // phase-B amendment, autoretry.go
+	d.maybeAutoRetry(ctx, t.Name, cand, outcome) // see autoretry.go
 }
 
 // parkEntry records why a (ref, SHA) is parked — its terminal outcome, a
 // human-readable reason, and when — feeding the dashboard snapshot's
-// ParkedEntry (docs/plans/phase23.md §2.1, §2.3). Semantics are unchanged
-// from phase1 §9.1: sticky per (ref, SHA), cleared only when the ref's SHA
+// ParkedEntry. Sticky per (ref, SHA): cleared only when the ref's SHA
 // changes, the ref vanishes, or a CommandRetry clears it explicitly
 // (command.go) — never when some other candidate lands.
 type parkEntry struct {
@@ -1825,8 +1787,7 @@ type parkEntry struct {
 
 	// RunID is the terminal RunRecord that parked this (ref, SHA) — the
 	// dashboard's /t/{target} Parked table links its outcome tag to
-	// /run/{RunID} when this is non-empty (docs/plans this phase's "parked
-	// entries must link to the run that parked them"). Every live call site
+	// /run/{RunID} when this is non-empty. Every live call site
 	// (finishRun, rejectPreMerge, rejectRun, rejectBatch, the two
 	// command.go cancel paths) has its own record's RunID in scope by
 	// construction; only a boot-time seed (seedParksOnce, from history
@@ -1837,7 +1798,7 @@ type parkEntry struct {
 // park marks cand's (ref, SHA) as parked for target, recording outcome,
 // detail, and the RunID of the run that decided it as the park's reason: it
 // will not be re-tested until the ref's SHA changes, the ref vanishes, or a
-// CommandRetry clears it (§9.1).
+// CommandRetry clears it.
 func (d *Daemon) park(target string, cand core.Candidate, outcome core.Outcome, detail, runID string) {
 	m := d.done[target]
 	if m == nil {
@@ -1862,22 +1823,21 @@ func eventKindForOutcome(o core.Outcome) core.EventKind {
 	}
 }
 
-// runIDTimeFormat is the UTC timestamp portion of a run ID (§9.4):
-// yyyymmddThhmmssZ.
+// runIDTimeFormat is the UTC timestamp portion of a run ID: yyyymmddThhmmssZ.
 const runIDTimeFormat = "20060102T150405Z"
 
-// runIDCounter is a monotonic per-process counter folded into every run ID
-// (docs/plans/phase23.md §2.4). The phase-1 review (C7) found that two
-// trials sharing an identical trial tree and started within the same UTC
-// second — a re-push that restores previously-tested content, or two
-// daemon instances racing the same candidate — mint identical run IDs
-// under the timestamp+OID-prefix scheme alone. The container executor
-// (phase 2/3) derives container names from run IDs, so such a collision
-// would also break `--name`; the counter closes the gap regardless of
-// clock resolution or tree content. Package-level (not per-Daemon) because
-// the uniqueness this protects is process-wide: two Daemon instances in one
-// process (as the duplicate-daemon tests construct) must not mint
-// colliding IDs either.
+// runIDCounter is a monotonic per-process counter folded into every run ID.
+// Two trials sharing an identical trial tree and started within the same
+// UTC second — a re-push that restores previously-tested content, or two
+// daemon instances racing the same candidate — would otherwise mint
+// identical run IDs under the timestamp+OID-prefix scheme alone. The
+// container executor derives container names from run IDs, so such a
+// collision would also break `--name`; the counter closes the gap
+// regardless of clock resolution or tree content. Package-level (not
+// per-Daemon) because the uniqueness this protects is process-wide: two
+// Daemon instances in one process (as the duplicate-daemon tests
+// construct) must not mint colliding IDs either. See docs/design/core.md
+// ("Run identity") for the full three-part ID scheme.
 var runIDCounter atomic.Int64
 
 // newRunID builds a run ID: a UTC timestamp, a monotonic per-process

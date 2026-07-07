@@ -16,8 +16,8 @@ import (
 // unchanged and unaware whether a provider is installed.
 //
 // endpoint == "" installs nothing: it leaves whatever global provider is
-// already registered (the phase-1 default is none, so spans stay no-op) and
-// returns a nil-returning no-op shutdown.
+// already registered (the default is none, so spans stay no-op) and returns
+// a nil-returning no-op shutdown.
 //
 // Otherwise it builds an otlptracehttp exporter (WithEndpoint(endpoint), and
 // WithInsecure() when insecure is set), wraps it in a BatchSpanProcessor, and

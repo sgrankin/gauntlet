@@ -7,9 +7,9 @@ import (
 )
 
 // Subprocess-free: exercises versionString() directly rather than shelling
-// out to a built binary (per the project testing style,
-// docs/plans/phase23.md §5 — no exec in unit tests). `make build &&
-// ./gauntlet -version` is the end-to-end check, done by hand, not here.
+// out to a built binary, matching the project's no-exec-in-unit-tests
+// testing style. `make build && ./gauntlet -version` is the end-to-end
+// check, done by hand, not here.
 
 func TestVersionStringDefault(t *testing.T) {
 	got := versionString()

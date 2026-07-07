@@ -1,12 +1,11 @@
 # Batch red falls back to serial: 3 candidates batch together, the combined
-# check suite fails, nothing parks — every member gets its own EventSkipped
-# (§2.6, overridden by §10 amendment 2 for the event vocabulary: no
-# batch-level EventRejected). The target then walks its queue one candidate
-# at a time (batch-red serial fallback) until the true culprit (bob) is
-# found and genuinely parked with EventRejected; alice and carol land
-# individually. A landing clears the fallback flag, so once alice lands the
-# target re-batches its remaining members (bob+carol) before red-ing again
-# and continuing the one-at-a-time walk — self-healing either way (§2.6).
+# check suite fails, nothing parks — every member gets its own EventSkipped,
+# never a batch-level EventRejected. The target then walks its queue one
+# candidate at a time (batch-red serial fallback) until the true culprit
+# (bob) is found and genuinely parked with EventRejected; alice and carol
+# land individually. A landing clears the fallback flag, so once alice lands
+# the target re-batches its remaining members (bob+carol) before red-ing
+# again and continuing the one-at-a-time walk — self-healing either way.
 
 set-mode main batch 8
 

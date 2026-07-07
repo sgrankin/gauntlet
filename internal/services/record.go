@@ -12,11 +12,9 @@ import (
 )
 
 // Record is the on-disk snapshot of one pool instance, persisted under
-// <state>/services/<full-keyhash>.json (docs/plans/services.md §3 "Pool
-// records"; docs/plans/services-impl.md §3.5 — this struct's JSON shape is
-// pinned there). Records are efficiency hints, not truth (DESIGN.md
-// Invariant 4): boot (Pool.Adopt) treats the driver's live-instance listing
-// as truth and these records as hints toward matching it — a live instance
+// <state>/services/<full-keyhash>.json. Records are efficiency hints, not
+// truth: boot (Pool.Adopt) treats the driver's live-instance listing as
+// truth and these records as hints toward matching it — a live instance
 // with no matchable record is destroyed (slower, never wrong), and a
 // record with no live instance is simply stale and ignored. No SQLite.
 type Record struct {
@@ -46,7 +44,7 @@ func recordPath(stateDir, key string) string {
 // writeRecord atomically (write-temp-then-rename, same directory so the
 // rename is same-filesystem and thus atomic) persists rec under stateDir.
 // Used both for the initial write after Create and for every subsequent
-// touch (lastUsed on Release, M3) — always a full rewrite, never a partial
+// touch (lastUsed on Release) — always a full rewrite, never a partial
 // patch, so a crash mid-write can never leave a record holding a mix of old
 // and new fields.
 func writeRecord(stateDir string, rec Record) error {
@@ -123,10 +121,10 @@ func removeRecord(stateDir, key string) {
 	os.Remove(recordPath(stateDir, key))
 }
 
-// touchRecordLastUsed rewrites key's record with LastUsed=now (M3: the idle
-// clock starts when the last in-flight reference drops, so Release — never
-// Ensure — is what moves this). Best-effort from the caller's point of
-// view: if the record doesn't exist (e.g. an eviction raced this touch)
+// touchRecordLastUsed rewrites key's record with LastUsed=now (the idle
+// clock starts when the last in-flight reference drops, so Release —
+// never Ensure — is what moves this). Best-effort from the caller's point
+// of view: if the record doesn't exist (e.g. an eviction raced this touch)
 // there's nothing to touch, and the error is not load-bearing (records are
 // hints, not truth).
 func touchRecordLastUsed(stateDir, key string, now time.Time) error {

@@ -1,6 +1,6 @@
 {{/* checkRow renders one Checks/Hooks row (checkView) — shared by both
-     ranges below since the two sections are structurally identical (P5-B's
-     "same row treatment as Checks"). Anatomy (v8): the summary line is a
+     ranges below since the two sections are structurally identical, using
+     the same row treatment as Checks. Anatomy (v8): the summary line is a
      flex row (name+status left, duration+log link right, via the
      .check-summary-line wrapper — see base.html's doc for why that wrapper
      lives INSIDE <summary> rather than being a rule on summary itself), and
@@ -42,9 +42,9 @@
 {{if .Run.Recovered}} <span class="tag neutral" title="synthesized by crash recovery; no trial or checks actually ran">recovered landing</span>{{end}}
 </p>
 {{if .Run.BatchID}}
-<!-- Batch identity (docs/plans/phase5.md §10 amendment 1): this run's checks
-     were tested once against the whole batch's chain tip, not just this
-     candidate alone — see the members link for the rest of the batch. -->
+<!-- Batch identity: this run's checks were tested once against the whole
+     batch's chain tip, not just this candidate alone — see the members
+     link for the rest of the batch. -->
 <p class="muted">landed in batch <code title="{{.Run.BatchID}}">{{shortSHA .Run.BatchID}}</code> ({{.Run.BatchPosition}}) &middot; <a href="/batch/{{.Run.BatchID}}">view batch members</a></p>
 {{end}}
 <div class="table-scroll">
@@ -76,8 +76,8 @@
 {{if .Hooks}}
 <!-- Post-land hooks (internal/hooks): rendered only when this run actually
      has hook rows — a run for a target with no configured hooks, or one
-     that never reached hooks at all, gets no section here (chunk P5-B),
-     same row treatment as Checks above. -->
+     that never reached hooks at all, gets no section here. Same row
+     treatment as Checks above. -->
 <h2>Hooks</h2>
 <div class="checklist">
 {{range .Hooks}}{{template "checkRow" .}}{{end}}

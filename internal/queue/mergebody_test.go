@@ -37,8 +37,8 @@ func newMergeBodyHarness(t *testing.T, mergeBody func(ctx context.Context, cand 
 }
 
 // TestMergeBody_NilProducesExactPriorMessageShape locks in Config.MergeBody
-// == nil (the zero value every pre-phase-4 test and config already relies
-// on) as behaviorally identical to phase 1/2/3: no body paragraph, ever.
+// == nil (the zero value every test and config already relies on) as
+// producing no body paragraph, ever.
 func TestMergeBody_NilProducesExactPriorMessageShape(t *testing.T) {
 	h := newMergeBodyHarness(t, nil)
 	h.git.seed("main", nil)
@@ -57,8 +57,8 @@ func TestMergeBody_NilProducesExactPriorMessageShape(t *testing.T) {
 	}
 }
 
-// TestMergeBody_SetInsertsBodyBetweenSubjectAndTrailers is phase-4's core
-// wiring contract: a configured MergeBody hook is called once per trial
+// TestMergeBody_SetInsertsBodyBetweenSubjectAndTrailers is the core wiring
+// contract: a configured MergeBody hook is called once per trial
 // (before the merge commit is built), and its return lands in the actual
 // landed commit's message, between the subject and the trailers.
 func TestMergeBody_SetInsertsBodyBetweenSubjectAndTrailers(t *testing.T) {

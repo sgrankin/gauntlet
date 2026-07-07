@@ -17,8 +17,8 @@ func init() {
 	readyPollInterval = time.Millisecond
 }
 
-// fakeDriver is a Driver test double (docs/plans/services-impl.md §3.7): an
-// in-memory registry standing in for a real container runtime, with
+// fakeDriver is a Driver test double: an in-memory registry standing in
+// for a real container runtime, with
 // scriptable affordances (notReady, notAlive) tests use to drive every
 // branch of Pool's ensure/adopt/reap logic without docker.
 type fakeDriver struct {
@@ -34,15 +34,16 @@ type fakeDriver struct {
 	notAlive map[string]bool // key -> ProbeAlive always reports false
 
 	// blockReadyUntilDone makes ProbeReady block on ctx.Done() and then
-	// return ctx.Err() — review BUG 1's repro: an ensure whose ctx gets
-	// canceled mid-ready-poll, never a real not-ready response.
+	// return ctx.Err() — reproduces an ensure whose ctx gets canceled
+	// mid-ready-poll, never a real not-ready response.
 	blockReadyUntilDone bool
 
 	// destroyCtxDone records, for every Destroy call in order, whether the
-	// ctx it received was already done (canceled/expired) at call time
-	// (review BUG 1: before the fix, cleanup ran on the ensure's own ctx,
-	// so a canceled ensure meant Destroy's context was already done and
-	// exec.CommandContext would never actually start the subprocess).
+	// ctx it received was already done (canceled/expired) at call time —
+	// cleanup must run on a detached context, not the ensure's own ctx: a
+	// canceled ensure would otherwise mean Destroy's context is already
+	// done and exec.CommandContext would never actually start the
+	// subprocess.
 	destroyCtxDone []bool
 }
 
@@ -455,15 +456,16 @@ func TestMaxInstances(t *testing.T) {
 	p.Release(eA)
 }
 
-// TestMaxInstancesHardCapUnderConcurrentDistinctKeyMisses is review BUG 2's
-// repro: with MaxInstances=1 and the pool empty (one remaining slot), two
-// concurrent EnsureAll calls on two DIFFERENT keys race for that slot.
-// Before the fix, doEnsure's cap check (len(p.instances) >= cap) and the
-// eventual p.instances[key]=inst insert were separated by the blocking
-// create() call, so both goroutines could read "under cap" before either
-// had inserted, overshooting it. reserveSlot/releaseSlot close that window
-// by reserving the slot atomically under p.mu before create runs, so this
-// must hold deterministically regardless of scheduling — not just usually.
+// TestMaxInstancesHardCapUnderConcurrentDistinctKeyMisses proves the
+// max-instances cap holds even when two concurrent EnsureAll calls on two
+// DIFFERENT keys race for the pool's one remaining slot: with
+// MaxInstances=1 and the pool empty, doEnsure's cap check
+// (len(p.instances) >= cap) and the eventual p.instances[key]=inst insert
+// are separated by the blocking create() call, so both goroutines could
+// read "under cap" before either had inserted, overshooting it.
+// reserveSlot/releaseSlot close that window by reserving the slot
+// atomically under p.mu before create runs, so this must hold
+// deterministically regardless of scheduling — not just usually.
 func TestMaxInstancesHardCapUnderConcurrentDistinctKeyMisses(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	fd := newFakeDriver()
@@ -505,7 +507,7 @@ func TestMaxInstancesHardCapUnderConcurrentDistinctKeyMisses(t *testing.T) {
 	}
 }
 
-// --- ensure failure (review m5: TailLogs then Destroy) ---
+// --- ensure failure (TailLogs then Destroy) ---
 
 func TestEnsureFailureTailsLogsAndDestroys(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
@@ -549,15 +551,15 @@ func TestEnsureFailureTailsLogsAndDestroys(t *testing.T) {
 	}
 }
 
-// TestCreateCleanupUsesDetachedContext is review BUG 1's repro: an ensure
-// whose ctx is canceled while blocked in the ready-poll (the "supersede
-// lands during ready-poll" scenario) must still actually run its
-// TailLogs/Destroy cleanup. Before the fix, cleanup ran on the same
-// (now-canceled) ctx, and exec.CommandContext on an already-canceled
-// context never starts the subprocess — Destroy would silently no-op,
-// leaking the container under its deterministic name and leaving it
-// untracked (poisoning every future ensure of that key with "name already
-// in use" until the next restart's Adopt).
+// TestCreateCleanupUsesDetachedContext proves that an ensure whose ctx is
+// canceled while blocked in the ready-poll (the "supersede lands during
+// ready-poll" scenario) must still actually run its TailLogs/Destroy
+// cleanup. Cleanup must not run on the same (now-canceled) ctx:
+// exec.CommandContext on an already-canceled context never starts the
+// subprocess — Destroy would silently no-op, leaking the container under
+// its deterministic name and leaving it untracked (poisoning every future
+// ensure of that key with "name already in use" until the next restart's
+// Adopt).
 func TestCreateCleanupUsesDetachedContext(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	fd := newFakeDriver()
@@ -586,7 +588,7 @@ func TestCreateCleanupUsesDetachedContext(t *testing.T) {
 	}
 }
 
-// --- A4: defensive needs resolution ---
+// --- defensive needs resolution ---
 
 func TestEnsureAllUnknownNeed(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
@@ -684,12 +686,12 @@ func TestAnyDead(t *testing.T) {
 		t.Error("dead instance was not evicted by AnyDead")
 	}
 
-	// review NIT 1: the wrapper's `defer Release(ens)` still runs after
-	// AnyDead's eviction (reconcile.go's M1 path calls both on the same
-	// Ensured). Release must not resurrect a lastUsed entry for a key
-	// AnyDead already dropped from p.instances — Reap only ever ranges
-	// p.instances, so such an entry would be permanently unreachable, a
-	// slow leak keyed by every service that ever died mid-run.
+	// The wrapper's `defer Release(ens)` still runs after AnyDead's
+	// eviction (reconcile.go calls both on the same Ensured). Release must
+	// not resurrect a lastUsed entry for a key AnyDead already dropped
+	// from p.instances — Reap only ever ranges p.instances, so such an
+	// entry would be permanently unreachable, a slow leak keyed by every
+	// service that ever died mid-run.
 	p.Release(e)
 	p.mu.Lock()
 	_, lastUsedLeaked := p.lastUsed[key]

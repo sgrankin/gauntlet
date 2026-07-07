@@ -1,10 +1,10 @@
-// Batch-summary parallelization suite (S6, phase-6 audit synthesis): proves
-// precomputeMergeBodies actually bounds concurrency and wall clock (direct
-// unit tests, a fake summarizer with no queue.Daemon involved at all), and
-// that startBatchRun's wiring of it lands every member's own precomputed
-// body in its own merge commit message (an integration proof on the fake
+// Batch-summary parallelization suite: proves precomputeMergeBodies
+// actually bounds concurrency and wall clock (direct unit tests, a fake
+// summarizer with no queue.Daemon involved at all), and that
+// startBatchRun's wiring of it lands every member's own precomputed body
+// in its own merge commit message (an integration proof on the fake
 // harness — batch_test.go's tier — with a real-time-sleeping fake
-// summarizer, since the timing property this fixes is real wall clock, not
+// summarizer, since the timing property under test is real wall clock, not
 // the harness's injected logical clock).
 package queue
 

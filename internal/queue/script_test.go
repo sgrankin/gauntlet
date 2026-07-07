@@ -1,7 +1,7 @@
 // Growth-layer scenario harness (DESIGN.md's testing ledger row): a tiny
 // rsc/script-style command DSL over txtar, built on
-// github.com/rogpeppe/go-internal/testscript (spike-decided 2026-07-05 over
-// the orphaned rsc.io/script). Scripts under testdata/script/*.txtar read
+// github.com/rogpeppe/go-internal/testscript (chosen over the orphaned
+// rsc.io/script). Scripts under testdata/script/*.txtar read
 // like documentation of the queue's state machine; they DUPLICATE coverage
 // that already exists as Go tests elsewhere in this package (daemon_test.go,
 // moves_test.go, park_test.go, integration_*_test.go and friends) — those
@@ -39,8 +39,8 @@
 //	    Delete the candidate ref, as if the author cancelled.
 //
 //	cancel <target> <user> <topic>
-//	    Send a core.CommandCancel for the candidate ref (Feature 1, manual
-//	    operator cancellation) — the channel-agnostic equivalent of a Slack
+//	    Send a core.CommandCancel for the candidate ref (manual operator
+//	    cancellation) — the channel-agnostic equivalent of a Slack
 //	    ":x:" reaction or POST /api/v1/cancel. Applied on the next "tick",
 //	    exactly like a retry command.
 //
@@ -54,8 +54,8 @@
 //	await-started [@<selector>] <name>
 //	    Block until check <name> has registered as started (the gated
 //	    executor's Started signal) on the run <selector> names — or, with
-//	    no selector, the pipeline's head run (lane.runs[0]), exactly the
-//	    pre-P5-F "currently in-flight run" every existing script assumes.
+//	    no selector, the pipeline's head run (lane.runs[0]) — the single
+//	    in-flight run every script written before pipelines existed assumes.
 //	    See "Run selectors" below.
 //
 //	release-check [@<selector>] <name> <passed|failed|skipped>
@@ -63,8 +63,8 @@
 //	    omitted), then (like the Go harnesses' own release/releaseGated
 //	    helpers) spins ReconcileOnce until a new event lands.
 //
-// Run selectors (docs/plans/phase5.md §5.1): a pipeline can hold more than
-// one run at once (speculate's window), so await-started/release-check take
+// Run selectors: a pipeline can hold more than one run at once (speculate's
+// window), so await-started/release-check take
 // an optional leading "@<selector>" argument naming which one:
 //
 //	@topic:<t>   the run whose head member's Topic == t
@@ -97,15 +97,15 @@
 //	    against it parked (Rejected, Conflict, or Error) rather than landed.
 //
 //	assert-slot-parked-none <target> <user> <topic>
-//	    Assert the candidate ref still exists and is NOT parked (docs/plans/
-//	    phase5.md §5.1): the Skipped-not-parked shape a pipeline bubble, a
-//	    mid-window member move, or a head target move leaves behind — the
-//	    ref is free to re-queue on the very next refill, unlike
-//	    assert-slot-parked's sticky (Rejected/Conflict/Error) case.
+//	    Assert the candidate ref still exists and is NOT parked: the
+//	    Skipped-not-parked shape a pipeline bubble, a mid-window member
+//	    move, or a head target move leaves behind — the ref is free to
+//	    re-queue on the very next refill, unlike assert-slot-parked's
+//	    sticky (Rejected/Conflict/Error) case.
 //
 //	set-mode <target> <mode> <n>
-//	    Test-only escape hatch (docs/plans/phase5.md P5-E/P5-F): mutates
-//	    target's Mode/MaxBatch/Window on the already-constructed Daemon.
+//	    Test-only escape hatch: mutates target's Mode/MaxBatch/Window on
+//	    the already-constructed Daemon.
 //	    Setup builds one fixed target config shared by every script in this
 //	    directory (Mode "", the serial default); batch/speculate scenarios
 //	    call this as their first command to switch "main" into the relevant
@@ -210,7 +210,7 @@ type scriptHarness interface {
 	slotParked(target, user, topic string) bool
 
 	// cancel sends a core.CommandCancel for (target, user, topic)'s
-	// candidate ref (Feature 1, manual operator cancellation) — the DSL's
+	// candidate ref (manual operator cancellation) — the DSL's
 	// "cancel" command backing implementation. Draining/applying it happens
 	// on the next "tick", exactly like SendCommand/CommandRetry.
 	cancel(target, user, topic string)
@@ -421,12 +421,13 @@ func snapshotPipelineDepth(d *Daemon, target string) int {
 	return 0
 }
 
-// resolveRunSelector resolves a DSL run selector (docs/plans/phase5.md
-// §5.1) against snap, the Daemon's published Snapshot: "" (omitted) is the
-// head run of the first target with any in-flight runs — every script that
-// never passes a selector keeps addressing "the currently in-flight run"
-// exactly as before P5-F. "topic:<t>" is the run whose head member's Topic
-// == t; "#<i>" is the run at 0-based lane position i. Both are searched
+// resolveRunSelector resolves a DSL run selector against snap, the
+// Daemon's published Snapshot: "" (omitted) is the head run of the first
+// target with any in-flight runs — every script that never passes a
+// selector keeps addressing "the currently in-flight run" as it always
+// did, from before a lane could hold more than one. "topic:<t>" is the run
+// whose head member's Topic == t; "#<i>" is the run at 0-based lane
+// position i. Both are searched
 // across every target's Pipeline: every script in this package drives
 // exactly one target at a time, so there is no ambiguity in practice.
 // Returns "" if snap is nil or the selector names nothing (an out-of-range
@@ -697,7 +698,7 @@ func cmdTick(ts *testscript.TestScript, neg bool, args []string) {
 }
 
 // parseSelector strips an optional leading "@<selector>" argument
-// (docs/plans/phase5.md §5.1) off args, returning the selector's bare form
+// off args, returning the selector's bare form
 // (the "@" itself stripped, so resolveRunSelector sees "topic:foo" or "#1")
 // and the remaining arguments. No leading "@" means no selector: "" (head
 // run, resolveRunSelector's own "omitted" case).
@@ -867,10 +868,9 @@ func cmdAssertSlotParked(ts *testscript.TestScript, neg bool, args []string) {
 }
 
 // cmdAssertSlotParkedNone asserts the ref-still-exists-but-unparked shape a
-// pipeline bubble or a mid-window invalidation leaves behind (docs/plans/
-// phase5.md §5.1): Skipped, NOT parked, free to re-queue on the very next
-// refill — the complement of cmdAssertSlotParked's sticky Rejected/Conflict/
-// Error case.
+// pipeline bubble or a mid-window invalidation leaves behind: Skipped, NOT
+// parked, free to re-queue on the very next refill — the complement of
+// cmdAssertSlotParked's sticky Rejected/Conflict/Error case.
 func cmdAssertSlotParkedNone(ts *testscript.TestScript, neg bool, args []string) {
 	if neg {
 		ts.Fatalf("assert-slot-parked-none does not support !; use assert-slot-parked instead")
@@ -949,9 +949,9 @@ func cmdAssertLandedOrder(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
-// cmdAssertTargetChain generalizes cmdAssertTargetIsMerge to a whole chain
-// (docs/plans/phase5.md §5.1): topics are given oldest-first (build/FIFO
-// order), so target's tip is topics[last]'s own link, and walking
+// cmdAssertTargetChain generalizes cmdAssertTargetIsMerge to a whole chain:
+// topics are given oldest-first (build/FIFO order), so target's tip is
+// topics[last]'s own link, and walking
 // parent[0] from the tip steps back through the chain in reverse.
 func cmdAssertTargetChain(ts *testscript.TestScript, neg bool, args []string) {
 	if neg {

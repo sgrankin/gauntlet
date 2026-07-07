@@ -3,8 +3,7 @@
 # predicted, unpushed predecessor) — so all three checks are running
 # concurrently before any of them lands. Landing then happens strictly FIFO,
 # one release per run, and the final chain is exactly the same shape a batch
-# or a serial walk would have produced. Ports docs/plans/phase5.md §5.2's
-# speculate_pipeline_fill row.
+# or a serial walk would have produced.
 
 set-mode main speculate 3
 direct-push main files/spec

@@ -8,8 +8,8 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// GatedExecutor is a core.Executor test double (docs/plans/phase1.md §5).
-// RunCheck registers by (RunID, Name) and blocks until the test calls
+// GatedExecutor is a core.Executor test double. RunCheck registers by
+// (RunID, Name) and blocks until the test calls
 // Release with the same (RunID, Name), which supplies the CheckResult
 // RunCheck returns. This lets tests step a run check-by-check.
 //

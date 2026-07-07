@@ -10,8 +10,7 @@ import (
 )
 
 // lockFileName is the fixed name of the advisory lock file every gauntlet
-// daemon takes on its own -state directory (S2, phase-6 audit synthesis,
-// lifecycle #1).
+// daemon takes on its own -state directory.
 const lockFileName = "gauntlet.lock"
 
 // Lock is an exclusive, process-lifetime advisory flock on

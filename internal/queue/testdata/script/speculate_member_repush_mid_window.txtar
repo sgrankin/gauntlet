@@ -4,7 +4,6 @@
 # verdict: bob and carol (behind him) are Skipped — NOT parked, a re-queue —
 # while alice (ahead of bob) is untouched and survives to land. The window
 # then refills bob' (new content) and carol on the corrected prediction.
-# Ports docs/plans/phase5.md §5.2's speculate_member_repush_mid_window row.
 
 set-mode main speculate 3
 direct-push main files/spec

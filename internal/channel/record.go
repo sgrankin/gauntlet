@@ -19,9 +19,9 @@ type RecordingChannel struct {
 
 	// cmds is buffered so SendCommand can enqueue test-injected commands
 	// (e.g. CommandRetry) without a reader present yet; ReconcileOnce's
-	// drainCommands (docs/plans/phase23.md §2.2) drains it non-blockingly at
-	// the top of the next reconcile pass. A phase-1 test that never calls
-	// SendCommand still observes Commands() as never yielding.
+	// drainCommands drains it non-blockingly at the top of the next
+	// reconcile pass. A test that never calls SendCommand still observes
+	// Commands() as never yielding.
 	cmds chan core.Command
 }
 
@@ -40,8 +40,8 @@ func NewRecordingChannel() *RecordingChannel {
 
 // SendCommand enqueues cmd for delivery on Commands() — a test affordance
 // letting tests inject inbound commands (e.g. core.CommandRetry) the way a
-// real duplex channel implementation (Slack's :recycle: reaction, phase 2)
-// would. It does not block: the buffer (commandBuffer) is sized generously
+// real duplex channel implementation (Slack's :recycle: reaction) would. It
+// does not block: the buffer (commandBuffer) is sized generously
 // for test use; a test that needs to enqueue more than that before a drain
 // is doing something unusual enough to warrant a look.
 func (c *RecordingChannel) SendCommand(cmd core.Command) {
@@ -60,8 +60,8 @@ func (c *RecordingChannel) Emit(ctx context.Context, ev core.Event) error {
 }
 
 // Commands returns the channel SendCommand enqueues onto. A test that never
-// calls SendCommand observes it as never yielding, matching phase 1's
-// behavior (Invariant 8: no phase-1 channel produces a Command on its own).
+// calls SendCommand observes it as never yielding, matching LogChannel's
+// behavior (Invariant 8: no built-in channel produces a Command on its own).
 func (c *RecordingChannel) Commands() <-chan core.Command {
 	return c.cmds
 }

@@ -16,14 +16,14 @@ import (
 	"github.com/sgrankin/gauntlet/internal/services"
 )
 
-// fakeServicePool is a ServicePool test double (docs/plans/services-impl.md
-// §4.6): an in-memory affordance struct — scriptable EnsureAll error,
-// scriptable AnyDead, and recorded Release calls — in the same spirit as
-// executor.GatedExecutor, never a mock framework. It never touches a real
-// driver/container: EnsureAll fabricates env pairs straight from needs, the
-// same shape the real pool produces (services.md §4), so the queue-layer
-// wrapper (reconcile.go's startCheck) can be tested without chunk 2's own
-// pool machinery.
+// fakeServicePool is a ServicePool test double: an in-memory affordance
+// struct — scriptable EnsureAll error, scriptable AnyDead, and recorded
+// Release calls — in the same spirit as executor.GatedExecutor, never a
+// mock framework. It never touches a real driver/container: EnsureAll
+// fabricates env pairs straight from needs, the same shape the real pool
+// produces (see docs/design/services.md, "The endpoint contract"), so the
+// queue-layer wrapper (reconcile.go's startCheck) can be tested without the
+// real pool machinery.
 type fakeServicePool struct {
 	mu sync.Mutex
 
@@ -78,10 +78,9 @@ func (f *fakeServicePool) releaseCallCount() int {
 
 // recordingGatedExecutor wraps executor.GatedExecutor to additionally record
 // every core.CheckJob RunCheck is called with, so tests can assert what the
-// startCheck wrapper actually handed the executor (docs/plans/
-// services-impl.md §4.6 "env injection", "passing check + needs") — a thin
-// recording layer, not a replacement gate/release mechanism, which it
-// delegates to the embedded GatedExecutor unchanged.
+// startCheck wrapper actually handed the executor (env injection, passing
+// check + needs) — a thin recording layer, not a replacement gate/release
+// mechanism, which it delegates to the embedded GatedExecutor unchanged.
 type recordingGatedExecutor struct {
 	*executor.GatedExecutor
 	mu   sync.Mutex
@@ -142,10 +141,11 @@ func waitForRunTerminal(h *testHarness, runID string) core.Event {
 	return core.Event{}
 }
 
-// TestServices_Gating_RejectedLoud covers docs/plans/services-impl.md §4.6's
-// "gating" row: a spec declaring needs on a daemon with Config.Services ==
-// nil is rejected loudly (services.md §7 "loud like a malformed check"),
-// never silently run without its dependency.
+// TestServices_Gating_RejectedLoud covers capability gating: a spec
+// declaring needs on a daemon with Config.Services == nil is rejected
+// loudly (see docs/design/services.md, "The model: a cache entry, not a
+// supervised unit" — "loud like a malformed check"), never silently run
+// without its dependency.
 func TestServices_Gating_RejectedLoud(t *testing.T) {
 	h := newHarness(t) // plain harness: Config.Services stays nil
 	h.git.seed("main", nil)
@@ -214,7 +214,7 @@ func TestServices_EnsureTimeFailure(t *testing.T) {
 	}
 }
 
-// TestServices_MidRunDeath_M1 covers "mid-run death (M1)": a FAILED check
+// TestServices_MidRunDeath_M1 covers mid-run service death: a FAILED check
 // whose service died mid-run must convert to OutcomeError (never a
 // rejected/false-negative park), with the check's captured output retained
 // for the skeptical.

@@ -1,7 +1,7 @@
 // Post-land hooks wiring: mapping cfg.Targets' Hooks into hooks.Runner's
-// Params lives here, per the same config->package-local-Params pattern
-// channels.go uses for history/ghstatus/slack (docs/plans/phase23.md §9.5):
-// internal/hooks never imports internal/config.
+// Params lives here, following the same config->package-local-Params
+// pattern channels.go uses for history/ghstatus/slack: internal/hooks
+// never imports internal/config.
 package main
 
 import (
