@@ -51,7 +51,7 @@ below) additionally gets one pair per resolved service:
 - `GAUNTLET_SVC_<NAME>_HOST` / `GAUNTLET_SVC_<NAME>_PORT` — where to reach
   the service (`<NAME>` is the service's declared name, upcased,
   non-alphanumerics turned into `_`). Absent entirely for a check with no
-  `needs`, and for hooks (which can't declare `needs` at all in phase A).
+  `needs`, and for hooks (which can't declare `needs` at all).
 
 **Result-file protocol.** A non-zero exit is always a failure, full stop —
 the result file is ignored on failure. On exit 0: a result file containing
@@ -175,10 +175,10 @@ decision, not an accident.
 **`max-instances` bounds count, not resources.** It caps how many live
 instances the pool will create — nothing enforces per-instance memory/CPU,
 which is whatever the runtime defaults to (typically unlimited). A single
-heavyweight service spec can still pressure the builder; that's a known,
-documented gap in phase A, not a solved problem.
+heavyweight service spec can still pressure the builder unless it sets the
+ceilings below.
 
-**`memory`/`cpus` (phase B) put a ceiling on that.** `memory "2g"` is passed
+**`memory`/`cpus` put a ceiling on that.** `memory "2g"` is passed
 to the container runtime's `--memory` verbatim; `cpus "1.5"` likewise to
 `--cpus`. Both are optional — omit either and no flag is emitted at all, the
 runtime's own (typically unlimited) default applies, exactly as before.
@@ -195,16 +195,16 @@ dial it directly on the container network), which needs *some* shell/binary
 present. An image with no shell must declare its own `ready-command`, or
 readiness will never be detected.
 
-**Hooks can't declare services in phase A.** Post-land hooks have no
-`needs` grammar at all — this is deliberate scope control for v1, not an
+**Hooks can't declare services.** Post-land hooks have no
+`needs` grammar at all — this is deliberate scope control, not an
 oversight; a hook's environment never carries `GAUNTLET_SVC_*` vars.
 
-**Apple's `container` runtime is deferred for services.** Phase A's
-docker/podman networking model (a shared user-defined network, service
-containers as aliases on it) has no Apple `container` CLI equivalent yet.
-A daemon configured for services under a container-networked mode with
+**Apple's `container` runtime is unsupported for services.** The
+docker/podman networking model services rely on (a shared user-defined
+network, service containers as aliases on it) has no Apple `container`
+CLI equivalent yet. A daemon configured for services with
 runtime `"container"` fails at startup with:
-`services require docker or podman in phase A; Apple container networking is deferred (docs/plans/services.md §9)`.
+`services require docker or podman; Apple's container CLI lacks the shared container network services need`.
 `executor "local"` plus `services { runtime "docker" }`
 (services containerized, checks run as local subprocesses) works fine on
 any box with docker/podman, Apple `container` included for the checks

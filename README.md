@@ -168,8 +168,8 @@ without any operator action, using this exact same retry machinery
 (`auto-retry-errors`, default on — see [docs/config.md](docs/config.md)). If
 that automatic retry also errors, the park sticks around for a human exactly
 as before; a fresh push (new SHA) always gets its own fresh auto-retry
-budget. Set `auto-retry-errors false` to fall back to the pre-phase-B
-behavior, where every infra-error park waits for an operator.
+budget. Set `auto-retry-errors false` to disable this, so every
+infra-error park waits for an operator.
 
 **Operator cancellation.** An operator (not the author) can stop
 a candidate that's currently being tested, or pull one out of the queue
@@ -195,8 +195,8 @@ see [docs/config.md's "Hooks"](docs/config.md#hooks).
 ## Configuring the daemon
 
 Every optional daemon feature is a node in `gauntlet.kdl`, and absence
-disables it — a minimal config (remote, committer, targets) runs the same
-single-lane daemon phase 1 shipped. The optional nodes: SQLite run
+disables it — a minimal config (remote, committer, targets) runs a plain
+single-lane daemon. The optional nodes: SQLite run
 `history`, the web `dashboard`, `github` commit statuses, a duplex `slack`
 channel with reaction commands, `otlp` span export, the container
 `executor`, shared `services`, Claude merge `summarize`, per-target queue
@@ -225,7 +225,7 @@ OTLP) is walked through in [docs/setup.md](docs/setup.md).
 
 ## Status
 
-Feature-complete through phase 5 — serial/batch/speculate modes,
+Feature-complete — serial/batch/speculate modes,
 local+container executors, dashboard/API/MCP, Slack duplex with reaction
 commands, GitHub statuses, post-land hooks, Claude merge summaries, full
 log capture, and park persistence are all shipped; post-completion

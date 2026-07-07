@@ -5,12 +5,10 @@ passed via `-config` — see [`gauntlet.kdl`](../gauntlet.kdl) in the repo
 root for a complete example). The repo-side check spec (`.gauntlet.kdl`)
 is covered in [checks.md](checks.md).
 
-The `history`, `dashboard`, `github`, `slack`, `otlp`, and container
-`executor` nodes below (`docs/plans/phase23.md` §3) are all wired into the
-daemon (`cmd/gauntlet`) alongside the phase-1 fields (`remote`,
-`poll-interval`, `check-spec`, `committer`, `merge-message`, `target`). Each
-new node is optional — absence disables the feature it configures, so an
-existing phase-1 `gauntlet.kdl` keeps working unchanged.
+The core fields (`remote`, `poll-interval`, `check-spec`, `committer`,
+`merge-message`, `target`) are all a daemon strictly needs. Every other
+node below is optional — absence disables the feature it configures, so a
+minimal `gauntlet.kdl` keeps working unchanged as features are added.
 
 ```kdl
 log-retention "720h"   // optional; default 30 days ("720h")
@@ -139,13 +137,13 @@ summarize {
   inbound commands are gated; posting is unaffected.
 - **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter
   (`internal/obs`) pointed at `<endpoint>`; `insecure` skips TLS (typical for
-  a local collector). The daemon already emits spans via the OTel API in
-  phase 1 with a no-op provider — this just gives them somewhere to go.
-  **Endpoint absent ⇒ no-op** (phase-1 default): spans are emitted and
-  immediately discarded, same as today.
+  a local collector). The daemon always emits spans via the OTel API —
+  this just gives them somewhere to go.
+  **Endpoint absent ⇒ no-op**: spans are emitted and
+  immediately discarded.
 - **`executor <kind>`** — selects the check executor. `"local"` (the
   default when the node is absent, or when written with no further
-  configuration) runs checks as local subprocesses, same as phase 1.
+  configuration) runs checks as local subprocesses.
   `"container"` runs each check via `runtime` (`"docker"`, `"podman"`, or
   `"container"` for Apple's `container` CLI; default `"container"`) against
   `image`, mounting the trial tree read-write at `workdir` (default
@@ -158,21 +156,21 @@ summarize {
 - **`services`** — gates shared, cached service instances a check spec's
   `service`/`needs` nodes can request (`internal/services`); see
   [checks.md's "Shared services"](checks.md#shared-services) for the full
-  contract. `allow` lists the driver kinds permitted on this box — phase A
-  implements only `"container"` (`"artifact"`/`"oci-unpack"` are rejected
+  contract. `allow` lists the driver kinds permitted on this box — only
+  `"container"` is implemented (`"artifact"`/`"oci-unpack"` are rejected
   as reserved for a future release). `max-instances` hard-caps the pool's
   live instance count (default 8) — a count cap only, not a memory/CPU
   bound. `runtime` (`"docker"` or `"podman"`; default `"docker"`) is
   **only consulted when `executor` is `"local"`**: under `executor
   "container"`, the executor's own `runtime` wins instead (and must itself
   be docker/podman — Apple's `container` CLI is a hard startup error for
-  services in phase A), so setting both to conflicting values is a config
+  services), so setting both to conflicting values is a config
   error. **`allow` absent ⇒ disabled**: a check spec declaring
   `service`/`needs` is then rejected at run time, loudly, like a malformed
   check spec — never silently ignored.
 - **`summarize`** — enables a Claude-written merge-commit body
   (`internal/summarize`); see [Summaries](#summaries) below. **Node absent
-  ⇒ disabled**: merge commits get exactly the phase-1/2/3 subject +
+  ⇒ disabled**: merge commits get exactly the plain subject +
   trailers, no body. Once the node is present (even empty, `summarize {}`),
   an empty/unset `api-key-env` is a startup error, same rationale as
   `github`/`slack` above.
@@ -285,8 +283,7 @@ target "main" branch="main" {
 ```
 
 - Hooks are nested inside their `target` block, in the order they should
-  run. A target with no `hook` nodes has no post-land behavior — the
-  existing phase-1/2/3 behavior, unchanged.
+  run. A target with no `hook` nodes has no post-land behavior.
 - Each hook runs on the daemon host via the configured executor (`local` or
   `container`, same as checks), against an export of the landed merge
   commit's tree. It gets the same `GAUNTLET_*` environment contract a check
@@ -381,14 +378,15 @@ already-checked tip ever gets deployed.
 ## Queue modes
 
 Each `target` picks its own queueing discipline via `mode`
-(`docs/plans/phase5.md`): `"serial"` (the default — one candidate tested
-and landed at a time, byte-for-byte the phase-1 behavior), `"batch"`, or
+(see [design/queue-modes.md](design/queue-modes.md) for the mechanics):
+`"serial"` (the default — one candidate tested
+and landed at a time), `"batch"`, or
 `"speculate"`. Config is dumb data — the knobs below are validated at load
 (node-named errors) but the daemon otherwise treats them as plain per-target
 settings.
 
 ```kdl
-// Default serial — unchanged from phase 1.
+// Default serial.
 target "main" branch="main"
 
 // Batch: test up to 8 queued candidates as one --no-ff chain; on red, fall
@@ -431,7 +429,7 @@ target "staging" branch="staging" {
   target drives against the configured executor — size it with your
   build capacity in mind, not just desired queue depth.
 - **`on-batch-red`** — the batch red-recovery strategy. `"serial"`
-  (default) is the only strategy phase 5 implements: on a red batch, every
+  (default) is the only strategy implemented: on a red batch, every
   member re-queues unparked and the next refill for this target forms
   them one at a time (serial semantics) until the culprit is found and
   parked; batching resumes automatically once a landing occurs.
@@ -443,7 +441,7 @@ target "staging" branch="staging" {
 - **Reserved, rejected if set**: `window-start`, `window-max`, and
   `window-halve-on-red` reserve config surface for a possible future
   adaptive speculation-window governor (start small, grow on green, halve
-  on red). Phase 5 ships only the fixed `window` above; setting any of
+  on red). Only the fixed `window` above is implemented; setting any of
   these three on any target is a load-time error (same "reserved for a
   future release" rationale as `on-batch-red "bisect"`), so a config that
   names them fails loudly rather than silently no-opping.
