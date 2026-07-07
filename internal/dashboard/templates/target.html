@@ -22,12 +22,14 @@
 </ul>
 <p>{{if $run.CurrentName}}current check: <strong>{{$run.CurrentName}}</strong> ({{$run.CurrentElapsed}}){{else}}<span class="muted">between checks</span>{{end}}</p>
 {{if $run.Done}}
+<div class="table-scroll">
 <table>
 <tr><th>check</th><th>status</th><th>duration</th><th>err</th></tr>
 {{range $run.Done}}
 <tr><td>{{.Name}}</td><td><span class="tag {{.Status.Class}}">{{.Status.Word}}</span></td><td>{{.Duration}}</td><td class="muted">{{.Err}}</td></tr>
 {{end}}
 </table>
+</div>
 {{else}}
 <p class="muted">no checks finished yet</p>
 {{end}}
@@ -35,16 +37,18 @@
 {{end}}
 {{else if .InFlight}}
 <p><strong>{{.InFlight.Candidate.User}}/{{.InFlight.Candidate.Topic}}</strong>
- (<code title="{{.InFlight.Candidate.SHA}}">{{shortSHA .InFlight.Candidate.SHA}}</code>) &middot; run <code>{{.InFlight.RunID}}</code>
+ (<code class="nowrap" title="{{.InFlight.Candidate.SHA}}">{{shortSHA .InFlight.Candidate.SHA}}</code>) &middot; run <code class="nowrap">{{.InFlight.RunID}}</code>
  &middot; running {{.InFlight.RunElapsed}}</p>
 <p>{{if .InFlight.CurrentName}}current check: <strong>{{.InFlight.CurrentName}}</strong> ({{.InFlight.CurrentElapsed}}){{else}}<span class="muted">between checks</span>{{end}}</p>
 {{if .InFlight.Done}}
+<div class="table-scroll">
 <table>
 <tr><th>check</th><th>status</th><th>duration</th><th>err</th></tr>
 {{range .InFlight.Done}}
 <tr><td>{{.Name}}</td><td><span class="tag {{.Status.Class}}">{{.Status.Word}}</span></td><td>{{.Duration}}</td><td class="muted">{{.Err}}</td></tr>
 {{end}}
 </table>
+</div>
 {{else}}
 <p class="muted">no checks finished yet</p>
 {{end}}
@@ -56,12 +60,14 @@
 <div class="section">
 <h2>Waiting ({{len .Waiting}})</h2>
 {{if .Waiting}}
+<div class="table-scroll">
 <table>
 <tr><th>#</th><th>user/topic</th><th>ref</th><th>sha</th></tr>
 {{range .Waiting}}
-<tr><td>{{.Seq}}</td><td>{{.User}}/{{.Topic}}</td><td class="mono muted" title="{{.Ref}}">{{compactRef .Ref}}</td><td><code title="{{.SHA}}">{{shortSHA .SHA}}</code></td></tr>
+<tr><td>{{.Seq}}</td><td>{{.User}}/{{.Topic}}</td><td class="mono muted" title="{{.Ref}}">{{compactRef .Ref}}</td><td><code class="nowrap" title="{{.SHA}}">{{shortSHA .SHA}}</code></td></tr>
 {{end}}
 </table>
+</div>
 {{else}}
 <p class="muted">none</p>
 {{end}}
@@ -70,12 +76,14 @@
 <div class="section">
 <h2>Parked ({{len .Parked}})</h2>
 {{if .Parked}}
+<div class="table-scroll">
 <table>
 <tr><th>user/topic</th><th>sha</th><th>outcome</th><th>reason</th><th>at</th></tr>
 {{range .Parked}}
-<tr><td>{{.User}}/{{.Topic}}</td><td><code title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td>{{if and .RunID $.StoreEnabled}}<a href="/run/{{.RunID}}" class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</a>{{else}}<span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span>{{end}}</td><td>{{.Reason}}</td><td class="muted nowrap">{{.At}}</td></tr>
+<tr><td>{{.User}}/{{.Topic}}</td><td><code class="nowrap" title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td>{{if and .RunID $.StoreEnabled}}<a href="/run/{{.RunID}}" class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</a>{{else}}<span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span>{{end}}</td><td>{{.Reason}}</td><td class="muted nowrap">{{.At}}</td></tr>
 {{end}}
 </table>
+</div>
 {{else}}
 <p class="muted">none</p>
 {{end}}
@@ -87,12 +95,14 @@
 <p>{{if .LiveHook.Running}}running <strong>{{.LiveHook.CurrentHook}}</strong> ({{.LiveHook.HookIndex}}/{{.LiveHook.HookCount}}) &middot; {{.LiveHook.Elapsed}}{{else}}<span class="muted">idle</span>{{end}}{{if gt .LiveHook.BacklogDepth 0}} &middot; backlog {{.LiveHook.BacklogDepth}}{{end}}</p>
 {{end}}
 {{if .HookRuns}}
+<div class="table-scroll">
 <table>
 <tr><th>run</th><th>owed</th><th>done</th><th>started</th><th>status</th></tr>
 {{range .HookRuns}}
 <tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.Owed}}</td><td>{{.Done}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{if .Skipped}}<span class="tag warn">skipped</span> {{.SkipReason}}{{else if .Incomplete}}<span class="tag bad">crash-incomplete</span>{{else}}<span class="tag ok">complete</span>{{end}}</td></tr>
 {{end}}
 </table>
+</div>
 {{else if not .LiveHook}}
 <p class="muted">none</p>
 {{end}}
@@ -102,12 +112,14 @@
 <h2>Recent runs</h2>
 {{if .StoreEnabled}}
 {{if .RecentRuns}}
+<div class="table-scroll">
 <table>
 <tr><th>run</th><th>user/topic</th><th>outcome</th><th>detail</th><th>started</th><th>duration</th></tr>
 {{range .RecentRuns}}
-<tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a></td><td>{{.Detail}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
+<tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a>{{if .CheckRatio}} <span class="muted check-ratio">{{.CheckRatio}}</span>{{end}}</td><td>{{.Detail}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
 {{end}}
 </table>
+</div>
 {{else}}
 <p class="muted">none yet</p>
 {{end}}

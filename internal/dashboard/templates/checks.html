@@ -10,12 +10,14 @@
 {{else}}
 <h2>Check stats{{if .Target}} — {{.Target}}{{end}}</h2>
 {{if .Stats}}
+<div class="table-scroll">
 <table>
 <tr><th>check</th><th>total</th><th>failed</th><th>red rate</th><th>avg</th><th>max</th></tr>
 {{range .Stats}}
 <tr><td>{{.Name}}</td><td>{{.Total}}</td><td>{{.Failed}}</td><td>{{.RedRate}}</td><td>{{.Avg}}</td><td>{{.Max}}</td></tr>
 {{end}}
 </table>
+</div>
 {{else}}
 <p class="muted">no data for this window</p>
 {{end}}

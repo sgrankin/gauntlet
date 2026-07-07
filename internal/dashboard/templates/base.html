@@ -9,11 +9,17 @@
 <style>
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
+  /* Page background is the soft gray, --card the white content surface —
+     inverted from this pair's own names because --bg is also what
+     pre.output (below) paints itself with: a captured-output block wants to
+     read as recessed relative to whatever card contains it, and the one
+     variable already meaning "the surface behind everything" is exactly the
+     right value for that, in light mode as much as dark. */
+  --bg: #f6f8fa;
   --fg: #1b1f23;
   --muted: #656d76;
   --border: #d0d7de;
-  --card: #f6f8fa;
+  --card: #ffffff;
   --ok: #1a7f37;
   --bad: #cf222e;
   --warn: #9a6700;
@@ -24,6 +30,11 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    /* Unchanged by the light-mode --bg/--card inversion above: dark mode
+       already had --card lighter than --bg (a card standing out by being
+       brighter, not darker, than the page it sits on) — the same visual
+       relationship light mode now also has, just reached from the opposite
+       direction (card lighter vs. card whiter). */
     --bg: #0d1117;
     --fg: #e6edf3;
     --muted: #9198a1;
@@ -53,9 +64,28 @@ header { margin-bottom: 1.5rem; }
 header nav a { margin-right: 1rem; font-size: .9rem; }
 h1 { font-size: 1.3rem; margin: .3rem 0 0; }
 h2 { font-size: 1.05rem; margin: 0 0 .3rem; }
-table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
+table { border-collapse: collapse; width: 100%; }
 th, td { padding: .35rem .6rem; border-bottom: 1px solid var(--border); text-align: left; font-size: .88rem; vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
+/* .table-scroll wraps every <table> in the templates (mobile overflow
+   fix): a nowrap cell (SHA, run ID, timestamp) has an unbreakable min-content
+   width, so on a narrow viewport the table as a whole wants to be wider than
+   its container — without this wrapper that pressure bubbles up to <body>
+   and the WHOLE PAGE scrolls sideways. overflow-x:auto here catches that
+   growth at the table's own box instead: the table is free to be wider than
+   the wrapper, and only the wrapper's contents scroll to reveal it. This
+   only works because `table` above stays width:100% (never a min-width) —
+   auto table layout still respects each cell's min-content size and grows
+   past 100% of a 100%-width table when a nowrap cell demands it; a table
+   fighting to StAY at exactly 100% would instead be forced to shrink those
+   cells, which is what used to make a starved SHA cell (mono +
+   overflow-wrap:anywhere, see .nowrap's own doc below) shatter character-by-
+   character instead of overflowing cleanly.
+   Doubles as this pass's "tables read as being on a white surface" fix:
+   border/background/radius mirror .card, so a table becomes its own content
+   surface on the gray page rather than sitting flush on the body background. */
+.table-scroll { overflow-x: auto; border: 1px solid var(--border); background: var(--card); border-radius: 8px; margin: .5rem 0 1rem; }
+.table-scroll table { margin: 0; }
 .card { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; min-width: 0; overflow-wrap: anywhere; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
 .grid > * { min-width: 0; }
@@ -68,11 +98,18 @@ th { color: var(--muted); font-weight: 600; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
 footer { margin-top: 2rem; }
 .section { margin-bottom: 1.5rem; }
-/* nowrap: run IDs (e.g. 20260705T224731Z-5-bb12231a0a65) and formatted
-   timestamps both contain hyphens/spaces that a table cell will wrap on at
-   awkward points otherwise — applied directly to the cell or link, not to
-   <table> generally, since plenty of other columns (topic, reason) should
-   still wrap. */
+/* nowrap: run IDs (e.g. 20260705T224731Z-5-bb12231a0a65), formatted
+   timestamps, and short SHAs (<code>, which is mono + overflow-wrap:anywhere
+   below) all contain characters a table cell will otherwise wrap or break on
+   at awkward points — applied directly to the cell or link, not to <table>
+   generally, since plenty of other columns (topic, reason) should still
+   wrap. Combined with .table-scroll above, this is also the mobile-overflow
+   fix for SHA cells specifically: without white-space:nowrap, a starved
+   narrow cell lets overflow-wrap:anywhere break the SHA one character per
+   line (vertical "shattering"); nowrap forbids any break at all, which
+   pushes the table past 100% width instead — exactly what .table-scroll
+   exists to catch with a horizontal scrollbar rather than letting it
+   shatter or bleed into the page. */
 .nowrap { white-space: nowrap; }
 
 /* --- status chips: shared between /, /t/{target} and /run/{id} ---------
@@ -94,6 +131,12 @@ footer { margin-top: 2rem; }
    neutral (not tied to outcome) so it layers over any chip-<class> fill. */
 .chip-batched { box-shadow: 0 0 0 2px var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; min-width: 0; }
+/* .check-ratio: the compact "✓ passed/total" next to a run's outcome chip
+   on target.html's Recent runs table only — index.html's bare chip strip
+   never renders this (see runSummary.CheckRatio's doc: a chip there is a
+   filled square, never text, by design). tabular-nums keeps the digits from
+   jittering width as different rows show 1-2 vs 10+ checks. */
+.check-ratio { margin-left: .3rem; font-variant-numeric: tabular-nums; }
 
 /* --- pipeline stacked list (/t/{target}, docs/plans/phase5.md §3.4) ----- */
 .pipeline-run { border-top: 1px solid var(--border); padding-top: .6rem; margin-top: .6rem; }
@@ -101,7 +144,16 @@ footer { margin-top: 2rem; }
 .pipeline-members { margin: .2rem 0 .4rem; padding-left: 1.2rem; }
 
 /* --- per-check output (/run/{id}) --------------------------------------- */
-.checklist { margin: .5rem 0 1rem; border-top: 1px solid var(--border); }
+/* .checklist is carded like .table-scroll above (gray-page/white-card pass):
+   border/background/radius mirror .card, so the whole check list reads as
+   one content surface rather than sitting flush on the body. This is also
+   why pre.output's own var(--bg) background (below) reads as "recessed" —
+   it's --bg (the page's own gray) nested inside this white --card box, the
+   same relation a native inset panel has to its dialog. padding is
+   horizontal only: each .check-row still owns its own vertical padding/
+   border-bottom, so the card's padding here only needs to keep row content
+   off the card's own left/right border. */
+.checklist { margin: .5rem 0 1rem; border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 0 .8rem; }
 /* .check-row is the one shared "row" box, whichever element carries it: a
    plain <div class="check-row"> (no output) or a <details class="check-row">
    (has output, run.html) — the padding/border-bottom belongs to that outer
@@ -114,9 +166,34 @@ footer { margin-top: 2rem; }
    double-border/indent bug this rule fixes. summary itself only needs its
    own display/cursor/marker treatment now, no box of its own. */
 .check-row { display: block; padding: .4rem .2rem; border-bottom: 1px solid var(--border); font-size: .88rem; }
+/* The last row's own border-bottom would otherwise sit right on top of
+   .checklist's now-added bottom border (a thin double line) — every row
+   above it still wants the separator, just not the final one. */
+.checklist .check-row:last-child { border-bottom: none; }
 details.check-row summary { display: block; cursor: pointer; }
 details.check-row summary::marker { color: var(--muted); }
+/* .check-summary-line is an inner wrapper INSIDE <summary>, not a rule on
+   summary itself: setting display:flex directly on <summary> drops its
+   native disclosure-triangle marker in some browsers, since the marker box
+   is tied to summary's own (list-item-flavored) display rather than being a
+   plain generated-content overlay. Wrapping the actual content in a child
+   flex container gets the same left/right layout without touching that. */
+.check-summary-line { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
+.check-summary-name { min-width: 0; overflow-wrap: anywhere; }
+.check-summary-meta { white-space: nowrap; flex: none; }
 pre.output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .6rem; margin: .3rem 0 .6rem; overflow-x: auto; overflow-y: auto; max-height: 30em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; white-space: pre; }
+/* .check-command: the check's argv, echoed above its output (v8,
+   command-echo). Sized/backgrounded like pre.output but flattened on the
+   bottom edge and glued to it via the adjacent-sibling rule below, so the
+   two read as one bordered box with a colored command line on top — the
+   tangled pipeline-log look. The adjacent-sibling selector (rather than e.g.
+   a shared wrapper div) means a check whose Command is "" (a pre-v8 row)
+   renders no .check-command element at all and pre.output silently keeps
+   its normal fully-rounded standalone box — no empty header bar, no dangling
+   flattened corner. overflow-x:auto + white-space:pre so a long command
+   scrolls in its own box exactly like pre.output does, never the page. */
+.check-command { background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-bottom: none; border-radius: 6px 6px 0 0; margin: .3rem 0 0; padding: .5rem .6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; overflow-x: auto; white-space: pre; }
+.check-command + pre.output { border-top: none; border-radius: 0 0 6px 6px; margin-top: 0; }
 
 /* --- queue-depth chart (/checks) ----------------------------------------- */
 .depth-chart { background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 100%; height: auto; }

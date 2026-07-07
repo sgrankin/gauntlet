@@ -5,6 +5,7 @@
 <p class="muted">no such batch</p>
 {{else}}
 <p>batch <code>{{.BatchID}}</code> &middot; {{len .Members}} members</p>
+<div class="table-scroll">
 <table>
 <tr><th>#</th><th>run</th><th>user/topic</th><th>outcome</th><th>detail</th><th>started</th><th>duration</th></tr>
 {{range .Members}}
@@ -19,5 +20,6 @@
 </tr>
 {{end}}
 </table>
+</div>
 {{end}}
 {{end}}

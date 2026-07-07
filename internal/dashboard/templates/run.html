@@ -1,3 +1,34 @@
+{{/* checkRow renders one Checks/Hooks row (checkView) — shared by both
+     ranges below since the two sections are structurally identical (P5-B's
+     "same row treatment as Checks"). Anatomy (v8): the summary line is a
+     flex row (name+status left, duration+log link right, via the
+     .check-summary-line wrapper — see base.html's doc for why that wrapper
+     lives INSIDE <summary> rather than being a rule on summary itself), and
+     a non-empty Command renders as an accent-colored echo line immediately
+     above the captured output, glued to it into one bordered box
+     (base.html's ".check-command + pre.output" rule) — omitted entirely for
+     an empty Command (no output at all, or a pre-v8 row that never
+     recorded one). */}}
+{{define "checkRow"}}
+{{if .Output}}
+<details class="check-row"{{if .Open}} open{{end}}>
+<summary><span class="check-summary-line">
+<span class="check-summary-name"><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}}{{if .Err}} &middot; err: {{.Err}}{{end}}</span></span>
+<span class="check-summary-meta muted">{{.Duration}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
+</span></summary>
+{{if .Command}}<div class="check-command">{{.Command}}</div>{{end}}
+<pre class="output">{{.Output}}</pre>
+</details>
+{{else}}
+<div class="check-row">
+<span class="check-summary-line">
+<span class="check-summary-name"><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}}{{if .Err}} &middot; err: {{.Err}}{{end}}</span></span>
+<span class="check-summary-meta muted">{{.Duration}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
+</span>
+</div>
+{{end}}
+{{end}}
+
 {{define "content"}}
 {{if not .StoreEnabled}}
 <p class="muted">history disabled</p>
@@ -16,17 +47,19 @@
      candidate alone — see the members link for the rest of the batch. -->
 <p class="muted">landed in batch <code title="{{.Run.BatchID}}">{{shortSHA .Run.BatchID}}</code> ({{.Run.BatchPosition}}) &middot; <a href="/batch/{{.Run.BatchID}}">view batch members</a></p>
 {{end}}
+<div class="table-scroll">
 <table>
 <tr><th>ref</th><td class="mono" title="{{.Run.Ref}}">{{compactRef .Run.Ref}}</td></tr>
-<tr><th>candidate sha</th><td><code title="{{.Run.SHA}}">{{shortSHA .Run.SHA}}</code></td></tr>
-<tr><th>base</th><td><code title="{{.Run.BaseOID}}">{{shortSHA .Run.BaseOID}}</code></td></tr>
-<tr><th>merge sha</th><td><code title="{{.Run.MergeSHA}}">{{shortSHA .Run.MergeSHA}}</code></td></tr>
+<tr><th>candidate sha</th><td><code class="nowrap" title="{{.Run.SHA}}">{{shortSHA .Run.SHA}}</code></td></tr>
+<tr><th>base</th><td><code class="nowrap" title="{{.Run.BaseOID}}">{{shortSHA .Run.BaseOID}}</code></td></tr>
+<tr><th>merge sha</th><td><code class="nowrap" title="{{.Run.MergeSHA}}">{{shortSHA .Run.MergeSHA}}</code></td></tr>
 <tr><th>trial merge</th><td>{{if .Run.TrialClean}}clean{{else}}conflict{{end}}</td></tr>
 <tr><th>detail</th><td>{{.Run.Detail}}</td></tr>
 <tr><th>started</th><td>{{.Run.StartedAt}}</td></tr>
 <tr><th>ended</th><td>{{.Run.EndedAt}}</td></tr>
 <tr><th>duration</th><td>{{.Run.Duration}}</td></tr>
 </table>
+</div>
 
 <h2>Checks</h2>
 {{if .Checks}}
@@ -34,18 +67,7 @@
      every check's captured output is one click away, and a failed/errored
      check starts already expanded so its output is impossible to miss. -->
 <div class="checklist">
-{{range .Checks}}
-{{if .Output}}
-<details class="check-row"{{if .Open}} open{{end}}>
-<summary><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}</summary>
-<pre class="output">{{.Output}}</pre>
-</details>
-{{else}}
-<div class="check-row">
-<span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}
-</div>
-{{end}}
-{{end}}
+{{range .Checks}}{{template "checkRow" .}}{{end}}
 </div>
 {{else}}
 <p class="muted">no checks recorded</p>
@@ -58,18 +80,7 @@
      same row treatment as Checks above. -->
 <h2>Hooks</h2>
 <div class="checklist">
-{{range .Hooks}}
-{{if .Output}}
-<details class="check-row"{{if .Open}} open{{end}}>
-<summary><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}</summary>
-<pre class="output">{{.Output}}</pre>
-</details>
-{{else}}
-<div class="check-row">
-<span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}} &middot; {{.Duration}}</span>{{if .Err}}<span class="muted"> &middot; err: {{.Err}}</span>{{end}}{{if .LogURL}} <a href="{{.LogURL}}">full log</a>{{end}}
-</div>
-{{end}}
-{{end}}
+{{range .Hooks}}{{template "checkRow" .}}{{end}}
 </div>
 {{end}}
 {{end}}

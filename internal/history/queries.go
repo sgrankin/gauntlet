@@ -17,8 +17,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -87,6 +87,17 @@ type RunRow struct {
 	// view, not the runs listing.
 	Speculated bool
 	Recovered  bool
+
+	// ChecksTotal and ChecksPassed are this run's own check pass/total
+	// counts, populated only by RecentRuns (via correlated scalar
+	// subqueries — see its doc comment) — dashboard/server.go turns
+	// them into the compact "✓ n/m" ratio next to the outcome chip on
+	// target.html's Recent runs table. Run/BatchMembers/LatestTerminalPerRef
+	// never select these columns, so both fields stay at their Go zero
+	// value (0) on a RunRow returned from any of those; ChecksTotal == 0
+	// there is not a claim "this run had no checks", just "not queried".
+	ChecksTotal  int
+	ChecksPassed int
 }
 
 // CheckRow is one row of the checks table, as read back for the dashboard.
@@ -107,6 +118,11 @@ type CheckRow struct {
 	// under its configured LogRoot; a stored path pointing at a since-pruned
 	// or otherwise missing file serves a friendly 404, not an error.
 	LogPath string
+	// Command is the check's argv, shell-joined into one display string at
+	// write time (store.go's joinCommand, core.CheckResult.Command) — run.html
+	// renders it as an accent-colored command echo above the check's output.
+	// Empty for rows written before v8; run.html renders no echo line then.
+	Command string
 }
 
 // HookRow is one row of the hooks table, as read back for the dashboard:
@@ -155,10 +171,35 @@ const selectRunColumns = `run_id, target, candidate_ref, candidate_user, candida
 	batch_id, position, batch_size, speculated, recovered`
 
 // RecentRuns returns target's most recent runs, newest first, capped at
-// limit.
+// limit. Each row also carries its own ChecksTotal/ChecksPassed — see
+// RunRow's doc for what those feed (target.html's compact "✓ n/m" ratio).
+//
+// The two counts are correlated scalar subqueries in the SELECT list, not a
+// LEFT JOIN against a GROUP-BY-all-of-checks derived table: this query runs
+// on every dashboard refresh tick (5s), and runs.target/started_at is
+// already indexed (idx_runs_target_started), so WHERE+ORDER BY+LIMIT narrow
+// to the ~20 returned rows before either subquery ever runs — each one is
+// then a single indexed lookup on checks' own primary key (run_id, seq),
+// scoped to just that run_id, rather than an aggregate over the ENTIRE
+// checks table computed up front regardless of the LIMIT. COUNT(*) over zero
+// matching rows is 0, not NULL, so neither subquery needs the COALESCE a
+// LEFT JOIN's aggregate columns would.
+//
+// Batch-aware only incidentally: unlike CheckStats' target-wide aggregate
+// (which must dedupe a batch's duplicated per-member check rows to avoid
+// counting one suite N times), this correlates on a single run_id at a time,
+// and writeRecord duplicates a batch's checks verbatim onto every member's
+// own run_id — so each member's own count here is already exactly that
+// member's own (duplicated but internally consistent) check set, with no
+// cross-member counting to get wrong.
 func (s *Store) RecentRuns(target string, limit int) ([]RunRow, error) {
-	rows, err := s.db.Query(
-		`SELECT `+selectRunColumns+` FROM runs WHERE target = ? ORDER BY started_at DESC LIMIT ?`,
+	rows, err := s.db.Query(`
+SELECT `+selectRunColumns+`,
+       (SELECT COUNT(*) FROM checks c WHERE c.run_id = runs.run_id),
+       (SELECT COUNT(*) FROM checks c WHERE c.run_id = runs.run_id AND c.status = 'passed')
+FROM runs
+WHERE target = ?
+ORDER BY started_at DESC LIMIT ?`,
 		target, limit,
 	)
 	if err != nil {
@@ -168,10 +209,12 @@ func (s *Store) RecentRuns(target string, limit int) ([]RunRow, error) {
 
 	var out []RunRow
 	for rows.Next() {
-		r, err := scanRunRow(rows)
+		var total, passed int
+		r, err := scanRunRow(rows, &total, &passed)
 		if err != nil {
 			return nil, fmt.Errorf("history: recent runs: %w", err)
 		}
+		r.ChecksTotal, r.ChecksPassed = total, passed
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -222,7 +265,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -234,7 +277,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	for rows.Next() {
 		var c CheckRow
 		var durationMS int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond
@@ -593,18 +636,23 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanRunRow(row rowScanner) (RunRow, error) {
+// scanRunRow scans one selectRunColumns-shaped row into a RunRow. extra, when
+// given, is appended to the Scan destination list after the fixed 19 —
+// RecentRuns' query below additionally selects a check-count aggregate that
+// no other RunRow-returning method needs, so its caller passes pointers for
+// those trailing columns rather than this function knowing about them itself.
+func scanRunRow(row rowScanner, extra ...any) (RunRow, error) {
 	var r RunRow
 	var trialClean int
 	var speculated, recovered int
 	var startedMS, endedMS, durationMS int64
-	err := row.Scan(
+	dest := []any{
 		&r.RunID, &r.Target, &r.CandidateRef, &r.CandidateUser, &r.CandidateTopic, &r.CandidateSHA,
 		&r.BaseOID, &r.MergeSHA, &trialClean, &r.Outcome, &r.Detail,
 		&startedMS, &endedMS, &durationMS,
 		&r.BatchID, &r.Position, &r.BatchSize, &speculated, &recovered,
-	)
-	if err != nil {
+	}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return RunRow{}, err
 	}
 	r.TrialClean = trialClean != 0

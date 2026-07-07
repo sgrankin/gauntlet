@@ -625,18 +625,26 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	needs := check.Needs
 	svcs := r.services
 	go func() {
+		// Command (v8, run.html's command echo): stamped onto the result
+		// here rather than by the Executor implementations themselves, since
+		// job.Command is already in scope at every send point below and this
+		// is the one place a CheckResult crosses back from "what was run" to
+		// "what history records" — see core.CheckResult.Command's doc.
 		if len(needs) == 0 || d.cfg.Services == nil {
-			result <- d.exec.RunCheck(spanCtx, job) // unchanged path: hooks & needs-free checks
+			res := d.exec.RunCheck(spanCtx, job) // unchanged path: hooks & needs-free checks
+			res.Command = job.Command
+			result <- res
 			return
 		}
 		ens, err := d.cfg.Services.EnsureAll(spanCtx, svcs, needs) // BLOCKING, off the reconcile loop (F1)
 		if err != nil {
-			result <- core.CheckResult{Name: check.Name, Err: fmt.Errorf("service ensure: %w", err)}
+			result <- core.CheckResult{Name: check.Name, Command: job.Command, Err: fmt.Errorf("service ensure: %w", err)}
 			return // -> verdictErrored -> OutcomeError, park-as-error (services.md §7)
 		}
 		defer d.cfg.Services.Release(ens) // refcount--, touch last-used (M3)
 		job.ServiceEnv, job.Networks = ens.Env, ens.Networks
 		res := d.exec.RunCheck(spanCtx, job)
+		res.Command = job.Command
 		if res.Err == nil && res.Status == core.CheckFailed {
 			// M1: only a genuinely red verdict re-probes — a passing check
 			// never touches AnyDead.

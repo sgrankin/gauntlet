@@ -117,6 +117,16 @@ const (
 type CheckResult struct {
 	Name string
 
+	// Command is the argv that was actually submitted for this check
+	// (= CheckJob.Command at the time RunCheck was called), copied onto the
+	// result by the queue right after the executor returns (internal/queue/
+	// reconcile.go's startCheck) rather than by the Executor implementations
+	// themselves. Nil for a result a test builds by hand without going
+	// through startCheck (e.g. GatedExecutor.Release's caller-supplied
+	// CheckResult) — history/dashboard treat that the same as an old
+	// pre-v8 row that predates this field: no command echo rendered.
+	Command []string
+
 	Status CheckStatus
 
 	// Output is the check's captured output, tail-capped (64 KiB in phase

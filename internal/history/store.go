@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -23,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 7
+const schemaVersion = 8
 
 var _ core.Channel = (*Store)(nil)
 
@@ -97,6 +98,9 @@ func Open(path string) (*Store, error) {
 //     runs ADD COLUMN speculated/recovered (core.RunRecord.Speculated/
 //     Recovered persistence, closing the "announced live, dropped at
 //     landing" gap), stamp user_version=7, loop.
+//   - 7 (schema v7: checks has no command column): ALTER TABLE checks ADD
+//     COLUMN command (run.html's command echo, core.CheckResult.Command),
+//     stamp user_version=8, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -213,6 +217,13 @@ CREATE TABLE hook_runs (
 			}
 			if _, err := db.Exec(`PRAGMA user_version = 7`); err != nil {
 				return fmt.Errorf("history: set user_version=7: %w", err)
+			}
+		case 7:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN command TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v7->v8 (checks.command): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 8`); err != nil {
+				return fmt.Errorf("history: set user_version=8: %w", err)
 			}
 		case schemaVersion:
 			return nil
@@ -334,6 +345,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			// Config.LogDir configured, or the file couldn't be created) —
 			// see core.CheckResult.LogPath's doc for the log-less fallback.
 			cr.LogPath,
+			joinCommand(cr.Command),
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}
@@ -539,6 +551,18 @@ func batchSizeOrDefault(n int) int {
 		return 1
 	}
 	return n
+}
+
+// joinCommand renders a check's argv (core.CheckResult.Command) as one
+// display string for run.html's command echo: plain space-joining, not
+// shell-quoted — this is a read-only echo of what ran, never re-parsed or
+// re-executed, so an argument containing a space renders ambiguously but
+// harmlessly rather than needing real shell-quoting machinery. Nil/empty
+// (a result built by hand without going through queue/reconcile.go's
+// startCheck, or a pre-v8 row) yields "", which run.html treats as "render
+// no echo line" rather than a blank one.
+func joinCommand(argv []string) string {
+	return strings.Join(argv, " ")
 }
 
 func boolToInt(b bool) int {

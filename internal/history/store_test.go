@@ -1025,6 +1025,178 @@ func TestMigrate_V6ToV7(t *testing.T) {
 	}
 }
 
+// schemaV7SQL is schema.sql as it existed before chunk 4 (dashboard visual
+// refresh) added checks.command: every v7 table/column is present (runs has
+// speculated/recovered), but checks has no command column yet. Kept here,
+// verbatim, so TestMigrate_V7ToV8 can build a genuine v7 database by hand and
+// prove the running code migrates it forward correctly.
+const schemaV7SQL = `
+CREATE TABLE runs (
+  run_id       TEXT PRIMARY KEY,
+  target       TEXT NOT NULL,
+  candidate_ref   TEXT NOT NULL,
+  candidate_user  TEXT NOT NULL,
+  candidate_topic TEXT NOT NULL,
+  candidate_sha   TEXT NOT NULL,
+  base_oid     TEXT NOT NULL,
+  merge_sha    TEXT NOT NULL,
+  trial_clean  INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  detail       TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL,
+  batch_id     TEXT NOT NULL DEFAULT '',
+  position     INTEGER NOT NULL DEFAULT 0,
+  batch_size   INTEGER NOT NULL DEFAULT 1,
+  speculated   INTEGER NOT NULL DEFAULT 0,
+  recovered    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
+CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';
+
+CREATE TABLE checks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_checks_name ON checks(name);
+
+CREATE TABLE hooks (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_hooks_name ON hooks(name);
+
+CREATE TABLE queue_depth (
+  at        INTEGER NOT NULL,
+  target    TEXT NOT NULL,
+  waiting   INTEGER NOT NULL,
+  in_flight INTEGER NOT NULL,
+  parked    INTEGER NOT NULL,
+  PRIMARY KEY (at, target)
+);
+
+CREATE TABLE retry_intents (
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  sha    TEXT NOT NULL,
+  at     INTEGER NOT NULL,
+  PRIMARY KEY (target, ref)
+);
+
+CREATE TABLE ignored_refs (
+  at     INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (at, target, ref)
+);
+
+CREATE TABLE hook_runs (
+  run_id      TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  target      TEXT NOT NULL,
+  owed_count  INTEGER NOT NULL,
+  started_at  INTEGER NOT NULL,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT NOT NULL DEFAULT ''
+);
+`
+
+// TestMigrate_V7ToV8 builds a v7 database by hand (schemaV7SQL, checks has no
+// command column, user_version stamped to 7 — exactly what an
+// already-deployed v7 Store would have on disk) and confirms that opening it
+// with the current code migrates it in place: user_version lands on
+// schemaVersion, the pre-existing check row survives with the new command
+// column readable at its documented default (""), and a fresh write against
+// the migrated database round-trips Command correctly.
+func TestMigrate_V7ToV8(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v7.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV7SQL); err != nil {
+		t.Fatalf("apply v7 schema: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 7`); err != nil {
+		t.Fatalf("stamp user_version=7: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size, speculated, recovered)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1, 0, 0)`,
+	); err != nil {
+		t.Fatalf("seed v7 run: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '')`,
+	); err != nil {
+		t.Fatalf("seed v7 check: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v7 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	run, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if run.RunID != "run-old" || len(checks) != 1 || checks[0].Output != "clean" {
+		t.Errorf("Run(run-old) after migrate = %+v / %+v, want the pre-existing row untouched", run, checks)
+	}
+	if checks[0].Command != "" {
+		t.Errorf("checks[0].Command = %q, want \"\" (column default for a pre-v8 row)", checks[0].Command)
+	}
+
+	// A fresh write against the migrated database must round-trip the new
+	// command column correctly.
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 6, 13, 0, 0, 0, time.UTC))
+	rec.Checks[0].Command = []string{"go", "build", "./..."}
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if newChecks[0].Command != "go build ./..." {
+		t.Errorf("Run(run-new) checks[0].Command = %q, want %q", newChecks[0].Command, "go build ./...")
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }
@@ -1649,6 +1821,50 @@ func TestStore_RecentRuns_OrderAndLimit(t *testing.T) {
 	// Newest (run-c) first.
 	if runs[0].RunID != "run-c" || runs[1].RunID != "run-b" {
 		t.Errorf("RecentRuns order = [%s %s], want [run-c run-b]", runs[0].RunID, runs[1].RunID)
+	}
+}
+
+// TestStore_RecentRuns_ChecksTotalAndPassed confirms RecentRuns' joined
+// check-count aggregate (RunRow.ChecksTotal/ChecksPassed, dashboard's "✓ n/m"
+// ratio): a run with sampleRecord's two checks (one passed, one failed)
+// reads back 2/1, and a run with no checks table rows at all reads back 0/0
+// — dashboard/server.go is what turns that 0 into "omit the ratio", but the
+// store-level contract is just "count what's actually there".
+func TestStore_RecentRuns_ChecksTotalAndPassed(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+
+	withChecks := sampleRecord("run-with-checks", "main", base)
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-with-checks", Record: withChecks}); err != nil {
+		t.Fatalf("Emit(run-with-checks): %v", err)
+	}
+
+	noChecks := &core.RunRecord{
+		RunID:     "run-no-checks",
+		Target:    "main",
+		Candidate: core.Candidate{Ref: "refs/heads/for/main/eve/nocheck", Target: "main", User: "eve", Topic: "nocheck", SHA: "sha-nocheck"},
+		Outcome:   core.OutcomeError,
+		StartedAt: base.Add(time.Minute),
+		EndedAt:   base.Add(time.Minute),
+	}
+	if err := s.Emit(ctx, core.Event{Kind: core.EventError, Target: "main", RunID: "run-no-checks", Record: noChecks}); err != nil {
+		t.Fatalf("Emit(run-no-checks): %v", err)
+	}
+
+	runs, err := s.RecentRuns("main", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	byID := make(map[string]RunRow, len(runs))
+	for _, r := range runs {
+		byID[r.RunID] = r
+	}
+	if r := byID["run-with-checks"]; r.ChecksTotal != 2 || r.ChecksPassed != 1 {
+		t.Errorf("run-with-checks ChecksTotal/ChecksPassed = %d/%d, want 2/1", r.ChecksTotal, r.ChecksPassed)
+	}
+	if r := byID["run-no-checks"]; r.ChecksTotal != 0 || r.ChecksPassed != 0 {
+		t.Errorf("run-no-checks ChecksTotal/ChecksPassed = %d/%d, want 0/0", r.ChecksTotal, r.ChecksPassed)
 	}
 }
 

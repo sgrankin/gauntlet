@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 7).
+-- schema.sql: gauntlet history store schema (user_version = 8).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -54,6 +54,11 @@ CREATE TABLE checks (
   err         TEXT NOT NULL DEFAULT '',
   output      TEXT NOT NULL DEFAULT '',   -- captured output, verbatim (executor tail-caps at 64KiB) (v2+)
   log_path    TEXT NOT NULL DEFAULT '',   -- full per-check log file path, if one was written (v3+)
+  -- command (v8+): the check's argv (core.CheckJob.Command), shell-joined
+  -- into one display string by writeRecord — run.html's command echo above
+  -- a check's captured output. Empty for rows written before v8, in which
+  -- case run.html renders no echo line at all rather than a blank one.
+  command     TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

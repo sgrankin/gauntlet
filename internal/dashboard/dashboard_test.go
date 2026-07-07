@@ -582,6 +582,39 @@ func TestTarget_RecentRunsRenderAsChips(t *testing.T) {
 	if !strings.Contains(body, `<a href="/run/run-mallory-rejected" class="tag bad">rejected</a>`) {
 		t.Errorf("expected the parked outcome tag to link to its run when history is enabled:\n%s", body)
 	}
+	// sampleRecord's two checks (one passed, one failed) must render as the
+	// compact "✓ 1/2" ratio next to the outcome chip (task #38).
+	if !strings.Contains(body, `class="muted check-ratio">✓ 1/2</span>`) {
+		t.Errorf("expected a ✓ 1/2 check ratio next to the outcome chip:\n%s", body)
+	}
+}
+
+// TestTarget_RecentRunsOmitCheckRatioWhenNoChecks confirms a run with no
+// checks table rows at all (RunRow.ChecksTotal == 0) renders no check-ratio
+// span — never "✓ 0/0" (runSummary.CheckRatio's doc).
+func TestTarget_RecentRunsOmitCheckRatioWhenNoChecks(t *testing.T) {
+	store := openTestStore(t)
+	rec := &core.RunRecord{
+		RunID:     "run-no-checks",
+		Target:    "main",
+		Candidate: core.Candidate{Ref: "refs/heads/for/main/eve/nocheck", Target: "main", User: "eve", Topic: "nocheck", SHA: "sha-nocheck"},
+		Outcome:   core.OutcomeError,
+		StartedAt: time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC),
+		EndedAt:   time.Date(2026, 7, 5, 11, 0, 1, 0, time.UTC),
+	}
+	emitRun(t, store, rec)
+
+	snap := testSnapshot()
+	h := dashboard.New(func() *queue.Snapshot { return snap }, store)
+	_, body := get(t, h, "/t/main")
+
+	// base.html's <style> block mentions the "check-ratio" class name in its
+	// own CSS rule regardless of whether any element uses it, so the
+	// assertion below looks for the actual rendered span, not the bare
+	// substring.
+	if strings.Contains(body, `class="muted check-ratio"`) {
+		t.Errorf("expected no check-ratio span for a run with zero recorded checks:\n%s", body)
+	}
 }
 
 // --- short SHA rendering (bullet 2: fix SHA overflow) -------------------------
@@ -652,6 +685,35 @@ func TestRun_PassedCheckWithNoOutputStaysFlat(t *testing.T) {
 	}
 	if detailsIdx != -1 && detailsIdx < lintIdx && strings.Index(body[detailsIdx:lintIdx], "</details>") == -1 {
 		t.Errorf("lint (no output) appears to be wrapped in a <details>, want a flat row:\n%s", body)
+	}
+}
+
+// TestRun_ShowsCommandEchoAboveOutput confirms a check whose history row
+// carries a Command (v8) renders it as a .check-command line immediately
+// before its <pre class="output">, and that a check with no Command (the
+// pre-v8/no-command case) renders no such line at all.
+func TestRun_ShowsCommandEchoAboveOutput(t *testing.T) {
+	store := openTestStore(t)
+	rec := sampleRecord("run-cmd-1", "main")
+	rec.Checks[0].Output = "clean" // lint: give it output too, so it also gets a <details>
+	rec.Checks[0].Command = nil    // lint: no command recorded (pre-v8 row) -> no echo line
+	rec.Checks[1].Command = []string{"go", "test", "./..."}
+	emitRun(t, store, rec)
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	_, body := get(t, h, "/run/run-cmd-1")
+
+	if !strings.Contains(body, `<div class="check-command">go test ./...</div>`) {
+		t.Errorf("expected the test check's command echoed above its output:\n%s", body)
+	}
+	if strings.Count(body, `class="check-command"`) != 1 {
+		t.Errorf("expected exactly one command echo (lint has no Command), got body:\n%s", body)
+	}
+	// The echo must render as part of the SAME details box, before <pre>.
+	cmdIdx := strings.Index(body, `class="check-command"`)
+	preIdx := strings.Index(body, `<pre class="output">boom`)
+	if cmdIdx < 0 || preIdx < 0 || cmdIdx > preIdx {
+		t.Errorf("expected the command echo to appear before test's captured output:\n%s", body)
 	}
 }
 

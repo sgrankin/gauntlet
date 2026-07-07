@@ -352,7 +352,8 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			// LogURL is only populated when there's both a stored log file
 			// (c.LogPath != "") and a configured containment root to serve it
 			// from (d.logRoot != "", WithLogRoot) — see runLogURL.
-			LogURL: d.runLogURL(row.RunID, c.Name, c.LogPath),
+			LogURL:  d.runLogURL(row.RunID, c.Name, c.LogPath),
+			Command: c.Command,
 		})
 	}
 
@@ -862,10 +863,24 @@ func (d *dash) recentRuns(target string, limit int, at time.Time) ([]runSummary,
 			Title:     chipTitle(row.Outcome, row.CandidateTopic, row.StartedAt, at),
 			Detail:    row.Detail,
 			StartedAt: formatTime(row.StartedAt), Duration: formatDuration(row.Duration),
-			Batched: row.BatchID != "",
+			Batched:    row.BatchID != "",
+			CheckRatio: checkRatioString(row.ChecksTotal, row.ChecksPassed),
 		})
 	}
 	return out, true
+}
+
+// checkRatioString formats a run's own check pass/total counts (RunRow.
+// ChecksTotal/ChecksPassed, RecentRuns' joined aggregate) as the compact
+// "✓ passed/total" string target.html renders next to a run's outcome chip.
+// total == 0 (no checks table rows for this run at all — e.g. a recovered
+// landing, or an error before any check ran) returns "" rather than
+// "✓ 0/0": runSummary.CheckRatio's doc.
+func checkRatioString(total, passed int) string {
+	if total == 0 {
+		return ""
+	}
+	return fmt.Sprintf("✓ %d/%d", passed, total)
 }
 
 func buildInFlight(rs *queue.RunSnapshot, at time.Time) *inFlightView {
@@ -994,6 +1009,12 @@ func errText(err error) string {
 	return err.Error()
 }
 
+// formatDuration renders d for display, getting friendlier as it grows: Go's
+// native Duration.String() (e.g. "1m5s") below 90s, "Xm Ys" (a space, always
+// both units, e.g. "5m 27s") from 90s up to an hour, and "Xh Ym" beyond that
+// — a bare "1h5s" native rendering starts looking less like an at-a-glance
+// duration and more like something to parse once minutes stop being the
+// biggest unit that matters.
 func formatDuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
@@ -1003,8 +1024,14 @@ func formatDuration(d time.Duration) string {
 		return d.Round(time.Millisecond).String()
 	case d < time.Minute:
 		return d.Round(10 * time.Millisecond).String()
-	default:
+	case d < 90*time.Second:
 		return d.Round(time.Second).String()
+	case d < time.Hour:
+		d = d.Round(time.Second)
+		return fmt.Sprintf("%dm %ds", int(d/time.Minute), int(d%time.Minute/time.Second))
+	default:
+		d = d.Round(time.Minute)
+		return fmt.Sprintf("%dh %dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
 	}
 }
 
@@ -1303,6 +1330,14 @@ type checkView struct {
 	// handleRun populates this — buildInFlight's in-flight "Done" checks
 	// never have a history row yet, so their LogURL is always "".
 	LogURL string
+
+	// Command is the check's argv, already shell-joined into one display
+	// string (history.CheckRow.Command) — run.html renders it as a command
+	// echo above Output, only when both are non-empty. Only handleRun's
+	// Checks populate this from history; Hooks (HookRow has no Command
+	// column) and every in-flight "Done" checkView leave it "", which
+	// run.html treats as "no echo line" (same convention as a pre-v8 row).
+	Command string
 }
 
 // runSummary is one row of a target's recent-run history: the compact
@@ -1323,6 +1358,16 @@ type runSummary struct {
 	// strip. Purely cosmetic; the underlying data is BatchID itself
 	// (exposed via the API/MCP fields, not this view struct).
 	Batched bool
+
+	// CheckRatio is the compact "✓ passed/total" string (checkRatioString)
+	// for target.html's Recent runs table, or "" for a run with no checks
+	// table rows at all (RunRow.ChecksTotal == 0) — omitted rather than
+	// rendered as "✓ 0/0", since "nothing recorded" isn't the same claim as
+	// "zero of zero passed". index.html's bare chip-strip rendering of this
+	// same type never reads this field: a chip is deliberately "a filled
+	// square, never text" (base.html's .chip doc), so there's no room for it
+	// there by design.
+	CheckRatio string
 }
 
 type targetData struct {
