@@ -17,7 +17,7 @@ system past that (DESIGN.md's decision ledger, "Deployments as post-land
 hooks"): a hook that needs more (health checks, rollback, progressive
 delivery) hands off to a real CD system. Auth in front of the dashboard and
 anything past a single running instance are explicitly out of scope for
-gauntlet (docs/plans/phase23.md §8) — front the daemon with your own
+gauntlet — front the daemon with your own
 reverse proxy/CD system for those.
 
 If a target's deploy hook runs slower than that target merges (a builder

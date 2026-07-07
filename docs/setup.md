@@ -1,7 +1,7 @@
 # Integration setup guides
 
 These channels/executors have no fake to exercise in CI-style tests; verify
-them by hand against the real service once, per `docs/plans/phase23.md` §5.
+them by hand against the real service once.
 Each section pairs the one-time external setup (tokens, apps, images) with
 what a successful live run should look like. The config nodes referenced
 here are documented in [config.md](config.md).

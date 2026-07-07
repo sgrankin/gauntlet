@@ -3,7 +3,9 @@
 Gauntlet is a merge-queue daemon. Read [README.md](README.md) for what it
 does and [DESIGN.md](DESIGN.md) — especially the decision ledger and
 invariants — before any structural change; the ledger records what was
-already tried and killed.
+already tried and killed. Mechanism-level design (queue core, batch and
+speculate modes, shared services, scaling) lives in
+[docs/design/](docs/design/).
 
 ## Commands
 

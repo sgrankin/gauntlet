@@ -139,7 +139,7 @@ gauntlet hooks-cancel -url http://localhost:8080 -target main
 muted line on the dashboard index page) exists for external park/wake
 automation — e.g. an Azure Function that deallocates a parked-builder VM
 once the daemon has been idle long enough, and re-wakes it when refs arrive
-(see `docs/plans/scale.md` §2). It's the whole daemon's idleness, not just
+(see [design/scaling.md](design/scaling.md)). It's the whole daemon's idleness, not just
 the queue's: no waiting candidates and no in-flight runs across every
 target, AND no target's post-land hook currently running or backlogged.
 Absent (not `null` or `""`) whenever the daemon is busy right now — there's

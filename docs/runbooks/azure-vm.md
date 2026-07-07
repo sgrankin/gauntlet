@@ -67,8 +67,8 @@ az vm create \
   semantics"](../../README.md#landing-changes), already shipped) exists to
   absorb once, but stacking spot eviction *and* the park/wake deallocation
   below multiplies infra-error surface for no real savings at this scale
-  (docs/plans/scale.md §5's own framing: revisit spot only once a
-  remote-executor/multi-worker story exists, §3 of that doc — not before).
+  ([design/scaling.md](../design/scaling.md)'s own framing: revisit spot only
+  once a remote-executor/multi-worker story exists — not before).
   A regular VM parked overnight beats spot complexity today.
 - `first-boot.sh` (referenced by `--custom-data`) is written in Phase 3
   below — for this first `az vm create`, either write it first or create
@@ -500,7 +500,7 @@ recovery drill's from-scratch VM recreate.
 
 A deallocated VM keeps its disks (so every warm docker layer, module cache,
 and `history.db` survives) and bills storage only, not compute — the
-mechanism docs/plans/scale.md §2 sketches. Two timer-driven pieces, either
+mechanism [design/scaling.md](../design/scaling.md)'s "Axis 2" sketches. Two timer-driven pieces, either
 as an Azure Function or a cron job on some other always-on box:
 
 **Wake** — a parked daemon can't see refs arrive, so wake-on-work has to

@@ -23,9 +23,8 @@ Requires git 2.38 or newer (`git merge-tree --write-tree`).
   verification: GitHub PAT, Slack app, container executor, OTLP.
 - [docs/deploy.md](docs/deploy.md) — production deployment guide, plus
   step-by-step [runbooks](docs/runbooks/).
-- [docs/plans/](docs/plans/README.md) and
-  [docs/reviews/](docs/reviews/README.md) — historical build plans and
-  review records; code comments cite them by section.
+- [docs/design/](docs/design/) — feature design docs: the queue core,
+  queue modes (batch/speculate), shared services, and scaling.
 
 ## Running
 
@@ -184,8 +183,8 @@ batch-mates (unparked, "batch member cancelled") — but only when driven via
 the API/CLI: a Slack reaction can't name a single batch member (see the
 [Slack app guide](docs/setup.md#slack-app)), so use those for a batch. See
 [docs/api.md](docs/api.md) for the wire shape; the full per-mode
-cancellation semantics are recorded in
-[docs/plans/phase5.md](docs/plans/phase5.md).
+cancellation semantics are recorded in [docs/design/queue-modes.md's
+"Cancellation semantics per mode"](docs/design/queue-modes.md#cancellation-semantics-per-mode).
 
 Post-land hooks have their own, separate cancel surface
 (`POST /api/v1/hooks/cancel`, the MCP `hook_cancel` tool, or
