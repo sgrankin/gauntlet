@@ -27,7 +27,7 @@ lines as above.
 
 ## Check environment reference
 
-Every executor (local or container) sets six environment variables before
+Every executor (local or container) sets these environment variables before
 running a check's command, and provides a result file for reporting
 `skipped`:
 
@@ -44,6 +44,19 @@ running a check's command, and provides a result file for reporting
   `testdb_$GAUNTLET_RUN_ID` on a shared SQL Server — so concurrent runs
   (the speculate window, or a batch's members) can't collide on the same
   external resource.
+- `GAUNTLET_GIT_DIR` — a git dir holding every object the SHAs above name
+  (the daemon's own bare repo — the trial merge commit is created there
+  whether or not it ever lands, so `GAUNTLET_MERGE_SHA` always resolves).
+  Usable as `GIT_DIR` or `git --git-dir`; see ["Conditional
+  execution"](#conditional-execution) below. **Read-only by contract**: the
+  container executor mounts it `:ro` at the fixed path `/gauntlet-git`; the
+  local executor hands you the daemon's live repo path and trusts your
+  script not to write to it. Honesty note, same spirit as services' "trust,
+  stated honestly": the git dir's `config` file carries the daemon's remote
+  URL verbatim — if that URL embeds a credential (rather than using a
+  credential helper or SSH agent, both of which keep secrets out of the
+  URL), every check can read it. Local checks could already read it off
+  disk; this extends that visibility to container checks too.
 
 A check that declares `needs` (see ["Shared services"](#shared-services)
 below) additionally gets one pair per resolved service:
@@ -85,21 +98,35 @@ To read one offline: `zstd -d <path>` (or `zstd -dc <path> | less`).
 The environment contract above is the whole mechanism for
 conditional/monorepo-style execution — gauntlet has no path-filter config
 (see DESIGN.md "Decision ledger": path globs, never). An affected-only
-check decides for itself, using the SHAs it's handed:
+check decides for itself, using the SHAs it's handed. The check's working
+tree is a plain export (`git archive`, no `.git`), so point git at
+`GAUNTLET_GIT_DIR` instead:
 
 ```sh
-if git diff --name-only "$GAUNTLET_BASE_SHA" "$GAUNTLET_MERGE_SHA" | grep -q '^services/web/'; then
+if git --git-dir="$GAUNTLET_GIT_DIR" diff --name-only "$GAUNTLET_BASE_SHA" "$GAUNTLET_MERGE_SHA" | grep -q '^services/web/'; then
     go test ./services/web/...
 else
     echo skipped > "$GAUNTLET_RESULT_FILE"
 fi
 ```
 
-Note the check's working tree is a plain export (`git archive`, no `.git`),
-so resolving that diff needs a git object store the check can reach on its
-own — e.g. a clone the check maintains in a cache volume, or a shallow fetch
-of just those two SHAs. Gauntlet hands you the SHAs; how you turn them into
-a diff is repo-owned, same as everything else about what a check does.
+For a batch run this diff is exactly what the run's verdict covers: the
+base is the target tip the whole chain was built on and the merge SHA is
+the chain tip, so `base..merge` is every member's changes together — the
+right unit for skipping, since a batch's members land (or fail) on this one
+shared suite.
+
+The same object store also serves content-based test caching without
+hand-maintained input manifests — key a cache entry on the last commit that
+touched a check's inputs:
+
+```sh
+key=$(git --git-dir="$GAUNTLET_GIT_DIR" log -1 --format=%H "$GAUNTLET_MERGE_SHA" -- services/web/)
+```
+
+Gauntlet hands you the SHAs and the object store; which paths matter to
+which check is repo-owned code, same as everything else about what a check
+does.
 
 ## Shared services
 

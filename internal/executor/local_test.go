@@ -192,6 +192,47 @@ exit 0
 	}
 }
 
+func TestLocalExecutor_GitDirEnv(t *testing.T) {
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test "$%s" = "/state/repos/origin.git" || { echo "bad git dir: $%s"; exit 1; }
+exit 0
+`, core.EnvGitDir, core.EnvGitDir)
+	cmd := script(t, dir, "check.sh", body)
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{GitDir: "/state/repos/origin.git"}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+}
+
+func TestLocalExecutor_EmptyGitDirOmitsEnvVar(t *testing.T) {
+	// Empty GitDir must leave the variable UNSET (the pre-GitDir contract),
+	// not set-but-empty: a check script telling the two apart with
+	// ${GAUNTLET_GIT_DIR+x} should see the var absent.
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test -z "${%s+x}" || { echo "git dir var unexpectedly set: $%s"; exit 1; }
+exit 0
+`, core.EnvGitDir, core.EnvGitDir)
+	cmd := script(t, dir, "check.sh", body)
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+}
+
 func TestLocalExecutor_ServiceEnvAppended(t *testing.T) {
 	dir := t.TempDir()
 	body := `#!/bin/sh

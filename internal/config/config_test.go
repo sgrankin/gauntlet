@@ -1242,6 +1242,41 @@ executor "container" {
 			wantErr: "result-dir",
 		},
 		{
+			// Reserved-path guard: a mount must not shadow the fixed
+			// read-only bare-repo mount at /gauntlet-git (containerGitDir).
+			name: "executor mount collides with git dir",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/dir" path="/gauntlet-git"
+}
+`,
+			wantErr: "git-dir",
+		},
+		{
+			// Same as above, for a subpath under the git-dir mount.
+			name: "executor mount is a subpath under git dir",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "container" {
+    image "ghcr.io/acme/ci:latest"
+    mount "/host/dir" path="/gauntlet-git/sub"
+}
+`,
+			wantErr: "git-dir",
+		},
+		{
 			name: "executor mount host contains colon",
 			kdl: `
 remote "https://example.com/repo.git"

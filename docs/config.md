@@ -152,7 +152,12 @@ summarize {
   runs. `image` is required when `kind` is `"container"`. `mount` entries
   (host path + `path` + optional `readonly`) add plain host bind mounts —
   see the [container executor guide](setup.md#container-executor) for the
-  docker-socket/testcontainers case and its trust implications.
+  docker-socket/testcontainers case and its trust implications. Both
+  executors also hand every check the daemon's bare repo as
+  `GAUNTLET_GIT_DIR` (see [checks.md](checks.md#check-environment-reference));
+  under `"container"` that's an automatic read-only mount at the fixed path
+  `/gauntlet-git`, which — like `workdir` and the `/gauntlet` result dir —
+  is reserved: an operator `mount` at or under it is a config error.
 - **`services`** — gates shared, cached service instances a check spec's
   `service`/`needs` nodes can request (`internal/services`); see
   [checks.md's "Shared services"](checks.md#shared-services) for the full

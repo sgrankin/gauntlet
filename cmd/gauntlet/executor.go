@@ -24,10 +24,16 @@ import (
 // token namespaces the container executor's container names — see
 // executor.Params.Token's doc. Unused by the local executor, which has no
 // host-global naming namespace to collide on.
-func buildExecutor(cfg *config.Daemon, scratchDir, token string) (core.Executor, error) {
+//
+// gitDir is the daemon's bare repo path (absolute — main.go resolves it),
+// exported to every check as GAUNTLET_GIT_DIR: verbatim by the local
+// executor, via a read-only bind mount at a fixed in-container path by the
+// container executor (core.EnvGitDir has the contract). Empty omits the
+// variable and the mount entirely.
+func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string) (core.Executor, error) {
 	switch cfg.Executor.Kind {
 	case "", "local":
-		return executor.LocalExecutor{BaseDir: scratchDir}, nil
+		return executor.LocalExecutor{BaseDir: scratchDir, GitDir: gitDir}, nil
 	case "container":
 		caches := make([]executor.Cache, len(cfg.Executor.Caches))
 		for i, c := range cfg.Executor.Caches {
@@ -45,6 +51,7 @@ func buildExecutor(cfg *config.Daemon, scratchDir, token string) (core.Executor,
 			Mounts:     mounts,
 			ScratchDir: scratchDir,
 			Token:      token,
+			GitDir:     gitDir,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("container executor: %w", err)

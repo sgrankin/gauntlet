@@ -279,6 +279,12 @@ type Cache struct {
 // same boundary).
 const reservedResultDir = "/gauntlet"
 
+// reservedGitDir is the fixed in-container path the daemon's bare repo is
+// bind-mounted at read-only (the GAUNTLET_GIT_DIR contract) — keep in sync
+// with internal/executor/container.go's containerGitDir, duplicated for the
+// same no-import-of-executor reason as reservedResultDir above.
+const reservedGitDir = "/gauntlet-git"
+
 // Mount is one host bind mount into the container executor, alongside the
 // trial tree and the named cache volumes above (DESIGN.md decision ledger,
 // "Generic container mounts"). The motivating case is the host docker
@@ -289,9 +295,10 @@ const reservedResultDir = "/gauntlet"
 // Both Host and Path are required, must be absolute, and must not contain
 // ':' (validate() below — the container runtime's "-v host:path[:ro]" argv
 // syntax has no escape for it). Path may not be at or under the executor's
-// own Workdir or reservedResultDir, the fixed in-container result-dir mount
-// (internal/executor/container.go's containerResultDir) — both are the
-// executor's own contract with every check and must not be silently
+// own Workdir, reservedResultDir (the fixed in-container result-dir mount,
+// internal/executor/container.go's containerResultDir), or reservedGitDir
+// (the fixed read-only bare-repo mount, containerGitDir there) — all three
+// are the executor's own contract with every check and must not be silently
 // shadowed, even partially, by an operator-configured mount.
 //
 // README's "Container executor" section spells out the trust implication of
@@ -840,8 +847,9 @@ func (d *Daemon) validate() error {
 		}
 		// Reserved in-container paths are the executor's own contract with
 		// every check (the trial tree at Workdir, the result dir at
-		// reservedResultDir — keep in sync with
-		// internal/executor/container.go's containerResultDir) and must
+		// reservedResultDir, the bare-repo mount at reservedGitDir — keep
+		// in sync with internal/executor/container.go's containerResultDir
+		// and containerGitDir) and must
 		// never be silently shadowed by an operator mount, including by a
 		// mount at some path UNDER one of them: a nested bind is legal to
 		// docker/podman/container and would partially, silently shadow the
@@ -854,6 +862,9 @@ func (d *Daemon) validate() error {
 		}
 		if pathAtOrUnder(m.Path, reservedResultDir) {
 			return fmt.Errorf("executor: mount %q: path %q is at or under the reserved result-dir mount %q", m.Host, m.Path, reservedResultDir)
+		}
+		if pathAtOrUnder(m.Path, reservedGitDir) {
+			return fmt.Errorf("executor: mount %q: path %q is at or under the reserved git-dir mount %q", m.Host, m.Path, reservedGitDir)
 		}
 	}
 

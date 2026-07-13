@@ -30,6 +30,21 @@ const (
 	containerResultFile = containerResultDir + "/result"
 )
 
+// containerGitDir is the fixed in-container path the daemon's bare repo is
+// bind-mounted at (read-only) when Params.GitDir is set, and the value
+// GAUNTLET_GIT_DIR carries in that case. Fixed — never derived from the
+// host path — deliberately: path-keyed build caches (Go's build cache keys
+// on full file paths) stay stable across builders and daemons this way, the
+// same reason the trial tree always lands at one Workdir. A sibling of
+// containerResultDir rather than a child (/gauntlet/git) so no runtime ever
+// has to nest one bind mount inside another.
+//
+// internal/config's validate() duplicates this as reservedGitDir (that
+// package deliberately doesn't import this one — see containerResultDir's
+// note above) to reject an operator Mount at or under this path. Renaming
+// this constant means updating that copy too.
+const containerGitDir = "/gauntlet-git"
+
 // Cache is a persistent named volume mounted into every check container, so
 // build caches (e.g. Go's module/build cache) survive across runs instead of
 // re-downloading/rebuilding from scratch in a fresh container each time.
@@ -77,6 +92,16 @@ type Params struct {
 	// (see runArgs) — e.g. the host docker socket, for repos whose checks
 	// run testcontainers against the host daemon.
 	Mounts []Mount
+
+	// GitDir, when non-empty, is the daemon's bare repo path on the host
+	// (absolute — a relative -v source is a named volume to every
+	// docker-compatible runtime, not a bind). runArgs mounts it read-only
+	// at the fixed containerGitDir and exports GAUNTLET_GIT_DIR pointing
+	// there, so affected-only checks can `git diff`/`git log` the SHAs the
+	// env contract hands them without their own object store
+	// (core.EnvGitDir). Empty adds no mount and no variable — the
+	// pre-GitDir container run shape, byte-identical.
+	GitDir string
 
 	// ScratchDir is the directory each check's ephemeral host-side result
 	// dir (gauntlet-container-*, bind-mounted into the container at
@@ -332,7 +357,8 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //	  -w <workdir> \
 //	  -v <job.Dir>:<workdir>            # trial tree, read-write \
 //	  -v <resultDir>:/gauntlet          # writable result dir \
-//	  -e GAUNTLET_* (all six)           \
+//	  -v <p.GitDir>:/gauntlet-git:ro    # bare repo, only when GitDir is set \
+//	  -e GAUNTLET_* (all six, plus GAUNTLET_GIT_DIR when GitDir is set) \
 //	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
 //	  -v <mountHost>:<mountPath>[:ro] ... # operator-configured host bind mounts \
 //	  --network <n> ...                # one per job.Networks (ModeNetwork) \
@@ -351,6 +377,11 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		"-w", p.Workdir,
 		"-v", job.Dir+":"+p.Workdir,
 		"-v", resultDir+":"+containerResultDir,
+	)
+	if p.GitDir != "" {
+		args = append(args, "-v", p.GitDir+":"+containerGitDir+":ro")
+	}
+	args = append(args,
 		"-e", core.EnvBaseSHA+"="+job.BaseSHA,
 		"-e", core.EnvMergeSHA+"="+job.MergeSHA,
 		"-e", core.EnvCandidateSHA+"="+job.Candidate.SHA,
@@ -358,6 +389,9 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		"-e", core.EnvResultFile+"="+containerResultFile,
 		"-e", core.EnvRunID+"="+job.RunID,
 	)
+	if p.GitDir != "" {
+		args = append(args, "-e", core.EnvGitDir+"="+containerGitDir)
+	}
 	for _, c := range p.Caches {
 		args = append(args, "-v", c.Name+":"+c.Path)
 	}

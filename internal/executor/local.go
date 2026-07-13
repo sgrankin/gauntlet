@@ -35,6 +35,15 @@ type LocalExecutor struct {
 	// fallback), which every existing caller/test that never sets this
 	// field still gets unchanged.
 	BaseDir string
+
+	// GitDir, when non-empty, is the daemon's bare repo path (absolute —
+	// checks run with cwd set to the trial tree, so a relative path would
+	// resolve wrong), exported to every check as GAUNTLET_GIT_DIR so
+	// affected-only scripts can `git diff`/`git log` the SHAs the env
+	// contract hands them without their own object store (core.EnvGitDir).
+	// Empty omits the variable entirely — the pre-GitDir contract,
+	// unchanged, which every hand-built executor in tests still gets.
+	GitDir string
 }
 
 // RunCheck implements core.Executor.
@@ -70,7 +79,10 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		core.EnvResultFile+"="+resultFile,
 		core.EnvRunID+"="+job.RunID,
 	)
-	// Shared-services env: appended after the six built-ins, nil for
+	if e.GitDir != "" {
+		cmd.Env = append(cmd.Env, core.EnvGitDir+"="+e.GitDir)
+	}
+	// Shared-services env: appended after the built-ins, nil for
 	// checks with no `needs`. Networks is ModeNetwork-only (a shared
 	// runtime network) and has no meaning for a local subprocess, so it's
 	// deliberately ignored here.

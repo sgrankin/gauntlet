@@ -150,7 +150,15 @@ func run() error {
 	// Key the bare repo's directory off the remote URL so a future
 	// multi-remote daemon (or a config that just changes remotes) never
 	// collides with a stale clone left under the same state dir.
-	repoDir := filepath.Join(*statePath, "repos", remoteKey(cfg.Remote))
+	//
+	// Absolute from the start: this path is also handed to every check as
+	// GAUNTLET_GIT_DIR (buildExecutor below), where checks run with cwd set
+	// to the trial tree — and the container executor needs an absolute -v
+	// source (a relative one is a named volume, not a bind mount).
+	repoDir, err := filepath.Abs(filepath.Join(*statePath, "repos", remoteKey(cfg.Remote)))
+	if err != nil {
+		return fmt.Errorf("resolve repo dir under %s: %w", *statePath, err)
+	}
 	repo, err := gitx.New(ctx, repoDir, cfg.Remote)
 	if err != nil {
 		return fmt.Errorf("open repo at %s: %w", repoDir, err)
@@ -251,7 +259,7 @@ func run() error {
 		}
 	}
 
-	ex, err := buildExecutor(cfg, scratchDir, token)
+	ex, err := buildExecutor(cfg, scratchDir, token, repoDir)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
 	}

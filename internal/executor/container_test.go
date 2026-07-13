@@ -139,6 +139,44 @@ func TestParams_RunArgs_ResultDirMount(t *testing.T) {
 	}
 }
 
+func TestParams_RunArgs_GitDirMountAndEnv(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img", GitDir: "/state/repos/origin.git"}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	// The bare repo is mounted read-only at the FIXED containerGitDir —
+	// never at a host-derived path — so path-keyed build caches (e.g. Go's,
+	// keyed on full file paths) stay stable across builders and daemons.
+	if !containsPair(got, "-v", "/state/repos/origin.git:/gauntlet-git:ro") {
+		t.Fatalf("expected read-only bare-repo mount at %s; argv=%v", containerGitDir, got)
+	}
+	if !containsPair(got, "-e", "GAUNTLET_GIT_DIR=/gauntlet-git") {
+		t.Fatalf("expected GAUNTLET_GIT_DIR pointing at the fixed in-container path; argv=%v", got)
+	}
+	mountIdx := indexOfPair(got, "-v", "/state/repos/origin.git:/gauntlet-git:ro")
+	envIdx := indexOfPair(got, "-e", "GAUNTLET_GIT_DIR=/gauntlet-git")
+	imgIdx := indexOf(got, "img")
+	if !(mountIdx < imgIdx && envIdx < imgIdx) {
+		t.Fatalf("git-dir mount and env must precede the image; argv=%v", got)
+	}
+}
+
+func TestParams_RunArgs_EmptyGitDirAddsNothing(t *testing.T) {
+	// Empty GitDir keeps the pre-GitDir run shape byte-identical: no extra
+	// mount, no GAUNTLET_GIT_DIR env pair.
+	p := Params{Workdir: "/w", Image: "img"}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	for _, a := range got {
+		if strings.Contains(a, "GAUNTLET_GIT_DIR") || strings.Contains(a, containerGitDir) {
+			t.Fatalf("empty GitDir must add no git-dir argv entries, found %q; argv=%v", a, got)
+		}
+	}
+}
+
 func TestParams_RunArgs_MultipleCachesPreserveOrder(t *testing.T) {
 	p := Params{
 		Workdir: "/w",

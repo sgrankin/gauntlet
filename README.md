@@ -217,8 +217,10 @@ policies. See [docs/config.md](docs/config.md) for the full reference.
 
 A check is a named command in your repo's `.gauntlet.kdl`, run against an
 export of the trial-merged tree with a small `GAUNTLET_*` environment
-contract: the base/merge/candidate SHAs, the candidate ref, a run ID for
-namespacing shared resources, and a result file for reporting `skipped`.
+contract: the base/merge/candidate SHAs, the candidate ref, a read-only git
+dir that resolves those SHAs (for affected-only diffs and content-keyed
+caching), a run ID for namespacing shared resources, and a result file for
+reporting `skipped`.
 Checks that need a real backing service (a database, a broker) can declare
 `service`/`needs` and get a warm, pooled instance. See
 [docs/checks.md](docs/checks.md) for the full contract, including full-log

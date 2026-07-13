@@ -73,7 +73,7 @@ type CheckJob struct {
 	Clean bool
 
 	// ServiceEnv is extra environment (GAUNTLET_SVC_<NAME>_HOST/PORT) for
-	// this check's resolved `needs`, appended after the six built-in
+	// this check's resolved `needs`, appended after the built-in
 	// GAUNTLET_* vars by every executor. nil for checks with no needs and
 	// for hooks.
 	//
@@ -187,6 +187,22 @@ const (
 	// distinguishes them, and the run ID is the one identity already
 	// unique per run that a check couldn't otherwise see.
 	EnvRunID = "GAUNTLET_RUN_ID"
+
+	// EnvGitDir is a git dir (usable as GIT_DIR or `git --git-dir`) holding
+	// every object the *_SHA vars above name — the daemon's own bare repo,
+	// which contains the trial merge commit whether or not it ever lands.
+	// The trial tree itself is exported without a .git (git archive), so
+	// this is what lets an affected-only check resolve
+	// `git diff $GAUNTLET_BASE_SHA $GAUNTLET_MERGE_SHA`, or derive
+	// content-based cache keys (`git log -1 -- <inputs>`), without
+	// maintaining its own clone. Read-only by contract: the container
+	// executor mounts it :ro at a fixed in-container path; the local
+	// executor exports the daemon's live repo path and trusts the check
+	// (the same own-developers threat model as everything else). Absent
+	// entirely when the executor wasn't told where the repo lives
+	// (LocalExecutor.GitDir / executor.Params.GitDir empty — the state of
+	// every hand-built executor in tests before this field existed).
+	EnvGitDir = "GAUNTLET_GIT_DIR"
 )
 
 // Outcome is a run's final disposition.
