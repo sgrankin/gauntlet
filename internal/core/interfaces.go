@@ -69,6 +69,20 @@ type GitRepo interface {
 	// against.
 	ExportTree(ctx context.Context, tree, dir string) error
 
+	// Pin anchors oid — an active run's chain-tip merge commit — against
+	// garbage collection until Unpin. The merge commits gauntlet creates
+	// are referenced by no branch until (unless) they land, yet checks and
+	// hooks resolve them through GAUNTLET_GIT_DIR for the whole run, so
+	// their reachability is part of the check contract, not a GC-timing
+	// accident. Pinning the chain tip covers the entire chain: a commit
+	// reaches its parents, so every link, every member SHA, and the base
+	// stay live behind one pin. Idempotent per OID.
+	Pin(ctx context.Context, oid string) error
+
+	// Unpin releases oid's pin. Unpinning an OID that was never pinned is
+	// a no-op, not an error, so terminal paths may unpin unconditionally.
+	Unpin(ctx context.Context, oid string) error
+
 	// CASUpdate compare-and-swaps remoteRef from oldOID to newOID.
 	// newOID == "" deletes the ref. Returns ErrCASStale if the ref's
 	// actual value did not match oldOID (Invariants 2 and 3).

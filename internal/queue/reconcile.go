@@ -1026,6 +1026,15 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 	tipTree := trials[len(trials)-1].TreeOID
 	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, chainTip))
 
+	// Pin the chain tip before anything reads through it (startRun's pin
+	// site has the full rationale). One pin covers the whole chain: the tip
+	// reaches every link, every member SHA, and the base through commit
+	// parenthood.
+	if err := d.git.Pin(ctx, chainTip); err != nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "pin trial chain: "+err.Error(), rootSpan)
+		return
+	}
+
 	specData, err := d.git.ReadFileFromTree(ctx, tipTree, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
@@ -1115,6 +1124,11 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 // always non-nil here: finishBatchStart's own callers always have a real
 // run-in-progress span by this point.
 func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID string, links []chainLink, trials []core.TrialMerge, outcome core.Outcome, detail string, rootSpan trace.Span) {
+	// Mirrors rejectRun: a chain rejected after finishBatchStart's pin site
+	// never reaches finalizeRun, so its tip pin is released here. Call
+	// sites before the pin (or the pin failure itself) unpin a ref that
+	// never existed — a no-op by Unpin's contract.
+	d.unpin(ctx, links[len(links)-1].mergeOID)
 	now := d.now()
 	prevBase := base
 	var lastRec *core.RunRecord
@@ -1178,7 +1192,7 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 		m.rec.EndedAt = now
 	}
 
-	d.finalizeRun(r)
+	d.finalizeRun(ctx, r)
 
 	for i := range r.members {
 		m := &r.members[i]
@@ -1408,6 +1422,19 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	}
 	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, link.mergeOID))
 
+	// Pin the merge commit before anything reads through it: the spec read,
+	// the export, and every check resolving GAUNTLET_*_SHA through
+	// GAUNTLET_GIT_DIR all depend on this otherwise-unreferenced object
+	// surviving git maintenance for the run's whole lifetime — reachability
+	// is part of the check contract, not a gc.pruneExpire timing accident.
+	// Every terminal path releases it: finalizeRun for a run that got this
+	// far, rejectRun below for the pre-check failures, landedPins (via the
+	// next Fetch) for a landing.
+	if err := d.git.Pin(ctx, link.mergeOID); err != nil {
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "pin trial merge: "+err.Error(), rootSpan)
+		return nil, false
+	}
+
 	specData, err := d.git.ReadFileFromTree(ctx, trial.TreeOID, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
@@ -1513,6 +1540,13 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		return
 	}
 
+	// The landing's GC pin is handed to landedPins rather than released
+	// here: the chain becomes locally reachable (via the remote-tracking
+	// target ref) only at the NEXT successful Fetch, and post-land hooks may
+	// export the merge from a backlog well after this call — see the field's
+	// doc. finalizeRun's own unpin skips landed runs for exactly this reason.
+	d.landedPins[r.chainTip] = true
+
 	// Any successful landing for this target clears batch-red serial
 	// fallback, resuming batching on the next refill —
 	// whether this landing is an ordinary batch, or one round of the
@@ -1552,7 +1586,7 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	// and spans are no-op), but don't write a consumer — or a batch-chunk
 	// extension — that assumes the dir is gone by EventLanded time.
 	obs.EndSpan(landSpan, nil) // the land itself (target push) succeeded regardless of any slot-delete outcome
-	d.finalizeRun(r)
+	d.finalizeRun(ctx, r)
 }
 
 // finishRun finalizes every member's RunRecord (outcome/detail/end time),
@@ -1577,7 +1611,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 		}
 	}
 
-	d.finalizeRun(r)
+	d.finalizeRun(ctx, r)
 
 	for i := range r.members {
 		m := &r.members[i]
@@ -1614,12 +1648,32 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 // job. It does not touch the lane: lane.runs is truncated by
 // advanceLane/invalidateSuffix, the sole mutators of that slice, at the
 // same call sites that already know the removal boundary.
-func (d *Daemon) finalizeRun(r *run) {
+//
+// It also releases the run's GC pin (created at startRun/finishBatchStart's
+// pin site) for every outcome but a landing: each caller sets every
+// member's Outcome before calling here, so the head member's outcome is
+// authoritative. A landed run's pin instead outlives this call in
+// landedPins (landRun hands it over before finalizing) until the next
+// successful Fetch anchors the chain through the remote-tracking target
+// ref.
+func (d *Daemon) finalizeRun(ctx context.Context, r *run) {
 	obs.EndRun(r.rootSpan, r.members[0].rec)
+
+	if r.members[0].rec.Outcome != core.OutcomeLanded {
+		d.unpin(ctx, r.chainTip)
+	}
 
 	if r.dir != "" {
 		_ = os.RemoveAll(r.dir)
 	}
+}
+
+// unpin best-effort-releases oid's GC pin. The error is deliberately
+// dropped, mirroring finalizeRun's own os.RemoveAll: a pin that outlives
+// its run merely protects some garbage until startup's pin sweep clears
+// it, which is strictly better than any failure handling this could add.
+func (d *Daemon) unpin(ctx context.Context, oid string) {
+	_ = d.git.Unpin(ctx, oid)
 }
 
 // recoverLanded implements Invariant 4's crash-recovery branch: cand.SHA is
@@ -1756,6 +1810,10 @@ func (d *Daemon) skipPreMergePredicted(ctx context.Context, t config.Target, can
 // check spec, or an export failure). rootSpan is always non-nil here: every
 // call site follows a successful StartRun.
 func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candidate, runID, baseOID, mergeOID string, trial core.TrialMerge, outcome core.Outcome, detail string, rootSpan trace.Span) {
+	// Every rejectRun call site sits after startRun's pin site (the pin
+	// failure itself included — unpinning a never-created pin is a no-op),
+	// and this run never reaches finalizeRun, so the pin is released here.
+	d.unpin(ctx, mergeOID)
 	now := d.now()
 	rec := &core.RunRecord{
 		RunID: runID, Target: t.Name, Candidate: cand,

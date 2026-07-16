@@ -381,10 +381,11 @@ gauntlet cancel -url http://localhost:8080 -target main -ref refs/heads/for/main
 flock, not a bug. If a restart hangs on "already running", check for a
 stale process holding the lock before assuming corruption.
 
-**Never run `git gc --prune=now`** against a repo under `repos/` while the
-daemon is running against it — it can reap an unpushed batch/speculation
-chain link out from under an in-flight run. A plain `git gc` (default grace
-period) is always safe.
+**`git gc` against a repo under `repos/` is safe while the daemon runs,
+`--prune=now` included**: every in-flight run pins its trial chain with a
+`refs/gauntlet/pin/*` ref until the run concludes, so gc only ever collects
+genuinely abandoned trial objects. Just don't delete those pin refs by hand
+while the daemon is running — they're what makes this safe.
 
 See [docs/deploy.md](../deploy.md) for the full production guide this
 runbook distills, and [docs/config.md](../config.md) for the complete

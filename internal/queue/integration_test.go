@@ -43,6 +43,7 @@ type integrationHarness struct {
 	t      *testing.T
 	remote *testutil.Remote
 	git    *gitx.Repo
+	dir    string // the daemon's own local bare repo (gitx.Repo's --git-dir)
 	ch     *channel.RecordingChannel
 	d      *Daemon
 }
@@ -82,7 +83,7 @@ func newIntegrationHarness(t *testing.T, remote *testutil.Remote, exec core.Exec
 	// RecordingChannel stream for every integration test built on this
 	// harness.
 	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })
-	return &integrationHarness{t: t, remote: remote, git: repo, ch: ch, d: d}
+	return &integrationHarness{t: t, remote: remote, git: repo, dir: dir, ch: ch, d: d}
 }
 
 func (h *integrationHarness) reconcile() {

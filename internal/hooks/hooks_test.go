@@ -65,6 +65,9 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 	return nil
 }
 
+func (f *fakeGitRepo) Pin(ctx context.Context, oid string) error   { return nil }
+func (f *fakeGitRepo) Unpin(ctx context.Context, oid string) error { return nil }
+
 func (f *fakeGitRepo) exportedDir() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

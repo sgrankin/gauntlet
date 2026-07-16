@@ -393,32 +393,29 @@ backup job beyond that.
 
 ### Object accumulation (batch/speculate)
 
-Trial merges and chain links are commits with no refs; abandoned ones (red
-batches, invalidated windows, crashes) sit in the daemon's bare repo as loose
-objects until `git gc` collects them. Harmless — but a busy queue's state dir
-benefits from an occasional `git -C <state>/repos/<key> gc`.
+Trial merges and chain links are commits no branch references; abandoned
+ones (red batches, invalidated windows, crashes) sit in the daemon's bare
+repo as loose objects until `git gc` collects them. Harmless — but a busy
+queue's state dir benefits from an occasional
+`git -C <state>/repos/<key> gc`.
 
-**Why this is safe while the daemon runs — and why the letter of that claim
-matters.** It is *not* safe because of file locking. An unpushed chain link
-(a batch's intermediate merge commit, or a speculation window's predicted
-base) is reachable only from the daemon's own in-memory `lane.runs` state,
-never from any ref — so from git's perspective, every such object looks
-unreachable the instant it's created, indistinguishable from real garbage.
-What actually protects it is `git gc`'s loose-object prune **grace period**:
-by default `gc.pruneExpire` is `2.weeks.ago`, so a plain `git gc` never
-removes a loose object younger than that, however unreachable it looks. Every
-chain link the daemon might still resume using is, in practice, far younger
-than two weeks old, so a default-configured `git gc` run against a live
-daemon's repo is safe.
+**Why this is safe while the daemon runs.** Every *in-flight* run pins its
+chain's tip commit with a local ref (`refs/gauntlet/pin/<tip>`) from the
+moment the trial merge is created until the run's terminal outcome — or,
+for a landing, until the next fetch makes the chain reachable through the
+remote-tracking target ref. One pin covers the whole chain (a commit
+reaches its parents), so from git's perspective nothing an active run — or
+a check reading `GAUNTLET_GIT_DIR`, or a queued post-land hook — still
+needs ever looks unreachable. Any gc, **including `git gc --prune=now`**,
+is therefore safe to run against a live daemon's repo: it collects only
+genuinely abandoned trial objects, which is exactly what you want. (Pins
+stranded by a crash are swept at the next daemon start; every interrupted
+run re-runs from scratch anyway.)
 
-**Never run `git gc --prune=now`** (or set `gc.pruneExpire=now`, or any
-value shorter than the daemon's own chain lifetime) **against a repo the
-daemon is actively using.** That discards the grace period entirely and can
-reap an unpushed chain link out from under an in-flight batch or speculation
-window. The daemon has no way to detect or recover from an object it still
-needs simply vanishing from under it — the next operation that touches that
-link (building the next chain link, or the eventual land) just fails,
-surfacing as a spurious check/land failure with no ref-level explanation to
-point at. Keep any `--prune=now` (or otherwise expire-now) gc run for a repo
-you've first confirmed the daemon isn't running against — e.g. planned
-maintenance with the daemon stopped.
+Two residual cautions. A `--prune=now` run discards the `gc.pruneExpire`
+grace period (default two weeks) for *abandoned* objects — fine, they're
+garbage, but it forecloses any forensic `git show` on a just-failed trial's
+merge you hadn't inspected yet. And the pins protect the daemon's own
+objects, not its refs: don't delete `refs/gauntlet/pin/*` by hand while the
+daemon runs — that reintroduces the exact mid-run object loss the pins
+exist to prevent.

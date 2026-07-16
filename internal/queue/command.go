@@ -232,7 +232,7 @@ func (d *Daemon) cancelBatchMember(ctx context.Context, t config.Target, r *run,
 		}
 	}
 
-	d.finalizeRun(r)
+	d.finalizeRun(ctx, r)
 
 	for i := range r.members {
 		m := &r.members[i]

@@ -298,6 +298,72 @@ func (r *Repo) ExportTree(ctx context.Context, tree, dir string) error {
 	return nil
 }
 
+// pinRefPrefix is the local ref namespace that anchors in-flight synthetic
+// merge commits against garbage collection. The queue owns no branch, so a
+// trial chain's commits are otherwise unreferenced loose objects — safe
+// from `git gc` only by the gc.pruneExpire grace period, which an
+// operator's `--prune=now` (or a long-enough run) defeats. One ref per
+// active run, named by the pinned OID itself, keeps the whole chain
+// reachable (a commit reaches its parents) for as long as checks and hooks
+// may resolve it through GAUNTLET_GIT_DIR.
+//
+// The namespace is deliberately outside refs/heads/ and refs/remotes/:
+// Fetch's refspec and --prune only touch refs/remotes/origin/*, ListRefs
+// only reads them, and CASUpdate only pushes refs the caller names — so
+// pins are invisible to the queue's view of ground truth and are never
+// pushed anywhere.
+const pinRefPrefix = "refs/gauntlet/pin/"
+
+// Pin anchors oid against garbage collection by pointing
+// refs/gauntlet/pin/<oid> at it. Idempotent: pinning the same OID twice
+// resolves to the same ref and value. Pins are local refs, not objects,
+// so Invariant 6 (the merge commit is the only object gauntlet creates)
+// stands.
+func (r *Repo) Pin(ctx context.Context, oid string) error {
+	if _, err := r.run(ctx, "update-ref", pinRefPrefix+oid, oid); err != nil {
+		return fmt.Errorf("gitx: pin %s: %w", oid, err)
+	}
+	return nil
+}
+
+// Unpin removes oid's pin ref. Unpinning an OID that was never pinned (or
+// was already unpinned) is a no-op, not an error — `update-ref -d` without
+// an old-value assertion succeeds on a missing ref, which is exactly the
+// idempotence terminal paths need (they unpin unconditionally rather than
+// tracking whether their run ever reached the pin step).
+func (r *Repo) Unpin(ctx context.Context, oid string) error {
+	if _, err := r.run(ctx, "update-ref", "-d", pinRefPrefix+oid); err != nil {
+		return fmt.Errorf("gitx: unpin %s: %w", oid, err)
+	}
+	return nil
+}
+
+// SweepPins deletes every pin ref, returning how many were swept. Startup
+// calls this before the first reconcile pass: a crash can strand pins, and
+// every in-flight run is re-derived from refs and re-run from scratch
+// anyway (Invariant 4), so a surviving pin never protects anything the new
+// process still needs — the same rationale as sweeping the trials dir.
+// Safe only under the daemon's exclusive state lock, like that sweep.
+func (r *Repo) SweepPins(ctx context.Context) (int, error) {
+	out, err := r.run(ctx, "for-each-ref", "--format=%(refname)", pinRefPrefix)
+	if err != nil {
+		return 0, fmt.Errorf("gitx: sweep pins: %w", err)
+	}
+	refs := splitLines(out)
+	if len(refs) == 0 {
+		return 0, nil
+	}
+	// One update-ref --stdin transaction instead of a subprocess per ref.
+	var b strings.Builder
+	for _, ref := range refs {
+		fmt.Fprintf(&b, "delete %s\n", ref)
+	}
+	if _, err := runGit(ctx, r.dir, strings.NewReader(b.String()), "update-ref", "--stdin"); err != nil {
+		return 0, fmt.Errorf("gitx: sweep pins: %w", err)
+	}
+	return len(refs), nil
+}
+
 // CASUpdate compare-and-swaps remoteRef from oldOID to newOID (newOID == ""
 // deletes). oldOID == "" asserts the ref must not currently exist. Returns
 // core.ErrCASStale (wrapped) if the ref's actual value did not match oldOID.

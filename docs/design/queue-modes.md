@@ -374,7 +374,19 @@ so config stays forward-compatible without ever silently no-opping:
 
 Also out of scope by design: cross-target batching or speculation (each target is
 its own pipeline), combined batch+speculate on one target (one discipline each),
-priority lanes or reordering (FIFO only), GC-anchoring refs for in-flight chains
-(refless — links are short-lived loose objects the daemon owns), and same-tick
-refill after a landing (deferred one tick to preserve the no-stale-snapshot
-rule).
+priority lanes or reordering (FIFO only), and same-tick refill after a landing
+(deferred one tick to preserve the no-stale-snapshot rule).
+
+One earlier entry in this list has since been overturned: GC-anchoring refs
+for in-flight chains ("refless — links are short-lived loose objects the
+daemon owns") were deliberately not built while nothing outside the daemon's
+own next few ticks ever resolved a chain link. `GAUNTLET_GIT_DIR` changed
+that — checks and hooks now read the merge commit out of the bare repo for
+the run's whole lifetime, making reachability part of the check contract
+rather than a `gc.pruneExpire` timing accident. Each run now pins its chain
+tip at `refs/gauntlet/pin/<tip>` (one ref covers the whole chain through
+commit parenthood) from just after `commit-tree` until its terminal outcome
+— or, for a landing, until the next successful fetch anchors the chain via
+the remote-tracking target ref. The namespace is invisible to
+`fetch`/`ListRefs`, so queue state derivation is unchanged; DESIGN.md's
+decision ledger has the full entry.

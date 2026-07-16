@@ -336,6 +336,21 @@ type Daemon struct {
 	// "Lifecycle: ensure, release, reap").
 	reaperArmed bool
 
+	// landedPins holds chain-tip merge OIDs whose runs landed but whose GC
+	// pin (core.GitRepo.Pin) hasn't been released yet. A landed chain
+	// becomes reachable through refs/remotes/origin/<branch> only at the
+	// NEXT successful Fetch, and post-land hooks may export the merge from
+	// a backlog well after landing — so landRun hands the pin over here
+	// instead of unpinning inline, and ReconcileOnce releases every entry
+	// right after its Fetch succeeds, the moment local ground truth itself
+	// anchors the landing. (A target force-pushed to discard a landing
+	// before that fetch legitimately orphans the merge; the pin does not
+	// exist to outlive the landing it protected.) In-memory only,
+	// reconstructible in the usual weak sense: a crash strands the pin refs
+	// themselves, and startup's pin sweep clears them (Invariant 4 — the
+	// stranded pins protect nothing a fresh process still needs).
+	landedPins map[string]bool
+
 	// idleSince is buildSnapshot's own tracked idle-transition instant (see
 	// docs/design/scaling.md, "Axis 2 — park the builder"; and
 	// Snapshot.IdleSince's own doc): zero while the
@@ -409,6 +424,7 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		lanes:         make(map[string]*lane),
 		batchFallback: make(map[string]bool),
 		seeded:        make(map[string]bool),
+		landedPins:    make(map[string]bool),
 	}, nil
 }
 
@@ -494,6 +510,16 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	if err := d.git.Fetch(ctx); err != nil {
 		return fmt.Errorf("queue: fetch: %w", err)
 	}
+	// This Fetch just succeeded, so every landing recorded in landedPins is
+	// now anchored by its target's remote-tracking ref (or was deliberately
+	// force-pushed away — see the field's doc); either way the pin has done
+	// its job and is released. Best-effort like the other unpin sites: a
+	// failed release is retried never, swept at next startup.
+	for oid := range d.landedPins {
+		d.unpin(ctx, oid)
+		delete(d.landedPins, oid)
+	}
+
 	refs, err := d.git.ListRefs(ctx)
 	if err != nil {
 		return fmt.Errorf("queue: list refs: %w", err)

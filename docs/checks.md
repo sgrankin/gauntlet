@@ -117,12 +117,32 @@ right unit for skipping, since a batch's members land (or fail) on this one
 shared suite.
 
 The same object store also serves content-based test caching without
-hand-maintained input manifests — key a cache entry on the last commit that
-touched a check's inputs:
+hand-maintained input manifests. For a cache *key*, prefer the content
+identity itself — the tree OID of the inputs, straight from the merge being
+tested:
 
 ```sh
-key=$(git --git-dir="$GAUNTLET_GIT_DIR" log -1 --format=%H "$GAUNTLET_MERGE_SHA" -- services/web/)
+key=$(git --git-dir="$GAUNTLET_GIT_DIR" rev-parse "$GAUNTLET_MERGE_SHA:services/web")
 ```
+
+Two trials whose `services/web` trees are byte-identical get the same key,
+including across a revert that restores earlier content — that's what makes
+it an identity. The last-*changing*-commit query answers a different
+question, provenance ("which commit last touched these inputs?"):
+
+```sh
+git --git-dir="$GAUNTLET_GIT_DIR" log -1 --format=%H "$GAUNTLET_MERGE_SHA" -- services/web/
+```
+
+It also works as a cache key, just a conservative one — a revert produces a
+new commit and so a fresh key even though the content (and any correct
+cached result) is unchanged. Use it when you want the commit for humans or
+logs; use `rev-parse` when you want maximal cache hits.
+
+Every SHA in the environment contract stays resolvable in
+`GAUNTLET_GIT_DIR` for your check's entire lifetime — the daemon pins the
+trial chain against `git gc` until the run (and, for landings, any post-land
+hook) is done — so a long check never has an object vanish mid-query.
 
 Gauntlet hands you the SHAs and the object store; which paths matter to
 which check is repo-owned code, same as everything else about what a check

@@ -912,6 +912,55 @@ func TestContainerExecutor_Functional(t *testing.T) {
 		}
 	})
 
+	t.Run("GitDirMountedReadOnly", func(t *testing.T) {
+		// A REAL bare repo (holding an unpushed synthetic merge — the exact
+		// object topology a live run mounts) at the fixed /gauntlet-git:
+		// the check must be able to read through $GAUNTLET_GIT_DIR but
+		// never write through it. The tiny cached test images carry no git
+		// binary, so the read/write probes use shell built-ins; the git
+		// *query* contract against this same repo shape is proven
+		// end-to-end by TestLocalExecutor_GitDirEndToEndQueries — the
+		// container-specific deltas under test here are the fixed mount
+		// path, the env value, and the :ro enforcement.
+		gitDir, _, _, mergeSHA := bareRepoWithUnpushedMerge(t)
+
+		dir := t.TempDir()
+		cmd := containerScript(t, dir, "/workspace", "check.sh", `#!/bin/sh
+set -eu
+[ "$GAUNTLET_GIT_DIR" = "/gauntlet-git" ] || { echo "GAUNTLET_GIT_DIR=$GAUNTLET_GIT_DIR"; exit 1; }
+[ -f "$GAUNTLET_GIT_DIR/HEAD" ] || { echo "no HEAD under the mount"; exit 1; }
+if echo poison > "$GAUNTLET_GIT_DIR/objects/poison" 2>/dev/null; then
+    echo "object store is writable through the mount"
+    exit 1
+fi
+if echo poison > "$GAUNTLET_GIT_DIR/config" 2>/dev/null; then
+    echo "config is writable through the mount"
+    exit 1
+fi
+`)
+		c, err := New(Params{Runtime: testRuntime, Image: image, Workdir: "/workspace", GitDir: gitDir})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		job := newJob(t, cmd)
+		job.Dir = dir
+		job.MergeSHA = mergeSHA
+
+		res := c.RunCheck(context.Background(), job)
+
+		if res.Err != nil {
+			t.Fatalf("unexpected Err: %v (output=%q)", res.Err, res.Output)
+		}
+		if res.Status != core.CheckPassed {
+			t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+		}
+		// The write probes must have failed inside the container without
+		// leaving a trace on the host either.
+		if _, err := os.Stat(filepath.Join(gitDir, "objects", "poison")); !os.IsNotExist(err) {
+			t.Fatalf("write probe reached the host object store (stat err=%v)", err)
+		}
+	})
+
 	t.Run("Cancel", func(t *testing.T) {
 		dir := t.TempDir()
 		cmd := containerScript(t, dir, "/workspace", "check.sh", "#!/bin/sh\nsleep 300\n")

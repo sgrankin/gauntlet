@@ -164,6 +164,16 @@ func run() error {
 		return fmt.Errorf("open repo at %s: %w", repoDir, err)
 	}
 
+	// GC pins (refs/gauntlet/pin/*) anchor in-flight trial merges against
+	// git maintenance for exactly one run's lifetime. A crash strands them;
+	// every interrupted run is re-derived from refs and re-run from scratch
+	// (Invariant 4), so a stale pin never protects anything this process
+	// still needs — swept unconditionally, same rationale (and same lock
+	// guarantee) as the trials dir below.
+	if _, err := repo.SweepPins(ctx); err != nil {
+		return fmt.Errorf("sweep gc pins: %w", err)
+	}
+
 	// The trials dir only ever holds ephemeral trial-tree exports for the
 	// run currently in flight, never anything that needs to survive a
 	// restart, so sweeping it at startup cleans up anything orphaned by a

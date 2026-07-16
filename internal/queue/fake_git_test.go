@@ -27,6 +27,7 @@ type fakeGitRepo struct {
 	refs    map[string]string            // ref name -> OID
 	commits map[string]fakeCommit        // commit OID -> parents + tree
 	trees   map[string]map[string]string // tree OID -> path -> content
+	pins    map[string]bool              // pinned OIDs (Pin/Unpin), mirroring gitx's refs/gauntlet/pin/*
 
 	// conflicts scripts a MergeTree outcome for a specific (base, candidate)
 	// OID pair, overriding the default (always-clean, candidate-wins) merge.
@@ -42,6 +43,7 @@ type fakeGitRepo struct {
 	commitTreeErr error
 	isAncestorErr error
 	exportErr     error
+	pinErr        error
 
 	mergeTreeCalls  int
 	commitTreeCalls int
@@ -77,6 +79,7 @@ func newFakeGitRepo() *fakeGitRepo {
 		refs:      make(map[string]string),
 		commits:   make(map[string]fakeCommit),
 		trees:     make(map[string]map[string]string),
+		pins:      make(map[string]bool),
 		conflicts: make(map[[2]string]core.TrialMerge),
 	}
 }
@@ -256,6 +259,25 @@ func (f *fakeGitRepo) ExportTree(ctx context.Context, tree, dir string) error {
 	return nil
 }
 
+func (f *fakeGitRepo) Pin(ctx context.Context, oid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pinErr != nil {
+		return f.pinErr
+	}
+	f.pins[oid] = true
+	return nil
+}
+
+// Unpin mirrors gitx's contract: removing an absent pin is a no-op, never
+// an error, so terminal paths may unpin unconditionally.
+func (f *fakeGitRepo) Unpin(ctx context.Context, oid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.pins, oid)
+	return nil
+}
+
 func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID string) error {
 	if f.beforeCAS != nil {
 		f.beforeCAS(remoteRef)
@@ -379,6 +401,20 @@ func (f *fakeGitRepo) hasRef(ref string) bool {
 	defer f.mu.Unlock()
 	_, ok := f.refs[ref]
 	return ok
+}
+
+// pinned reports whether oid is currently pinned.
+func (f *fakeGitRepo) pinned(oid string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pins[oid]
+}
+
+// pinCount returns how many OIDs are currently pinned.
+func (f *fakeGitRepo) pinCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.pins)
 }
 
 // commitMessage returns the exact message CommitTree was given for oid, for
