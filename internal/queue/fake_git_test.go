@@ -45,6 +45,14 @@ type fakeGitRepo struct {
 	exportErr     error
 	pinErr        error
 
+	// casErr, when non-nil, makes CASUpdate fail WITHOUT mutating refs and
+	// WITHOUT being a stale lease — the ambiguous "client-visible error,
+	// push may or may not have applied" failure landRun's Skip path exists
+	// for. (This fake models the didn't-apply half; the did-apply half is a
+	// beforeCAS-style ref mutation plus a plain error, which no current
+	// test needs.)
+	casErr error
+
 	mergeTreeCalls  int
 	commitTreeCalls int
 	exportCalls     int
@@ -285,6 +293,9 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.casLog = append(f.casLog, casCall{ref: remoteRef, old: oldOID, new: newOID})
+	if f.casErr != nil {
+		return f.casErr
+	}
 	if f.refs[remoteRef] != oldOID {
 		return core.ErrCASStale
 	}

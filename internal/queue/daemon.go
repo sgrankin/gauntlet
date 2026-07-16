@@ -336,20 +336,24 @@ type Daemon struct {
 	// "Lifecycle: ensure, release, reap").
 	reaperArmed bool
 
-	// landedPins holds chain-tip merge OIDs whose runs landed but whose GC
-	// pin (core.GitRepo.Pin) hasn't been released yet. A landed chain
-	// becomes reachable through refs/remotes/origin/<branch> only at the
-	// NEXT successful Fetch, and post-land hooks may export the merge from
-	// a backlog well after landing — so landRun hands the pin over here
-	// instead of unpinning inline, and ReconcileOnce releases every entry
-	// right after its Fetch succeeds, the moment local ground truth itself
-	// anchors the landing. (A target force-pushed to discard a landing
-	// before that fetch legitimately orphans the merge; the pin does not
-	// exist to outlive the landing it protected.) In-memory only,
-	// reconstructible in the usual weak sense: a crash strands the pin refs
-	// themselves, and startup's pin sweep clears them (Invariant 4 — the
-	// stranded pins protect nothing a fresh process still needs).
-	landedPins map[string]bool
+	// landedPins maps chain-tip merge OIDs to their target's ref name for
+	// runs whose GC pin (core.GitRepo.Pin) must outlive the run itself:
+	// landings (the chain becomes locally reachable through
+	// refs/remotes/origin/<branch> only once a Fetch reflects the push, and
+	// post-land hooks may export the merge from a backlog well after
+	// landing) and ambiguous target-push failures (the push may have taken
+	// effect server-side despite the client-visible error — landRun's
+	// Skip-not-park rationale). landRun registers the pin here instead of
+	// letting finalizeRun release it; ReconcileOnce releases an entry only
+	// once the tick's fetched target ref actually REACHES the tip
+	// (IsAncestor) — "a Fetch succeeded" alone isn't the anchor, e.g. a
+	// lagging read replica can serve the pre-push tip. An entry that never
+	// anchors (a genuinely failed ambiguous push, a target force-pushed to
+	// discard its landing) is deliberately retained: one stale ref per rare
+	// event, swept — like every crash-stranded pin — by the next startup's
+	// pin sweep (Invariant 4: stranded pins protect nothing a fresh process
+	// still needs). In-memory only, reconstructible in that same weak sense.
+	landedPins map[string]string
 
 	// idleSince is buildSnapshot's own tracked idle-transition instant (see
 	// docs/design/scaling.md, "Axis 2 — park the builder"; and
@@ -424,7 +428,7 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		lanes:         make(map[string]*lane),
 		batchFallback: make(map[string]bool),
 		seeded:        make(map[string]bool),
-		landedPins:    make(map[string]bool),
+		landedPins:    make(map[string]string),
 	}, nil
 }
 
@@ -510,19 +514,28 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	if err := d.git.Fetch(ctx); err != nil {
 		return fmt.Errorf("queue: fetch: %w", err)
 	}
-	// This Fetch just succeeded, so every landing recorded in landedPins is
-	// now anchored by its target's remote-tracking ref (or was deliberately
-	// force-pushed away — see the field's doc); either way the pin has done
-	// its job and is released. Best-effort like the other unpin sites: a
-	// failed release is retried never, swept at next startup.
-	for oid := range d.landedPins {
-		d.unpin(ctx, oid)
-		delete(d.landedPins, oid)
-	}
-
 	refs, err := d.git.ListRefs(ctx)
 	if err != nil {
 		return fmt.Errorf("queue: list refs: %w", err)
+	}
+
+	// Release each deferred pin (landedPins) whose landing this tick's
+	// fetched ground truth now anchors: the tip must be REACHABLE from the
+	// target's remote-tracking ref, not merely fetched-after — a lagging
+	// replica can serve the pre-push tip, and an ambiguous push failure may
+	// never have landed at all. Unanchored entries simply wait (or, if they
+	// never anchor, ride until startup's sweep — see the field's doc); an
+	// IsAncestor error likewise just retries next tick.
+	for oid, refName := range d.landedPins {
+		tip, ok := refs[refName]
+		if !ok {
+			continue
+		}
+		if anchored, err := d.git.IsAncestor(ctx, oid, tip); err != nil || !anchored {
+			continue
+		}
+		d.unpin(ctx, oid)
+		delete(d.landedPins, oid)
 	}
 
 	for _, t := range d.cfg.Targets {

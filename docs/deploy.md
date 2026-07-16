@@ -400,22 +400,34 @@ queue's state dir benefits from an occasional
 `git -C <state>/repos/<key> gc`.
 
 **Why this is safe while the daemon runs.** Every *in-flight* run pins its
-chain's tip commit with a local ref (`refs/gauntlet/pin/<tip>`) from the
-moment the trial merge is created until the run's terminal outcome — or,
-for a landing, until the next fetch makes the chain reachable through the
+chain's tip commit with a local ref (`refs/gauntlet/pin/<tip>`) from just
+after the trial merge is created until the run's terminal outcome — or,
+for a landing, until a fetch shows the chain anchored by the
 remote-tracking target ref. One pin covers the whole chain (a commit
-reaches its parents), so from git's perspective nothing an active run — or
-a check reading `GAUNTLET_GIT_DIR`, or a queued post-land hook — still
-needs ever looks unreachable. Any gc, **including `git gc --prune=now`**,
-is therefore safe to run against a live daemon's repo: it collects only
-genuinely abandoned trial objects, which is exactly what you want. (Pins
-stranded by a crash are swept at the next daemon start; every interrupted
-run re-runs from scratch anyway.)
+reaches its parents), so however long a run lasts, nothing an active run —
+a check reading `GAUNTLET_GIT_DIR`, a queued post-land hook — still needs
+ever looks unreachable to gc. A default-configured `git gc` is therefore
+always safe, and (unlike before the pins) that safety no longer silently
+depends on every run finishing inside `gc.pruneExpire`'s grace period.
+(Pins stranded by a crash are swept at the next daemon start; every
+interrupted run re-runs from scratch anyway.)
 
-Two residual cautions. A `--prune=now` run discards the `gc.pruneExpire`
-grace period (default two weeks) for *abandoned* objects — fine, they're
-garbage, but it forecloses any forensic `git show` on a just-failed trial's
-merge you hadn't inspected yet. And the pins protect the daemon's own
-objects, not its refs: don't delete `refs/gauntlet/pin/*` by hand while the
-daemon runs — that reintroduces the exact mid-run object loss the pins
-exist to prevent.
+**`git gc --prune=now` is a sharper tool: safe for runs, not for the
+instants between object creation and pinning.** The pin can only exist
+after `commit-tree` writes the merge it names, so there is a window — sub-
+second for a serial run, up to a whole chain-formation pass for a batch —
+where freshly written trial objects are unreferenced, unpinned, and, with
+the grace period discarded, collectable. This is the same race
+`--prune=now` has with a plain `git commit` running anywhere; no
+create-then-reference scheme closes it. If an expire-now gc fires inside
+that window the run fails as an infrastructure error and parks — spurious
+but visible, and auto-retry-once normally absorbs it. So: put a plain
+`git gc` (grace period intact — it covers exactly this window) in cron;
+reserve `--prune=now` for a repo the daemon isn't running against, or
+accept that rare, self-healing hiccup. What the pins ended is the old,
+much worse failure — a *long-running* run losing its objects mid-check
+with no recovery path.
+
+One more caution: the pins protect the daemon's objects, not themselves.
+Don't delete `refs/gauntlet/pin/*` by hand while the daemon runs — that
+reintroduces the exact mid-run object loss the pins exist to prevent.

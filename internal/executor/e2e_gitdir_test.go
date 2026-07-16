@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/core"
-	"github.com/sgrankin/gauntlet/internal/gitx"
 	"github.com/sgrankin/gauntlet/internal/testutil"
 )
 
@@ -46,40 +45,14 @@ func chmodR(t *testing.T, root string, writable bool) {
 }
 
 // bareRepoWithUnpushedMerge builds the exact object topology a live run
-// hands checks: a bare clone of a remote whose base ("main") and candidate
-// refs were fetched, plus a synthetic merge commit created by CommitTree
-// that exists ONLY in the local bare repo — no ref anywhere names it, and
-// the remote has never seen it. Returns the bare repo path and the three
-// SHAs of the env contract.
+// hands checks (the shared testutil fixture), with the candidate adding a
+// web/ subtree so the rev-parse/diff/log queries below have a path to name.
 func bareRepoWithUnpushedMerge(t *testing.T) (gitDir, baseSHA, candSHA, mergeSHA string) {
 	t.Helper()
-	ctx := context.Background()
-	remote := testutil.NewRemote(t)
-	remote.Seed("main", map[string]string{"sub/f.txt": "base\n"})
-	candRef := remote.PushCandidate("main", "alice", "feat", map[string]string{"web/g.txt": "new\n"})
-
-	gitDir = remote.BareClone()
-	repo, err := gitx.New(ctx, gitDir, remote.Dir)
-	if err != nil {
-		t.Fatalf("gitx.New: %v", err)
-	}
-	if err := repo.Fetch(ctx); err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	refs, err := repo.ListRefs(ctx)
-	if err != nil {
-		t.Fatalf("ListRefs: %v", err)
-	}
-	baseSHA, candSHA = refs["refs/heads/main"], refs[candRef]
-	tm, err := repo.MergeTree(ctx, baseSHA, candSHA)
-	if err != nil || !tm.Clean {
-		t.Fatalf("MergeTree: clean=%v err=%v", tm.Clean, err)
-	}
-	mergeSHA, err = repo.CommitTree(ctx, tm.TreeOID, []string{baseSHA, candSHA}, "trial merge", core.Identity{Name: "Gauntlet", Email: "g@ci.example"})
-	if err != nil {
-		t.Fatalf("CommitTree: %v", err)
-	}
-	return gitDir, baseSHA, candSHA, mergeSHA
+	um := testutil.NewUnpushedMerge(t,
+		map[string]string{"sub/f.txt": "base\n"},
+		map[string]string{"web/g.txt": "new\n"})
+	return um.GitDir, um.BaseSHA, um.CandSHA, um.MergeSHA
 }
 
 func TestLocalExecutor_GitDirEndToEndQueries(t *testing.T) {

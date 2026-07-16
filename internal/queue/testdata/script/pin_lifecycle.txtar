@@ -1,0 +1,38 @@
+# GC-pin lifecycle: an in-flight run pins its chain tip against git gc; a
+# landing's pin rides until the next fetch anchors the chain through the
+# target ref; a red terminal releases the pin the same tick. Ports the
+# when-semantics of pin_test.go's green/red cases so both harnesses (fake
+# and real git) exercise them; the does-it-actually-survive-gc half stays
+# in pin_integration_test.go, which needs a real `git gc` subprocess.
+
+push-candidate main alice widget files/widget
+tick
+await-started test
+assert-pins 1                 # the in-flight run's chain tip is pinned
+
+release-check test passed     # green: lands this tick
+assert-pins 1                 # landed: pin rides until an anchoring fetch
+tick                          # fetch now reflects the push; pin released
+assert-pins 0
+
+push-candidate main bob gadget files/gadget
+tick
+await-started test
+assert-pins 1
+
+release-check test failed     # red: parks this tick
+assert-pins 0                 # a terminal run's pin is released immediately
+assert-slot-parked main bob gadget
+
+-- files/widget/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/widget/widget.txt --
+widget
+-- files/gadget/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+-- files/gadget/gadget.txt --
+gadget

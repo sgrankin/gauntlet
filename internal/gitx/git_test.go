@@ -518,108 +518,79 @@ func TestFindLandingMergeUnlandedReturnsEmpty(t *testing.T) {
 	}
 }
 
-// makeUnreferencedMerge builds exactly the object the daemon's runs live
-// on: a synthetic merge commit created by CommitTree that no branch — local
-// or remote — references. Returns the merge OID.
-func makeUnreferencedMerge(t *testing.T, ctx context.Context, repo *gitx.Repo, remote *testutil.Remote) string {
+// unpushedMerge builds exactly the object the daemon's runs live on — a
+// synthetic merge commit no branch references (the shared testutil
+// fixture) — plus a gitx.Repo over that same bare repo for the pin calls
+// under test.
+func unpushedMerge(t *testing.T) (*testutil.UnpushedMerge, *gitx.Repo) {
 	t.Helper()
-	remote.Seed("main", map[string]string{"f.txt": "line1\n"})
-	candRef := remote.PushCandidate("main", "alice", "feat", map[string]string{"g.txt": "new\n"})
-	if err := repo.Fetch(ctx); err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	refs, err := repo.ListRefs(ctx)
+	um := testutil.NewUnpushedMerge(t,
+		map[string]string{"f.txt": "line1\n"},
+		map[string]string{"g.txt": "new\n"})
+	repo, err := gitx.New(context.Background(), um.GitDir, um.Remote.Dir)
 	if err != nil {
-		t.Fatalf("ListRefs: %v", err)
+		t.Fatalf("gitx.New: %v", err)
 	}
-	base, cand := refs["refs/heads/main"], refs[candRef]
-	tm, err := repo.MergeTree(ctx, base, cand)
-	if err != nil || !tm.Clean {
-		t.Fatalf("MergeTree: clean=%v err=%v", tm.Clean, err)
-	}
-	merge, err := repo.CommitTree(ctx, tm.TreeOID, []string{base, cand}, "trial", core.Identity{Name: "Gauntlet", Email: "g@ci.example"})
-	if err != nil {
-		t.Fatalf("CommitTree: %v", err)
-	}
-	return merge
-}
-
-// gcPruneNow runs the most aggressive collection an operator can: no grace
-// period at all. This is the maintenance pass pins exist to survive.
-func gcPruneNow(t *testing.T, gitDir string) {
-	t.Helper()
-	if out, err := exec.Command("git", "--git-dir="+gitDir, "gc", "--prune=now", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("gc --prune=now: %v: %s", err, out)
-	}
-}
-
-func objectExists(gitDir, oid string) bool {
-	return exec.Command("git", "--git-dir="+gitDir, "cat-file", "-e", oid).Run() == nil
+	return um, repo
 }
 
 func TestPinSurvivesGCPruneNow(t *testing.T) {
 	ctx := context.Background()
-	repo, remote, dir := newRepo(t)
-	merge := makeUnreferencedMerge(t, ctx, repo, remote)
+	um, repo := unpushedMerge(t)
 
-	if err := repo.Pin(ctx, merge); err != nil {
+	if err := repo.Pin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Pin: %v", err)
 	}
-	if err := repo.Pin(ctx, merge); err != nil {
+	if err := repo.Pin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Pin (repeat): %v", err)
 	}
-	gcPruneNow(t, dir)
-	if !objectExists(dir, merge) {
-		t.Fatalf("pinned merge %s pruned by gc --prune=now", merge)
+	testutil.GCPruneNow(t, um.GitDir)
+	if !testutil.ObjectExists(um.GitDir, um.MergeSHA) {
+		t.Fatalf("pinned merge %s pruned by gc --prune=now", um.MergeSHA)
 	}
 	// The parents (base, candidate) must survive through the pin too even
 	// once their remote-tracking anchors vanish: reachability through the
 	// pinned tip is the whole point of pinning only the chain tip.
-	parentLine := strings.SplitN(catFile(t, dir, merge), "\n", 4)
-	for _, ln := range parentLine {
-		if oid, ok := strings.CutPrefix(ln, "parent "); ok {
-			if !objectExists(dir, oid) {
-				t.Fatalf("parent %s of pinned merge pruned", oid)
-			}
+	for _, oid := range []string{um.BaseSHA, um.CandSHA} {
+		if !testutil.ObjectExists(um.GitDir, oid) {
+			t.Fatalf("parent %s of pinned merge pruned", oid)
 		}
 	}
 }
 
 func TestUnpinReleasesObjectAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	repo, remote, dir := newRepo(t)
-	merge := makeUnreferencedMerge(t, ctx, repo, remote)
+	um, repo := unpushedMerge(t)
 
-	if err := repo.Pin(ctx, merge); err != nil {
+	if err := repo.Pin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Pin: %v", err)
 	}
-	if err := repo.Unpin(ctx, merge); err != nil {
+	if err := repo.Unpin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Unpin: %v", err)
 	}
 	// Unpinning again — and unpinning an OID that was never pinned — must
 	// be a no-op: terminal paths unpin unconditionally.
-	if err := repo.Unpin(ctx, merge); err != nil {
+	if err := repo.Unpin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Unpin (repeat): %v", err)
 	}
 	if err := repo.Unpin(ctx, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"); err != nil {
 		t.Fatalf("Unpin (never pinned): %v", err)
 	}
-	gcPruneNow(t, dir)
-	if objectExists(dir, merge) {
-		t.Fatalf("unpinned, unreferenced merge %s survived gc --prune=now", merge)
+	testutil.GCPruneNow(t, um.GitDir)
+	if testutil.ObjectExists(um.GitDir, um.MergeSHA) {
+		t.Fatalf("unpinned, unreferenced merge %s survived gc --prune=now", um.MergeSHA)
 	}
 }
 
 func TestSweepPins(t *testing.T) {
 	ctx := context.Background()
-	repo, remote, _ := newRepo(t)
-	merge := makeUnreferencedMerge(t, ctx, repo, remote)
+	um, repo := unpushedMerge(t)
 
 	n, err := repo.SweepPins(ctx)
 	if err != nil || n != 0 {
 		t.Fatalf("SweepPins (empty) = %d, %v, want 0, nil", n, err)
 	}
-	if err := repo.Pin(ctx, merge); err != nil {
+	if err := repo.Pin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Pin: %v", err)
 	}
 	n, err = repo.SweepPins(ctx)
@@ -634,10 +605,9 @@ func TestSweepPins(t *testing.T) {
 
 func TestFetchPruneLeavesPinsAlone(t *testing.T) {
 	ctx := context.Background()
-	repo, remote, dir := newRepo(t)
-	merge := makeUnreferencedMerge(t, ctx, repo, remote)
+	um, repo := unpushedMerge(t)
 
-	if err := repo.Pin(ctx, merge); err != nil {
+	if err := repo.Pin(ctx, um.MergeSHA); err != nil {
 		t.Fatalf("Pin: %v", err)
 	}
 	// fetch --prune prunes remote-tracking refs whose remote counterpart
@@ -645,8 +615,8 @@ func TestFetchPruneLeavesPinsAlone(t *testing.T) {
 	if err := repo.Fetch(ctx); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if got := revParse(t, dir, "refs/gauntlet/pin/"+merge); got != merge {
-		t.Fatalf("pin ref = %s after fetch --prune, want %s", got, merge)
+	if got := revParse(t, um.GitDir, "refs/gauntlet/pin/"+um.MergeSHA); got != um.MergeSHA {
+		t.Fatalf("pin ref = %s after fetch --prune, want %s", got, um.MergeSHA)
 	}
 	refs, err := repo.ListRefs(ctx)
 	if err != nil {

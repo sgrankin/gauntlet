@@ -141,8 +141,9 @@ logs; use `rev-parse` when you want maximal cache hits.
 
 Every SHA in the environment contract stays resolvable in
 `GAUNTLET_GIT_DIR` for your check's entire lifetime — the daemon pins the
-trial chain against `git gc` until the run (and, for landings, any post-land
-hook) is done — so a long check never has an object vanish mid-query.
+trial chain against `git gc` for the whole run, and a landed chain stays
+anchored through the fetched target ref afterwards — so a long check never
+has an object vanish mid-query.
 
 Gauntlet hands you the SHAs and the object store; which paths matter to
 which check is repo-owned code, same as everything else about what a check

@@ -128,6 +128,12 @@
 //	    link, topics[last] is the tip itself), each merge's parent[1] equal
 //	    to that topic's landed candidate SHA verbatim (Invariant 1/6 for
 //	    the whole chain — assert-target-is-merge's chain generalization).
+//
+//	assert-pins <n>
+//	    Assert the number of live GC pin refs (refs/gauntlet/pin/*) in the
+//	    daemon's repo: one per in-flight run (the chain tip), back to zero
+//	    once every terminal path — and, for a landing, the next anchoring
+//	    fetch — has released them.
 package queue
 
 import (
@@ -208,6 +214,10 @@ type scriptHarness interface {
 	// topic) is currently parked (a sticky Daemon.done entry) at its
 	// current SHA — assert-slot-parked-none's data source.
 	slotParked(target, user, topic string) bool
+
+	// pinCount returns how many GC pin refs (refs/gauntlet/pin/*)
+	// currently exist in the daemon's repo — assert-pins's data source.
+	pinCount() int
 
 	// cancel sends a core.CommandCancel for (target, user, topic)'s
 	// candidate ref (manual operator cancellation) — the DSL's
@@ -309,6 +319,8 @@ func (f fakeScriptHarness) cancel(target, user, topic string) {
 	f.h.ch.SendCommand(core.Command{Kind: core.CommandCancel, Target: target, Ref: candidateRef(target, user, topic)})
 }
 
+func (f fakeScriptHarness) pinCount() int { return f.h.git.pinCount() }
+
 // --- realScriptHarness: adapts integrationHarness (integration_test.go) ---
 
 // realScriptHarness pairs an integrationHarness with the GatedExecutor it was
@@ -404,6 +416,8 @@ func (r realScriptHarness) slotParked(target, user, topic string) bool {
 func (r realScriptHarness) cancel(target, user, topic string) {
 	r.h.ch.SendCommand(core.Command{Kind: core.CommandCancel, Target: target, Ref: candidateRef(target, user, topic)})
 }
+
+func (r realScriptHarness) pinCount() int { return len(r.h.pinRefs()) }
 
 // snapshotPipelineDepth reads len(lane.runs) for target out of d's most
 // recently published Snapshot (shared by both scriptHarness
@@ -573,6 +587,7 @@ func commands() map[string]func(ts *testscript.TestScript, neg bool, args []stri
 		"assert-slot-parked-none": cmdAssertSlotParkedNone,
 		"set-mode":                cmdSetMode,
 		"assert-pipeline-depth":   cmdAssertPipelineDepth,
+		"assert-pins":             cmdAssertPins,
 		"assert-landed-order":     cmdAssertLandedOrder,
 		"assert-target-chain":     cmdAssertTargetChain,
 	}
@@ -919,6 +934,22 @@ func cmdAssertPipelineDepth(ts *testscript.TestScript, neg bool, args []string) 
 	got := getHarness(ts).pipelineDepth(target)
 	if got != want {
 		ts.Fatalf("assert-pipeline-depth: %s pipeline depth = %d, want %d", target, got, want)
+	}
+}
+
+func cmdAssertPins(ts *testscript.TestScript, neg bool, args []string) {
+	if neg {
+		ts.Fatalf("assert-pins does not support !")
+	}
+	if len(args) != 1 {
+		ts.Fatalf("usage: assert-pins <n>")
+	}
+	want, err := strconv.Atoi(args[0])
+	if err != nil {
+		ts.Fatalf("assert-pins: invalid n %q: %v", args[0], err)
+	}
+	if got := getHarness(ts).pinCount(); got != want {
+		ts.Fatalf("assert-pins: %d live pin refs, want %d", got, want)
 	}
 }
 

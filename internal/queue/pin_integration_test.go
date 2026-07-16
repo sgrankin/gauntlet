@@ -13,17 +13,8 @@ import (
 
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/executor"
+	"github.com/sgrankin/gauntlet/internal/testutil"
 )
-
-// gcPruneNow runs `git gc --prune=now` against the daemon's own bare repo —
-// the maintenance pass docs/deploy.md used to forbid outright while the
-// daemon was running, and which pins now make safe for in-flight work.
-func (h *integrationHarness) gcPruneNow() {
-	h.t.Helper()
-	if out, err := exec.Command("git", "--git-dir="+h.dir, "gc", "--prune=now", "-q").CombinedOutput(); err != nil {
-		h.t.Fatalf("gc --prune=now: %v: %s", err, out)
-	}
-}
 
 // gitDirQuery runs one git query against the daemon's bare repo exactly the
 // way a check script would through GAUNTLET_GIT_DIR.
@@ -62,7 +53,7 @@ func TestIntegration_PinnedTrialSurvivesGCPruneNow(t *testing.T) {
 	// The operator runs the most aggressive maintenance possible while the
 	// check is mid-flight. Without the pin, the trial merge is an
 	// unreferenced loose object and this collects it.
-	h.gcPruneNow()
+	testutil.GCPruneNow(h.t, h.dir)
 
 	// The exact queries docs/checks.md tells check scripts to run against
 	// $GAUNTLET_GIT_DIR must still work mid-check.
@@ -77,8 +68,8 @@ func TestIntegration_PinnedTrialSurvivesGCPruneNow(t *testing.T) {
 
 	// Green: the run lands. The pin must survive the landing tick itself
 	// (a queued post-land hook may still export the merge) and be released
-	// by the next successful fetch, after which the chain is anchored by
-	// the remote-tracking target ref instead.
+	// once a later fetch shows the chain anchored by the remote-tracking
+	// target ref instead.
 	h.releaseGated(gated, runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
 	if pins := h.pinRefs(); len(pins) != 1 {
 		t.Fatalf("pins right after landing = %v, want exactly the landed tip's (released only at the next fetch)", pins)
@@ -92,7 +83,7 @@ func TestIntegration_PinnedTrialSurvivesGCPruneNow(t *testing.T) {
 	// reachability now flows from refs/remotes/origin/main, proving the
 	// pin-release handoff happened only once ground truth itself anchored
 	// the landing.
-	h.gcPruneNow()
+	testutil.GCPruneNow(h.t, h.dir)
 	if out, err := h.gitDirQuery("cat-file", "-e", tip); err != nil {
 		t.Fatalf("landed merge %s lost to gc after pin release: %v %s", tip, err, out)
 	}
@@ -114,7 +105,7 @@ func TestIntegration_RedRunPinReleasedAndCollectable(t *testing.T) {
 		t.Fatalf("pins after red terminal = %v, want none", pins)
 	}
 	// A rejected trial's merge is garbage by design; nothing may anchor it.
-	h.gcPruneNow()
+	testutil.GCPruneNow(h.t, h.dir)
 	if _, err := h.gitDirQuery("cat-file", "-e", tip); err == nil {
 		t.Fatalf("rejected trial merge %s survived gc --prune=now; something still anchors it", tip)
 	}

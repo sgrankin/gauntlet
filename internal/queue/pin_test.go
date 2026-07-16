@@ -61,6 +61,70 @@ func TestPin_LandedRunReleasesPinOnNextFetch(t *testing.T) {
 	}
 }
 
+func TestPin_LandedPinWaitsForAnchoredFetch(t *testing.T) {
+	h := newHarness(t)
+	base := h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", checkSpecFile("test"))
+
+	h.reconcile()
+	tip := h.d.headRun("main").chainTip
+	runID := h.currentRunID()
+	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // lands; target now at tip
+
+	// Simulate a lagging fetch: the next tick's view of the target still
+	// shows the pre-push tip (a read replica serving stale refs). "A fetch
+	// succeeded" alone must NOT release the pin — the fetched ref doesn't
+	// anchor the landing yet.
+	h.git.setRef("refs/heads/main", base)
+	h.reconcile()
+	if !h.git.pinned(tip) {
+		t.Fatalf("landed chain tip %s unpinned on a fetch that did not anchor it", tip)
+	}
+
+	// The replica catches up; the fetched target ref reaches the tip and
+	// the pin is released.
+	h.git.setRef("refs/heads/main", tip)
+	h.reconcile()
+	if h.git.pinned(tip) {
+		t.Fatalf("landed chain tip %s still pinned after an anchoring fetch", tip)
+	}
+}
+
+func TestPin_AmbiguousPushFailureRetainsPin(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", checkSpecFile("test"))
+
+	h.reconcile()
+	tip := h.d.headRun("main").chainTip
+	runID := h.currentRunID()
+
+	// The land push fails ambiguously (a client-visible error that is NOT a
+	// stale lease — the push may or may not have applied server-side). The
+	// run Skips, but the pin must be retained: if the push DID apply, this
+	// chain is the real target tip, and nothing local anchors it until a
+	// fetch reflects that.
+	h.git.casErr = errors.New("remote hung up unexpectedly")
+	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
+	if !h.git.pinned(tip) {
+		t.Fatalf("chain tip %s unpinned after an ambiguous land-push failure", tip)
+	}
+
+	// Here the push genuinely did not apply: the ref never anchors the tip,
+	// so the pin deliberately rides (startup's sweep is its bound) while
+	// the re-trial proceeds with its own fresh pin.
+	h.git.casErr = nil
+	h.reconcile()
+	if !h.git.pinned(tip) {
+		t.Fatalf("unanchored ambiguous-push pin %s was released; it must ride until startup's sweep", tip)
+	}
+	if r := h.d.headRun("main"); r == nil || r.chainTip == tip {
+		t.Fatalf("expected a fresh re-trial run with its own chain tip, got %+v", r)
+	}
+}
+
 func TestPin_RedRunReleasesPinAtTerminal(t *testing.T) {
 	h := newHarness(t)
 	h.git.seed("main", nil)

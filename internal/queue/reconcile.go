@@ -1535,6 +1535,17 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		detail := "target moved before land; slot kept, retried next tick"
 		if !errors.Is(err, core.ErrCASStale) {
 			detail = "land: push target: " + err.Error() + "; slot kept, retried next tick"
+			// The ambiguous case in the flesh: the push may have taken
+			// effect server-side, making this chain the real target tip —
+			// so its pin must not be released until ground truth settles.
+			// Registering in landedPins makes finalizeRun (below, via
+			// finishRun) leave the pin alone; the release loop then unpins
+			// once a fetch shows the tip anchored, or retains the pin for
+			// startup's sweep if the push genuinely failed (the field's
+			// doc has the accounting). A definite stale lease needs none of
+			// this: the push did NOT happen, and the re-trial pins its own
+			// fresh chain.
+			d.landedPins[r.chainTip] = targetRefName(t)
 		}
 		d.finishRun(ctx, t, r, core.OutcomeSkipped, detail, false)
 		return
@@ -1542,10 +1553,11 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 
 	// The landing's GC pin is handed to landedPins rather than released
 	// here: the chain becomes locally reachable (via the remote-tracking
-	// target ref) only at the NEXT successful Fetch, and post-land hooks may
-	// export the merge from a backlog well after this call — see the field's
-	// doc. finalizeRun's own unpin skips landed runs for exactly this reason.
-	d.landedPins[r.chainTip] = true
+	// target ref) only once a Fetch reflects this push, and post-land hooks
+	// may export the merge from a backlog well after this call — see the
+	// field's doc. finalizeRun's own unpin skips registered runs for
+	// exactly this reason.
+	d.landedPins[r.chainTip] = targetRefName(t)
 
 	// Any successful landing for this target clears batch-red serial
 	// fallback, resuming batching on the next refill —
@@ -1650,16 +1662,18 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 // same call sites that already know the removal boundary.
 //
 // It also releases the run's GC pin (created at startRun/finishBatchStart's
-// pin site) for every outcome but a landing: each caller sets every
-// member's Outcome before calling here, so the head member's outcome is
-// authoritative. A landed run's pin instead outlives this call in
-// landedPins (landRun hands it over before finalizing) until the next
-// successful Fetch anchors the chain through the remote-tracking target
-// ref.
+// pin site) — unless landRun already handed the pin to landedPins, which it
+// does before finalizing: a landed chain must stay pinned until the next
+// successful Fetch anchors it through the remote-tracking target ref. The
+// handoff registration itself is the authority here, not an outcome field a
+// caller might set without going through landRun — so a hypothetical future
+// path that marks members Landed some other way still releases its pin
+// rather than leaking it, and a path that registers the handoff never
+// double-releases.
 func (d *Daemon) finalizeRun(ctx context.Context, r *run) {
 	obs.EndRun(r.rootSpan, r.members[0].rec)
 
-	if r.members[0].rec.Outcome != core.OutcomeLanded {
+	if _, deferred := d.landedPins[r.chainTip]; !deferred {
 		d.unpin(ctx, r.chainTip)
 	}
 
