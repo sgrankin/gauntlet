@@ -7,9 +7,66 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+// TestRunDrain_WaitFastDrainSucceeds: a daemon that drains and exits before
+// the client ever observes "draining" must NOT make `gauntlet drain --wait`
+// exit non-zero. The POST already confirmed the drain began, so a later
+// unreachable status endpoint means the daemon drained and exited.
+func TestRunDrain_WaitFastDrainSucceeds(t *testing.T) {
+	posted := make(chan struct{}, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/drain", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"draining"}`))
+		select {
+		case posted <- struct{}{}:
+		default:
+		}
+	})
+	srv := httptest.NewServer(mux)
+	// Close the server once the drain POST lands, so the follow-up status
+	// GET gets a TRANSPORT failure (the daemon has drained and exited).
+	go func() {
+		<-posted
+		srv.Close()
+	}()
+
+	err := runDrain([]string{"-url", srv.URL, "-wait"})
+	if err != nil {
+		t.Fatalf("runDrain --wait against a fast/idle drain returned error: %v", err)
+	}
+}
+
+// TestRunDrain_WaitReachesDrained: the normal path — the status endpoint
+// reports draining, then drained, and --wait returns success.
+func TestRunDrain_WaitReachesDrained(t *testing.T) {
+	var polls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/drain", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"draining"}`))
+	})
+	mux.HandleFunc("/api/v1/status", func(w http.ResponseWriter, r *http.Request) {
+		lifecycle := "draining"
+		if polls.Add(1) >= 2 {
+			lifecycle = "drained"
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"lifecycle":"` + lifecycle + `"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if err := runDrain([]string{"-url", srv.URL, "-wait"}); err != nil {
+		t.Fatalf("runDrain --wait: %v", err)
+	}
+}
 
 func TestParseStatusFlags_Defaults(t *testing.T) {
 	f, err := parseStatusFlags(nil)

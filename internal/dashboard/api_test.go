@@ -825,6 +825,26 @@ func TestAPIDrain_BeginsDrain(t *testing.T) {
 	}
 }
 
+// TestAPIDrain_EmptyChunkedBody: a client that POSTs an empty body without
+// a Content-Length (chunked / HTTP-2, ContentLength == -1) must still be a
+// valid no-deadline drain, not a 400.
+func TestAPIDrain_EmptyChunkedBody(t *testing.T) {
+	called := 0
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithDrain(func(time.Time) { called++ }))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/drain", http.NoBody)
+	req.ContentLength = -1 // unknown length, as a chunked/HTTP-2 request presents
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", rec.Code, rec.Body.String())
+	}
+	if called != 1 {
+		t.Fatalf("drain called %d times, want 1", called)
+	}
+}
+
 func TestAPIDrain_BadDeadlineIs400(t *testing.T) {
 	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithDrain(func(time.Time) {}))
 	resp, body := postJSON(t, h, "/api/v1/drain", `{"deadline":"soon"}`)

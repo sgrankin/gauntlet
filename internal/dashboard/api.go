@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -1117,12 +1118,12 @@ func (d *dash) handleAPIDrain(w http.ResponseWriter, r *http.Request) {
 	}
 	var req drainRequest
 	// An empty body is valid (drain with no deadline); only malformed JSON
-	// is an error.
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
-			return
-		}
+	// is an error. io.EOF means the body was empty — which reaches here
+	// for a chunked/HTTP-2 request (ContentLength == -1, so the length
+	// guard alone can't catch it) — and must be accepted, not rejected.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
 	}
 	var deadline time.Time
 	if req.Deadline != "" {

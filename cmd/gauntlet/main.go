@@ -603,11 +603,24 @@ func run() error {
 	// ever shortens the effective deadline — never resumes admission.
 	var drainMu sync.Mutex
 	var drainTimer *time.Timer
+	var armedDeadline time.Time
 	beginDrain := func(deadline time.Time) {
 		drainMu.Lock()
 		defer drainMu.Unlock()
 		d.Drain(deadline)
-		if !deadline.IsZero() && drainTimer == nil {
+		if deadline.IsZero() {
+			return
+		}
+		// Arm — or RE-arm to an earlier instant — the force timer, so a
+		// second drain request that shortens the deadline actually forces
+		// sooner (the "only ever shortens" contract; the queue's advisory
+		// deadline alone shortening would otherwise make status lie about
+		// when force happens). Never lengthens: a later deadline is ignored.
+		if drainTimer == nil || deadline.Before(armedDeadline) {
+			if drainTimer != nil {
+				drainTimer.Stop()
+			}
+			armedDeadline = deadline
 			drainTimer = time.AfterFunc(time.Until(deadline), cancel)
 		}
 	}

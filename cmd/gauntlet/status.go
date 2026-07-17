@@ -656,29 +656,33 @@ func runDrain(args []string) error {
 		return nil
 	}
 
-	// Poll the lifecycle until it reaches "drained". Once drained, the
-	// daemon exits and the status endpoint stops answering — a connection
-	// failure AFTER we have seen draining is itself the completion signal.
-	seenDraining := false
+	// Poll the lifecycle until it reaches "drained". The POST above
+	// already confirmed the drain began, so the daemon WAS alive; once it
+	// finishes draining it exits and the status endpoint stops answering.
+	// A TRANSPORT failure (connection refused/EOF) is therefore itself the
+	// completion signal — even on the very first poll, which matters for a
+	// fast/idle drain that finishes before we can observe "draining". A
+	// transient HTTP error (e.g. 503 "no snapshot yet") is NOT completion:
+	// the daemon is still up, so keep polling.
 	for {
-		raw, err := httpGetBody(f.url + "/api/v1/status")
+		res, err := http.Get(f.url + "/api/v1/status")
 		if err != nil {
-			if seenDraining {
-				fmt.Fprintln(os.Stdout, "drained")
-				return nil
-			}
-			return err
+			fmt.Fprintln(os.Stdout, "drained")
+			return nil
+		}
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode >= 300 {
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
 		var s statusLifecycle
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return err
 		}
-		switch s.Lifecycle {
-		case "drained":
+		if s.Lifecycle == "drained" {
 			fmt.Fprintln(os.Stdout, "drained")
 			return nil
-		case "draining":
-			seenDraining = true
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
