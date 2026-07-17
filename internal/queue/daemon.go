@@ -150,6 +150,14 @@ type Config struct {
 	// actual routing lives in the Executor implementation (executor.Mux).
 	KnownExecutorProfile func(name string) bool
 
+	// HistoryMtimes enables the deterministic-mtimes pass after every
+	// trial export (config's `export { mtimes "history" }`): the exported
+	// tree's file timestamps are rewritten to history-derived committer
+	// times via GitRepo.RestoreMtimes before any check can observe the
+	// tree. A pass failure is an infrastructure error (OutcomeError park)
+	// — never a silent wall-clock tree claiming stable-cache metadata.
+	HistoryMtimes bool
+
 	// ImageCapableProfile reports whether profile name ("" = the default
 	// executor) can run a candidate-built image — i.e. is a container
 	// profile. Gated at spec load like KnownExecutorProfile: a check

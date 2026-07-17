@@ -501,15 +501,16 @@ func run() error {
 	}
 
 	qcfg := queue.Config{
-		Targets:      cfg.Targets,
-		CheckSpec:    cfg.CheckSpec,
-		Committer:    cfg.Committer,
-		MergeMessage: cfg.MergeMsg,
-		MergeBody:    mergeBody,
-		WorkDir:      trialsDir,
-		LogDir:       logsDir,
-		SeedParks:    seedParks,
-		Slots:        slots,
+		Targets:       cfg.Targets,
+		CheckSpec:     cfg.CheckSpec,
+		Committer:     cfg.Committer,
+		MergeMessage:  cfg.MergeMsg,
+		MergeBody:     mergeBody,
+		WorkDir:       trialsDir,
+		LogDir:        logsDir,
+		SeedParks:     seedParks,
+		Slots:         slots,
+		HistoryMtimes: cfg.Export.Mtimes == "history",
 		// KnownExecutorProfile: the queue rejects a spec naming an
 		// undefined profile before any of its commands start; nil (no
 		// profiles configured) means only the default ("") is legal.

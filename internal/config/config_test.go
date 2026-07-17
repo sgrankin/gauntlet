@@ -1631,6 +1631,21 @@ services {
 `,
 			wantErr: `runtime "docker" conflicts with executor runtime "podman"`,
 		},
+		{
+			name: "export mtimes with an unknown mode",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+export {
+    mtimes "author-time"
+}
+`,
+			wantErr: `export: mtimes must be "history"`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1647,6 +1662,44 @@ services {
 				t.Errorf("LoadDaemon error = %q, want substring %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestLoadDaemon_ExportMtimes covers the opt-in `export { mtimes "history" }`
+// block (deterministic per-path mtimes, issue #5) and its absent-means-off
+// default.
+func TestLoadDaemon_ExportMtimes(t *testing.T) {
+	base := `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+`
+	load := func(t *testing.T, kdl string) *Daemon {
+		t.Helper()
+		path := t.TempDir() + "/gauntlet.kdl"
+		if err := os.WriteFile(path, []byte(kdl), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := LoadDaemon(path)
+		if err != nil {
+			t.Fatalf("LoadDaemon: %v", err)
+		}
+		return d
+	}
+
+	if d := load(t, base); d.Export.Mtimes != "" {
+		t.Errorf("Export.Mtimes = %q with no export block, want \"\"", d.Export.Mtimes)
+	}
+	d := load(t, base+`
+export {
+    mtimes "history"
+}
+`)
+	if d.Export.Mtimes != "history" {
+		t.Errorf("Export.Mtimes = %q, want \"history\"", d.Export.Mtimes)
 	}
 }
 

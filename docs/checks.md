@@ -281,6 +281,14 @@ new commit and so a fresh key even though the content (and any correct
 cached result) is unchanged. Use it when you want the commit for humans or
 logs; use `rev-parse` when you want maximal cache hits.
 
+Some build/test tools you can't rewire key their caches on file *metadata*
+(path + mtime + size) rather than content, and a plain export gives every
+file extraction wall time — a guaranteed miss on every run. For those, the
+daemon operator can turn on deterministic history-derived mtimes for all
+exported trees with the top-level `export { mtimes "history" }` block; see
+[config.md](config.md) for the exact semantics. It's an operator knob, not
+something the check spec can request.
+
 Every SHA in the environment contract stays resolvable in
 `GAUNTLET_GIT_DIR` for your check's entire lifetime — the daemon pins the
 trial chain against `git gc` for the whole run, and a landed chain stays

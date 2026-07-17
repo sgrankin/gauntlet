@@ -1284,6 +1284,11 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
 		return
 	}
+	if err := d.restoreMtimes(ctx, chainTip, dir, rootSpan); err != nil {
+		_ = os.RemoveAll(dir)
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
+		return
+	}
 
 	now := d.now()
 	members := make([]runMember, len(links))
@@ -1705,6 +1710,11 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
 		return nil, false
 	}
+	if err := d.restoreMtimes(ctx, link.mergeOID, dir, rootSpan); err != nil {
+		_ = os.RemoveAll(dir)
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
+		return nil, false
+	}
 
 	rec := &core.RunRecord{
 		RunID:      runID,
@@ -2063,6 +2073,28 @@ func (d *Daemon) finalizeRun(ctx context.Context, r *run) {
 	if r.dir != "" {
 		_ = os.RemoveAll(r.dir)
 	}
+}
+
+// restoreMtimes runs the optional deterministic-mtimes pass
+// (Config.HistoryMtimes) over a freshly exported trial dir, keyed off the
+// chain-tip MERGE COMMIT — never the bare tree, whose export carries no
+// history — and records the walk's cost on the run's root span. No-op when
+// the feature is off; an error is the caller's OutcomeError (the tree must
+// never silently run with wall-clock metadata while the config promises
+// otherwise).
+func (d *Daemon) restoreMtimes(ctx context.Context, mergeOID, dir string, rootSpan trace.Span) error {
+	if !d.cfg.HistoryMtimes {
+		return nil
+	}
+	stats, err := d.git.RestoreMtimes(ctx, mergeOID, dir)
+	if err != nil {
+		return err
+	}
+	rootSpan.SetAttributes(
+		attribute.Int("gauntlet.mtimes.entries", stats.Commits),
+		attribute.Int("gauntlet.mtimes.paths", stats.Paths),
+	)
+	return nil
 }
 
 // unpin best-effort-releases oid's GC pin. The error is deliberately

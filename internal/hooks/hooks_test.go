@@ -65,6 +65,9 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 	return nil
 }
 
+func (f *fakeGitRepo) RestoreMtimes(ctx context.Context, commit, dir string) (core.MtimeStats, error) {
+	return core.MtimeStats{}, nil
+}
 func (f *fakeGitRepo) Pin(ctx context.Context, oid string) error   { return nil }
 func (f *fakeGitRepo) Unpin(ctx context.Context, oid string) error { return nil }
 

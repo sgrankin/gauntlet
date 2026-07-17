@@ -2,6 +2,7 @@ package queue
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -120,5 +121,56 @@ func TestReconcile_ExportTreeError(t *testing.T) {
 	h.reconcile()
 	if h.git.exportCalls != calls {
 		t.Fatal("parked candidate re-exported after the infra error cleared")
+	}
+}
+
+func TestReconcile_RestoreMtimesError(t *testing.T) {
+	h := newHarness(t)
+	h.d.cfg.HistoryMtimes = true
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", checkSpecFile("test"))
+	h.git.mtimeErr = errors.New("gitx: restore-mtimes: history exhausted")
+
+	h.reconcile()
+
+	recs := h.ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeError {
+		t.Fatalf("Outcome = %v, want Error", last.Outcome)
+	}
+	// The tree must never silently run checks with wall-clock metadata
+	// while the config promises history-derived mtimes, and the record
+	// must say which pass failed.
+	if !strings.Contains(last.Detail, "restore mtimes") {
+		t.Fatalf("Detail = %q, want it to name the mtimes pass", last.Detail)
+	}
+	if !h.git.hasRef(ref) {
+		t.Fatal("slot removed on an infra error")
+	}
+
+	h.git.mtimeErr = nil
+	calls := h.git.mtimeCalls
+	h.reconcile()
+	if h.git.mtimeCalls != calls {
+		t.Fatal("parked candidate re-tested after the infra error cleared")
+	}
+}
+
+// The mtimes pass is strictly opt-in: with Config.HistoryMtimes unset (the
+// default, as in newHarness), a run's export must not touch RestoreMtimes
+// at all.
+func TestReconcile_MtimesOffNeverCalled(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+	h.git.pushCandidate(candidateRef("main", "alice", "widget"), "", checkSpecFile("test"))
+
+	h.reconcile()
+
+	if h.git.exportCalls == 0 {
+		t.Fatal("run never exported; the test exercised nothing")
+	}
+	if h.git.mtimeCalls != 0 {
+		t.Fatalf("RestoreMtimes called %d time(s) with HistoryMtimes off", h.git.mtimeCalls)
 	}
 }

@@ -46,13 +46,14 @@ func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, sl
 		return nil
 	}
 	return hooks.New(hooks.Params{
-		Hooks:    hookMap,
-		Policies: policyMap,
-		Git:      git,
-		Exec:     ex,
-		Slots:    slots,
-		Emit:     emit,
-		WorkDir:  workDir,
-		LogDir:   logDir,
+		Hooks:         hookMap,
+		Policies:      policyMap,
+		Git:           git,
+		Exec:          ex,
+		Slots:         slots,
+		HistoryMtimes: cfg.Export.Mtimes == "history",
+		Emit:          emit,
+		WorkDir:       workDir,
+		LogDir:        logDir,
 	})
 }

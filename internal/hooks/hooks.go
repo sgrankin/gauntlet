@@ -91,6 +91,12 @@ type Params struct {
 	// landed coordinates (base/merge/candidate SHA, ref) for free.
 	Exec core.Executor
 
+	// HistoryMtimes mirrors queue.Config.HistoryMtimes for the hook
+	// export: hooks run against the landed merge's tree, and the same
+	// metadata determinism applies (config's `export { mtimes "history" }`
+	// covers every trial materialization, not one executor's).
+	HistoryMtimes bool
+
 	// Slots is the daemon-wide execution-capacity semaphore hooks share
 	// with candidate checks (the operator's `max-executions` cap —
 	// core.Slots): each hook's RunCheck holds one slot for its whole
@@ -156,6 +162,7 @@ type Runner struct {
 	policies map[string]Policy
 	git      core.GitRepo
 	slots    *core.Slots // shared daemon-wide execution cap; nil = unlimited
+	mtimes   bool        // Params.HistoryMtimes
 	exec     core.Executor
 	notify   func(context.Context, core.Event)
 	workDir  string
@@ -242,6 +249,7 @@ func New(p Params) *Runner {
 		git:      p.Git,
 		exec:     p.Exec,
 		slots:    p.Slots,
+		mtimes:   p.HistoryMtimes,
 		notify:   p.Emit,
 		workDir:  p.WorkDir,
 		logDir:   p.LogDir,
@@ -709,6 +717,15 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 	if err := r.git.ExportTree(ctx, rec.MergeSHA, dir); err != nil {
 		fmt.Fprintf(r.log, "hooks: %s: export tree %s: %v\n", ev.Target, rec.MergeSHA, err)
 		return
+	}
+	if r.mtimes {
+		// Same determinism the checks got; a failure skips the hooks (with
+		// the log line as the trace) rather than running them against a
+		// tree whose metadata isn't what the config promises.
+		if _, err := r.git.RestoreMtimes(ctx, rec.MergeSHA, dir); err != nil {
+			fmt.Fprintf(r.log, "hooks: %s: restore mtimes %s: %v\n", ev.Target, rec.MergeSHA, err)
+			return
+		}
 	}
 
 	for i, h := range hs {

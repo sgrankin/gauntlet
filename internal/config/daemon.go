@@ -215,6 +215,11 @@ type Daemon struct {
 	// all-powerful default — see docs/config.md.
 	Profiles []Executor `kdl:"-"`
 
+	// Export configures trial-tree materialization (every export: check
+	// trees, image-build trees, hook trees). Zero value = defaults (no
+	// deterministic-mtimes pass).
+	Export Export `kdl:"export"`
+
 	// MaxExecutions is the daemon-wide cap on concurrently executing
 	// bounded commands — candidate checks and post-land hooks, across
 	// every target, mode, speculation window, and executor profile. It
@@ -339,6 +344,24 @@ type Executor struct {
 	// adopts the value into the top-level field (and rejects it on a
 	// named profile, or when both spellings are set).
 	MaxExecutions int `kdl:"max-executions"`
+}
+
+// Export configures how trial trees are materialized on disk — an
+// operator/builder-cache property, deliberately not a repo-spec one: the
+// repo must not silently impose a potentially expensive history walk on
+// the machine.
+type Export struct {
+	// Mtimes selects file-timestamp materialization. "" (absent, the
+	// default): extraction wall time, the classic behavior. "history":
+	// every tracked file's mtime is set to the committer time of the last
+	// commit that changed that path (git-restore-mtime semantics, keyed
+	// off the exact synthetic merge) — so re-exports of the same merge
+	// are metadata-identical and path+metadata-keyed caches (test-result
+	// caches recording stat() of opened files) stop missing on every
+	// unrelated commit. Costs one bounded history walk per export; the
+	// walk failing fails the trial as an infrastructure error, never a
+	// silent wall-clock fallback. Any other value is a config error.
+	Mtimes string `kdl:"mtimes"`
 }
 
 // AddHost is one `add-host "hostname" "gateway"` pair on a container
@@ -1105,6 +1128,11 @@ func (d *Daemon) validate() error {
 		if err := validateExecutor(p, label); err != nil {
 			return err
 		}
+	}
+	switch d.Export.Mtimes {
+	case "", "history":
+	default:
+		return fmt.Errorf("export: mtimes must be \"history\" (or absent), got %q", d.Export.Mtimes)
 	}
 	// Zero is "left unset" = unlimited (the field doc), so only a negative
 	// value — never a meaningful cap — is rejected.

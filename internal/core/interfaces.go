@@ -69,6 +69,15 @@ type GitRepo interface {
 	// against.
 	ExportTree(ctx context.Context, tree, dir string) error
 
+	// RestoreMtimes rewrites every tracked file's mtime under dir — a
+	// fresh ExportTree of commit's tree — to the committer time of the
+	// last commit that changed that path, so repeated exports of the same
+	// commit are metadata-identical (deterministic per-path mtimes for
+	// path+metadata-keyed build caches). Failure is an infrastructure
+	// error: callers fail the trial rather than run checks against a tree
+	// whose metadata silently isn't what the feature promises.
+	RestoreMtimes(ctx context.Context, commit, dir string) (MtimeStats, error)
+
 	// Pin anchors oid — an active run's chain-tip merge commit — against
 	// garbage collection until Unpin. The merge commits gauntlet creates
 	// are referenced by no branch until (unless) they land, yet checks and
@@ -87,6 +96,18 @@ type GitRepo interface {
 	// newOID == "" deletes the ref. Returns ErrCASStale if the ref's
 	// actual value did not match oldOID (Invariants 2 and 3).
 	CASUpdate(ctx context.Context, remoteRef, oldOID, newOID string) error
+}
+
+// MtimeStats reports what one RestoreMtimes pass did, for instrumentation:
+// the walk is per-export work on the reconcile path, so its cost should be
+// observable, not guessed.
+type MtimeStats struct {
+	// Commits is how many history entries the walk consumed. A merge
+	// contributes one entry per parent, so this can exceed the commit
+	// count.
+	Commits int
+	// Paths is how many tracked paths were stamped.
+	Paths int
 }
 
 // Executor runs one named check and reports its verdict. The queue owns

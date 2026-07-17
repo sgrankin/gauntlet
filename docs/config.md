@@ -214,6 +214,38 @@ summarize {
   what actually bounds it. A check that sits ready waiting for a slot
   records that wait in history (`waited` vs `duration`), so capacity
   starvation is visible rather than mistaken for slow commands.
+- **`export`** (top level) — configures how trial trees are materialized
+  on disk, for *every* export: check trees, candidate-built image trees,
+  and hook trees.
+
+  ```kdl
+  export {
+      mtimes "history"
+  }
+  ```
+
+  `mtimes` selects file-timestamp behavior. Absent (the default), files
+  carry extraction wall time — the classic behavior, so two exports of
+  the same commit differ in metadata. `"history"` sets every tracked
+  file's mtime to the committer time of the last commit that changed
+  that path (git-restore-mtime semantics, computed against the exact
+  synthetic merge commit), so re-exports of the same merge are metadata-
+  identical and path+metadata-keyed build/test caches stop missing on
+  every unrelated commit. Details worth knowing: committer time, not
+  author time, and future-dated commits are stamped verbatim (a cache
+  may decline to reuse until the clock catches up — deterministic beats
+  plausible); a path a merge changed relative to *all* its parents (an
+  auto-merge product, including gauntlet's own trial merge) gets that
+  merge's time, anything matching a parent keeps its deeper
+  history-derived time; a rename counts as a change at the new path;
+  symlink timestamps are set without following the link; directory
+  mtimes are untouched. The pass costs one bounded history walk per
+  export (two git subprocesses, stopping as soon as every path is
+  stamped; cost is recorded on the run's trace span). A walk failure
+  fails the trial as an infrastructure error — there is deliberately no
+  silent wall-clock fallback. This is an operator knob, not a repo-spec
+  one: the repo must not impose a potentially expensive host-side walk
+  on the daemon.
 - **`services`** — gates shared, cached service instances a check spec's
   `service`/`needs` nodes can request (`internal/services`); see
   [checks.md's "Shared services"](checks.md#shared-services) for the full

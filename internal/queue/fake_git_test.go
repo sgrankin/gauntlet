@@ -44,6 +44,7 @@ type fakeGitRepo struct {
 	isAncestorErr error
 	exportErr     error
 	pinErr        error
+	mtimeErr      error
 
 	// casErr, when non-nil, makes CASUpdate fail WITHOUT mutating refs and
 	// WITHOUT being a stale lease — the ambiguous "client-visible error,
@@ -54,6 +55,7 @@ type fakeGitRepo struct {
 	casErr error
 
 	mergeTreeCalls  int
+	mtimeCalls      int
 	commitTreeCalls int
 	exportCalls     int
 
@@ -265,6 +267,16 @@ func (f *fakeGitRepo) ExportTree(ctx context.Context, tree, dir string) error {
 		}
 	}
 	return nil
+}
+
+func (f *fakeGitRepo) RestoreMtimes(ctx context.Context, commit, dir string) (core.MtimeStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mtimeCalls++
+	if f.mtimeErr != nil {
+		return core.MtimeStats{}, f.mtimeErr
+	}
+	return core.MtimeStats{}, nil
 }
 
 func (f *fakeGitRepo) Pin(ctx context.Context, oid string) error {
