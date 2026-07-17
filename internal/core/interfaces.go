@@ -103,8 +103,8 @@ type GitRepo interface {
 // observable, not guessed.
 type MtimeStats struct {
 	// Commits is how many history entries the walk consumed. A merge
-	// contributes one entry per parent it differs from, so this can
-	// exceed the commit count.
+	// contributes up to one entry per parent it differs from, so this
+	// can exceed the commit count.
 	Commits int
 	// Paths is how many exported paths were stamped.
 	Paths int

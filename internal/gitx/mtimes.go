@@ -114,8 +114,16 @@ func (r *Repo) RestoreMtimes(ctx context.Context, commit, dir string) (core.Mtim
 	// auto-merge products. git emits NO entry at all for a parent the
 	// merge is tree-identical to, so %P rides along in the header to make
 	// the missing entries detectable. --name-status -z gives NUL-safe
-	// per-path change lists; %ct is the committer time.
-	cmd := gitCommand(ctx, r.dir, "log", "-z", "--diff-merges=separate", "--name-status", "--format=%x01%H %P %ct", commit)
+	// per-path change lists; %ct is the committer time. The -c overrides
+	// pin the two other log.* knobs that can reshape the stream: showRoot
+	// off would drop the root's entries (every root-era path then reads
+	// as unstamped), and showSignature on pollutes stdout ahead of the
+	// first header.
+	cmd := gitCommand(ctx, r.dir,
+		"-c", "log.showRoot=true", "-c", "log.showSignature=false",
+		"log", "-z", "--diff-merges=separate", "--name-status", "--format=%x01%H %P %ct", commit)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return stats, fmt.Errorf("gitx: restore-mtimes %s: %w", commit, err)
@@ -225,6 +233,13 @@ func (r *Repo) RestoreMtimes(ctx context.Context, commit, dir string) (core.Mtim
 	}
 	if sawEOF {
 		if err := cmd.Wait(); err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if len(msg) > 2048 {
+				msg = msg[:2048] + "..."
+			}
+			if msg != "" {
+				return stats, fmt.Errorf("gitx: restore-mtimes %s: log: %w: %s", commit, err, msg)
+			}
 			return stats, fmt.Errorf("gitx: restore-mtimes %s: log: %w", commit, err)
 		}
 		waited = true

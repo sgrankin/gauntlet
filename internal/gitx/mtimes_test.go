@@ -395,6 +395,42 @@ func TestRestoreMtimes_FutureTimestampVerbatim(t *testing.T) {
 	}
 }
 
+// TestRestoreMtimes_CorruptHistoryFailsLoudly pins the stream-death path:
+// when `git log` dies mid-walk (here: a history object deleted from the
+// object store), the subprocess's failure must surface as the pass's
+// error — never "history exhausted", and never silent success off the
+// truncated prefix. This is the Wait-on-EOF certification the walker's
+// framing deliberately does not provide on its own.
+func TestRestoreMtimes_CorruptHistoryFailsLoudly(t *testing.T) {
+	ctx := context.Background()
+	w := newMtimeRepo(t)
+	w.commitAt(t1, "c1", map[string]string{"a.txt": "a\n"})
+	mid := w.commitAt(t2, "c2", map[string]string{"b.txt": "b\n"})
+	tip := w.commitAt(t3, "c3", map[string]string{"b.txt": "b2\n"})
+	repo, bare := w.open()
+
+	dir := t.TempDir()
+	if err := repo.ExportTree(ctx, tip, dir); err != nil {
+		t.Fatalf("ExportTree: %v", err)
+	}
+
+	// Sever the walk mid-history: c2's commit object goes away, so the
+	// log stream ends (exit != 0) after emitting only c3 — with a.txt
+	// (stamped by the root) still pending.
+	obj := filepath.Join(bare, "objects", mid[:2], mid[2:])
+	if err := os.Remove(obj); err != nil {
+		t.Fatalf("remove %s: %v", obj, err)
+	}
+
+	_, err := repo.RestoreMtimes(ctx, tip, dir)
+	if err == nil {
+		t.Fatal("RestoreMtimes over corrupt history = nil error, want the log subprocess's failure surfaced")
+	}
+	if !strings.Contains(err.Error(), "log:") {
+		t.Errorf("error = %q, want the log subprocess's own failure (not a framing or exhaustion misdiagnosis)", err)
+	}
+}
+
 func TestRestoreMtimes_CancellationFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := newMtimeRepo(t)
