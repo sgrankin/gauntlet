@@ -61,6 +61,21 @@ type fakeGitRepo struct {
 	exportCalls     int
 	lsRemoteCalls   int
 
+	// exportTrees records the exact tree-ish argument of every ExportTree
+	// call, in order — so tests can assert WHICH object was archived (the
+	// trial TREE OID, never the chain-tip merge COMMIT: issue #9's
+	// exact-tree/export-subst invariant), not merely how many times.
+	exportTrees []string
+
+	// exportHook, when non-nil, is invoked inside ExportTree with the call's
+	// (ctx, tree, dir) after exportCalls/exportTrees are recorded but before
+	// any files are written, and OUTSIDE f.mu so it may block. A non-nil
+	// return short-circuits the export with that error (no files written);
+	// nil lets the default materialization proceed. This is how the
+	// cap/cancellation test gates and counts concurrent materializations
+	// deterministically without a real, slow git process.
+	exportHook func(ctx context.Context, tree, dir string) error
+
 	// casLog records every CASUpdate call in order, so tests can assert
 	// ordering (e.g. land pushes the target before deleting the slot)
 	// directly instead of inferring it indirectly.
@@ -247,17 +262,26 @@ const maxLandingMergeSearchTest = 1000
 
 func (f *fakeGitRepo) ExportTree(ctx context.Context, tree, dir string) error {
 	f.mu.Lock()
+	f.exportCalls++
+	f.exportTrees = append(f.exportTrees, tree)
 	if f.exportErr != nil {
-		f.exportCalls++
 		f.mu.Unlock()
 		return f.exportErr
 	}
+	hook := f.exportHook
 	files := make(map[string]string, len(f.trees[tree]))
 	for k, v := range f.trees[tree] {
 		files[k] = v
 	}
-	f.exportCalls++
 	f.mu.Unlock()
+
+	// Runs outside the lock so it may block (cap/cancellation test); a
+	// non-nil return short-circuits before any files are written.
+	if hook != nil {
+		if err := hook(ctx, tree, dir); err != nil {
+			return err
+		}
+	}
 
 	for path, content := range files {
 		full := filepath.Join(dir, path)

@@ -56,6 +56,49 @@ func TestSweepAndRecreate_RemovesOrphanScratchDirs(t *testing.T) {
 	}
 }
 
+// TestSweepAndRecreate_RemovesOrphanNodeWorkspaces is issue #9's startup
+// orphan-sweep guarantee: isolated per-node workspaces are created as
+// gauntlet-node-* dirs directly under WorkDir (== the trials dir), so the
+// same wholesale trials-dir sweep that clears crashed run-level
+// gauntlet-trial-* dirs must also clear crash-left node workspaces. The
+// sweep is prefix-agnostic (it recreates the whole directory), so a
+// gauntlet-node-* orphan is removed alongside a gauntlet-trial-* one.
+func TestSweepAndRecreate_RemovesOrphanNodeWorkspaces(t *testing.T) {
+	state := t.TempDir()
+	trials := filepath.Join(state, "trials")
+	if err := os.MkdirAll(trials, 0o755); err != nil {
+		t.Fatalf("seed trials dir: %v", err)
+	}
+	nodeOrphan := filepath.Join(trials, "gauntlet-node-abc123")
+	runOrphan := filepath.Join(trials, "gauntlet-trial-def456")
+	for _, d := range []string{nodeOrphan, runOrphan} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("seed orphan dir %s: %v", d, err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "stray.txt"), []byte("stale"), 0o600); err != nil {
+			t.Fatalf("seed orphan file: %v", err)
+		}
+	}
+
+	if err := sweepAndRecreate(trials); err != nil {
+		t.Fatalf("sweepAndRecreate: %v", err)
+	}
+
+	if _, err := os.Stat(nodeOrphan); !os.IsNotExist(err) {
+		t.Errorf("node workspace orphan %s still exists after sweep (err=%v)", nodeOrphan, err)
+	}
+	if _, err := os.Stat(runOrphan); !os.IsNotExist(err) {
+		t.Errorf("run-level orphan %s still exists after sweep (err=%v)", runOrphan, err)
+	}
+	entries, err := os.ReadDir(trials)
+	if err != nil {
+		t.Fatalf("ReadDir trials: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("trials dir has %d entries after sweep, want 0", len(entries))
+	}
+}
+
 // TestSweepAndRecreate_CreatesDirIfAbsent covers the first-run case: no
 // prior scratch dir at all (fresh -state), same as trialsDir's existing
 // startup behavior.

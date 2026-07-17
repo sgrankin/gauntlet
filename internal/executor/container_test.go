@@ -74,6 +74,37 @@ func TestParams_RunArgs_Shape(t *testing.T) {
 	}
 }
 
+// TestParams_RunArgs_DistinctDirsSameWorkdir is the executor half of issue
+// #9's isolation guarantee: two graph nodes materialized into DISTINCT host
+// directories are each bind-mounted at the SAME fixed container workdir. The
+// queue hands each isolated node its own private job.Dir (proven in
+// queue/isolated_acceptance_test.go, TestIsolated_ConcurrentNodesGetDistinctDirs);
+// here we prove the container executor maps those distinct host paths onto
+// one in-container workdir, so conflicting mutations cannot cross even though
+// both checks see the same /workspace path.
+func TestParams_RunArgs_DistinctDirsSameWorkdir(t *testing.T) {
+	p := Params{Workdir: "/workspace", Image: "img"}
+
+	jobA := containerJob([]string{"true"})
+	jobA.Dir = "/host/node-a"
+	jobB := containerJob([]string{"true"})
+	jobB.Dir = "/host/node-b"
+
+	gotA := p.runArgs(jobA, "gauntlet-run1-a", "/rd")
+	gotB := p.runArgs(jobB, "gauntlet-run1-b", "/rd")
+
+	if !containsPair(gotA, "-v", "/host/node-a:/workspace") {
+		t.Fatalf("node A: want distinct host dir at the fixed workdir; argv=%v", gotA)
+	}
+	if !containsPair(gotB, "-v", "/host/node-b:/workspace") {
+		t.Fatalf("node B: want distinct host dir at the fixed workdir; argv=%v", gotB)
+	}
+	// Same in-container workdir, different host sources — no shared bytes.
+	if containsPair(gotB, "-v", "/host/node-a:/workspace") {
+		t.Fatalf("node B mounted node A's host dir — isolation broken; argv=%v", gotB)
+	}
+}
+
 func TestParams_RunArgs_NoCaches(t *testing.T) {
 	p := Params{Workdir: "/workspace", Image: "img"}
 	job := containerJob([]string{"true"})
