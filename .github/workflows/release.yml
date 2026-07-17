@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual dispatch is the release path when a local `git push <tag>` is
+  # unavailable (e.g. an environment whose git relay only permits branch
+  # pushes): the runner itself creates and pushes the tag with its own
+  # GITHUB_TOKEN, then goreleaser runs exactly as it does for a pushed tag.
+  # Dispatch this on the commit you want released (normally the default
+  # branch tip).
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to create and publish (e.g. v0.2.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,6 +30,31 @@ jobs:
           # goreleaser generates the changelog from git log, which needs full
           # history, not the default shallow clone.
           fetch-depth: 0
+
+      # On manual dispatch there is no tag yet: validate the requested
+      # version, refuse to clobber an existing tag, then create and push it on
+      # the checked-out commit so goreleaser sees the same tagged git state a
+      # `push: tags` event would present. Tags pushed with GITHUB_TOKEN do not
+      # re-trigger this workflow (GitHub's recursion guard), so there is no
+      # double release.
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$VERSION" in
+            v[0-9]*) ;;
+            *) echo "version must match ^v[0-9] (got '$VERSION')" >&2; exit 1 ;;
+          esac
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "tag $VERSION already exists on origin — pick a new version" >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"
 
       - uses: actions/setup-go@v6
         with:
