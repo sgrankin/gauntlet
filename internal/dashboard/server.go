@@ -1332,6 +1332,9 @@ func checkRowDetail(c history.CheckRow) string {
 	if c.Waited > 0 {
 		parts = append(parts, "waited "+formatDuration(c.Waited)+" for an execution slot")
 	}
+	if c.Materialized > 0 {
+		parts = append(parts, "workspace materialized in "+formatDuration(c.Materialized))
+	}
 	if c.Image != "" {
 		parts = append(parts, "image "+shortImageRef(c.Image))
 	}

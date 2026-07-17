@@ -1353,6 +1353,76 @@ func TestMigrate_V9ToV10(t *testing.T) {
 	}
 }
 
+// TestMigrate_V10ToV11 builds a v10 database by hand (v7 schema + the v8,
+// v9, v10 ALTERs) and proves Open migrates it: checks gains the
+// materialize_ms column with pre-existing rows untouched (default 0), and
+// a fresh write round-trips a non-zero materialization cost.
+func TestMigrate_V10ToV11(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v10.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		schemaV7SQL,
+		`ALTER TABLE checks ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN waited_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE checks ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
+		`PRAGMA user_version = 10`,
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size, speculated, recovered)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1, 0, 0)`,
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '', 'true')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed v10 db: %q: %v", stmt, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v10 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+	_, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Materialized != 0 {
+		t.Errorf("pre-v11 row = %+v, want untouched with zero materialize", checks)
+	}
+
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC))
+	rec.Checks[0].Materialized = 250 * time.Millisecond
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if newChecks[0].Materialized != 250*time.Millisecond {
+		t.Errorf("checks[0].Materialized = %v, want 250ms round-tripped", newChecks[0].Materialized)
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }

@@ -71,6 +71,68 @@ sat ready waiting for host capacity records that wait separately from its
 own duration, so a slow host and a slow command are distinguishable in
 history.
 
+## Workspace isolation
+
+By default every node in a run — each check and each `image:` build —
+shares **one** writable export of the merge tree. That makes ordering
+parallel without making filesystems independent: two nodes running at once
+can collide through ordinary tool output (dependency dirs, `bin`/`obj`
+trees, coverage files, a Docker build context read while another command
+mutates it), and the failure mode is a *nondeterministic green* — one
+check accidentally consuming another's half-written files — not a clean
+error.
+
+A top-level `workspace "isolated"` switches the run to **one private
+workspace per node**:
+
+```kdl
+workspace "isolated"
+max-parallel 4
+
+check "test" { command "./ci/test" }
+check "lint" { command "./ci/lint" }
+```
+
+Each node gets a fresh materialization of the run's exact chain-tip tree —
+same contents, modes, symlinks, and (with `export { mtimes "history" }`)
+the same history-derived mtimes — so no node ever observes another's
+mutations, whether they overlap or are related by `after`. **In isolated
+mode `after` is verdict ordering only, not shared dataflow**: a file a
+prerequisite writes is deliberately absent from its dependent. Durable
+handoff belongs in an immutable image identity, a content-addressed
+cache/artifact, or a repository program — never an accidental shared
+working tree.
+
+Details worth knowing:
+
+- **Absent = shared, unchanged.** Omitting the policy preserves today's
+  single writable export, including intentional sequential filesystem
+  handoff, byte-for-byte — even at `max-parallel 1`.
+- **Export, not clone.** The private workspace is a `git archive` of the
+  chain-tip tree with no `.git`; git queries still go through
+  `GAUNTLET_GIT_DIR` and the exact `GAUNTLET_*_SHA` values, as always.
+- **Stable container path.** Distinct host directories are still bound at
+  the profile's fixed `workdir` (normally `/workspace`), so tools whose
+  caches embed absolute source paths see the same in-container path across
+  nodes and runs. A local executor gets its private host path directly;
+  path-sensitive checks should select a container profile.
+- **Candidate-image builds are isolated too**, and their consumers still
+  receive only the captured immutable image identity — never files the
+  build happened to write beside its Docker context.
+- **Bounded and cleaned.** A node's workspace is materialized only once it
+  wins a `max-executions` slot (so the cap bounds concurrent archives too)
+  and removed after its command's process/container fully stops;
+  crash-orphaned node directories are swept at daemon startup. An archive
+  or mtime failure is an infrastructure error (park-as-error), never a
+  silent fallback to a shared directory. Materialization cost is recorded
+  separately from slot-wait and command time (history's `materialize_ms`,
+  a trace attribute) so you can tell whether isolation is actually
+  material before optimizing.
+- **Not a security sandbox.** Isolation prevents accidental cross-node
+  filesystem coupling; it does not defend mutually hostile commands.
+  Executor profiles, cache mounts, service endpoints, and Docker-socket
+  authority are unchanged.
+
 ## Executor profiles
 
 When the daemon defines named execution profiles

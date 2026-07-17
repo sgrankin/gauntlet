@@ -2514,6 +2514,16 @@ check "test" {
 			wantErr: `max-parallel 1000 exceeds`,
 		},
 		{
+			name: "unknown workspace policy",
+			kdl: `
+workspace "sandboxed"
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `workspace must be "isolated"`,
+		},
+		{
 			name: "check consumes undeclared image",
 			kdl: `
 check "unit" {

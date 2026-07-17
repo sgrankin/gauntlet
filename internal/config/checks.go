@@ -42,6 +42,17 @@ type CheckSpec struct {
 	// execution cap (executor `max-executions`) still bounds the whole
 	// host; this knob only widens one candidate's slice of it.
 	MaxParallel int `kdl:"max-parallel"`
+
+	// Workspace selects the filesystem model for this candidate's graph
+	// nodes (issue #9). "" (absent, the default) is SHARED: one writable
+	// export per run, handed to every check and image-build node —
+	// today's behavior, including intentional sequential filesystem
+	// handoff between `after`-ordered checks. "isolated" gives every node
+	// its own private materialization of the run's exact chain-tip tree,
+	// so parallel (or `after`-related) nodes never observe one another's
+	// mutations — `after` becomes verdict ordering only, not a shared
+	// working tree. Any other value is a spec error. See docs/checks.md.
+	Workspace string `kdl:"workspace"`
 }
 
 // Check is one named check: a command to run against the exported trial
@@ -386,8 +397,18 @@ func (cs *CheckSpec) validate() error {
 	if cs.MaxParallel > maxAllowedMaxParallel {
 		return fmt.Errorf("max-parallel %d exceeds the maximum of %d", cs.MaxParallel, maxAllowedMaxParallel)
 	}
+	switch cs.Workspace {
+	case "", "isolated":
+	default:
+		return fmt.Errorf("workspace must be \"isolated\" (or absent for shared), got %q", cs.Workspace)
+	}
 	return nil
 }
+
+// Isolated reports whether this spec selects per-node isolated
+// workspaces (issue #9). A convenience for the queue so it never string-
+// compares the policy value itself.
+func (cs *CheckSpec) Isolated() bool { return cs.Workspace == "isolated" }
 
 // maxAllowedMaxParallel is a sane safety valve on CheckSpec.MaxParallel,
 // not a hard architectural requirement — the same stance as daemon.go's

@@ -361,6 +361,12 @@ type run struct {
 	// `needs` against declared Service specs.
 	services []config.Service
 
+	// isolated selects per-node private workspaces (issue #9,
+	// CheckSpec.Workspace == "isolated"): when set, dir is "" (no shared
+	// export) and each check materializes its own copy of chainTip's tree
+	// in startCheck. Read-only for the run's life, set once at start.
+	isolated bool
+
 	verdict runVerdict // set by advanceChecks, consumed by advanceLane
 
 	// verifiedEmitted guards the once-per-run EventVerified emit (the

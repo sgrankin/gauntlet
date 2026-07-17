@@ -147,6 +147,26 @@ check "lint" {
 	}
 }
 
+// TestParseChecks_Workspace covers the isolated-workspace policy (issue
+// #9): absent = shared (default, Isolated() false), "isolated" parses.
+func TestParseChecks_Workspace(t *testing.T) {
+	shared, err := ParseChecks([]byte("check \"t\" {\n    command \"true\"\n}\n"))
+	if err != nil {
+		t.Fatalf("ParseChecks (no workspace): %v", err)
+	}
+	if shared.Workspace != "" || shared.Isolated() {
+		t.Errorf("absent workspace = %q / Isolated=%v, want shared default", shared.Workspace, shared.Isolated())
+	}
+
+	iso, err := ParseChecks([]byte("workspace \"isolated\"\ncheck \"t\" {\n    command \"true\"\n}\n"))
+	if err != nil {
+		t.Fatalf("ParseChecks (isolated): %v", err)
+	}
+	if iso.Workspace != "isolated" || !iso.Isolated() {
+		t.Errorf("workspace = %q / Isolated=%v, want isolated", iso.Workspace, iso.Isolated())
+	}
+}
+
 func TestCheckSpec_RequiresServices(t *testing.T) {
 	cases := []struct {
 		name string

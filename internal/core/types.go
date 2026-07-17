@@ -213,6 +213,15 @@ type CheckResult struct {
 	// the host's.
 	Waited time.Duration
 
+	// Materialized is how long this node's private workspace took to
+	// materialize (git archive extract + the history-mtime pass) before
+	// its command ran — isolated-workspace mode only (issue #9), zero in
+	// shared mode where the run's single export happens once up front and
+	// is not attributed to any one check. Recorded separately from Waited
+	// (slot wait) and Duration (the command) so an operator can evaluate
+	// whether per-node materialization is a material cost of isolation.
+	Materialized time.Duration
+
 	// BlockedBy, set only when Status is CheckBlocked, names the
 	// prerequisite check(s) whose non-green end blocked this one — the
 	// direct `after` edges that failed, or, for a check with no failed

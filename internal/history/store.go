@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 10
+const schemaVersion = 11
 
 var _ core.Channel = (*Store)(nil)
 
@@ -109,6 +109,10 @@ func Open(path string) (*Store, error) {
 //     COLUMN image (the immutable candidate-built image identity a build
 //     node produced / a consumer ran in — CheckResult.Image), stamp
 //     user_version=10, loop.
+//   - 10 (schema v10: checks has no materialize_ms column): ALTER TABLE
+//     checks ADD COLUMN materialize_ms (isolated-workspace materialization
+//     cost — CheckResult.Materialized, issue #9), stamp user_version=11,
+//     loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -250,6 +254,13 @@ CREATE TABLE hook_runs (
 			if _, err := db.Exec(`PRAGMA user_version = 10`); err != nil {
 				return fmt.Errorf("history: set user_version=10: %w", err)
 			}
+		case 10:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN materialize_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v10->v11 (checks.materialize_ms): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 11`); err != nil {
+				return fmt.Errorf("history: set user_version=11: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -388,6 +399,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			strings.Join(cr.BlockedBy, ","),
 			cr.Waited.Milliseconds(),
 			cr.Image,
+			cr.Materialized.Milliseconds(),
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

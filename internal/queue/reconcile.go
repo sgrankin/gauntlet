@@ -821,12 +821,34 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	// happens, but defensively) can't race this goroutine.
 	needs := check.Needs
 	svcs := r.services
+	isolated := r.isolated
+	chainTip := r.chainTip // captured by value; the goroutine never touches r
 	go func() {
 		// The execution slot advanceChecks acquired for this check is
 		// released only when this goroutine exits — RunCheck has returned
 		// and the executor's child cleanup is complete by then, so the
 		// freed slot never represents a live process/container.
 		defer d.cfg.Slots.Release()
+
+		// Isolated mode (issue #9): materialize this node's own private
+		// copy of the chain-tip tree now that the slot is held, so the
+		// daemon-wide cap bounds simultaneous archives too. A failure is
+		// park-as-error, exactly like a service-ensure failure below —
+		// never a fallback to a shared dir. The dir is removed after
+		// RunCheck returns (child stopped), covering pass/fail/cancel.
+		var materialized time.Duration
+		if isolated {
+			wsDir, took, err := d.materializeNode(spanCtx, chainTip)
+			if err != nil {
+				result <- core.CheckResult{Name: check.Name, Command: job.Command, Err: fmt.Errorf("materialize workspace: %w", err)}
+				return
+			}
+			defer os.RemoveAll(wsDir)
+			job.Dir = wsDir
+			materialized = took
+			span.SetAttributes(attribute.Int64("gauntlet.workspace.materialize_ms", took.Milliseconds()))
+		}
+
 		// Command (v8, run.html's command echo): stamped onto the result
 		// here rather than by the Executor implementations themselves, since
 		// job.Command is already in scope at every send point below and this
@@ -835,19 +857,21 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		if len(needs) == 0 || d.cfg.Services == nil {
 			res := d.exec.RunCheck(spanCtx, job) // unchanged path: hooks & needs-free checks
 			res.Command = job.Command
+			res.Materialized = materialized
 			stampConsumedImage(&res, job)
 			result <- res
 			return
 		}
 		ens, err := d.cfg.Services.EnsureAll(spanCtx, svcs, needs) // BLOCKING, off the reconcile loop
 		if err != nil {
-			result <- core.CheckResult{Name: check.Name, Command: job.Command, Err: fmt.Errorf("service ensure: %w", err)}
+			result <- core.CheckResult{Name: check.Name, Command: job.Command, Materialized: materialized, Err: fmt.Errorf("service ensure: %w", err)}
 			return // -> verdictErrored -> OutcomeError, park-as-error (see docs/design/services.md "Failure semantics")
 		}
 		defer d.cfg.Services.Release(ens) // refcount--; last-used is touched on release, not ensure
 		job.ServiceEnv, job.Networks = ens.Env, ens.Networks
 		res := d.exec.RunCheck(spanCtx, job)
 		res.Command = job.Command
+		res.Materialized = materialized
 		stampConsumedImage(&res, job)
 		if res.Err == nil && res.Status == core.CheckFailed {
 			// Only a genuinely red verdict re-probes — a passing check
@@ -1299,20 +1323,26 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 
-	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
-	if err != nil {
-		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
-		return
-	}
-	if err := d.git.ExportTree(ctx, tipTree, dir); err != nil {
-		_ = os.RemoveAll(dir)
-		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
-		return
-	}
-	if err := d.restoreMtimes(ctx, chainTip, dir, rootSpan); err != nil {
-		_ = os.RemoveAll(dir)
-		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
-		return
+	// Isolated mode defers materialization to each node (issue #9); shared
+	// mode exports the chain tip once here, as today (see startRun's
+	// matching block for the full rationale).
+	var dir string
+	if !spec.Isolated() {
+		dir, err = os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
+		if err != nil {
+			d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
+			return
+		}
+		if err := d.git.ExportTree(ctx, tipTree, dir); err != nil {
+			_ = os.RemoveAll(dir)
+			d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
+			return
+		}
+		if err := d.restoreMtimes(ctx, chainTip, dir, rootSpan); err != nil {
+			_ = os.RemoveAll(dir)
+			d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
+			return
+		}
 	}
 
 	// One trial ref + one status at the chain-tip merge for the whole
@@ -1370,6 +1400,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		imageRefs:   make(map[string]string, len(spec.Images)),
 		services:    spec.Services,
 		verdict:     verdictNone,
+		isolated:    spec.Isolated(),
 		trialRef:    trialRef,
 		rootCtx:     rootCtx,
 		rootSpan:    rootSpan,
@@ -1746,24 +1777,31 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		return nil, false
 	}
 
-	// Trial-tree export dirs are created under cfg.WorkDir when it's set.
-	// os.MkdirTemp treats an empty dir argument as "use the OS default temp
-	// dir" already; sweeping WorkDir at startup is cmd's job, not the
-	// queue's.
-	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
-	if err != nil {
-		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
-		return nil, false
-	}
-	if err := d.git.ExportTree(ctx, trial.TreeOID, dir); err != nil {
-		_ = os.RemoveAll(dir)
-		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
-		return nil, false
-	}
-	if err := d.restoreMtimes(ctx, link.mergeOID, dir, rootSpan); err != nil {
-		_ = os.RemoveAll(dir)
-		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
-		return nil, false
+	// Workspace materialization (issue #9). SHARED mode (the default):
+	// one writable export for the whole run, created here and handed to
+	// every node — today's behavior. ISOLATED mode: no shared export;
+	// each node materializes its own private copy in startCheck once it
+	// holds an execution slot (r.dir stays "", so no node ever sees
+	// another's mutations). Trial-tree export dirs are created under
+	// cfg.WorkDir when set; os.MkdirTemp treats "" as the OS temp dir, and
+	// sweeping WorkDir at startup is cmd's job.
+	var dir string
+	if !spec.Isolated() {
+		dir, err = os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
+		if err != nil {
+			d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: mkdir temp: "+err.Error(), rootSpan)
+			return nil, false
+		}
+		if err := d.git.ExportTree(ctx, trial.TreeOID, dir); err != nil {
+			_ = os.RemoveAll(dir)
+			d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "export tree: "+err.Error(), rootSpan)
+			return nil, false
+		}
+		if err := d.restoreMtimes(ctx, link.mergeOID, dir, rootSpan); err != nil {
+			_ = os.RemoveAll(dir)
+			d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
+			return nil, false
+		}
 	}
 
 	// Publish the trial ref (issue #7) as the LAST fallible pre-check
@@ -1810,6 +1848,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		imageRefs:   make(map[string]string, len(spec.Images)),
 		services:    spec.Services,
 		verdict:     verdictNone,
+		isolated:    spec.Isolated(),
 		trialRef:    trialRef,
 		rootCtx:     rootCtx,
 		rootSpan:    rootSpan,
