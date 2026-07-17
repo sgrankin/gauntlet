@@ -323,12 +323,16 @@ type ignoredRefStatus struct {
 }
 
 type inFlightStatus struct {
-	Ref          string   `json:"ref"`
-	SHA          string   `json:"sha"`
-	RunID        string   `json:"runID"`
-	CurrentCheck string   `json:"currentCheck"`
-	StartedAt    string   `json:"startedAt"`
-	ChecksDone   []string `json:"checksDone"`
+	Ref          string `json:"ref"`
+	SHA          string `json:"sha"`
+	RunID        string `json:"runID"`
+	CurrentCheck string `json:"currentCheck"`
+	// RunningChecks is every check in flight right now, in spec order —
+	// more than one only when the candidate's spec set max-parallel > 1.
+	// CurrentCheck stays the spec-first entry for back-compat.
+	RunningChecks []string `json:"runningChecks,omitempty"`
+	StartedAt     string   `json:"startedAt"`
+	ChecksDone    []string `json:"checksDone"`
 }
 
 // pipelineStatus, pipelineMemberStatus mirror dashboard/api.go's own
@@ -341,7 +345,9 @@ type pipelineStatus struct {
 	BatchID      string                 `json:"batchId"`
 	ChecksDone   []string               `json:"checksDone"`
 	CurrentCheck string                 `json:"currentCheck"`
-	StartedAt    string                 `json:"startedAt"`
+	// RunningChecks mirrors inFlightStatus's field of the same name.
+	RunningChecks []string `json:"runningChecks,omitempty"`
+	StartedAt     string   `json:"startedAt"`
 }
 
 type pipelineMemberStatus struct {
@@ -498,6 +504,9 @@ func buildInFlightStatus(rs *queue.RunSnapshot) *inFlightStatus {
 	if rs.Current != nil {
 		v.CurrentCheck = rs.Current.Name
 	}
+	for _, c := range rs.Running {
+		v.RunningChecks = append(v.RunningChecks, c.Name)
+	}
 	return v
 }
 
@@ -520,6 +529,9 @@ func buildPipelineStatus(rs queue.RunSnapshot) pipelineStatus {
 	}
 	if rs.Current != nil {
 		v.CurrentCheck = rs.Current.Name
+	}
+	for _, c := range rs.Running {
+		v.RunningChecks = append(v.RunningChecks, c.Name)
 	}
 	return v
 }

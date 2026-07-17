@@ -14,7 +14,7 @@
 <details class="check-row"{{if .Open}} open{{end}}>
 <summary><span class="check-summary-line">
 <span class="check-summary-name"><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}}{{if .Err}} &middot; err: {{.Err}}{{end}}</span></span>
-<span class="check-summary-meta muted">{{.Duration}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
+<span class="check-summary-meta muted">{{.Duration}}{{if .Detail}} &middot; {{.Detail}}{{end}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
 </span></summary>
 {{if .Command}}<div class="check-command">{{.Command}}</div>{{end}}
 <pre class="output">{{.Output}}</pre>
@@ -23,7 +23,7 @@
 <div class="check-row">
 <span class="check-summary-line">
 <span class="check-summary-name"><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}}{{if .Err}} &middot; err: {{.Err}}{{end}}</span></span>
-<span class="check-summary-meta muted">{{.Duration}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
+<span class="check-summary-meta muted">{{.Duration}}{{if .Detail}} &middot; {{.Detail}}{{end}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
 </span>
 </div>
 {{end}}

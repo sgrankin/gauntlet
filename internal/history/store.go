@@ -343,9 +343,19 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 	// mirrors ghstatus's and hooks.Runner's own documented "ignores this
 	// event kind on purpose" stance.
 	for i, cr := range rec.Checks {
+		// seq is the check's spec-declaration position: CheckResult.Seq
+		// (1-based, stamped by the queue's materialization) when present,
+		// else the slice index — identical for any contiguous spec-prefix
+		// record (every pre-Seq record; every hand-built test record), and
+		// only Seq keeps gapped records (an externally concluded parallel
+		// run) aligned with the `<seq>-<name>.log.zst` filename prefix.
+		seq := i
+		if cr.Seq > 0 {
+			seq = cr.Seq - 1
+		}
 		if _, err := tx.ExecContext(ctx, insertCheckSQL,
 			rec.RunID,
-			i,
+			seq,
 			cr.Name,
 			checkStatusString(cr.Status),
 			cr.Duration.Milliseconds(),

@@ -760,14 +760,22 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 		// One daemon-wide execution slot per hook, held for the whole
 		// RunCheck (executor child cleanup included), same budget candidate
 		// checks draw from. Blocking is correct here — this is the hooks
-		// runner's own goroutine, and a ctx cancellation (shutdown,
-		// PolicyCancel) aborts the wait cleanly with the hook unstarted.
+		// runner's own goroutine — but an abort during the wait (shutdown,
+		// PolicyCancel superseding this landing) must produce the same
+		// Err-carrying result an abort during RunCheck produces:
+		// EventHookStarted already fired (durably upserting the owed
+		// hook_runs row), so returning silently would leave a
+		// started-never-finished row indistinguishable from a crash and
+		// hide the supersession from every channel. The invariant is
+		// "every EventHookStarted is followed by an EventHookFinished",
+		// however the hook ended.
+		var result core.CheckResult
 		if err := r.slots.Acquire(spanCtx); err != nil {
-			obs.EndSpan(span, err)
-			return
+			result = core.CheckResult{Name: job.Name, Command: job.Command, Err: fmt.Errorf("waiting for an execution slot: %w", err)}
+		} else {
+			result = r.exec.RunCheck(spanCtx, job)
+			r.slots.Release()
 		}
-		result := r.exec.RunCheck(spanCtx, job)
-		r.slots.Release()
 		obs.EndCheck(span, result)
 
 		// A non-nil Err (as opposed to a verdict CheckFailed) is the only

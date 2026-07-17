@@ -134,6 +134,19 @@ const (
 type CheckResult struct {
 	Name string
 
+	// Seq is the check's 1-based SPEC-DECLARATION position — the durable
+	// per-check identity history's seq column and the log filename prefix
+	// share. Stamped by the queue when it materializes a run's record
+	// (never by executors); 0 means "unknown" (a hand-built result, or a
+	// record predating this field), in which case history falls back to
+	// the row's slice index — identical whenever the record is a
+	// contiguous spec prefix, which every pre-parallelism record was.
+	// With parallel checks an externally-concluded run's record can have
+	// GAPS (a later check finished while an earlier one was still
+	// running when the run was aborted), and only this field keeps the
+	// stored seq aligned with the on-disk `<seq>-<name>.log.zst` prefix.
+	Seq int
+
 	// Command is the argv that was actually submitted for this check
 	// (= CheckJob.Command at the time RunCheck was called), copied onto the
 	// result by the queue right after the executor returns (internal/queue/

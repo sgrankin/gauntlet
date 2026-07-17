@@ -94,9 +94,11 @@ type RunSnapshot struct {
 	// spirit whenever Running is non-empty.
 	Current *CurrentCheck
 
-	// Running is every check in flight right now, ordered by start time
-	// (earliest first) — more than one only when the candidate's spec set
-	// max-parallel > 1.
+	// Running is every check in flight right now, in spec-declaration
+	// order (the same durable identity ordering history rows use — start
+	// times tie under the injected test clock, so they can't be a
+	// deterministic sort key) — more than one entry only when the
+	// candidate's spec set max-parallel > 1.
 	Running []CurrentCheck
 
 	StartedAt time.Time
@@ -272,7 +274,10 @@ func buildRunSnapshot(r *run) *RunSnapshot {
 			running = append(running, CurrentCheck{Name: inf.name, StartedAt: inf.start})
 		}
 	}
-	sort.Slice(running, func(i, j int) bool { return running[i].StartedAt.Before(running[j].StartedAt) })
+	// running is already in spec-declaration order (the loop above walks
+	// r.checks) — deterministic, unlike start-time ordering, whose values
+	// tie for checks started in the same tick. Current is the spec-first
+	// running check, the stable generalization of the old single value.
 	var cur *CurrentCheck
 	if len(running) > 0 {
 		cur = &running[0]

@@ -132,6 +132,56 @@ func TestParallel_FailFastCancelsSiblingsAndBlocksDependents(t *testing.T) {
 	}
 }
 
+// TestParallel_SameTickRedKeepsFinishedSiblingResult pins the
+// drain-then-cull ordering: when a red check and a green sibling finish in
+// the same window, the sibling's REAL result (it ran to completion) must be
+// recorded — never rewritten as "blocked, never ran" just because the red
+// check came earlier in spec order. Both results are placed directly into
+// the runs' buffered result channels before one reconcile consumes them,
+// the exact state an unlucky tick boundary produces (white-box: the gated
+// executor can't create two-results-buffered-at-once deterministically).
+func TestParallel_SameTickRedKeepsFinishedSiblingResult(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", parallelSpecFile(2, "a", "b"))
+
+	h.reconcile() // both roots in flight
+	r := h.d.headRun("main")
+	if r == nil || len(r.inflight) != 2 {
+		t.Fatalf("inflight = %+v, want both roots running", r)
+	}
+	// a (spec-first) fails and b passes "simultaneously": both buffered
+	// before the next drain.
+	r.inflight["a"].result <- core.CheckResult{Name: "a", Status: core.CheckFailed}
+	r.inflight["b"].result <- core.CheckResult{Name: "b", Status: core.CheckPassed, Duration: 2 * time.Second, Output: "ok"}
+
+	h.reconcile() // one drain consumes both, then culls
+
+	recs := h.ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeRejected || !strings.Contains(last.Detail, `check "a" failed`) {
+		t.Fatalf("terminal = %v %q, want Rejected on a", last.Outcome, last.Detail)
+	}
+	if len(last.Checks) != 2 {
+		t.Fatalf("Checks = %+v, want both rows", last.Checks)
+	}
+	b := last.Checks[1]
+	if b.Status != core.CheckPassed || b.Duration != 2*time.Second || b.Output != "ok" {
+		t.Fatalf("b = %+v, want its real completed result kept, not a blocked rewrite", b)
+	}
+	// And b's finish is evented like any other completed check.
+	var bFinished bool
+	for _, e := range h.ch.Events() {
+		if e.Kind == core.EventCheckFinished && e.CheckName == "b" {
+			bFinished = true
+		}
+	}
+	if !bFinished {
+		t.Fatal("no EventCheckFinished for b despite its result being consumed")
+	}
+}
+
 func TestParallel_ExecutionCapStarvesAndRecordsWaited(t *testing.T) {
 	h := newHarness(t)
 	// One slot for the whole daemon: with max-parallel 2, the run may WANT

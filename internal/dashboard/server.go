@@ -345,6 +345,7 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	for _, c := range checks {
 		data.Checks = append(data.Checks, checkView{
 			Seq: c.Seq, Name: c.Name, Status: wordTag(c.Status), Duration: formatDuration(c.Duration), Err: c.Err,
+			Detail: checkRowDetail(c),
 			Output: c.Output,
 			// Open the failed/errored check's output by default — this page
 			// exists to answer "how did it fail", so the failed check's
@@ -898,10 +899,7 @@ func buildInFlight(rs *queue.RunSnapshot, at time.Time) *inFlightView {
 			Seq: i, Name: cr.Name, Status: checkTag(cr.Status), Duration: formatDuration(cr.Duration), Err: errText(cr.Err),
 		})
 	}
-	if rs.Current != nil {
-		v.CurrentName = rs.Current.Name
-		v.CurrentElapsed = formatDuration(at.Sub(rs.Current.StartedAt))
-	}
+	v.CurrentName, v.CurrentElapsed = runningDisplay(rs, at)
 	return v
 }
 
@@ -928,10 +926,7 @@ func buildPipelineRun(rs *queue.RunSnapshot, at time.Time) pipelineRunView {
 			Seq: i, Name: cr.Name, Status: checkTag(cr.Status), Duration: formatDuration(cr.Duration), Err: errText(cr.Err),
 		})
 	}
-	if rs.Current != nil {
-		v.CurrentName = rs.Current.Name
-		v.CurrentElapsed = formatDuration(at.Sub(rs.Current.StartedAt))
-	}
+	v.CurrentName, v.CurrentElapsed = runningDisplay(rs, at)
 	return v
 }
 
@@ -1319,11 +1314,59 @@ type memberView struct {
 	User, Topic, SHA string
 }
 
+// checkRowDetail folds history v9's blocked_by/waited_ms columns into one
+// short annotation for the run page: why a blocked check never ran, and how
+// long a slot-starved check waited for the daemon-wide execution cap before
+// its own duration even began. Empty for the common case (ran immediately).
+func checkRowDetail(c history.CheckRow) string {
+	var parts []string
+	if c.BlockedBy != "" {
+		parts = append(parts, "blocked by "+strings.ReplaceAll(c.BlockedBy, ",", ", "))
+	}
+	if c.Waited > 0 {
+		parts = append(parts, "waited "+formatDuration(c.Waited)+" for an execution slot")
+	}
+	return strings.Join(parts, " \u00b7 ")
+}
+
+// runningDisplay folds a snapshot's Running set into the display pair the
+// live templates render: names joined in spec order, elapsed of the
+// longest-running check. Identical to the old single-check display when one
+// check runs (the default serial case); "unit, lint (2m)" when a
+// max-parallel candidate has several in flight. Falls back to the
+// back-compat Current field when Running is empty — a hand-built
+// RunSnapshot (tests, older embedders) that only sets Current keeps
+// rendering.
+func runningDisplay(rs *queue.RunSnapshot, at time.Time) (names, elapsed string) {
+	running := rs.Running
+	if len(running) == 0 && rs.Current != nil {
+		running = []queue.CurrentCheck{*rs.Current}
+	}
+	if len(running) == 0 {
+		return "", ""
+	}
+	var ns []string
+	oldest := running[0].StartedAt
+	for _, c := range running {
+		ns = append(ns, c.Name)
+		if c.StartedAt.Before(oldest) {
+			oldest = c.StartedAt
+		}
+	}
+	return strings.Join(ns, ", "), formatDuration(at.Sub(oldest))
+}
+
 type checkView struct {
 	Seq           int
 	Name          string
 	Status        tag
 	Duration, Err string
+
+	// Detail is a short muted annotation rendered beside the duration:
+	// "blocked by <prereqs>" for a blocked row (history CheckRow.BlockedBy)
+	// and/or "waited <t> for an execution slot" for a slot-starved start
+	// (CheckRow.Waited) — the surfacing half of history v9's columns.
+	Detail string
 
 	// Output is the check's captured output (history.CheckRow.Output);
 	// empty for in-flight "Done" checks (buildInFlight doesn't populate it —

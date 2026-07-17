@@ -497,13 +497,16 @@ func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *la
 //
 //  1. Consume every finished result (non-blocking, in spec-declaration
 //     order — deterministic even when several checks finished since the
-//     last tick), ending its span and emitting EventCheckFinished.
-//  2. The first red/errored result consumed sets r.culprit — the run's
-//     explicit root failure — and FAIL-FAST cancels everything still in
-//     flight (their commands' outcomes can no longer matter; in serial
-//     terms this is exactly the old short-circuit). The cancelled and
-//     never-started checks become CheckBlocked rows when the run's record
-//     is materialized, so every declared check appears in history.
+//     last tick), ending its span and emitting EventCheckFinished. The
+//     drain always completes before any culling: a sibling that ran to
+//     completion in the same window as a red check keeps its real result.
+//  2. With the drain complete, the first red/errored RESULT in spec order
+//     sets r.culprit — the run's explicit root failure — and FAIL-FAST
+//     cancels everything still genuinely running (their commands'
+//     outcomes can no longer matter; in serial terms this is exactly the
+//     old short-circuit). The cancelled and never-started checks become
+//     CheckBlocked rows when the run's record is materialized, so every
+//     declared check appears in history.
 //  3. While healthy, start every READY check — all `after` prerequisites
 //     finished green — in spec order, bounded by r.maxParallel and the
 //     daemon-wide execution cap (Config.Slots; a slotless ready check
@@ -521,7 +524,12 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		return // already determined; waiting its turn behind a predecessor
 	}
 
-	// (1) + (2): consume finished results in spec order.
+	// (1): consume EVERY available result first, in spec order — every
+	// check that actually ran to completion gets its real result recorded
+	// (status, duration, output, log link) and its EventCheckFinished,
+	// even when a sibling that finished in the same window went red.
+	// Culling before draining would throw a completed sibling's buffered
+	// result away and falsely record a check that RAN as blocked.
 	for i := range r.checks {
 		name := r.checks[i].Name
 		inf, ok := r.inflight[name]
@@ -542,17 +550,25 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 			// the per-member terminal event carries each member's own
 			// duplicated Checks slice regardless.
 			d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.members[0].cand, RunID: r.runID, CheckName: res.Name, Check: &res})
-
-			if r.culprit == "" && (res.Err != nil || res.Status == core.CheckFailed) {
-				r.culprit = name
-				// Fail fast: every other in-flight command's outcome can no
-				// longer matter (the run is red regardless), so burning
-				// builder capacity on it buys nothing. Cancelled checks
-				// become blocked rows, not verdicts.
-				d.cancelRun(r)
-			}
 		default:
 			// still running
+		}
+	}
+
+	// (2): with the drain complete, the first non-green RESULT in spec
+	// order (deterministic whatever the completion order was) becomes the
+	// run's recorded root failure, and the run fails fast: everything
+	// still genuinely running is cancelled — those commands' outcomes can
+	// no longer matter (the run is red regardless), so burning builder
+	// capacity on them buys nothing. Only never-finished checks become
+	// blocked rows; same-window finishers were already recorded above.
+	if r.culprit == "" {
+		for i := range r.checks {
+			if res, ok := r.results[r.checks[i].Name]; ok && (res.Err != nil || res.Status == core.CheckFailed) {
+				r.culprit = r.checks[i].Name
+				d.cancelRun(r)
+				break
+			}
 		}
 	}
 
@@ -571,18 +587,24 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		return
 	}
 
-	// (3): start every ready check, spec order, up to the caps.
+	// (3): start every ready check, spec order, up to the caps. capacity
+	// is the run's own remaining max-parallel headroom this tick; a
+	// daemon-cap denial consumes it too, so readyAt (the Waited stamp) is
+	// only ever placed on checks that WOULD have started but for the
+	// daemon-wide cap — a check merely queued behind its own run's
+	// max-parallel is not starving and must not report capacity pressure.
+	capacity := r.maxParallel - len(r.inflight)
 	slotDenied := false
 	for i := range r.checks {
+		if capacity <= 0 {
+			break
+		}
 		c := &r.checks[i]
 		if _, done := r.results[c.Name]; done {
 			continue
 		}
 		if _, running := r.inflight[c.Name]; running {
 			continue
-		}
-		if len(r.inflight) >= r.maxParallel {
-			break
 		}
 		ready := true
 		for _, dep := range c.After {
@@ -597,12 +619,13 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		if !ready {
 			continue
 		}
+		capacity--
 		if slotDenied || !d.cfg.Slots.TryAcquire() {
 			// The daemon-wide cap is saturated: this check stays ready and
 			// starts on a later tick. One denial means denial for every
 			// later ready check this tick too (single semaphore) — no more
-			// TryAcquire calls, but keep scanning so every starving check
-			// gets its readyAt stamp.
+			// TryAcquire calls; the scan continues only to stamp the other
+			// checks inside this run's own headroom.
 			slotDenied = true
 			if _, stamped := r.readyAt[c.Name]; !stamped {
 				r.readyAt[c.Name] = d.now()
@@ -645,6 +668,12 @@ func (d *Daemon) materializeChecks(r *run) {
 	for i := range r.checks {
 		c := &r.checks[i]
 		if res, ok := r.results[c.Name]; ok {
+			// Seq: the 1-based spec position, matching the log filename
+			// prefix startCheck used — load-bearing for externally
+			// concluded parallel runs, whose finished set can have gaps
+			// (a later check done, an earlier one aborted mid-run), so a
+			// row's slice index alone would drift from its position.
+			res.Seq = i + 1
 			out = append(out, res)
 			continue
 		}
@@ -660,7 +689,7 @@ func (d *Daemon) materializeChecks(r *run) {
 		if len(blockedBy) == 0 {
 			blockedBy = []string{r.culprit}
 		}
-		out = append(out, core.CheckResult{Name: c.Name, Status: core.CheckBlocked, BlockedBy: blockedBy})
+		out = append(out, core.CheckResult{Name: c.Name, Seq: i + 1, Status: core.CheckBlocked, BlockedBy: blockedBy})
 	}
 	for i := range r.members {
 		r.members[i].rec.Checks = append([]core.CheckResult(nil), out...)

@@ -364,6 +364,12 @@ SELECT c.name,
        MAX(c.duration_ms) AS max_ms
 FROM checks c
 JOIN representative rep ON rep.run_id = c.run_id
+-- blocked rows (v9+) record that a check NEVER RAN — a prerequisite or the
+-- run's root failure stopped it. Counting them would dilute red-rate's
+-- denominator and drag avg/max duration toward their zero duration_ms, so
+-- they're excluded: these stats describe executions, and a blocked check
+-- didn't have one.
+WHERE c.status != 'blocked'
 GROUP BY c.name
 ORDER BY c.name`,
 		target, since.UnixMilli(),
