@@ -1320,10 +1320,12 @@ type memberView struct {
 	User, Topic, SHA string
 }
 
-// checkRowDetail folds history v9's blocked_by/waited_ms columns into one
-// short annotation for the run page: why a blocked check never ran, and how
-// long a slot-starved check waited for the daemon-wide execution cap before
-// its own duration even began. Empty for the common case (ran immediately).
+// checkRowDetail folds the history columns that qualify a check's run into
+// one short annotation for the run page: why a blocked check never ran
+// (v9 blocked_by), how long a slot-starved check waited for the daemon-wide
+// execution cap before its own duration began (v9 waited_ms), the built
+// image ref (v10 image), and per-node workspace materialization cost (v11
+// materialize_ms). Empty for the common case (ran immediately, shared tree).
 func checkRowDetail(c history.CheckRow) string {
 	var parts []string
 	if c.BlockedBy != "" {

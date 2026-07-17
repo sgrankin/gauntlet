@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 8).
+-- schema.sql: gauntlet history store schema (user_version = 11).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An

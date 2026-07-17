@@ -8,9 +8,9 @@ import (
 )
 
 // nodeWorkspacePrefix names the per-node private trial directories
-// (isolated mode, issue #9) so cmd's startup orphan sweep of WorkDir can
-// recognize and remove crash leftovers alongside the run-level
-// "gauntlet-trial-" dirs.
+// (isolated mode, issue #9). They live under WorkDir alongside the
+// run-level "gauntlet-trial-" dirs, so cmd's startup sweep — which wipes
+// WorkDir wholesale, not by prefix — clears any crash leftovers.
 const nodeWorkspacePrefix = "gauntlet-node-"
 
 // materializeNode creates one graph node's private workspace (isolated
