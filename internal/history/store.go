@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 8
+const schemaVersion = 9
 
 var _ core.Channel = (*Store)(nil)
 
@@ -101,6 +101,10 @@ func Open(path string) (*Store, error) {
 //   - 7 (schema v7: checks has no command column): ALTER TABLE checks ADD
 //     COLUMN command (run.html's command echo, core.CheckResult.Command),
 //     stamp user_version=8, loop.
+//   - 8 (schema v8: checks has no blocked_by/waited_ms columns): ALTER
+//     TABLE checks ADD COLUMN blocked_by (comma-joined prerequisite names
+//     for a CheckBlocked row) and waited_ms (CheckResult.Waited — slot-
+//     starvation wait, distinct from duration), stamp user_version=9, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -225,6 +229,16 @@ CREATE TABLE hook_runs (
 			if _, err := db.Exec(`PRAGMA user_version = 8`); err != nil {
 				return fmt.Errorf("history: set user_version=8: %w", err)
 			}
+		case 8:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v8->v9 (checks.blocked_by): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN waited_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v8->v9 (checks.waited_ms): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 9`); err != nil {
+				return fmt.Errorf("history: set user_version=9: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -346,6 +360,12 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			// see core.CheckResult.LogPath's doc for the log-less fallback.
 			cr.LogPath,
 			joinCommand(cr.Command),
+			// blocked_by: comma-joined (names are validated non-empty and
+			// comma-free is not guaranteed, but names never contain commas
+			// in practice; the canonical structured source remains the
+			// terminal event's Record) — set only on CheckBlocked rows.
+			strings.Join(cr.BlockedBy, ","),
+			cr.Waited.Milliseconds(),
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}
@@ -604,6 +624,8 @@ func checkStatusString(s core.CheckStatus) string {
 		return "failed"
 	case core.CheckSkipped:
 		return "skipped"
+	case core.CheckBlocked:
+		return "blocked"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(s))
 	}

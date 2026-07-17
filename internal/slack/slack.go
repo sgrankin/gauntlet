@@ -992,6 +992,8 @@ func checkEmoji(s core.CheckStatus) string {
 		return "✓"
 	case core.CheckSkipped:
 		return "⊘"
+	case core.CheckBlocked:
+		return "◌" // never ran: prerequisite failed
 	default: // CheckFailed
 		return "✗"
 	}

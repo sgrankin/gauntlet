@@ -24,7 +24,7 @@ import (
 // already live under (log/history parity with checks, chunk P5-B): the
 // existing retention sweep (logs.go's pruneLogFiles, keyed on that
 // directory's mtime) covers hook logs for free, with no separate sweep.
-func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, workDir, logDir string, emit func(context.Context, core.Event)) *hooks.Runner {
+func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, slots *core.Slots, workDir, logDir string, emit func(context.Context, core.Event)) *hooks.Runner {
 	hookMap := make(map[string][]hooks.Hook)
 	policyMap := make(map[string]hooks.Policy)
 	for _, t := range cfg.Targets {
@@ -50,6 +50,7 @@ func buildHooksRunner(cfg *config.Daemon, git core.GitRepo, ex core.Executor, wo
 		Policies: policyMap,
 		Git:      git,
 		Exec:     ex,
+		Slots:    slots,
 		Emit:     emit,
 		WorkDir:  workDir,
 		LogDir:   logDir,

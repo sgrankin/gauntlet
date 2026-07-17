@@ -1,0 +1,39 @@
+# Dependency-aware parallel checks: a diamond graph under max-parallel.
+# Both roots (unit, lint) run concurrently; the join (package) becomes
+# ready only once BOTH finish green — releasing lint alone must not start
+# it. Completion order (lint before unit) deliberately differs from
+# declaration order; the landed record still lands the tested merge.
+# Ports pin half of TestParallel_DiamondOverlapAndJoin to both harnesses.
+
+push-candidate main alice widget files/widget
+tick
+
+await-started unit
+await-started lint            # roots overlap: two checks in flight at once
+
+release-check lint passed     # join still blocked on unit
+release-check unit passed     # join edges satisfied
+await-started package
+
+release-check package passed  # all green: land
+
+assert-event landed
+assert-target-is-merge main
+assert-slot-gone main alice widget
+tick                          # the anchoring fetch releases the landing's GC pin
+assert-pins 0
+
+-- files/widget/.gauntlet.kdl --
+max-parallel 4
+check "unit" {
+    command "true"
+}
+check "lint" {
+    command "true"
+}
+check "package" {
+    command "true"
+    after "unit" "lint"
+}
+-- files/widget/widget.txt --
+widget

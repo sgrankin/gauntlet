@@ -106,6 +106,47 @@ check "t" {
 	}
 }
 
+// TestParseChecks_AfterGraph confirms the happy-path dependency grammar: a
+// diamond (two roots, one join), forward references (an edge to a check
+// declared later), and max-parallel all parse; absent max-parallel stays 0
+// (the queue treats 0 as 1, the serial default).
+func TestParseChecks_AfterGraph(t *testing.T) {
+	data := []byte(`
+max-parallel 4
+check "package" {
+    command "./ci/package"
+    after "unit" "lint"
+}
+check "unit" {
+    command "./ci/unit"
+}
+check "lint" {
+    command "./ci/lint"
+}
+`)
+	cs, err := ParseChecks(data)
+	if err != nil {
+		t.Fatalf("ParseChecks: %v", err)
+	}
+	if cs.MaxParallel != 4 {
+		t.Errorf("MaxParallel = %d, want 4", cs.MaxParallel)
+	}
+	if got := cs.Checks[0].After; len(got) != 2 || got[0] != "unit" || got[1] != "lint" {
+		t.Errorf("Checks[0].After = %v, want [unit lint]", got)
+	}
+	if cs.Checks[1].After != nil || cs.Checks[2].After != nil {
+		t.Errorf("rootless checks should have nil After, got %v / %v", cs.Checks[1].After, cs.Checks[2].After)
+	}
+
+	noParallel, err := ParseChecks([]byte("check \"t\" {\n    command \"true\"\n}\n"))
+	if err != nil {
+		t.Fatalf("ParseChecks (no max-parallel): %v", err)
+	}
+	if noParallel.MaxParallel != 0 {
+		t.Errorf("absent max-parallel = %d, want 0 (serial default)", noParallel.MaxParallel)
+	}
+}
+
 func TestCheckSpec_RequiresServices(t *testing.T) {
 	cases := []struct {
 		name string

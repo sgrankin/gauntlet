@@ -1197,6 +1197,93 @@ func TestMigrate_V7ToV8(t *testing.T) {
 	}
 }
 
+// TestMigrate_V8ToV9 builds a v8 database by hand (schemaV7SQL plus v7->v8's
+// own ALTER, the exact shape a real v8 db has) and proves Open migrates it:
+// checks gains blocked_by/waited_ms with pre-existing rows untouched, and a
+// fresh write round-trips both new columns.
+func TestMigrate_V8ToV9(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v8.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(schemaV7SQL); err != nil {
+		t.Fatalf("apply v7 schema: %v", err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE checks ADD COLUMN command TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("apply v7->v8 alter: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 8`); err != nil {
+		t.Fatalf("stamp user_version=8: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size, speculated, recovered)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1, 0, 0)`,
+	); err != nil {
+		t.Fatalf("seed v8 run: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '', 'true')`,
+	); err != nil {
+		t.Fatalf("seed v8 check: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v8 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+
+	_, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Output != "clean" || checks[0].Command != "true" {
+		t.Errorf("Run(run-old) checks after migrate = %+v, want the pre-existing row untouched", checks)
+	}
+	if checks[0].BlockedBy != "" || checks[0].Waited != 0 {
+		t.Errorf("pre-v9 row BlockedBy/Waited = %q/%v, want column defaults", checks[0].BlockedBy, checks[0].Waited)
+	}
+
+	// A fresh write against the migrated database must round-trip the new
+	// columns: a blocked row's prerequisites and a slot-starved check's
+	// wait.
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 17, 13, 0, 0, 0, time.UTC))
+	rec.Checks[0].Waited = 1500 * time.Millisecond
+	rec.Checks = append(rec.Checks, core.CheckResult{Name: "deploy-dryrun", Status: core.CheckBlocked, BlockedBy: []string{"lint", "test"}})
+	if err := s.Emit(ctx, core.Event{Kind: core.EventRejected, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if newChecks[0].Waited != 1500*time.Millisecond {
+		t.Errorf("checks[0].Waited = %v, want 1.5s", newChecks[0].Waited)
+	}
+	blocked := newChecks[len(newChecks)-1]
+	if blocked.Status != "blocked" || blocked.BlockedBy != "lint,test" {
+		t.Errorf("blocked row = %+v, want status blocked, BlockedBy \"lint,test\"", blocked)
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }

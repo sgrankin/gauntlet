@@ -16,6 +16,18 @@ import (
 type CheckSpec struct {
 	Checks   []Check   `kdl:"check,multiple"`
 	Services []Service `kdl:"service,multiple"`
+
+	// MaxParallel is how many of this candidate's ready checks may run
+	// concurrently. Unset (zero) means 1 — the pre-parallelism contract,
+	// preserved exactly: checks run one at a time in declaration order, so
+	// merely upgrading gauntlet never races commands that relied on that
+	// order. Raising it is the candidate's opt-in to overlap; only checks
+	// whose `after` edges (Check.After) are satisfied become ready, and
+	// undeclared orderings are independent BY DESIGN — an author enabling
+	// parallelism must declare every real edge. The operator's daemon-wide
+	// execution cap (executor `max-executions`) still bounds the whole
+	// host; this knob only widens one candidate's slice of it.
+	MaxParallel int `kdl:"max-parallel"`
 }
 
 // Check is one named check: a command to run against the exported trial
@@ -34,6 +46,20 @@ type Check struct {
 	// machinery: a lint check shouldn't block on (or keep warm) a database
 	// it never touches.
 	Needs []string `kdl:"needs"`
+
+	// After names the checks (by Check.Name) that must PASS (or report
+	// skipped — the same results that keep a candidate green) before this
+	// one becomes ready. A failed or errored prerequisite blocks this check
+	// instead of running it (core.CheckBlocked in the run record). Edges
+	// are validated unconditionally — unknown names, self-dependencies,
+	// duplicates, and cycles are spec errors even while max-parallel is 1,
+	// so raising parallelism later can never reveal a latently invalid
+	// graph. With max-parallel 1 the declared edges are redundant with
+	// declaration order but still enforced as documentation-with-teeth.
+	// This is deliberately the whole dependency grammar: no conditions, no
+	// matrices, no dataflow — a check that needs those implements them in
+	// its own command (the "jobs are commands, no DSL" wall).
+	After []string `kdl:"after"`
 }
 
 // EnvVar is one `env "NAME" "VALUE"` pair set inside a service's container.
@@ -225,18 +251,24 @@ func (cs *CheckSpec) validate() error {
 		}
 	}
 
+	// Two passes over the checks: names first, so `after` may reference a
+	// check declared later in the file (edges form a graph, not a
+	// sequence), then per-check fields and edges against the full name set.
 	seen := make(map[string]bool, len(cs.Checks))
 	for _, c := range cs.Checks {
 		if c.Name == "" {
 			return fmt.Errorf("check: name must not be empty")
 		}
-		if len(c.Command) == 0 {
-			return fmt.Errorf("check %q: command must not be empty", c.Name)
-		}
 		if seen[c.Name] {
 			return fmt.Errorf("check %q: duplicate", c.Name)
 		}
 		seen[c.Name] = true
+	}
+
+	for _, c := range cs.Checks {
+		if len(c.Command) == 0 {
+			return fmt.Errorf("check %q: command must not be empty", c.Name)
+		}
 
 		seenNeed := make(map[string]bool, len(c.Needs))
 		for _, n := range c.Needs {
@@ -247,6 +279,82 @@ func (cs *CheckSpec) validate() error {
 				return fmt.Errorf("check %q: needs %q: duplicate", c.Name, n)
 			}
 			seenNeed[n] = true
+		}
+
+		seenAfter := make(map[string]bool, len(c.After))
+		for _, a := range c.After {
+			if a == c.Name {
+				return fmt.Errorf("check %q: after %q: a check cannot depend on itself", c.Name, a)
+			}
+			if !seen[a] {
+				return fmt.Errorf("check %q: after %q: no such check declared", c.Name, a)
+			}
+			if seenAfter[a] {
+				return fmt.Errorf("check %q: after %q: duplicate", c.Name, a)
+			}
+			seenAfter[a] = true
+		}
+	}
+
+	if err := cs.validateAcyclic(); err != nil {
+		return err
+	}
+
+	// Zero is "left unset" (the field doc: means 1); like Daemon.Poll's
+	// zero-vs-absent ambiguity, an explicit `max-parallel 0` is
+	// indistinguishable from absence and gets the same serial default.
+	if cs.MaxParallel < 0 {
+		return fmt.Errorf("max-parallel must not be negative, got %d", cs.MaxParallel)
+	}
+	if cs.MaxParallel > maxAllowedMaxParallel {
+		return fmt.Errorf("max-parallel %d exceeds the maximum of %d", cs.MaxParallel, maxAllowedMaxParallel)
+	}
+	return nil
+}
+
+// maxAllowedMaxParallel is a sane safety valve on CheckSpec.MaxParallel,
+// not a hard architectural requirement — the same stance as daemon.go's
+// maxAllowedMaxBatch/maxAllowedWindow. The operator's `max-executions` cap
+// is the real host bound; this just rejects an obvious typo (a candidate
+// asking for thousands of concurrent checks) at spec-load time.
+const maxAllowedMaxParallel = 64
+
+// validateAcyclic rejects any cycle in the checks' `after` graph with a
+// deterministic message naming a check on the cycle. Iterative DFS with
+// tri-color marking, visiting checks in declaration order so the same spec
+// always reports the same cycle member.
+func (cs *CheckSpec) validateAcyclic() error {
+	edges := make(map[string][]string, len(cs.Checks))
+	for _, c := range cs.Checks {
+		edges[c.Name] = c.After
+	}
+	const (
+		white = 0 // unvisited
+		gray  = 1 // on the current DFS path
+		black = 2 // fully explored, cycle-free
+	)
+	color := make(map[string]int, len(cs.Checks))
+	var visit func(name string) error
+	visit = func(name string) error {
+		color[name] = gray
+		for _, dep := range edges[name] {
+			switch color[dep] {
+			case gray:
+				return fmt.Errorf("check %q: after %q: dependency cycle", name, dep)
+			case white:
+				if err := visit(dep); err != nil {
+					return err
+				}
+			}
+		}
+		color[name] = black
+		return nil
+	}
+	for _, c := range cs.Checks {
+		if color[c.Name] == white {
+			if err := visit(c.Name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

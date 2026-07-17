@@ -1070,6 +1070,11 @@ func wordTag(word string) tag {
 		return tag{word, "bad"}
 	case "skipped":
 		return tag{word, "warn"}
+	case "blocked":
+		// A check that never ran because a prerequisite failed: not the
+		// culprit (that check's own row is "failed"), but nothing like
+		// skipped's green either — neutral, deliberately.
+		return tag{word, "neutral"}
 	default:
 		return tag{word, "neutral"}
 	}
@@ -1100,6 +1105,8 @@ func checkWord(s core.CheckStatus) string {
 		return "failed"
 	case core.CheckSkipped:
 		return "skipped"
+	case core.CheckBlocked:
+		return "blocked"
 	default:
 		return "unknown"
 	}

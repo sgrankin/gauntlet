@@ -25,6 +25,52 @@ result-file protocol below). One kdl-go quirk to know: child blocks must be
 parse (with an unhelpful "line 0" error), so always write the braces across
 lines as above.
 
+## Ordering and parallelism
+
+By default checks run **one at a time, in declaration order** — upgrading
+gauntlet never races commands that relied on that order. A candidate opts
+into overlap with `max-parallel`, and declares real ordering constraints
+with `after`:
+
+```kdl
+max-parallel 4
+
+check "unit" {
+    command "./ci/unit"
+}
+check "lint" {
+    command "./ci/lint"
+}
+check "package" {
+    command "./ci/package"
+    after "unit" "lint"
+}
+```
+
+`unit` and `lint` run together; `package` becomes ready only once both end
+green (`passed` or `skipped` — the same results that keep a candidate
+green). Undeclared orderings are **independent by design**: once you raise
+`max-parallel`, declare every edge that matters. Edges are validated even
+while `max-parallel` is 1 (unknown names, self-dependencies, duplicates,
+and cycles are spec errors), so raising it later can never reveal a
+latently invalid graph. This is the entire dependency grammar — no
+conditions, no matrices, no dataflow; a check that needs those implements
+them in its own command.
+
+When a check fails, the run fails fast: still-running checks are cancelled
+and everything unfinished is recorded as **`blocked`** — a distinct status
+naming the prerequisite (or root failure) that stopped it, never confused
+with `skipped` (a check's own successful "nothing to do" verdict) and never
+silently absent. Every declared check gets exactly one history row, in
+declaration order, whatever order they actually ran.
+
+The operator's daemon-wide `max-executions` cap
+([config.md](config.md#daemon-config-gauntletkdl)) still bounds the whole
+host; `max-parallel` only widens one candidate's slice of it. A check that
+sat ready waiting for host capacity records that wait separately from its
+own duration, so a slow host and a slow command are distinguishable in
+history.
+
 ## Check environment reference
 
 Every executor (local or container) sets these environment variables before

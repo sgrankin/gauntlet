@@ -274,6 +274,15 @@ func run() error {
 		return fmt.Errorf("build executor: %w", err)
 	}
 
+	// The daemon-wide execution cap (executor `max-executions`): one
+	// core.Slots instance shared by the queue's checks and the hooks
+	// runner, so every bounded execution on the host draws from a single
+	// budget. nil (unset) means unlimited — the pre-cap behavior.
+	var slots *core.Slots
+	if cfg.Executor.MaxExecutions > 0 {
+		slots = core.NewSlots(cfg.Executor.MaxExecutions)
+	}
+
 	// Sweep containers orphaned by a prior gauntlet process that crashed
 	// mid-check, before its own --rm cleanup ran. Only attempted when a
 	// container executor is actually configured. AcquireLock above
@@ -401,7 +410,7 @@ func run() error {
 	// the snapshot is taken.
 	notifyChans := append([]core.Channel(nil), chans...)
 	hooksDir := filepath.Join(*statePath, "hooks")
-	hr := buildHooksRunner(cfg, repo, ex, hooksDir, logsDir, func(ctx context.Context, ev core.Event) {
+	hr := buildHooksRunner(cfg, repo, ex, slots, hooksDir, logsDir, func(ctx context.Context, ev core.Event) {
 		for _, ch := range notifyChans {
 			_ = ch.Emit(ctx, ev)
 		}
@@ -490,6 +499,7 @@ func run() error {
 		WorkDir:      trialsDir,
 		LogDir:       logsDir,
 		SeedParks:    seedParks,
+		Slots:        slots,
 		// AutoRetryErrors is a *bool defaulted true in config.applyDefaults
 		// (absent-vs-explicit-false needs the pointer); the queue takes the
 		// resolved value.

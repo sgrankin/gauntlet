@@ -110,6 +110,18 @@ const (
 	// "skipped" via the result file. Distinct from CheckPassed so run
 	// history doesn't lie about what actually ran.
 	CheckSkipped
+
+	// CheckBlocked means the check never ran because a prerequisite —
+	// an `after` edge, or the run failing before this check could start —
+	// did not end green (CheckResult.BlockedBy names it). Deliberately
+	// distinct from CheckSkipped: skipped is the CHECK's own successful
+	// "nothing to do here" verdict and counts green, while blocked is the
+	// run telling the truth that this command never executed at all. A
+	// blocked result carries no Duration, Output, or start time, and a run
+	// containing one is never green — the root failure is the run's
+	// rejection cause, recorded explicitly, never inferred from whichever
+	// result happened to finish last.
+	CheckBlocked
 )
 
 // CheckResult is one check's outcome within a run.
@@ -147,6 +159,23 @@ type CheckResult struct {
 	LogPath string
 
 	Duration time.Duration
+
+	// Waited is how long the check sat READY — every `after` prerequisite
+	// green, its run below max-parallel — but unable to start because the
+	// daemon-wide execution cap had no free slot. Zero when it started
+	// immediately (the common case, and always under an unlimited cap).
+	// Recorded so an operator can tell capacity starvation from a slow
+	// command: a long Duration is the check's own cost, a long Waited is
+	// the host's.
+	Waited time.Duration
+
+	// BlockedBy, set only when Status is CheckBlocked, names the
+	// prerequisite check(s) whose non-green end blocked this one — the
+	// direct `after` edges that failed, or, for a check with no failed
+	// edge of its own (it was in flight or independent when the run went
+	// red), the run's root failing check. Structured rather than prose so
+	// history and channels can link the culprit.
+	BlockedBy []string
 
 	// Err is set only for daemon-caused non-verdict failures. See Status
 	// doc for the Err-vs-Status contract.

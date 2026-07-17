@@ -200,10 +200,25 @@ func TestIntegration_ShortCircuitOnFail(t *testing.T) {
 	if last.Outcome != core.OutcomeRejected {
 		t.Fatalf("Outcome = %v, want Rejected", last.Outcome)
 	}
-	if len(last.Checks) != 1 {
-		t.Fatalf("Checks = %+v, want exactly 1 (short-circuit before test/build)", last.Checks)
+	// One row per DECLARED check, spec order: lint's real red verdict,
+	// then test/build as blocked rows naming the root failure — never
+	// absent (history must show they didn't run) and never "skipped"
+	// (that's a check's own successful nothing-to-do verdict).
+	if len(last.Checks) != 3 {
+		t.Fatalf("Checks = %+v, want one row per declared check", last.Checks)
 	}
 	if last.Checks[0].Name != "lint" || last.Checks[0].Status != core.CheckFailed {
 		t.Errorf("Checks[0] = %+v", last.Checks[0])
+	}
+	for _, blocked := range last.Checks[1:] {
+		if blocked.Status != core.CheckBlocked {
+			t.Errorf("check %q status = %v, want CheckBlocked", blocked.Name, blocked.Status)
+		}
+		if len(blocked.BlockedBy) != 1 || blocked.BlockedBy[0] != "lint" {
+			t.Errorf("check %q BlockedBy = %v, want [lint]", blocked.Name, blocked.BlockedBy)
+		}
+		if blocked.Duration != 0 || blocked.Output != "" {
+			t.Errorf("blocked check %q carries execution artifacts: %+v", blocked.Name, blocked)
+		}
 	}
 }

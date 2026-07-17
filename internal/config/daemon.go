@@ -262,6 +262,19 @@ type Executor struct {
 	Workdir string  `kdl:"workdir"` // default "/workspace"
 	Caches  []Cache `kdl:"cache,multiple"`
 	Mounts  []Mount `kdl:"mount,multiple"`
+
+	// MaxExecutions is the daemon-wide cap on concurrently executing
+	// bounded commands — candidate checks and post-land hooks today, image
+	// builds when those exist — across every target, mode, and
+	// speculation window. Zero (unset) means unlimited: exactly the
+	// pre-cap behavior, kept as the compatibility default, though a
+	// production deployment should set an explicit value sized to the
+	// host. Long-lived shared service containers do NOT count against
+	// this; their own instance limits apply. Named max-executions rather
+	// than max-checks because hooks (and future builds) share the budget:
+	// a slot is "one process/container the executor is running right
+	// now", whatever asked for it.
+	MaxExecutions int `kdl:"max-executions"`
 }
 
 // Cache is one persistent named cache volume mounted into the container
@@ -812,6 +825,11 @@ func (d *Daemon) validate() error {
 		}
 	default:
 		return fmt.Errorf("executor: kind must be \"local\" or \"container\", got %q", d.Executor.Kind)
+	}
+	// Zero is "left unset" = unlimited (the field doc), so only a negative
+	// value — never a meaningful cap — is rejected.
+	if d.Executor.MaxExecutions < 0 {
+		return fmt.Errorf("executor: max-executions must not be negative, got %d", d.Executor.MaxExecutions)
 	}
 	for _, c := range d.Executor.Caches {
 		if c.Name == "" {

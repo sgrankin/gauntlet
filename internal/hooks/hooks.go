@@ -91,6 +91,14 @@ type Params struct {
 	// landed coordinates (base/merge/candidate SHA, ref) for free.
 	Exec core.Executor
 
+	// Slots is the daemon-wide execution-capacity semaphore hooks share
+	// with candidate checks (the operator's `max-executions` cap —
+	// core.Slots): each hook's RunCheck holds one slot for its whole
+	// execution. Runner runs on its own goroutine, so unlike the queue's
+	// non-blocking TryAcquire this waits (a hook behind a saturated host
+	// starts late rather than never). nil means unlimited.
+	Slots *core.Slots
+
 	// Emit fans a hook-outcome event (EventHookFinished) out to the
 	// daemon's other channels. Each channel renders it differently: the
 	// log channel renders every hook result,
@@ -147,6 +155,7 @@ type Runner struct {
 	hooks    map[string][]Hook
 	policies map[string]Policy
 	git      core.GitRepo
+	slots    *core.Slots // shared daemon-wide execution cap; nil = unlimited
 	exec     core.Executor
 	notify   func(context.Context, core.Event)
 	workDir  string
@@ -232,6 +241,7 @@ func New(p Params) *Runner {
 		policies: p.Policies,
 		git:      p.Git,
 		exec:     p.Exec,
+		slots:    p.Slots,
 		notify:   p.Emit,
 		workDir:  p.WorkDir,
 		logDir:   p.LogDir,
@@ -747,7 +757,17 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 		// standalone span per hook rather than a child of one; with no OTel
 		// provider installed it's a no-op regardless (obs.Tracer's doc).
 		spanCtx, span := obs.StartCheck(ctx, r.tr, job.Name)
+		// One daemon-wide execution slot per hook, held for the whole
+		// RunCheck (executor child cleanup included), same budget candidate
+		// checks draw from. Blocking is correct here — this is the hooks
+		// runner's own goroutine, and a ctx cancellation (shutdown,
+		// PolicyCancel) aborts the wait cleanly with the hook unstarted.
+		if err := r.slots.Acquire(spanCtx); err != nil {
+			obs.EndSpan(span, err)
+			return
+		}
 		result := r.exec.RunCheck(spanCtx, job)
+		r.slots.Release()
 		obs.EndCheck(span, result)
 
 		// A non-nil Err (as opposed to a verdict CheckFailed) is the only

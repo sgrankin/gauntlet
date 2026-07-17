@@ -1972,6 +1972,91 @@ check "test" {
 `,
 			wantErr: `service "mssql": cpus "-1"`,
 		},
+		{
+			name: "after names an undeclared check",
+			kdl: `
+check "package" {
+    command "./ci/package"
+    after "unit"
+}
+`,
+			wantErr: `check "package": after "unit": no such check declared`,
+		},
+		{
+			name: "after self-dependency",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+    after "unit"
+}
+`,
+			wantErr: `check "unit": after "unit": a check cannot depend on itself`,
+		},
+		{
+			name: "after duplicate edge",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+check "package" {
+    command "./ci/package"
+    after "unit" "unit"
+}
+`,
+			wantErr: `check "package": after "unit": duplicate`,
+		},
+		{
+			name: "after two-node cycle",
+			kdl: `
+check "a" {
+    command "./a"
+    after "b"
+}
+check "b" {
+    command "./b"
+    after "a"
+}
+`,
+			wantErr: `dependency cycle`,
+		},
+		{
+			name: "after three-node cycle through a forward reference",
+			kdl: `
+check "a" {
+    command "./a"
+    after "c"
+}
+check "b" {
+    command "./b"
+    after "a"
+}
+check "c" {
+    command "./c"
+    after "b"
+}
+`,
+			wantErr: `dependency cycle`,
+		},
+		{
+			name: "negative max-parallel",
+			kdl: `
+max-parallel -2
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `max-parallel must not be negative`,
+		},
+		{
+			name: "absurd max-parallel",
+			kdl: `
+max-parallel 1000
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `max-parallel 1000 exceeds`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

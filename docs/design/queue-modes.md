@@ -293,10 +293,17 @@ spec-change boundary".)
 
 ### Window as a builder-concurrency bound
 
-Each speculative run executes at most one check at a time, so `window` is also
-the maximum number of concurrent check processes/containers the target drives
-against the executor. Sizing `window` is sizing builder load, not just queue
-depth — see [config.md](../config.md#queue-modes).
+While a candidate keeps the default serial checks, each speculative run
+executes at most one check at a time, so `window` is also the maximum number
+of concurrent check processes/containers the target drives against the
+executor. Sizing `window` is sizing builder load, not just queue depth — see
+[config.md](../config.md#queue-modes).
+
+A repo spec that raises `max-parallel` (dependency-aware parallel checks —
+DESIGN.md's ledger has the entry) breaks that identity: per-target demand
+becomes up to `window × max-parallel`. The operator's `max-executions` cap
+on the executor block is what restores a real host-wide bound; window alone
+no longer is one.
 
 ## Cancellation semantics per mode
 

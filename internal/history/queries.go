@@ -17,8 +17,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -123,6 +123,14 @@ type CheckRow struct {
 	// renders it as an accent-colored command echo above the check's output.
 	// Empty for rows written before v8; run.html renders no echo line then.
 	Command string
+	// BlockedBy is the comma-joined prerequisite names that blocked a
+	// 'blocked'-status check (core.CheckResult.BlockedBy); "" for every
+	// other status and for rows written before v9.
+	BlockedBy string
+	// Waited is how long the check sat ready but slotless under the
+	// daemon-wide max-executions cap before starting
+	// (core.CheckResult.Waited); zero for immediate starts and pre-v9 rows.
+	Waited time.Duration
 }
 
 // HookRow is one row of the hooks table, as read back for the dashboard:
@@ -265,7 +273,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path, command FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -276,11 +284,12 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	var checks []CheckRow
 	for rows.Next() {
 		var c CheckRow
-		var durationMS int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command); err != nil {
+		var durationMS, waitedMS int64
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond
+		c.Waited = time.Duration(waitedMS) * time.Millisecond
 		checks = append(checks, c)
 	}
 	if err := rows.Err(); err != nil {

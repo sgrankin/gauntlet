@@ -127,6 +127,17 @@ type Config struct {
 	// silently running without its dependency.
 	Services ServicePool
 
+	// Slots is the daemon-wide execution-capacity semaphore (the operator's
+	// `max-executions` cap — see core.Slots): the scheduler TryAcquires one
+	// slot per check before starting it and the check's goroutine releases
+	// it after executor cleanup, so a ready check on a saturated host
+	// simply stays ready (accruing CheckResult.Waited) until a later tick
+	// finds a slot. nil means unlimited — the zero-config default and the
+	// pre-cap behavior exactly. The SAME instance should be handed to the
+	// hooks Runner (and any future image-build machinery) so every bounded
+	// execution on the host shares one budget.
+	Slots *core.Slots
+
 	// AutoRetryErrors enables the auto-retry-once behavior (DESIGN.md
 	// decision ledger, "Auto-retry once on infra-error parks"; see also
 	// docs/design/scaling.md, "The one real prerequisite: auto-requeue on
@@ -187,15 +198,22 @@ type ParkSeed struct {
 	RunID string
 }
 
-// checkInFlight is the currently-running check within an in-flight run: its
+// checkInFlight is one currently-running check within an in-flight run: its
 // cancel func (for a ref/target move, Invariant 5) and the one-shot channel
-// its executor goroutine reports back on.
+// its executor goroutine reports back on. A run holds up to
+// run.maxParallel of these at once (run.inflight).
 type checkInFlight struct {
 	name   string
 	cancel context.CancelFunc
 	result chan core.CheckResult
 	span   trace.Span
 	start  time.Time
+
+	// waited is how long the check sat ready but slotless before this
+	// start (run.readyAt) — stamped onto CheckResult.Waited when the
+	// result is consumed, so history can tell capacity starvation from a
+	// slow command.
+	waited time.Duration
 }
 
 // runVerdict is a run's aggregate check-verdict-so-far, set by
@@ -223,9 +241,9 @@ type runMember struct {
 // run is the daemon's entire in-flight state for one run within a target's
 // lane (Invariant 4: "in-flight state is (slot, tested SHA, executor
 // run-id)"). It is reconstructible from ground truth on every tick except
-// for cur, which is the one piece of state that can't be rederived without
-// rerunning checks — exactly why losing it (a crash) costs at most a
-// rerun, never correctness.
+// for inflight, which is the one piece of state that can't be rederived
+// without rerunning checks — exactly why losing it (a crash) costs at most
+// a rerun, never correctness.
 type run struct {
 	target    string
 	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
@@ -236,22 +254,54 @@ type run struct {
 	runID     string
 	dir       string // exported trial tree; removed on every terminal transition
 	checks    []config.Check
-	idx       int // index into checks of the current (or next) check
+
+	// maxParallel is how many of this run's checks may be in flight at
+	// once — the spec's max-parallel with zero already normalized to 1 at
+	// run construction, so schedulers never re-interpret the default. At 1
+	// with no `after` edges, scheduling degenerates to the pre-parallelism
+	// contract exactly: one check at a time, in declaration order.
+	maxParallel int
+
+	// inflight holds every currently-running check by name; empty both
+	// before the first start and once the verdict is determined. Mutated
+	// only on the reconcile goroutine (the per-check goroutines communicate
+	// solely via their one-shot result channels).
+	inflight map[string]*checkInFlight
+
+	// results holds every finished check's result by name. rec.Checks is
+	// deliberately NOT built incrementally from these: materializeChecks
+	// fills every member's record once, in spec-declaration order — the
+	// durable per-check identity history/seq/log filenames key on — when
+	// the run concludes (green, red, or cancelled).
+	results map[string]core.CheckResult
+
+	// readyAt stamps when a ready check first found no free execution slot
+	// (Config.Slots exhausted), so its eventual CheckResult.Waited can
+	// report capacity starvation. Entries are removed when the check
+	// starts; a check that starts immediately never appears here.
+	readyAt map[string]time.Time
+
+	// culprit is the first check (in spec-consumption order) to finish
+	// red or errored — the run's explicit root failure. "" while the run
+	// is healthy. Set once; never inferred from whichever result happened
+	// to land last (parallel completion makes that ordering meaningless).
+	culprit string
+
+	// materialized guards materializeChecks's one-time fill of the member
+	// records' Checks slices.
+	materialized bool
 
 	// services is spec.Services verbatim — set once in startRun/
 	// finishBatchStart, read-only for the rest of the run's life: no
 	// cross-goroutine mutation, no race. startCheck's per-check goroutine
-	// reads it (alongside the
-	// current check's own Needs, r.checks[r.idx].Needs) to resolve `needs`
-	// against declared Service specs.
+	// reads it (alongside the started check's own Needs) to resolve
+	// `needs` against declared Service specs.
 	services []config.Service
 
 	verdict runVerdict // set by advanceChecks, consumed by advanceLane
 
 	rootCtx  context.Context
 	rootSpan trace.Span
-
-	cur *checkInFlight // nil between checks (never observable mid-tick: land follows immediately)
 }
 
 // lane is a target's in-flight pipeline, FIFO: runs[0] is the head (next to
@@ -363,6 +413,14 @@ type Daemon struct {
 	// Reconcile-goroutine-only, like order/done/lanes above — buildSnapshot
 	// is the sole reader and writer, and it only ever runs there.
 	idleSince time.Time
+
+	// tick counts completed ReconcileOnce passes, solely to rotate the
+	// target-iteration starting offset when a daemon-wide execution cap is
+	// configured (see ReconcileOnce): under slot contention, a fixed
+	// config-order iteration would let the first target's ready checks
+	// permanently absorb every freed slot. Uncapped daemons never rotate,
+	// keeping event ordering byte-identical to the pre-cap behavior.
+	tick int64
 
 	// snap holds the most recently published Snapshot; nil until the first
 	// successful ReconcileOnce pass completes.
@@ -544,8 +602,20 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	d.drainCommands(ctx, refs)
 	d.checkIgnoredRefs(ctx, refs)
 
-	for _, t := range d.cfg.Targets {
-		d.reconcileTarget(ctx, t, refs)
+	// Per-tick rotation of the target starting offset — but only under a
+	// configured execution cap, where it matters: when slots are scarce,
+	// whichever target is visited first grabs the freed ones, and a fixed
+	// order would starve later targets ("no specific fairness algorithm is
+	// prescribed, but one large graph must not permanently consume every
+	// released slot"). Uncapped daemons keep the fixed config order and
+	// its byte-identical event stream.
+	d.tick++
+	off := 0
+	if d.cfg.Slots != nil {
+		off = int(d.tick % int64(len(d.cfg.Targets)))
+	}
+	for i := range d.cfg.Targets {
+		d.reconcileTarget(ctx, d.cfg.Targets[(off+i)%len(d.cfg.Targets)], refs)
 	}
 
 	// Arm the services reaper once this pass has swept every target: by

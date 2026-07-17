@@ -49,7 +49,7 @@ CREATE TABLE checks (
   run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   seq         INTEGER NOT NULL,
   name        TEXT NOT NULL,
-  status      TEXT NOT NULL,              -- passed|failed|skipped
+  status      TEXT NOT NULL,              -- passed|failed|skipped|blocked (v9+)
   duration_ms INTEGER NOT NULL,
   err         TEXT NOT NULL DEFAULT '',
   output      TEXT NOT NULL DEFAULT '',   -- captured output, verbatim (executor tail-caps at 64KiB) (v2+)
@@ -59,6 +59,14 @@ CREATE TABLE checks (
   -- a check's captured output. Empty for rows written before v8, in which
   -- case run.html renders no echo line at all rather than a blank one.
   command     TEXT NOT NULL DEFAULT '',
+  -- blocked_by (v9+): comma-joined names of the prerequisites whose
+  -- non-green end blocked this check (status 'blocked' rows only) — the
+  -- run's explicit failure attribution, never inferred from row order.
+  blocked_by  TEXT NOT NULL DEFAULT '',
+  -- waited_ms (v9+): how long the check sat ready but slotless under the
+  -- daemon-wide max-executions cap before starting — capacity starvation,
+  -- as distinct from duration_ms (the command's own cost).
+  waited_ms   INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

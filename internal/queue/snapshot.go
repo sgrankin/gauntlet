@@ -86,12 +86,23 @@ type RunSnapshot struct {
 	// it's part of a batch; "" for serial and speculate.
 	BatchID string
 
-	Done      []core.CheckResult // checks finished so far, in run order
-	Current   *CurrentCheck      // the check running now; nil between checks
+	Done []core.CheckResult // checks finished so far, in spec-declaration order
+
+	// Current is the longest-running check right now; nil when none is in
+	// flight. Kept for back-compat with pre-parallelism consumers (the
+	// Candidate-vs-Members precedent above): Current == &Running[0] in
+	// spirit whenever Running is non-empty.
+	Current *CurrentCheck
+
+	// Running is every check in flight right now, ordered by start time
+	// (earliest first) — more than one only when the candidate's spec set
+	// max-parallel > 1.
+	Running []CurrentCheck
+
 	StartedAt time.Time
 }
 
-// CurrentCheck is the check running right now within an in-flight run.
+// CurrentCheck is one check running right now within an in-flight run.
 type CurrentCheck struct {
 	Name      string
 	StartedAt time.Time // elapsed = snapshot.At.Sub(StartedAt)
@@ -243,18 +254,28 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 	return ts
 }
 
-// buildRunSnapshot deep-copies r's observable state into a RunSnapshot: in
-// particular Done, which must be an independent slice since the head
-// member's rec.Checks is still live and grows via append on every future
-// check completion this same run goroutine processes.
+// buildRunSnapshot deep-copies r's observable state into a RunSnapshot:
+// Done is built fresh from r.results in spec-declaration order (the
+// member records themselves are only materialized at conclusion), and
+// Running lists every in-flight check, earliest start first.
 func buildRunSnapshot(r *run) *RunSnapshot {
 	head := r.members[0]
-	done := make([]core.CheckResult, len(head.rec.Checks))
-	copy(done, head.rec.Checks)
 
+	var done []core.CheckResult
+	var running []CurrentCheck
+	for i := range r.checks {
+		name := r.checks[i].Name
+		if res, ok := r.results[name]; ok {
+			done = append(done, res)
+		}
+		if inf, ok := r.inflight[name]; ok {
+			running = append(running, CurrentCheck{Name: inf.name, StartedAt: inf.start})
+		}
+	}
+	sort.Slice(running, func(i, j int) bool { return running[i].StartedAt.Before(running[j].StartedAt) })
 	var cur *CurrentCheck
-	if r.cur != nil {
-		cur = &CurrentCheck{Name: r.cur.name, StartedAt: r.cur.start}
+	if len(running) > 0 {
+		cur = &running[0]
 	}
 
 	members := make([]core.Candidate, len(r.members))
@@ -273,6 +294,7 @@ func buildRunSnapshot(r *run) *RunSnapshot {
 		BatchID:   r.batchID,   // "" unless part of a batch
 		Done:      done,
 		Current:   cur,
+		Running:   running,
 		StartedAt: head.rec.StartedAt,
 	}
 }

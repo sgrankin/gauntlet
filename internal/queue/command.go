@@ -217,6 +217,9 @@ func (d *Daemon) cancelInFlight(ctx context.Context, t config.Target, lane *lane
 // known (the operator named it), so there is nothing for a one-at-a-time
 // serial walk to discover that isn't already established.
 func (d *Daemon) cancelBatchMember(ctx context.Context, t config.Target, r *run, ref string) {
+	// Same externally-concluded materialization as finishRun: the records
+	// carry whatever checks finished before the operator's cancel.
+	d.materializeChecks(r)
 	now := d.now()
 	requeueDetail := fmt.Sprintf("batch member cancelled (%s)", ref)
 

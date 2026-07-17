@@ -367,18 +367,16 @@ func runInvalidated(r *run, laneIndex int, targetTip string, cands map[string]co
 }
 
 // runRejectOutcome derives the terminal Outcome and Detail for a run whose
-// verdict just turned red (verdictRejected/verdictErrored) from the last
-// check result recorded against its head member — exactly the run whose
-// result set the verdict, since both terminal verdicts short-circuit: no
-// further check ever starts once one fails or errors, so rec.Checks' last
-// entry is always the culprit.
+// verdict just turned red (verdictRejected/verdictErrored) from the run's
+// explicitly recorded root failure (run.culprit) — never from whichever
+// result happened to be recorded last, an ordering parallel completion
+// makes meaningless.
 func runRejectOutcome(r *run) (core.Outcome, string) {
-	checks := r.members[0].rec.Checks
-	last := checks[len(checks)-1]
-	if last.Err != nil {
-		return core.OutcomeError, fmt.Sprintf("check %q: %v", last.Name, last.Err)
+	res := r.results[r.culprit]
+	if res.Err != nil {
+		return core.OutcomeError, fmt.Sprintf("check %q: %v", res.Name, res.Err)
 	}
-	return core.OutcomeRejected, fmt.Sprintf("check %q failed", last.Name)
+	return core.OutcomeRejected, fmt.Sprintf("check %q failed", res.Name)
 }
 
 // advanceLane walks lane's pipeline front to back for one tick: a validity
@@ -492,82 +490,192 @@ func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *la
 // advanceChecks is one run's check-advance step for one tick. Move/target
 // checks live in advanceLane's validity sweep, and landing lives in
 // advanceLane's prefix-drain step; this function only ever advances checks.
-// A non-blocking read of
-// r.cur.result that finds nothing yet leaves r.verdict at verdictNone (r
-// stays in flight). A result ends the check span, appends it to the head
-// member's run record, emits EventCheckFinished, then sets r.verdict:
-// Err -> errored, Failed -> rejected (both short-circuit — no further
-// check starts), Passed/Skipped either starts the next check (verdict
-// stays none) or, if it was the last check, sets verdict green. It never
-// itself lands, parks, or finishes the run — those stay centralized in
-// advanceLane's bubble/land steps.
+// It never itself lands, parks, or finishes the run — those stay
+// centralized in advanceLane's bubble/land steps.
 //
-// r.cur is nil once r's verdict is fully determined (green/rejected/errored)
-// and no further check was started — the steady state of a run waiting its
-// turn to land behind a still-in-flight predecessor. At lane-depth 1 this
-// state is never observed by a SECOND call to advanceChecks: a run can only
-// go green while sitting at lane.runs[0] (the only position that exists),
-// and advanceLane's prefix-drain step lands it that very same tick, before
-// the lane is ever revisited. At depth > 1, a non-head run can resolve
-// (either verdict) before its predecessor does, and then sit one or more
-// further ticks with cur==nil while advanceChecks keeps being called on it
-// every tick regardless (advanceLane's loop iterates every surviving run
-// unconditionally) — a bare `<-r.cur.result` there would dereference a nil
-// *checkInFlight and panic (TestSpeculateDepth3RaceSoak: concurrent
-// releases can resolve a non-head run first). The guard above is a no-op
-// at depth 1, since that case never reaches this function with
-// r.cur == nil.
+// One tick's advance, in order:
+//
+//  1. Consume every finished result (non-blocking, in spec-declaration
+//     order — deterministic even when several checks finished since the
+//     last tick), ending its span and emitting EventCheckFinished.
+//  2. The first red/errored result consumed sets r.culprit — the run's
+//     explicit root failure — and FAIL-FAST cancels everything still in
+//     flight (their commands' outcomes can no longer matter; in serial
+//     terms this is exactly the old short-circuit). The cancelled and
+//     never-started checks become CheckBlocked rows when the run's record
+//     is materialized, so every declared check appears in history.
+//  3. While healthy, start every READY check — all `after` prerequisites
+//     finished green — in spec order, bounded by r.maxParallel and the
+//     daemon-wide execution cap (Config.Slots; a slotless ready check
+//     stays ready and accrues Waited).
+//  4. Set the verdict once fully determined: green when every check
+//     finished green; rejected/errored (per the culprit) once the fail-
+//     fast drain is complete.
+//
+// A run whose verdict is already determined has an empty inflight map and
+// falls straight through every step — the steady state of a non-head
+// speculate run waiting its turn to land behind a still-running
+// predecessor (advanceLane calls this unconditionally every tick).
 func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
-	if r.cur == nil {
-		return // verdict already determined; waiting its turn behind a predecessor (see doc comment)
+	if r.verdict != verdictNone {
+		return // already determined; waiting its turn behind a predecessor
 	}
-	select {
-	case res := <-r.cur.result:
-		obs.EndCheck(r.cur.span, res)
-		// A batch's checks run once against the chain tip's tree, but
-		// the result is duplicated onto every member's own RunRecord — each
-		// landed/skipped row stays self-contained ("did this land green?"
-		// needs no join), and BatchID/Position/BatchSize carry the "tested
-		// together" truth for anyone who needs it. Serial/speculate have
-		// exactly one member, so this is a one-element loop, unchanged in
-		// every observable respect.
-		for i := range r.members {
-			r.members[i].rec.Checks = append(r.members[i].rec.Checks, res)
-		}
-		// Check is the just-finished result itself, so channels can render
-		// a per-check verdict mid-run instead of waiting for the run's
-		// terminal event. Candidate attribution is the run's head member:
-		// one event per check per run, not one per member per check,
-		// matching startCheck's own choice
-		// below and keeping channel noise independent of batch size — the
-		// per-member terminal event (EventLanded/EventSkipped/EventRejected)
-		// carries each member's own duplicated Checks slice regardless.
-		d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.members[0].cand, RunID: r.runID, CheckName: res.Name, Check: &res})
-		r.cur = nil
 
-		switch {
-		case res.Err != nil:
-			r.verdict = verdictErrored
-		case res.Status == core.CheckFailed:
-			r.verdict = verdictRejected
-		default: // CheckPassed or CheckSkipped: both count as green
-			if r.idx+1 < len(r.checks) {
-				r.idx++
-				d.startCheck(ctx, r)
+	// (1) + (2): consume finished results in spec order.
+	for i := range r.checks {
+		name := r.checks[i].Name
+		inf, ok := r.inflight[name]
+		if !ok {
+			continue
+		}
+		select {
+		case res := <-inf.result:
+			obs.EndCheck(inf.span, res)
+			res.Waited = inf.waited
+			delete(r.inflight, name)
+			r.results[name] = res
+			// Check is the just-finished result itself, so channels can
+			// render a per-check verdict mid-run instead of waiting for
+			// the run's terminal event. Candidate attribution is the run's
+			// head member: one event per check per run, not one per member
+			// per check, keeping channel noise independent of batch size —
+			// the per-member terminal event carries each member's own
+			// duplicated Checks slice regardless.
+			d.emit(ctx, core.Event{Kind: core.EventCheckFinished, At: d.now(), Target: t.Name, Candidate: r.members[0].cand, RunID: r.runID, CheckName: res.Name, Check: &res})
+
+			if r.culprit == "" && (res.Err != nil || res.Status == core.CheckFailed) {
+				r.culprit = name
+				// Fail fast: every other in-flight command's outcome can no
+				// longer matter (the run is red regardless), so burning
+				// builder capacity on it buys nothing. Cancelled checks
+				// become blocked rows, not verdicts.
+				d.cancelRun(r)
+			}
+		default:
+			// still running
+		}
+	}
+
+	if r.culprit != "" {
+		// cancelInflight above emptied the map, so the drain is complete
+		// the same tick the culprit lands; the guard is belt-and-braces
+		// against a future partial-cancel policy.
+		if len(r.inflight) == 0 {
+			d.materializeChecks(r)
+			if r.results[r.culprit].Err != nil {
+				r.verdict = verdictErrored
 			} else {
-				r.verdict = verdictGreen
+				r.verdict = verdictRejected
 			}
 		}
-	default:
-		// current check still running; r.verdict stays verdictNone
+		return
+	}
+
+	// (3): start every ready check, spec order, up to the caps.
+	slotDenied := false
+	for i := range r.checks {
+		c := &r.checks[i]
+		if _, done := r.results[c.Name]; done {
+			continue
+		}
+		if _, running := r.inflight[c.Name]; running {
+			continue
+		}
+		if len(r.inflight) >= r.maxParallel {
+			break
+		}
+		ready := true
+		for _, dep := range c.After {
+			// Green = Passed or Skipped with no Err — the same results
+			// that keep a candidate green. A non-green dep can't occur
+			// here (it would have set r.culprit above).
+			if res, ok := r.results[dep]; !ok || res.Err != nil || (res.Status != core.CheckPassed && res.Status != core.CheckSkipped) {
+				ready = false
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
+		if slotDenied || !d.cfg.Slots.TryAcquire() {
+			// The daemon-wide cap is saturated: this check stays ready and
+			// starts on a later tick. One denial means denial for every
+			// later ready check this tick too (single semaphore) — no more
+			// TryAcquire calls, but keep scanning so every starving check
+			// gets its readyAt stamp.
+			slotDenied = true
+			if _, stamped := r.readyAt[c.Name]; !stamped {
+				r.readyAt[c.Name] = d.now()
+			}
+			continue
+		}
+		d.startCheck(ctx, r, i)
+	}
+
+	// (4): green once everything finished (and nothing red — culprit above).
+	if len(r.results) == len(r.checks) && len(r.inflight) == 0 {
+		d.materializeChecks(r)
+		r.verdict = verdictGreen
 	}
 }
 
-// startCheck launches r.checks[r.idx] via the configured Executor in its own
+// materializeChecks fills every member record's Checks slice, exactly once
+// per run, in spec-declaration order — the durable per-check identity
+// history's seq column and the log filename prefix both key on, regardless
+// of the order results actually arrived. Finished checks contribute their
+// real results; when the run has a culprit, every unfinished check becomes
+// a CheckBlocked row (no duration, no output — the command never ran to a
+// verdict) whose BlockedBy names its own non-green `after` prerequisites
+// when it has any, and otherwise the run's root failure. A run concluded
+// externally (move/cancel/skip) materializes only what finished — there is
+// no failure to attribute, and the terminal Skip explains the rest.
+//
+// A batch's checks run once against the chain tip's tree, but the results
+// are duplicated onto every member's own RunRecord — each landed/skipped
+// row stays self-contained ("did this land green?" needs no join), and
+// BatchID/Position/BatchSize carry the "tested together" truth for anyone
+// who needs it. Serial/speculate have exactly one member.
+func (d *Daemon) materializeChecks(r *run) {
+	if r.materialized {
+		return
+	}
+	r.materialized = true
+
+	var out []core.CheckResult
+	for i := range r.checks {
+		c := &r.checks[i]
+		if res, ok := r.results[c.Name]; ok {
+			out = append(out, res)
+			continue
+		}
+		if r.culprit == "" {
+			continue // externally concluded; unstarted checks get no row
+		}
+		var blockedBy []string
+		for _, dep := range c.After {
+			if res, ok := r.results[dep]; !ok || res.Err != nil || (res.Status != core.CheckPassed && res.Status != core.CheckSkipped) {
+				blockedBy = append(blockedBy, dep)
+			}
+		}
+		if len(blockedBy) == 0 {
+			blockedBy = []string{r.culprit}
+		}
+		out = append(out, core.CheckResult{Name: c.Name, Status: core.CheckBlocked, BlockedBy: blockedBy})
+	}
+	for i := range r.members {
+		r.members[i].rec.Checks = append([]core.CheckResult(nil), out...)
+	}
+}
+
+// startCheck launches r.checks[idx] via the configured Executor in its own
 // goroutine, which communicates back solely by sending once on the
-// checkInFlight's one-shot result channel.
-func (d *Daemon) startCheck(ctx context.Context, r *run) {
-	check := r.checks[r.idx]
+// checkInFlight's one-shot result channel. The caller (advanceChecks's
+// scheduler step) has already taken this check's daemon-wide execution
+// slot; the goroutine releases it on exit — after RunCheck has returned,
+// i.e. after executor child cleanup — so a freed slot never represents a
+// still-running process or container.
+func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
+	check := r.checks[idx]
 	checkCtx, cancel := context.WithCancel(r.rootCtx)
 	spanCtx, span := obs.StartCheck(checkCtx, d.tr, check.Name)
 
@@ -588,8 +696,11 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	// (core.SanitizeName) before becoming a path component — the trailing
 	// ".log.zst" suffix additionally guarantees the sanitized name can
 	// never resolve to "." or "..". The filename is prefixed with the
-	// check's 1-based position in the spec (r.idx+1), stable and matching
-	// history's per-check seq column: two check names that sanitize to the
+	// check's 1-based SPEC-DECLARATION position (idx+1) — the durable
+	// per-check identity, stable regardless of the order parallel checks
+	// actually start or finish, and matching history's per-check seq
+	// column (materializeChecks fills records in this same spec order):
+	// two check names that sanitize to the
 	// same string (e.g. "lint go" and "lint/go", both -> "lint-go") would
 	// otherwise alias onto the same O_TRUNC'd file, with both checks'
 	// history rows pointing at whichever happened to write last.
@@ -600,11 +711,19 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	// on serve (legacy plain ".log" rows from before this change keep
 	// working unchanged).
 	if d.cfg.LogDir != "" {
-		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, fmt.Sprintf("%d-%s.log.zst", r.idx+1, core.SanitizeName(check.Name)))
+		job.LogPath = filepath.Join(d.cfg.LogDir, r.runID, fmt.Sprintf("%d-%s.log.zst", idx+1, core.SanitizeName(check.Name)))
 	}
 
 	result := make(chan core.CheckResult, 1)
 	start := d.now()
+	// Waited: how long this check sat ready-but-slotless (advanceChecks
+	// stamped readyAt on the first denial). Zero for the common immediate
+	// start.
+	var waited time.Duration
+	if readyAt, ok := r.readyAt[check.Name]; ok {
+		waited = start.Sub(readyAt)
+		delete(r.readyAt, check.Name)
+	}
 	// ALL blocking service work — EnsureAll and the mid-run liveness
 	// re-probe — happens here, inside this check's own goroutine, never on
 	// the reconcile goroutine; see docs/design/services.md ("Lifecycle:
@@ -614,6 +733,11 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 	needs := check.Needs
 	svcs := r.services
 	go func() {
+		// The execution slot advanceChecks acquired for this check is
+		// released only when this goroutine exits — RunCheck has returned
+		// and the executor's child cleanup is complete by then, so the
+		// freed slot never represents a live process/container.
+		defer d.cfg.Slots.Release()
 		// Command (v8, run.html's command echo): stamped onto the result
 		// here rather than by the Executor implementations themselves, since
 		// job.Command is already in scope at every send point below and this
@@ -645,22 +769,23 @@ func (d *Daemon) startCheck(ctx context.Context, r *run) {
 		}
 		result <- res
 	}()
-	r.cur = &checkInFlight{name: check.Name, cancel: cancel, result: result, span: span, start: start}
+	r.inflight[check.Name] = &checkInFlight{name: check.Name, cancel: cancel, result: result, span: span, start: start, waited: waited}
 
 	d.emit(ctx, core.Event{Kind: core.EventCheckStarted, At: d.now(), Target: r.target, Candidate: r.members[0].cand, RunID: r.runID, CheckName: check.Name})
 }
 
-// cancelRun aborts r's current check, if any (Invariant 5): cancels its
-// context (the executor is responsible for killing the underlying process
-// group) and ends its span without waiting for the executor goroutine,
-// which reports into a buffered channel nobody needs to read anymore.
+// cancelRun aborts every in-flight check of r (Invariant 5 for a move,
+// fail-fast for a red verdict, operator cancel): each check's context is
+// cancelled (the executor is responsible for killing the underlying
+// process group) and its span ends, without waiting for the executor
+// goroutines — they report into buffered channels nobody needs to read
+// anymore, and each releases its own execution slot on exit regardless.
 func (d *Daemon) cancelRun(r *run) {
-	if r.cur == nil {
-		return
+	for name, inf := range r.inflight {
+		inf.cancel()
+		obs.EndSpan(inf.span, context.Canceled)
+		delete(r.inflight, name)
 	}
-	r.cur.cancel()
-	obs.EndSpan(r.cur.span, context.Canceled)
-	r.cur = nil
 }
 
 // chainLink is one candidate's link in the merge-commit chain (see
@@ -1089,19 +1214,22 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 	}
 
 	r := &run{
-		target:   t.Name,
-		members:  members,
-		baseOID:  base,
-		chainTip: chainTip,
-		batchID:  runID,
-		runID:    runID,
-		dir:      dir,
-		checks:   spec.Checks,
-		idx:      0,
-		services: spec.Services,
-		verdict:  verdictNone,
-		rootCtx:  rootCtx,
-		rootSpan: rootSpan,
+		target:      t.Name,
+		members:     members,
+		baseOID:     base,
+		chainTip:    chainTip,
+		batchID:     runID,
+		runID:       runID,
+		dir:         dir,
+		checks:      spec.Checks,
+		maxParallel: effectiveMaxParallel(spec),
+		inflight:    make(map[string]*checkInFlight),
+		results:     make(map[string]core.CheckResult),
+		readyAt:     make(map[string]time.Time),
+		services:    spec.Services,
+		verdict:     verdictNone,
+		rootCtx:     rootCtx,
+		rootSpan:    rootSpan,
 	}
 	l := d.lanes[t.Name]
 	if l == nil {
@@ -1109,7 +1237,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.lanes[t.Name] = l
 	}
 	l.runs = append(l.runs, r)
-	d.startCheck(ctx, r)
+	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 }
 
 // rejectBatch parks every member in links and emits its own terminal event
@@ -1179,8 +1307,8 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 // instead (see its own doc comment).
 func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 	checkName := "?"
-	if checks := r.members[0].rec.Checks; len(checks) > 0 {
-		checkName = checks[len(checks)-1].Name
+	if r.culprit != "" {
+		checkName = r.culprit
 	}
 	detail := fmt.Sprintf("batch %s red on check %q; serializing", r.batchID, checkName)
 	now := d.now()
@@ -1480,20 +1608,23 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		Speculated: predicted,
 	}
 	r := &run{
-		target:    t.Name,
-		members:   []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
-		baseOID:   base,
-		chainTip:  link.mergeOID,
-		predicted: predicted,
-		batchID:   "",
-		runID:     runID,
-		dir:       dir,
-		checks:    spec.Checks,
-		idx:       0,
-		services:  spec.Services,
-		verdict:   verdictNone,
-		rootCtx:   rootCtx,
-		rootSpan:  rootSpan,
+		target:      t.Name,
+		members:     []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
+		baseOID:     base,
+		chainTip:    link.mergeOID,
+		predicted:   predicted,
+		batchID:     "",
+		runID:       runID,
+		dir:         dir,
+		checks:      spec.Checks,
+		maxParallel: effectiveMaxParallel(spec),
+		inflight:    make(map[string]*checkInFlight),
+		results:     make(map[string]core.CheckResult),
+		readyAt:     make(map[string]time.Time),
+		services:    spec.Services,
+		verdict:     verdictNone,
+		rootCtx:     rootCtx,
+		rootSpan:    rootSpan,
 	}
 	l := d.lanes[t.Name]
 	if l == nil {
@@ -1501,8 +1632,19 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.lanes[t.Name] = l
 	}
 	l.runs = append(l.runs, r)
-	d.startCheck(ctx, r)
+	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 	return r, true
+}
+
+// effectiveMaxParallel normalizes a spec's max-parallel for run
+// construction: zero (unset) is the serial default of 1, per
+// config.CheckSpec.MaxParallel's contract, so schedulers never
+// re-interpret the default.
+func effectiveMaxParallel(spec *config.CheckSpec) int {
+	if spec.MaxParallel <= 0 {
+		return 1
+	}
+	return spec.MaxParallel
 }
 
 // landRun is the generalized land: one CAS push lands the whole chain, then
@@ -1612,6 +1754,11 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 // always false there): every member of an invalidated batch must Skip and
 // re-queue, none of them singled out.
 func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome core.Outcome, detail string, park bool) {
+	// A run concluded by its own verdict already materialized its records
+	// in advanceChecks (idempotent guard); this covers the externally
+	// concluded paths (move/cancel/skip), whose records carry whatever
+	// finished before the abort.
+	d.materializeChecks(r)
 	for i := range r.members {
 		m := &r.members[i]
 		m.rec.Outcome = outcome

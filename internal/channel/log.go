@@ -235,6 +235,8 @@ func checkStatusString(s core.CheckStatus) string {
 		return "failed"
 	case core.CheckSkipped:
 		return "skipped"
+	case core.CheckBlocked:
+		return "blocked"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(s))
 	}

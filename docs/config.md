@@ -158,6 +158,17 @@ summarize {
   under `"container"` that's an automatic read-only mount at the fixed path
   `/gauntlet-git`, which — like `workdir` and the `/gauntlet` result dir —
   is reserved: an operator `mount` at or under it is a config error.
+  `max-executions` caps how many bounded commands the daemon runs
+  concurrently host-wide — candidate checks and post-land hooks, across
+  every target, mode, and speculation window (long-lived shared *service*
+  containers don't count; their own limits apply). Unset means unlimited,
+  the compatibility default — a production deployment should set an
+  explicit value sized to the host, especially once any repo raises
+  `max-parallel` ([checks.md](checks.md#ordering-and-parallelism)): total
+  demand becomes Σ per-target `window` × per-candidate `max-parallel`, and
+  this cap is what actually bounds it. A check that sits ready waiting for
+  a slot records that wait in history (`waited` vs `duration`), so
+  capacity starvation is visible rather than mistaken for slow commands.
 - **`services`** — gates shared, cached service instances a check spec's
   `service`/`needs` nodes can request (`internal/services`); see
   [checks.md's "Shared services"](checks.md#shared-services) for the full
@@ -428,11 +439,14 @@ target "staging" branch="staging" {
 - **`window`** — the speculation pipeline depth: up to this many runs are
   in flight at once for the target. Legal only with `mode "speculate"`
   (a config error otherwise); defaults to 4 when left unset. Bounded to
-  1–32. **`window` doubles as a builder-concurrency bound**: each
-  speculative run executes at most one check at a time, so `window` is
-  also the maximum number of concurrent check processes/containers this
-  target drives against the configured executor — size it with your
-  build capacity in mind, not just desired queue depth.
+  1–32. **`window` doubles as a builder-concurrency bound** while
+  candidates keep the default serial checks: each speculative run then
+  executes at most one check at a time, so `window` is also the maximum
+  number of concurrent check processes/containers this target drives —
+  size it with your build capacity in mind, not just desired queue depth.
+  A repo spec that raises `max-parallel` changes that arithmetic (up to
+  `window × max-parallel` per target); the executor's `max-executions`
+  cap is the knob that restores a real host-wide bound.
 - **`on-batch-red`** — the batch red-recovery strategy. `"serial"`
   (default) is the only strategy implemented: on a red batch, every
   member re-queues unparked and the next refill for this target forms

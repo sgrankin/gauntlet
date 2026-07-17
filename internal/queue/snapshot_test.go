@@ -103,10 +103,11 @@ func TestSnapshot_MidRun(t *testing.T) {
 	}
 
 	// Deep-copy discipline: mutating the snapshot's Done slice must not
-	// alias the live run's RunRecord.Checks.
+	// alias the live run's own results (rec.Checks is only materialized at
+	// conclusion now; the live source mid-run is run.results).
 	ts2.InFlight.Done[0].Name = "corrupted"
-	if h.d.headRun("main").members[0].rec.Checks[0].Name != "lint" {
-		t.Fatal("Snapshot's Done slice aliases the live RunRecord.Checks slice")
+	if h.d.headRun("main").results["lint"].Name != "lint" {
+		t.Fatal("Snapshot's Done slice aliases the live run's results")
 	}
 
 	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // land; drains the run
