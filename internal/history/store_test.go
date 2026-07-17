@@ -1284,6 +1284,75 @@ func TestMigrate_V8ToV9(t *testing.T) {
 	}
 }
 
+// TestMigrate_V9ToV10 builds a v9 database by hand (v7 schema + the v8 and
+// v9 ALTERs) and proves Open migrates it: checks gains the image column
+// with pre-existing rows untouched, and a fresh write round-trips it.
+func TestMigrate_V9ToV10(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v9.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		schemaV7SQL,
+		`ALTER TABLE checks ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN waited_ms INTEGER NOT NULL DEFAULT 0`,
+		`PRAGMA user_version = 9`,
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size, speculated, recovered)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1, 0, 0)`,
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '', 'true')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed v9 db: %q: %v", stmt, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v9 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+	_, checks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Image != "" {
+		t.Errorf("pre-v10 row = %+v, want untouched with empty image", checks)
+	}
+
+	const id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 17, 14, 0, 0, 0, time.UTC))
+	rec.Checks[0].Image = id
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if newChecks[0].Image != id {
+		t.Errorf("checks[0].Image = %q, want the identity round-tripped", newChecks[0].Image)
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }

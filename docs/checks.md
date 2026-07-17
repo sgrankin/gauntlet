@@ -144,7 +144,11 @@ Every consumer then runs by the captured identity — recorded in history
 for both the build and its consumers, so a run always says exactly which
 bytes ran. A failed build (non-zero exit, or an empty/mutable/multi-line
 result) is ONE root cause: the build's own red row, with every consumer
-`blocked` on it — never N unrelated consumer failures.
+`blocked` on it — never N unrelated consumer failures. Validation is
+syntactic: gauntlet checks the reference's *shape*, not that the runtime
+can actually see it — a build that writes a well-formed ID for an image
+it never loaded (e.g. `buildx` without `--load`) surfaces as the first
+consumer's infrastructure error instead.
 
 Boundaries: consumers need a container-kind executor profile (gated at
 run start); a build runs on an ordinary operator profile (typically one
