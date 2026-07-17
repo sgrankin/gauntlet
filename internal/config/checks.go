@@ -60,6 +60,16 @@ type Check struct {
 	// matrices, no dataflow — a check that needs those implements them in
 	// its own command (the "jobs are commands, no DSL" wall).
 	After []string `kdl:"after"`
+
+	// Executor names the operator-defined execution profile this check
+	// runs on (daemon config's `executor "name" kind="..."` blocks); ""
+	// (the default) is the daemon's default executor, the pre-profiles
+	// behavior. The repo side can only NAME a profile — every host
+	// capability (mounts, images, fixed env, resource ceilings) stays
+	// operator-owned in daemon config. An unknown name rejects the spec
+	// at run start (like an undeclared `needs` service): a configuration
+	// error, never a red check verdict.
+	Executor string `kdl:"executor"`
 }
 
 // EnvVar is one `env "NAME" "VALUE"` pair set inside a service's container.

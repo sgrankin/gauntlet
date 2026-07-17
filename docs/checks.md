@@ -71,6 +71,36 @@ sat ready waiting for host capacity records that wait separately from its
 own duration, so a slow host and a slow command are distinguishable in
 history.
 
+## Executor profiles
+
+When the daemon defines named execution profiles
+([config.md](config.md#daemon-config-gauntletkdl)), a check selects one by
+name — so containerized checks (stable paths, warm caches) and host-local
+ones (host identity, private networks, installed tooling) can coexist in
+one candidate:
+
+```kdl
+check "test" {
+    command "./ci/test"
+    executor "it"
+}
+check "publish-receipt" {
+    command "./ci/publish-receipt"
+    executor "host"
+    after "test"
+}
+```
+
+Omitting `executor` runs the check on the daemon's default executor — the
+pre-profiles behavior, unchanged. The name is ALL the repo side can say:
+what a profile mounts, which image it runs, its fixed environment, and its
+resource ceilings are operator-owned daemon config. Selecting a profile
+grants the check everything attached to it, and a spec naming an undefined
+profile is rejected before any of its commands start (a configuration
+error, like an undeclared `needs` service — never a red verdict). The
+`GAUNTLET_*` environment contract, result-file protocol, log capture,
+timeouts, and cancellation are identical on every profile.
+
 ## Check environment reference
 
 Every executor (local or container) sets these environment variables before

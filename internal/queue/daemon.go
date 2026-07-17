@@ -138,6 +138,18 @@ type Config struct {
 	// execution on the host shares one budget.
 	Slots *core.Slots
 
+	// KnownExecutorProfile reports whether a repo-selected executor
+	// profile name (config.Check.Executor) resolves to a configured
+	// profile. Consulted once per run at spec load, right beside the
+	// RequiresServices gate: a spec naming an unknown profile is rejected
+	// loudly before any of its commands start — a configuration error,
+	// never a red check verdict. nil means no named profiles exist, so
+	// only the default ("", never consulted) is legal. This is a
+	// predicate, not an executor registry, on purpose: the queue core
+	// stays executor-agnostic (Invariant 8) — actual routing lives in the
+	// Executor implementation (executor.Mux).
+	KnownExecutorProfile func(name string) bool
+
 	// AutoRetryErrors enables the auto-retry-once behavior (DESIGN.md
 	// decision ledger, "Auto-retry once on infra-error parks"; see also
 	// docs/design/scaling.md, "The one real prerequisite: auto-requeue on

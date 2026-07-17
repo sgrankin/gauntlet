@@ -158,17 +158,58 @@ summarize {
   under `"container"` that's an automatic read-only mount at the fixed path
   `/gauntlet-git`, which — like `workdir` and the `/gauntlet` result dir —
   is reserved: an operator `mount` at or under it is a config error.
-  `max-executions` caps how many bounded commands the daemon runs
-  concurrently host-wide — candidate checks and post-land hooks, across
-  every target, mode, and speculation window (long-lived shared *service*
-  containers don't count; their own limits apply). Unset means unlimited,
-  the compatibility default — a production deployment should set an
-  explicit value sized to the host, especially once any repo raises
-  `max-parallel` ([checks.md](checks.md#ordering-and-parallelism)): total
-  demand becomes Σ per-target `window` × per-candidate `max-parallel`, and
-  this cap is what actually bounds it. A check that sits ready waiting for
-  a slot records that wait in history (`waited` vs `duration`), so
-  capacity starvation is visible rather than mistaken for slow commands.
+
+- **`executor <name> kind="local"|"container"` — named execution
+  profiles.** Beside the (at most one) kind-less default block above, any
+  number of *named* profiles may be declared; a repo check selects one
+  with `executor "<name>"` ([checks.md](checks.md#executor-profiles)), so
+  one candidate can mix containerized checks with host-local ones:
+
+  ```kdl
+  executor "container" {          // the default profile (arg = KIND)
+      runtime "docker"
+      image "go-ci:latest"
+  }
+  executor "host" kind="local"    // a named profile (arg = NAME)
+  executor "it" kind="container" {
+      image "go-ci:latest"
+      mount "/var/run/docker.sock" path="/var/run/docker.sock"
+      add-host "host.docker.internal" "host-gateway"
+      env "TESTCONTAINERS_HOST_OVERRIDE" "host.docker.internal"
+      memory "8g"
+      cpus "4"
+  }
+  ```
+
+  A profile carries every option the default executor does, plus fixed
+  non-secret `env` pairs (both kinds; the `GAUNTLET_*` namespace is
+  reserved and gauntlet's values win any other collision), and — container
+  only — `add-host` aliases and `--memory`/`--cpus` ceilings. Profile
+  names `local`/`container` are rejected (that spelling means the default
+  block's kind). **Defining a profile is what allows repos to select it**,
+  and selecting one grants the check everything attached to it (a socket
+  mount is host-authoritative — same trust math as the default executor's
+  mounts), so prefer several small profiles over one all-powerful one. The
+  repo side can only *name* a profile; mounts, images, env, and resource
+  ceilings all stay here, operator-owned. A spec naming an undefined
+  profile is rejected before any of its commands start. One caveat: the
+  shared-services endpoint mode still follows the *default* executor's
+  kind, so checks that declare `needs` should run on profiles of that same
+  kind — a container-profile check on a local-default daemon would get
+  host-published service endpoints it may not be able to reach.
+
+- **`max-executions`** (top level) caps how many bounded commands the
+  daemon runs concurrently host-wide — candidate checks and post-land
+  hooks, across every target, mode, speculation window, and executor
+  profile (long-lived shared *service* containers don't count; their own
+  limits apply). Unset means unlimited, the compatibility default — a
+  production deployment should set an explicit value sized to the host,
+  especially once any repo raises `max-parallel`
+  ([checks.md](checks.md#ordering-and-parallelism)): total demand becomes
+  Σ per-target `window` × per-candidate `max-parallel`, and this cap is
+  what actually bounds it. A check that sits ready waiting for a slot
+  records that wait in history (`waited` vs `duration`), so capacity
+  starvation is visible rather than mistaken for slow commands.
 - **`services`** — gates shared, cached service instances a check spec's
   `service`/`needs` nodes can request (`internal/services`); see
   [checks.md's "Shared services"](checks.md#shared-services) for the full

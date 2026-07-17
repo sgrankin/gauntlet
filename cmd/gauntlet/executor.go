@@ -8,56 +8,102 @@ import (
 	"github.com/sgrankin/gauntlet/internal/executor"
 )
 
-// buildExecutor selects the check-execution backend per cfg.Executor:
-// "local" (config's default) is the in-process executor; "container" wraps
-// a docker-compatible CLI. config.Daemon.validate already rejects any
-// other Kind, so the switch's default case is unreachable in practice — it
-// still returns an error rather than panicking, since this constructs from
-// a caller-supplied struct, not only from LoadDaemon.
+// buildExecutor constructs the daemon's check-execution backend: the
+// default profile (cfg.Executor — what checks naming no `executor` and
+// every post-land hook run on), plus one executor per named profile
+// (cfg.Profiles), routed by executor.Mux on CheckJob.Executor. With no
+// named profiles the default is returned bare — byte-identical to the
+// pre-profiles daemon, no Mux hop.
+//
+// The returned set is the profile-name vocabulary the queue's
+// KnownExecutorProfile predicate answers from, so a spec naming an
+// undefined profile is rejected before any of its commands start.
 //
 // scratchDir roots every check's ephemeral scratch dir: main.go sweeps it
 // at startup exactly like trialsDir, safe because AcquireLock guarantees
-// only one daemon uses -state at a time. Empty preserves each executor's
-// prior os.MkdirTemp("", ...) fallback verbatim — every existing caller
-// that built one of these executors directly (tests) is unaffected.
-//
-// token namespaces the container executor's container names — see
-// executor.Params.Token's doc. Unused by the local executor, which has no
-// host-global naming namespace to collide on.
-//
-// gitDir is the daemon's bare repo path (absolute — main.go resolves it),
-// exported to every check as GAUNTLET_GIT_DIR: verbatim by the local
-// executor, via a read-only bind mount at a fixed in-container path by the
-// container executor (core.EnvGitDir has the contract). Empty omits the
-// variable and the mount entirely.
-func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string) (core.Executor, error) {
-	switch cfg.Executor.Kind {
+// only one daemon uses -state at a time. token namespaces container names
+// (executor.Params.Token); every container profile shares it — a check
+// runs on exactly one profile, so names can't collide across profiles.
+// gitDir is the daemon's bare repo path, exported to every check as
+// GAUNTLET_GIT_DIR by every profile alike (core.EnvGitDir).
+func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string) (core.Executor, map[string]bool, error) {
+	def, err := buildOneExecutor(cfg.Executor, scratchDir, token, gitDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(cfg.Profiles) == 0 {
+		return def, nil, nil
+	}
+	named := make(map[string]core.Executor, len(cfg.Profiles))
+	names := make(map[string]bool, len(cfg.Profiles))
+	for _, p := range cfg.Profiles {
+		ex, err := buildOneExecutor(p, scratchDir, token, gitDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		named[p.Name] = ex
+		names[p.Name] = true
+	}
+	return executor.Mux{Default: def, Named: named}, names, nil
+}
+
+// buildOneExecutor constructs one profile's executor. config validation
+// already rejected any Kind outside the switch, so the default case is
+// unreachable in practice — it still errors rather than panicking, since
+// this constructs from a caller-supplied struct, not only from LoadDaemon.
+func buildOneExecutor(e config.Executor, scratchDir, token, gitDir string) (core.Executor, error) {
+	label := "executor"
+	if e.Name != "" {
+		label = fmt.Sprintf("executor %q", e.Name)
+	}
+	switch e.Kind {
 	case "", "local":
-		return executor.LocalExecutor{BaseDir: scratchDir, GitDir: gitDir}, nil
+		return executor.LocalExecutor{BaseDir: scratchDir, GitDir: gitDir, Env: envPairs(e.Env)}, nil
 	case "container":
-		caches := make([]executor.Cache, len(cfg.Executor.Caches))
-		for i, c := range cfg.Executor.Caches {
+		caches := make([]executor.Cache, len(e.Caches))
+		for i, c := range e.Caches {
 			caches[i] = executor.Cache{Name: c.Name, Path: c.Path}
 		}
-		mounts := make([]executor.Mount, len(cfg.Executor.Mounts))
-		for i, m := range cfg.Executor.Mounts {
+		mounts := make([]executor.Mount, len(e.Mounts))
+		for i, m := range e.Mounts {
 			mounts[i] = executor.Mount{Host: m.Host, Path: m.Path, ReadOnly: m.ReadOnly}
 		}
+		addHosts := make([]string, len(e.AddHosts))
+		for i, ah := range e.AddHosts {
+			addHosts[i] = ah.Host + ":" + ah.Gateway
+		}
 		ex, err := executor.New(executor.Params{
-			Runtime:    cfg.Executor.Runtime,
-			Image:      cfg.Executor.Image,
-			Workdir:    cfg.Executor.Workdir,
+			Runtime:    e.Runtime,
+			Image:      e.Image,
+			Workdir:    e.Workdir,
 			Caches:     caches,
 			Mounts:     mounts,
+			Env:        envPairs(e.Env),
+			AddHosts:   addHosts,
+			Memory:     e.Memory,
+			CPUs:       e.CPUs,
 			ScratchDir: scratchDir,
 			Token:      token,
 			GitDir:     gitDir,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("container executor: %w", err)
+			return nil, fmt.Errorf("%s: %w", label, err)
 		}
 		return ex, nil
 	default:
-		return nil, fmt.Errorf("executor: unknown kind %q", cfg.Executor.Kind)
+		return nil, fmt.Errorf("%s: unknown kind %q", label, e.Kind)
 	}
+}
+
+// envPairs renders a profile's fixed env as the "NAME=VALUE" strings both
+// executors consume.
+func envPairs(env []config.EnvVar) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make([]string, len(env))
+	for i, ev := range env {
+		out[i] = ev.Name + "=" + ev.Value
+	}
+	return out
 }

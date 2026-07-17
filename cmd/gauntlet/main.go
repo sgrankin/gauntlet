@@ -269,18 +269,18 @@ func run() error {
 		}
 	}
 
-	ex, err := buildExecutor(cfg, scratchDir, token, repoDir)
+	ex, profileNames, err := buildExecutor(cfg, scratchDir, token, repoDir)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
 	}
 
-	// The daemon-wide execution cap (executor `max-executions`): one
+	// The daemon-wide execution cap (top-level `max-executions`): one
 	// core.Slots instance shared by the queue's checks and the hooks
 	// runner, so every bounded execution on the host draws from a single
 	// budget. nil (unset) means unlimited — the pre-cap behavior.
 	var slots *core.Slots
-	if cfg.Executor.MaxExecutions > 0 {
-		slots = core.NewSlots(cfg.Executor.MaxExecutions)
+	if cfg.MaxExecutions > 0 {
+		slots = core.NewSlots(cfg.MaxExecutions)
 	}
 
 	// Sweep containers orphaned by a prior gauntlet process that crashed
@@ -296,11 +296,21 @@ func run() error {
 	// "gauntlet-<token>-" prefix. Tolerant of the runtime binary being
 	// entirely absent (logs and continues — see sweepContainerOrphans'
 	// doc).
-	if cfg.Executor.Kind == "container" {
-		runtime := cfg.Executor.Runtime
+	// With named profiles, several distinct runtimes may exist (a docker
+	// profile beside a podman one); sweep each exactly once.
+	swept := make(map[string]bool, 1)
+	for _, e := range append([]config.Executor{cfg.Executor}, cfg.Profiles...) {
+		if e.Kind != "container" {
+			continue
+		}
+		runtime := e.Runtime
 		if runtime == "" {
 			runtime = "container"
 		}
+		if swept[runtime] {
+			continue
+		}
+		swept[runtime] = true
 		sweepContainerOrphans(ctx, runtime, token, os.Stderr)
 	}
 
@@ -500,6 +510,10 @@ func run() error {
 		LogDir:       logsDir,
 		SeedParks:    seedParks,
 		Slots:        slots,
+		// KnownExecutorProfile: the queue rejects a spec naming an
+		// undefined profile before any of its commands start; nil (no
+		// profiles configured) means only the default ("") is legal.
+		KnownExecutorProfile: func(name string) bool { return profileNames[name] },
 		// AutoRetryErrors is a *bool defaulted true in config.applyDefaults
 		// (absent-vs-explicit-false needs the pointer); the queue takes the
 		// resolved value.

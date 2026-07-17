@@ -45,6 +45,15 @@ type CheckJob struct {
 	// Command is the argv to execute; Command[0] is the program.
 	Command []string
 
+	// Executor names the operator-defined execution profile this job runs
+	// on (config.Check.Executor, copied verbatim by the queue); "" means
+	// the default executor. Routing happens in executor.Mux — the daemon
+	// binary's Executor implementation when profiles are configured. The
+	// queue itself never interprets the name beyond a config-owned
+	// known-profile predicate at spec load (Invariant 8: the core stays
+	// executor-agnostic).
+	Executor string
+
 	// Dir is the exported trial tree the check runs against.
 	Dir string
 

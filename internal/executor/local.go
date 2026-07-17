@@ -44,6 +44,14 @@ type LocalExecutor struct {
 	// Empty omits the variable entirely — the pre-GitDir contract,
 	// unchanged, which every hand-built executor in tests still gets.
 	GitDir string
+
+	// Env is fixed operator-owned environment ("NAME=VALUE" strings) from
+	// the executor profile, appended BEFORE the GAUNTLET_* contract so
+	// gauntlet's own values win any collision (last entry wins for
+	// exec.Cmd.Env). Config validation already rejects GAUNTLET_-prefixed
+	// names outright. Nil for the profile-less default, byte-identical to
+	// the pre-profiles environment.
+	Env []string
 }
 
 // RunCheck implements core.Executor.
@@ -71,7 +79,11 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
 	cmd.Dir = job.Dir
-	cmd.Env = append(os.Environ(),
+	// Fixed profile env sits between the inherited environment and the
+	// GAUNTLET_* contract, so gauntlet's own values win any collision
+	// (last entry wins for exec.Cmd.Env).
+	cmd.Env = append(os.Environ(), e.Env...)
+	cmd.Env = append(cmd.Env,
 		core.EnvBaseSHA+"="+job.BaseSHA,
 		core.EnvMergeSHA+"="+job.MergeSHA,
 		core.EnvCandidateSHA+"="+job.Candidate.SHA,

@@ -713,6 +713,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		Target:    r.target,
 		Name:      check.Name,
 		Command:   check.Command,
+		Executor:  check.Executor,
 		Dir:       r.dir,
 		BaseSHA:   r.baseOID,
 		MergeSHA:  r.chainTip,
@@ -1207,6 +1208,11 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
 		return
 	}
+	// Same gate for executor profiles as startRun's (see there).
+	if chk, prof := unknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
+		return
+	}
 
 	dir, err := os.MkdirTemp(d.cfg.WorkDir, "gauntlet-trial-")
 	if err != nil {
@@ -1610,6 +1616,13 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
 		return nil, false
 	}
+	// Same gate for executor profiles: an unknown selection is a
+	// configuration error rejected before any command starts, never a red
+	// verdict mid-run (Config.KnownExecutorProfile's doc).
+	if chk, prof := unknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
+		return nil, false
+	}
 
 	// Trial-tree export dirs are created under cfg.WorkDir when it's set.
 	// os.MkdirTemp treats an empty dir argument as "use the OS default temp
@@ -1663,6 +1676,23 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	l.runs = append(l.runs, r)
 	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 	return r, true
+}
+
+// unknownExecutorProfile returns the first check (spec order) whose
+// Executor selection doesn't resolve against known, with the offending
+// profile name; ("", "") when every selection resolves. known == nil means
+// the daemon defines no named profiles, so any non-empty selection is
+// unknown.
+func unknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (check, profile string) {
+	for _, c := range spec.Checks {
+		if c.Executor == "" {
+			continue
+		}
+		if known == nil || !known(c.Executor) {
+			return c.Name, c.Executor
+		}
+	}
+	return "", ""
 }
 
 // effectiveMaxParallel normalizes a spec's max-parallel for run

@@ -93,6 +93,24 @@ type Params struct {
 	// run testcontainers against the host daemon.
 	Mounts []Mount
 
+	// Env is fixed operator-owned environment ("NAME=VALUE" strings, e.g.
+	// TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal), emitted as -e
+	// pairs BEFORE the GAUNTLET_* contract and service env — so on any
+	// collision the gauntlet-provided values win (last -e wins to every
+	// docker-compatible runtime). Config validation already rejects
+	// GAUNTLET_-prefixed names outright.
+	Env []string
+
+	// AddHosts are --add-host <host>:<gateway> entries (the
+	// testcontainers host.docker.internal pattern), pre-joined by the
+	// caller into "host:gateway" form.
+	AddHosts []string
+
+	// Memory/CPUs, when non-empty, are passed verbatim as --memory/--cpus
+	// resource ceilings. Empty emits no flag (the runtime's default).
+	Memory string
+	CPUs   string
+
 	// GitDir, when non-empty, is the daemon's bare repo path on the host
 	// (absolute — a relative -v source is a named volume to every
 	// docker-compatible runtime, not a bind). runArgs mounts it read-only
@@ -380,6 +398,20 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 	)
 	if p.GitDir != "" {
 		args = append(args, "-v", p.GitDir+":"+containerGitDir+":ro")
+	}
+	for _, ah := range p.AddHosts {
+		args = append(args, "--add-host", ah)
+	}
+	if p.Memory != "" {
+		args = append(args, "--memory", p.Memory)
+	}
+	if p.CPUs != "" {
+		args = append(args, "--cpus", p.CPUs)
+	}
+	// Fixed profile env FIRST: the GAUNTLET_* contract and per-run service
+	// env below must win any collision (last -e wins).
+	for _, kv := range p.Env {
+		args = append(args, "-e", kv)
 	}
 	args = append(args,
 		"-e", core.EnvBaseSHA+"="+job.BaseSHA,

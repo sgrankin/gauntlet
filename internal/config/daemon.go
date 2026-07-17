@@ -192,8 +192,39 @@ type Daemon struct {
 	GitHub    GitHub    `kdl:"github"`    // Repo=="" ⇒ disabled
 	Slack     Slack     `kdl:"slack"`     // Channel=="" ⇒ disabled
 	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (the default)
-	Executor  Executor  `kdl:"executor"`  // Kind=="" ⇒ "local"
 	Services  Services  `kdl:"services"`  // len(Allow)==0 ⇒ disabled
+
+	// Executors is the raw parse target for every `executor` node —
+	// applyDefaults splits it into Executor (the default profile: the one
+	// kind-less legacy block, or an implicit local executor when none is
+	// written) and Profiles (each `executor "name" kind="..."` block).
+	// Consumers read Executor/Profiles, never this.
+	Executors []Executor `kdl:"executor,multiple"`
+
+	// Executor is the resolved DEFAULT profile: what checks that name no
+	// `executor` in the repo spec run on, and what post-land hooks run on.
+	// Exactly the pre-profiles field, so a hand-assembled Daemon (tests)
+	// and every existing consumer keep working unchanged.
+	Executor Executor `kdl:"-"`
+
+	// Profiles is the resolved named executor profiles (the repo spec's
+	// `executor "name"` vocabulary, issue #3). Defining a profile is what
+	// allows a repo to select it; there is no separate allow-list.
+	// Selecting one grants the check every capability attached to it
+	// (mounts, env, sockets), so prefer several small profiles over one
+	// all-powerful default — see docs/config.md.
+	Profiles []Executor `kdl:"-"`
+
+	// MaxExecutions is the daemon-wide cap on concurrently executing
+	// bounded commands — candidate checks and post-land hooks, across
+	// every target, mode, speculation window, and executor profile. It
+	// lives at the top level (not on any one executor block) because it is
+	// a property of the host, not of a profile: one core.Slots budget
+	// covers everything. Zero (unset) means unlimited — the compatibility
+	// default; production deployments should set an explicit value sized
+	// to the host. Long-lived shared service containers do not count;
+	// their own instance limits apply.
+	MaxExecutions int `kdl:"max-executions"`
 
 	// Summarize is a pointer, unlike every other optional section above:
 	// every one of its fields has its own default (Model, APIKeyEnv,
@@ -255,26 +286,58 @@ type OTLP struct {
 
 // Executor selects the check-execution backend. Kind=="" defaults to "local"
 // (the in-process executor); "container" requires Image.
+// Executor is one execution profile. Two spellings share the node:
+//
+//	executor "container" { ... }         // legacy/default: the arg is the KIND
+//	executor "ci" kind="container" { ... } // named profile: the arg is the NAME
+//
+// The presence of the `kind` property is the discriminator — applyDefaults
+// resolves Arg into Kind (legacy) or Name (profile) and never leaves the
+// raw Arg for consumers. Profile names "local" and "container" are
+// rejected outright so the two spellings can never be confused.
+//
+// A profile is an operational guardrail, not a sandbox: selecting one in a
+// repo spec grants the check everything attached to it (mounts, fixed env,
+// a docker socket). The repo side can only NAME a profile; every host
+// capability stays operator-owned here — no per-check mount sources,
+// runtime flags, or resource overrides can come from the repo.
 type Executor struct {
-	Kind    string  `kdl:",arg"`    // "local" (default) | "container"
+	Arg  string `kdl:",arg"` // raw first argument; resolved by applyDefaults, never read downstream
+	Kind string `kdl:"kind"` // "local" | "container" (property form ⇒ named profile)
+	Name string `kdl:"-"`    // resolved profile name; "" = the default profile
+
 	Runtime string  `kdl:"runtime"` // "docker"|"podman"|"container"; default "container"
 	Image   string  `kdl:"image"`   // required when Kind=="container"
 	Workdir string  `kdl:"workdir"` // default "/workspace"
 	Caches  []Cache `kdl:"cache,multiple"`
 	Mounts  []Mount `kdl:"mount,multiple"`
 
-	// MaxExecutions is the daemon-wide cap on concurrently executing
-	// bounded commands — candidate checks and post-land hooks today, image
-	// builds when those exist — across every target, mode, and
-	// speculation window. Zero (unset) means unlimited: exactly the
-	// pre-cap behavior, kept as the compatibility default, though a
-	// production deployment should set an explicit value sized to the
-	// host. Long-lived shared service containers do NOT count against
-	// this; their own instance limits apply. Named max-executions rather
-	// than max-checks because hooks (and future builds) share the budget:
-	// a slot is "one process/container the executor is running right
-	// now", whatever asked for it.
-	MaxExecutions int `kdl:"max-executions"`
+	// Env is fixed, operator-owned environment values every check on this
+	// profile receives — non-secret topology like
+	// TESTCONTAINERS_HOST_OVERRIDE, not a secrets channel. Names may not
+	// collide with the GAUNTLET_* contract (validated); on any other
+	// collision the gauntlet-provided values win (they're appended after
+	// these). Works for both kinds: exported to the subprocess under
+	// "local", passed as -e pairs under "container".
+	Env []EnvVar `kdl:"env,multiple"`
+
+	// AddHosts is container-only: one --add-host <host>:<gateway> per
+	// entry (the testcontainers host.docker.internal pattern).
+	AddHosts []AddHost `kdl:"add-host,multiple"`
+
+	// Memory/CPUs are container-only resource ceilings, passed to the
+	// runtime verbatim as --memory/--cpus — same syntax and plausibility
+	// validation as a Service's fields of the same names. Empty emits no
+	// flag (the runtime's own default).
+	Memory string `kdl:"memory"`
+	CPUs   string `kdl:"cpus"`
+}
+
+// AddHost is one `add-host "hostname" "gateway"` pair on a container
+// executor profile.
+type AddHost struct {
+	Host    string `kdl:",arg"`
+	Gateway string `kdl:",arg"`
 }
 
 // Cache is one persistent named cache volume mounted into the container
@@ -505,11 +568,65 @@ func LoadDaemon(path string) (*Daemon, error) {
 	if err := kdl.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
+	if err := d.resolveExecutors(); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", path, err)
+	}
 	d.applyDefaults()
 	if err := d.validate(); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 	return &d, nil
+}
+
+// resolveExecutors splits the raw Executors nodes into the default profile
+// (Daemon.Executor — the single kind-less block, whose argument is the
+// KIND, exactly the pre-profiles spelling) and the named profiles
+// (Daemon.Profiles — each `executor "name" kind="..."` block, whose
+// argument is the NAME). The `kind` property's presence is the
+// discriminator; see the Executor type doc. Runs before applyDefaults so
+// per-profile defaulting and validation see resolved shapes only.
+func (d *Daemon) resolveExecutors() error {
+	seenDefault := false
+	for _, e := range d.Executors {
+		if e.Kind == "" {
+			// Legacy/default spelling: `executor "container" { ... }` —
+			// the argument is the kind.
+			if seenDefault {
+				return fmt.Errorf("executor: more than one default (kind-less) executor block; name additional ones with kind=, e.g. executor \"ci\" kind=\"container\"")
+			}
+			seenDefault = true
+			e.Kind = e.Arg
+			e.Arg = ""
+			d.Executor = e
+			continue
+		}
+		// Named profile: `executor "ci" kind="container" { ... }`.
+		if e.Arg == "" {
+			return fmt.Errorf("executor: a profile with kind=%q needs a name argument", e.Kind)
+		}
+		if e.Arg == "local" || e.Arg == "container" {
+			return fmt.Errorf("executor: profile may not be named %q — that word in the argument position means the DEFAULT executor's kind; pick another name", e.Arg)
+		}
+		e.Name = e.Arg
+		e.Arg = ""
+		d.Profiles = append(d.Profiles, e)
+	}
+	return nil
+}
+
+// applyExecutorDefaults fills one executor profile's container-only
+// defaults (Runtime, Workdir) when its kind is container. Kind itself is
+// only defaulted for the default profile (a named profile's kind= is
+// explicit by construction).
+func applyExecutorDefaults(e *Executor) {
+	if e.Kind == "container" {
+		if e.Runtime == "" {
+			e.Runtime = defaultRuntime
+		}
+		if e.Workdir == "" {
+			e.Workdir = defaultWorkdir
+		}
+	}
 }
 
 func (d *Daemon) applyDefaults() {
@@ -574,20 +691,17 @@ func (d *Daemon) applyDefaults() {
 		}
 	}
 
-	// Executor.Kind always defaults to "local", regardless of whether the
-	// "executor" node was present at all (an absent node ⇒ local executor).
-	// Runtime/Workdir only matter for the container executor, so only
-	// default them in that case.
+	// The default profile's Kind always defaults to "local", regardless of
+	// whether any "executor" node was present at all (an absent node ⇒
+	// local executor). Runtime/Workdir only matter for a container
+	// executor, so only default them in that case — for the default
+	// profile and every named profile alike.
 	if d.Executor.Kind == "" {
 		d.Executor.Kind = defaultExecutorKind
 	}
-	if d.Executor.Kind == "container" {
-		if d.Executor.Runtime == "" {
-			d.Executor.Runtime = defaultRuntime
-		}
-		if d.Executor.Workdir == "" {
-			d.Executor.Workdir = defaultWorkdir
-		}
+	applyExecutorDefaults(&d.Executor)
+	for i := range d.Profiles {
+		applyExecutorDefaults(&d.Profiles[i])
 	}
 
 	// Services: only defaulted when the block is enabled (len(Allow) > 0),
@@ -662,6 +776,132 @@ func (d *Daemon) applyDefaults() {
 // ever "" for kind "local", where mounts have no effect at all (see
 // cmd/gauntlet's buildExecutor), and a "" root would otherwise wrongly
 // match every absolute path via the separator-prefix check below.
+// validateExecutor validates one executor profile (the default profile or
+// a named one); label prefixes every error ("executor" for the default,
+// `executor "ci"` for a profile) so an operator can tell which block is at
+// fault.
+func validateExecutor(e *Executor, label string) error {
+	switch e.Kind {
+	case "local":
+		// Container-only options on a local profile are rejected loudly
+		// rather than silently no-opped ("reserved, rejected if set" house
+		// style): every one of these would otherwise read as configured
+		// while doing nothing.
+		switch {
+		case e.Image != "":
+			return fmt.Errorf("%s: image is container-only (kind is \"local\")", label)
+		case e.Runtime != "":
+			return fmt.Errorf("%s: runtime is container-only (kind is \"local\")", label)
+		case e.Workdir != "":
+			return fmt.Errorf("%s: workdir is container-only (kind is \"local\")", label)
+		case len(e.Caches) > 0:
+			return fmt.Errorf("%s: cache is container-only (kind is \"local\")", label)
+		case len(e.Mounts) > 0:
+			return fmt.Errorf("%s: mount is container-only (kind is \"local\")", label)
+		case len(e.AddHosts) > 0:
+			return fmt.Errorf("%s: add-host is container-only (kind is \"local\")", label)
+		case e.Memory != "":
+			return fmt.Errorf("%s: memory is container-only (kind is \"local\")", label)
+		case e.CPUs != "":
+			return fmt.Errorf("%s: cpus is container-only (kind is \"local\")", label)
+		}
+	case "container":
+		if e.Image == "" {
+			return fmt.Errorf("%s: image must not be empty for kind \"container\"", label)
+		}
+	default:
+		return fmt.Errorf("%s: kind must be \"local\" or \"container\", got %q", label, e.Kind)
+	}
+
+	// Env works for both kinds (exported to the subprocess under "local",
+	// -e pairs under "container"). The GAUNTLET_* namespace is the
+	// check-facing contract and may not be squatted on by config.
+	for _, ev := range e.Env {
+		if ev.Name == "" {
+			return fmt.Errorf("%s: env: name must not be empty", label)
+		}
+		if strings.Contains(ev.Name, "=") {
+			return fmt.Errorf("%s: env %q: name must not contain '='", label, ev.Name)
+		}
+		if strings.HasPrefix(ev.Name, "GAUNTLET_") {
+			return fmt.Errorf("%s: env %q: the GAUNTLET_* namespace is reserved for the check contract", label, ev.Name)
+		}
+	}
+
+	for _, ah := range e.AddHosts {
+		if ah.Host == "" || ah.Gateway == "" {
+			return fmt.Errorf("%s: add-host needs both a hostname and a gateway argument", label)
+		}
+		// --add-host's own syntax is host:gateway; a ':' inside either half
+		// would misparse rather than error, same failure shape as mounts.
+		if strings.Contains(ah.Host, ":") {
+			return fmt.Errorf("%s: add-host %q: hostname must not contain ':'", label, ah.Host)
+		}
+	}
+	if e.Memory != "" && !memoryPattern.MatchString(e.Memory) {
+		return fmt.Errorf("%s: memory %q: must match %s (e.g. \"2g\")", label, e.Memory, memoryPattern.String())
+	}
+	if e.CPUs != "" && !cpusPattern.MatchString(e.CPUs) {
+		return fmt.Errorf("%s: cpus %q: must match %s (e.g. \"1.5\")", label, e.CPUs, cpusPattern.String())
+	}
+
+	for _, c := range e.Caches {
+		if c.Name == "" {
+			return fmt.Errorf("%s: cache: name must not be empty", label)
+		}
+		if c.Path == "" {
+			return fmt.Errorf("%s: cache %q: path must not be empty", label, c.Name)
+		}
+	}
+	for _, m := range e.Mounts {
+		if m.Host == "" {
+			return fmt.Errorf("%s: mount: host must not be empty", label)
+		}
+		if !filepath.IsAbs(m.Host) {
+			return fmt.Errorf("%s: mount %q: host must be an absolute path", label, m.Host)
+		}
+		if m.Path == "" {
+			return fmt.Errorf("%s: mount %q: path must not be empty", label, m.Host)
+		}
+		if !filepath.IsAbs(m.Path) {
+			return fmt.Errorf("%s: mount %q: path must be an absolute path, got %q", label, m.Host, m.Path)
+		}
+		// ':' in either half silently corrupts the container runtime's
+		// "-v host:path[:ro]" argv syntax (internal/executor/container.go's
+		// runArgs just concatenates with ":") — the worst failure shape,
+		// since it misparses rather than erroring. Absolute Linux paths
+		// essentially never legitimately contain one.
+		if strings.Contains(m.Host, ":") {
+			return fmt.Errorf("%s: mount %q: host must not contain ':'", label, m.Host)
+		}
+		if strings.Contains(m.Path, ":") {
+			return fmt.Errorf("%s: mount %q: path must not contain ':', got %q", label, m.Host, m.Path)
+		}
+		// Reserved in-container paths are the executor's own contract with
+		// every check (the trial tree at Workdir, the result dir at
+		// reservedResultDir, the bare-repo mount at reservedGitDir — keep
+		// in sync with internal/executor/container.go's containerResultDir
+		// and containerGitDir) and must never be silently shadowed by an
+		// operator mount, including by a mount at some path UNDER one of
+		// them: a nested bind is legal to docker/podman/container and would
+		// partially, silently shadow the trial tree or result dir exactly
+		// as much as an exact-path collision would. pathAtOrUnder compares
+		// cleaned paths so a trailing slash, "//", or "/." spelling of the
+		// same path can't bypass the guard. Checked per profile: each
+		// container profile has its own workdir.
+		if pathAtOrUnder(m.Path, e.Workdir) {
+			return fmt.Errorf("%s: mount %q: path %q is at or under executor workdir %q", label, m.Host, m.Path, e.Workdir)
+		}
+		if pathAtOrUnder(m.Path, reservedResultDir) {
+			return fmt.Errorf("%s: mount %q: path %q is at or under the reserved result-dir mount %q", label, m.Host, m.Path, reservedResultDir)
+		}
+		if pathAtOrUnder(m.Path, reservedGitDir) {
+			return fmt.Errorf("%s: mount %q: path %q is at or under the reserved git-dir mount %q", label, m.Host, m.Path, reservedGitDir)
+		}
+	}
+	return nil
+}
+
 func pathAtOrUnder(path, reserved string) bool {
 	if reserved == "" {
 		return false
@@ -816,74 +1056,31 @@ func (d *Daemon) validate() error {
 		}
 	}
 
-	switch d.Executor.Kind {
-	case "local":
-		// no further requirements
-	case "container":
-		if d.Executor.Image == "" {
-			return fmt.Errorf("executor: image must not be empty for kind \"container\"")
+	if err := validateExecutor(&d.Executor, "executor"); err != nil {
+		return err
+	}
+	profileNames := make(map[string]bool, len(d.Profiles))
+	for i := range d.Profiles {
+		p := &d.Profiles[i]
+		label := fmt.Sprintf("executor %q", p.Name)
+		if profileNames[p.Name] {
+			return fmt.Errorf("%s: duplicate profile name", label)
 		}
-	default:
-		return fmt.Errorf("executor: kind must be \"local\" or \"container\", got %q", d.Executor.Kind)
+		profileNames[p.Name] = true
+		// A named profile's kind is explicit by construction
+		// (resolveExecutors requires the property), so unlike the default
+		// profile it never defaults — reject anything but the two kinds.
+		if p.Kind != "local" && p.Kind != "container" {
+			return fmt.Errorf("%s: kind must be \"local\" or \"container\", got %q", label, p.Kind)
+		}
+		if err := validateExecutor(p, label); err != nil {
+			return err
+		}
 	}
 	// Zero is "left unset" = unlimited (the field doc), so only a negative
 	// value — never a meaningful cap — is rejected.
-	if d.Executor.MaxExecutions < 0 {
-		return fmt.Errorf("executor: max-executions must not be negative, got %d", d.Executor.MaxExecutions)
-	}
-	for _, c := range d.Executor.Caches {
-		if c.Name == "" {
-			return fmt.Errorf("executor: cache: name must not be empty")
-		}
-		if c.Path == "" {
-			return fmt.Errorf("executor: cache %q: path must not be empty", c.Name)
-		}
-	}
-	for _, m := range d.Executor.Mounts {
-		if m.Host == "" {
-			return fmt.Errorf("executor: mount: host must not be empty")
-		}
-		if !filepath.IsAbs(m.Host) {
-			return fmt.Errorf("executor: mount %q: host must be an absolute path", m.Host)
-		}
-		if m.Path == "" {
-			return fmt.Errorf("executor: mount %q: path must not be empty", m.Host)
-		}
-		if !filepath.IsAbs(m.Path) {
-			return fmt.Errorf("executor: mount %q: path must be an absolute path, got %q", m.Host, m.Path)
-		}
-		// ':' in either half silently corrupts the container runtime's
-		// "-v host:path[:ro]" argv syntax (internal/executor/container.go's
-		// runArgs just concatenates with ":") — the worst failure shape,
-		// since it misparses rather than erroring. Absolute Linux paths
-		// essentially never legitimately contain one.
-		if strings.Contains(m.Host, ":") {
-			return fmt.Errorf("executor: mount %q: host must not contain ':'", m.Host)
-		}
-		if strings.Contains(m.Path, ":") {
-			return fmt.Errorf("executor: mount %q: path must not contain ':', got %q", m.Host, m.Path)
-		}
-		// Reserved in-container paths are the executor's own contract with
-		// every check (the trial tree at Workdir, the result dir at
-		// reservedResultDir, the bare-repo mount at reservedGitDir — keep
-		// in sync with internal/executor/container.go's containerResultDir
-		// and containerGitDir) and must
-		// never be silently shadowed by an operator mount, including by a
-		// mount at some path UNDER one of them: a nested bind is legal to
-		// docker/podman/container and would partially, silently shadow the
-		// trial tree or result dir exactly as much as an exact-path
-		// collision would. pathAtOrUnder compares cleaned paths so a
-		// trailing slash, "//", or "/." spelling of the same path can't
-		// bypass the guard.
-		if pathAtOrUnder(m.Path, d.Executor.Workdir) {
-			return fmt.Errorf("executor: mount %q: path %q is at or under executor workdir %q", m.Host, m.Path, d.Executor.Workdir)
-		}
-		if pathAtOrUnder(m.Path, reservedResultDir) {
-			return fmt.Errorf("executor: mount %q: path %q is at or under the reserved result-dir mount %q", m.Host, m.Path, reservedResultDir)
-		}
-		if pathAtOrUnder(m.Path, reservedGitDir) {
-			return fmt.Errorf("executor: mount %q: path %q is at or under the reserved git-dir mount %q", m.Host, m.Path, reservedGitDir)
-		}
+	if d.MaxExecutions < 0 {
+		return fmt.Errorf("max-executions must not be negative, got %d", d.MaxExecutions)
 	}
 
 	if len(d.Services.Allow) > 0 {
