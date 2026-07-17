@@ -1,0 +1,42 @@
+name: Release notes
+
+# Update an existing release's body from a committed notes file, in place
+# (gh release edit → PATCH; no rebuild, no re-tag, assets untouched). This is
+# the release-notes equivalent of the release workflow's branch trigger: for
+# environments whose git relay permits branch pushes but not the releases API.
+# Commit docs/releases/vX.Y.Z.md, then push a `release-notes/vX.Y.Z` branch.
+on:
+  push:
+    branches:
+      - 'release-notes/v*'
+
+permissions:
+  contents: write
+
+jobs:
+  edit-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Edit release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#release-notes/}"
+          case "$VERSION" in
+            v[0-9]*) ;;
+            *) echo "version must match ^v[0-9] (got '$VERSION')" >&2; exit 1 ;;
+          esac
+          file="docs/releases/${VERSION}.md"
+          if [ ! -f "$file" ]; then
+            echo "notes file $file not found" >&2
+            exit 1
+          fi
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file "$file"
+
+      # The trigger branch is one-shot; drop it once the notes are applied.
+      - name: Delete trigger branch
+        if: always()
+        run: git push origin --delete "$GITHUB_REF_NAME" || true
