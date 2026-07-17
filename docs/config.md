@@ -193,10 +193,14 @@ summarize {
   repo side can only *name* a profile; mounts, images, env, and resource
   ceilings all stay here, operator-owned. A spec naming an undefined
   profile is rejected before any of its commands start. One caveat: the
-  shared-services endpoint mode still follows the *default* executor's
-  kind, so checks that declare `needs` should run on profiles of that same
-  kind — a container-profile check on a local-default daemon would get
-  host-published service endpoints it may not be able to reach.
+  shared-services machinery still follows the *default* executor — its
+  kind picks the endpoint mode, and its **runtime** owns the shared
+  service network. Checks that declare `needs` should therefore run on
+  the default executor or on profiles matching its kind *and* runtime: a
+  container-profile check on a local-default daemon would get
+  host-published endpoints it may not be able to reach, and a podman
+  profile beside a docker default would be handed a `--network` that
+  doesn't exist in its runtime.
 
 - **`max-executions`** (top level) caps how many bounded commands the
   daemon runs concurrently host-wide — candidate checks and post-land

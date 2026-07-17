@@ -79,6 +79,42 @@ executor "ci" kind="container" {
 	}
 }
 
+// TestLoadDaemon_MaxExecutionsOnExecutorBlockStillLoads: the cap was
+// briefly documented on the executor block; a config written then must
+// keep loading, adopted into the canonical top-level field.
+func TestLoadDaemon_MaxExecutionsOnExecutorBlockStillLoads(t *testing.T) {
+	d, err := loadDaemonString(t, profileTestBase+`
+executor "container" {
+    image "ci:latest"
+    max-executions 6
+}
+`)
+	if err != nil {
+		t.Fatalf("LoadDaemon: %v", err)
+	}
+	if d.MaxExecutions != 6 {
+		t.Errorf("MaxExecutions = %d, want the executor-block value adopted", d.MaxExecutions)
+	}
+
+	if _, err := loadDaemonString(t, profileTestBase+`
+max-executions 4
+executor "container" {
+    image "ci:latest"
+    max-executions 6
+}
+`); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Errorf("both spellings set: err = %v, want a keep-the-top-level-one error", err)
+	}
+
+	if _, err := loadDaemonString(t, profileTestBase+`
+executor "a" kind="local" {
+    max-executions 6
+}
+`); err == nil || !strings.Contains(err.Error(), "daemon-wide") {
+		t.Errorf("per-profile cap: err = %v, want a daemon-wide rejection", err)
+	}
+}
+
 func TestLoadDaemon_NoExecutorNodeStillDefaultsLocal(t *testing.T) {
 	d, err := loadDaemonString(t, profileTestBase)
 	if err != nil {

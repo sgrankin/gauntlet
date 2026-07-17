@@ -101,6 +101,14 @@ error, like an undeclared `needs` service — never a red verdict). The
 `GAUNTLET_*` environment contract, result-file protocol, log capture,
 timeouts, and cancellation are identical on every profile.
 
+One combination to avoid: `executor "<name>"` together with `needs`.
+Shared-service endpoints are wired for the daemon's *default* executor
+(its kind picks published-port vs shared-network mode; its runtime owns
+the network), so a `needs` check on a profile of a different kind or
+runtime can receive endpoints it cannot reach. Keep service-dependent
+checks on the default executor unless your operator confirms the profile
+matches it.
+
 ## Check environment reference
 
 Every executor (local or container) sets these environment variables before

@@ -331,6 +331,14 @@ type Executor struct {
 	// flag (the runtime's own default).
 	Memory string `kdl:"memory"`
 	CPUs   string `kdl:"cpus"`
+
+	// MaxExecutions is DEPRECATED here: the cap is daemon-wide (spanning
+	// every profile), so it lives at the top level (Daemon.MaxExecutions)
+	// now. The field survives on the default block only so a config
+	// written when it was documented here keeps loading — resolveExecutors
+	// adopts the value into the top-level field (and rejects it on a
+	// named profile, or when both spellings are set).
+	MaxExecutions int `kdl:"max-executions"`
 }
 
 // AddHost is one `add-host "hostname" "gateway"` pair on a container
@@ -597,12 +605,25 @@ func (d *Daemon) resolveExecutors() error {
 			seenDefault = true
 			e.Kind = e.Arg
 			e.Arg = ""
+			// Deprecated spelling adoption: max-executions used to live on
+			// the executor block; it's daemon-wide, so the top-level field
+			// is canonical now, but the old location keeps working.
+			if e.MaxExecutions != 0 {
+				if d.MaxExecutions != 0 {
+					return fmt.Errorf("max-executions is set both at the top level and on the executor block; keep the top-level one")
+				}
+				d.MaxExecutions = e.MaxExecutions
+				e.MaxExecutions = 0
+			}
 			d.Executor = e
 			continue
 		}
 		// Named profile: `executor "ci" kind="container" { ... }`.
 		if e.Arg == "" {
 			return fmt.Errorf("executor: a profile with kind=%q needs a name argument", e.Kind)
+		}
+		if e.MaxExecutions != 0 {
+			return fmt.Errorf("executor %q: max-executions is daemon-wide, not per-profile; set it at the top level", e.Arg)
 		}
 		if e.Arg == "local" || e.Arg == "container" {
 			return fmt.Errorf("executor: profile may not be named %q — that word in the argument position means the DEFAULT executor's kind; pick another name", e.Arg)
