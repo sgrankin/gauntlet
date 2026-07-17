@@ -237,15 +237,25 @@ summarize {
   plausible); a path a merge changed relative to *all* its parents (an
   auto-merge product, including gauntlet's own trial merge) gets that
   merge's time, anything matching a parent keeps its deeper
-  history-derived time; a rename counts as a change at the new path;
-  symlink timestamps are set without following the link; directory
-  mtimes are untouched. The pass costs one bounded history walk per
-  export (two git subprocesses, stopping as soon as every path is
-  stamped; cost is recorded on the run's trace span). A walk failure
-  fails the trial as an infrastructure error — there is deliberately no
-  silent wall-clock fallback. This is an operator knob, not a repo-spec
-  one: the repo must not impose a potentially expensive host-side walk
-  on the daemon.
+  history-derived time — in particular, a trial merge whose tree equals
+  the candidate's (the up-to-date-candidate shape) owns nothing, so
+  re-trials of the same content restamp identically; a rename counts as
+  a change at the new path; symlink timestamps are set without
+  following the link; directory mtimes are untouched; only what the
+  export materialized is stamped (`export-ignore`'d paths and submodule
+  gitlinks are simply absent). One disclosed approximation, matching
+  the standard `git-restore-mtime` tool: "last commit that changed the
+  path" is resolved in commit-date order across the whole history, so
+  when a merge discarded one side's change, a discarded-but-newer
+  commit can win the stamp where `git log -1 -- path` would follow the
+  surviving lineage — still fully deterministic per commit (the
+  property caches key on), just not always the content-lineage time.
+  The pass costs one bounded history walk per export (a single git
+  subprocess, stopping as soon as every path is stamped; cost is
+  recorded on the run's trace span). A walk failure fails the trial as
+  an infrastructure error — there is deliberately no silent wall-clock
+  fallback. This is an operator knob, not a repo-spec one: the repo
+  must not impose a potentially expensive host-side walk on the daemon.
 - **`services`** — gates shared, cached service instances a check spec's
   `service`/`needs` nodes can request (`internal/services`); see
   [checks.md's "Shared services"](checks.md#shared-services) for the full

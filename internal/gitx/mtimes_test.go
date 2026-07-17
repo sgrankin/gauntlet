@@ -248,6 +248,109 @@ func TestRestoreMtimes_SyntheticMerge(t *testing.T) {
 	}
 }
 
+// TestRestoreMtimes_TreesameMergeInheritsCandidateTimes pins the MOST
+// common trial-merge shape: the candidate is already based on the current
+// tip, so the trial merge's tree is identical to the candidate's own tree.
+// git log emits NO diff entry at all for a tree-identical parent — not an
+// empty one — and a naive per-entry intersection then mistakes the merge
+// for an ordinary commit and stamps every candidate path with the merge's
+// own (wall-clock, per-trial) committer time: exactly the nondeterminism
+// this feature exists to remove. The walker counts entries against %P's
+// parent count instead, so the merge owns nothing and candidate paths
+// keep the candidate commit's time across re-trials.
+func TestRestoreMtimes_TreesameMergeInheritsCandidateTimes(t *testing.T) {
+	ctx := context.Background()
+	w := newMtimeRepo(t)
+	base := w.commitAt(t1, "base", map[string]string{"base.txt": "b\n"})
+	w.git("checkout", "-q", "-b", "cand")
+	cand := w.commitAt(t2, "cand", map[string]string{"cand.txt": "c\n"})
+
+	repo, _ := w.open()
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	tm, err := repo.MergeTree(ctx, base, cand)
+	if err != nil || !tm.Clean {
+		t.Fatalf("MergeTree: clean=%v err=%v", tm.Clean, err)
+	}
+	merge, err := repo.CommitTree(ctx, tm.TreeOID, []string{base, cand}, "trial", core.Identity{Name: "G", Email: "g@x"})
+	if err != nil {
+		t.Fatalf("CommitTree: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := repo.ExportTree(ctx, merge, dir); err != nil {
+		t.Fatalf("ExportTree: %v", err)
+	}
+	if _, err := repo.RestoreMtimes(ctx, merge, dir); err != nil {
+		t.Fatalf("RestoreMtimes: %v", err)
+	}
+	if got := mtimeOf(t, filepath.Join(dir, "cand.txt")); !got.Equal(t2) {
+		t.Errorf("cand.txt = %v, want the candidate commit's %v — a treesame trial merge must not own its paths", got, t2)
+	}
+	if got := mtimeOf(t, filepath.Join(dir, "base.txt")); !got.Equal(t1) {
+		t.Errorf("base.txt = %v, want inherited %v", got, t1)
+	}
+}
+
+// TestRestoreMtimes_ExportIgnoredPathsSkipped: the export (git archive)
+// honors export-ignore attributes, so a tracked-but-unexported path must
+// neither be stamped nor fail the pass — the pending set is what is on
+// disk, never the raw tree listing.
+func TestRestoreMtimes_ExportIgnoredPathsSkipped(t *testing.T) {
+	ctx := context.Background()
+	w := newMtimeRepo(t)
+	tip := w.commitAt(t1, "c1", map[string]string{
+		".gitattributes": "secret.txt export-ignore\n",
+		"secret.txt":     "s\n",
+		"a.txt":          "x\n",
+	})
+	repo, _ := w.open()
+
+	dir := t.TempDir()
+	if err := repo.ExportTree(ctx, tip, dir); err != nil {
+		t.Fatalf("ExportTree: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "secret.txt")); !os.IsNotExist(err) {
+		t.Fatalf("precondition: the export should omit secret.txt (lstat err=%v)", err)
+	}
+	stats, err := repo.RestoreMtimes(ctx, tip, dir)
+	if err != nil {
+		t.Fatalf("RestoreMtimes on an export-ignore repo: %v", err)
+	}
+	if stats.Paths != 2 { // a.txt + .gitattributes — never the unexported path
+		t.Errorf("stats.Paths = %d, want 2", stats.Paths)
+	}
+	if got := mtimeOf(t, filepath.Join(dir, "a.txt")); !got.Equal(t1) {
+		t.Errorf("a.txt = %v, want %v", got, t1)
+	}
+}
+
+// TestRestoreMtimes_ControlByteFilename: 0x01 — the header sentinel in the
+// log format — is a legal filename byte, and -z emits paths raw. The
+// NUL-token framing must treat it as data, in the tree and in history.
+func TestRestoreMtimes_ControlByteFilename(t *testing.T) {
+	ctx := context.Background()
+	w := newMtimeRepo(t)
+	w.commitAt(t1, "c1", map[string]string{"plain.txt": "p\n"})
+	tip := w.commitAt(t2, "c2", map[string]string{"we\x01ird.txt": "w\n"})
+	repo, _ := w.open()
+
+	dir := t.TempDir()
+	if err := repo.ExportTree(ctx, tip, dir); err != nil {
+		t.Fatalf("ExportTree: %v", err)
+	}
+	if _, err := repo.RestoreMtimes(ctx, tip, dir); err != nil {
+		t.Fatalf("RestoreMtimes with a 0x01 filename: %v", err)
+	}
+	if got := mtimeOf(t, filepath.Join(dir, "we\x01ird.txt")); !got.Equal(t2) {
+		t.Errorf("0x01-named file = %v, want %v", got, t2)
+	}
+	if got := mtimeOf(t, filepath.Join(dir, "plain.txt")); !got.Equal(t1) {
+		t.Errorf("plain.txt = %v, want %v", got, t1)
+	}
+}
+
 func TestRestoreMtimes_SymlinkNotFollowed(t *testing.T) {
 	ctx := context.Background()
 	w := newMtimeRepo(t)

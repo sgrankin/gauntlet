@@ -69,7 +69,7 @@ type GitRepo interface {
 	// against.
 	ExportTree(ctx context.Context, tree, dir string) error
 
-	// RestoreMtimes rewrites every tracked file's mtime under dir — a
+	// RestoreMtimes rewrites every exported file's mtime under dir — a
 	// fresh ExportTree of commit's tree — to the committer time of the
 	// last commit that changed that path, so repeated exports of the same
 	// commit are metadata-identical (deterministic per-path mtimes for
@@ -103,10 +103,10 @@ type GitRepo interface {
 // observable, not guessed.
 type MtimeStats struct {
 	// Commits is how many history entries the walk consumed. A merge
-	// contributes one entry per parent, so this can exceed the commit
-	// count.
+	// contributes one entry per parent it differs from, so this can
+	// exceed the commit count.
 	Commits int
-	// Paths is how many tracked paths were stamped.
+	// Paths is how many exported paths were stamped.
 	Paths int
 }
 

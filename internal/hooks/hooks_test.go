@@ -28,6 +28,9 @@ type fakeGitRepo struct {
 	exported  []string // tree-ish args, in call order
 	dirs      []string // dirs passed, in call order
 	exportErr error
+
+	mtimeErr     error
+	mtimeCommits []string // commits passed to RestoreMtimes, in call order
 }
 
 func (f *fakeGitRepo) Fetch(ctx context.Context) error { return nil }
@@ -66,6 +69,12 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 }
 
 func (f *fakeGitRepo) RestoreMtimes(ctx context.Context, commit, dir string) (core.MtimeStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mtimeCommits = append(f.mtimeCommits, commit)
+	if f.mtimeErr != nil {
+		return core.MtimeStats{}, f.mtimeErr
+	}
 	return core.MtimeStats{}, nil
 }
 func (f *fakeGitRepo) Pin(ctx context.Context, oid string) error   { return nil }
@@ -215,6 +224,9 @@ func TestRunner_RunsHooksInOrderWithLandedCoordinates(t *testing.T) {
 
 	if got := git.exported; len(got) != 1 || got[0] != "merge-sha" {
 		t.Fatalf("ExportTree called with %v, want [merge-sha] once", got)
+	}
+	if len(git.mtimeCommits) != 0 {
+		t.Fatalf("RestoreMtimes called with HistoryMtimes off (the default): %v", git.mtimeCommits)
 	}
 
 	// Every hook fires an EventHookStarted immediately before its
@@ -582,6 +594,64 @@ func TestRunner_ExportFailureSkipsHooks(t *testing.T) {
 
 	if exec.callCount() != 0 {
 		t.Fatalf("exec called %d times, want 0 (export failed)", exec.callCount())
+	}
+}
+
+// TestRunner_HistoryMtimes: with Params.HistoryMtimes on, the hook export
+// gets the same deterministic-mtimes pass trial exports do, keyed off the
+// landing's MergeSHA; off (the default), RestoreMtimes is never touched.
+func TestRunner_HistoryMtimes(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	r := New(Params{
+		Hooks:         map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Git:           git,
+		Exec:          exec,
+		Emit:          (&recordingEmit{}).fn,
+		WorkDir:       t.TempDir(),
+		Log:           io.Discard,
+		HistoryMtimes: true,
+	})
+
+	rec := &core.RunRecord{RunID: "run-7", Target: "main", MergeSHA: "merge-sha"}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	if exec.callCount() != 1 {
+		t.Fatalf("exec called %d times, want 1", exec.callCount())
+	}
+	if got := git.mtimeCommits; len(got) != 1 || got[0] != "merge-sha" {
+		t.Fatalf("RestoreMtimes commits = %v, want [merge-sha] once", got)
+	}
+}
+
+// TestRunner_HistoryMtimesFailureSkipsHooks mirrors the adjacent
+// export-failure contract: a failed mtimes pass must not run hooks against
+// a tree whose metadata isn't what the config promises, and it fails
+// before any EventHookStarted, so no Finished is owed.
+func TestRunner_HistoryMtimesFailureSkipsHooks(t *testing.T) {
+	git := &fakeGitRepo{mtimeErr: errors.New("walk truncated")}
+	exec := &fakeExecutor{}
+	emit := &recordingEmit{}
+	r := New(Params{
+		Hooks:         map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Git:           git,
+		Exec:          exec,
+		Emit:          emit.fn,
+		WorkDir:       t.TempDir(),
+		Log:           io.Discard,
+		HistoryMtimes: true,
+	})
+
+	rec := &core.RunRecord{RunID: "run-8", Target: "main", MergeSHA: "merge-sha"}
+	r.runLanding(context.Background(), landedEvent("main", rec), nil)
+
+	if exec.callCount() != 0 {
+		t.Fatalf("exec called %d times, want 0 (mtimes pass failed)", exec.callCount())
+	}
+	for _, ev := range emit.snapshot() {
+		if ev.Kind == core.EventHookStarted || ev.Kind == core.EventHookFinished {
+			t.Fatalf("got %v after a pre-hook failure; no hook events are owed", ev.Kind)
+		}
 	}
 }
 
