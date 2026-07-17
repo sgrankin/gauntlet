@@ -359,10 +359,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		// Mirrors LocalExecutor: exit 0 hands the result file's content
 		// back verbatim; validation (and the single-root-cause failure on
 		// a bad result) is the queue's job.
-		var image string
-		if data, err := os.ReadFile(resultFile); err == nil {
-			image = strings.TrimSpace(string(data))
-		}
+		image := readImageResult(resultFile)
 		return core.CheckResult{
 			Name:     job.Name,
 			Status:   core.CheckPassed,

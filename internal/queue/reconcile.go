@@ -546,17 +546,34 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 			// HERE, before the result is stored or evented, so a bad
 			// result is the build's own red verdict (one root cause;
 			// consumers block on it) and never N consumer failures.
-			if imgName, isImage := imageNodeName(name); isImage && res.Err == nil && res.Status == core.CheckPassed {
-				if ref, err := validImageRef(res.Image); err != nil {
+			if imgName, isImage := imageNodeName(name); isImage && res.Err == nil {
+				switch res.Status {
+				case core.CheckPassed:
+					if ref, err := validImageRef(res.Image); err != nil {
+						res.Status = core.CheckFailed
+						res.Image = ""
+						if res.Output != "" {
+							res.Output += "\n"
+						}
+						res.Output += "gauntlet: " + err.Error()
+					} else {
+						res.Image = ref
+						r.imageRefs[imgName] = ref
+					}
+				case core.CheckSkipped:
+					// Builds have no skipped verdict (the shipped executors
+					// can't produce one for an ImageBuild job), but the
+					// Executor is an injected interface: a green-shaped
+					// result with NO validated ref would release consumers
+					// onto the profile's static image — silently different
+					// bytes than claimed, the exact hole this feature
+					// closes. Flip it red so the guarantee holds by
+					// construction, whatever the executor did.
 					res.Status = core.CheckFailed
-					res.Image = ""
 					if res.Output != "" {
 						res.Output += "\n"
 					}
-					res.Output += "gauntlet: " + err.Error()
-				} else {
-					res.Image = ref
-					r.imageRefs[imgName] = ref
+					res.Output += "gauntlet: an image build cannot report skipped"
 				}
 			}
 			delete(r.inflight, name)
@@ -1829,12 +1846,25 @@ func validImageRef(raw string) (string, error) {
 		return "", fmt.Errorf("build wrote no image reference to $%s (e.g. docker buildx --iidfile \"$%s\")", core.EnvImageResultFile, core.EnvImageResultFile)
 	}
 	if strings.ContainsAny(ref, " \t\n\r") {
-		return "", fmt.Errorf("image result must be exactly one reference, got %q", ref)
+		return "", fmt.Errorf("image result must be exactly one reference, got %q", truncateForError(ref))
 	}
 	if localImageIDPattern.MatchString(ref) || digestRefPattern.MatchString(ref) {
 		return ref, nil
 	}
-	return "", fmt.Errorf("image result %q is not immutable: need a local image ID (sha256:<64 hex>) or a digest-pinned reference (<repo>@sha256:<64 hex>), never a tag", ref)
+	return "", fmt.Errorf("image result %q is not immutable: need a local image ID (sha256:<64 hex>) or a digest-pinned reference (<repo>@sha256:<64 hex>), never a tag", truncateForError(ref))
+}
+
+// truncateForError bounds captured result content quoted into an error
+// message: the executors already cap the read (executor.
+// maxImageResultBytes), and this keeps the message itself readable — a
+// misdirected build log should yield a pointed one-line diagnosis, not a
+// wall of quoted output on every channel.
+func truncateForError(s string) string {
+	const cap = 200
+	if len(s) <= cap {
+		return s
+	}
+	return s[:cap] + "..."
 }
 
 var (

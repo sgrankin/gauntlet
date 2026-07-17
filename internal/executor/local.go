@@ -186,10 +186,7 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		// file's content back verbatim for the QUEUE to validate (a
 		// missing/empty/mutable result is a build failure there, with one
 		// root cause — never N consumer failures here).
-		var image string
-		if data, err := os.ReadFile(resultFile); err == nil {
-			image = strings.TrimSpace(string(data))
-		}
+		image := readImageResult(resultFile)
 		return core.CheckResult{
 			Name:     job.Name,
 			Status:   core.CheckPassed,
@@ -210,6 +207,30 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		LogPath:  logPath,
 		Duration: duration,
 	}
+}
+
+// maxImageResultBytes bounds how much of an image-build result file is
+// ever read back: a legitimate reference is well under 1 KiB, and a build
+// that misdirects its whole log into the file (`build > "$FILE"` instead
+// of --iidfile) must not ride megabytes of it into the result, every
+// channel, and history — the truncated content still fails the queue's
+// validation, which is all it needs to do.
+const maxImageResultBytes = 4096
+
+// readImageResult reads an image build's captured result, bounded and
+// trimmed. Read errors read as "" (the queue rejects an empty result with
+// a pointed message either way).
+func readImageResult(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxImageResultBytes))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // resultFileEnv picks which result-file variable a job's command sees:

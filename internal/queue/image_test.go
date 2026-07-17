@@ -7,10 +7,12 @@
 package queue
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/executor"
 )
 
 const localID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -195,6 +197,51 @@ func TestImage_UnconsumedImageStillBuildsAndGates(t *testing.T) {
 	recs := h.ch.Records()
 	if recs[len(recs)-1].Outcome != core.OutcomeLanded {
 		t.Fatalf("Outcome = %v, want Landed", recs[len(recs)-1].Outcome)
+	}
+}
+
+// TestIntegration_ImageBuildEndToEnd exercises the whole image seam with a
+// REAL LocalExecutor subprocess: spec parse -> image node -> the executor
+// exporting GAUNTLET_IMAGE_RESULT_FILE (and not the check result file) ->
+// the build script writing an ID -> queue validation -> the consumer job
+// stamped with the captured identity -> both history rows carrying it.
+// (The txtar scenario harnesses run the gated executor, which never execs
+// a command, so this executor seam lives here in the integration tier —
+// same placement as the result-file and env-contract rows.)
+func TestIntegration_ImageBuildEndToEnd(t *testing.T) {
+	h := newIntegrationHarness(t, nil, executor.LocalExecutor{})
+	h.d.cfg.ImageCapableProfile = func(string) bool { return true }
+	remote := h.remote
+	remote.Seed("main", map[string]string{"README.md": "seed\n"})
+
+	files := map[string]string{
+		testCheckSpecPath: "image \"go-ci\" {\n    command \"/bin/sh\" \"build.sh\"\n}\n" +
+			"check \"unit\" {\n    command \"/bin/sh\" \"unit.sh\"\n    image \"go-ci\"\n}\n",
+		"build.sh": fmt.Sprintf(`#!/bin/sh
+set -eu
+[ -n "$%s" ] || exit 1
+[ -z "${%s+x}" ] || { echo "check result file leaked into a build"; exit 1; }
+printf '%s' > "$%s"
+`, core.EnvImageResultFile, core.EnvResultFile, localID, core.EnvImageResultFile),
+		"unit.sh": "#!/bin/sh\nexit 0\n",
+	}
+	remote.PushCandidate("main", "alice", "widget", files)
+
+	before := len(h.ch.Records())
+	h.reconcile()
+	rec := h.pumpUntilRecord(before)
+
+	if rec.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v, want Landed; Detail=%q Checks=%+v", rec.Outcome, rec.Detail, rec.Checks)
+	}
+	if len(rec.Checks) != 2 || rec.Checks[0].Name != "image:go-ci" || rec.Checks[1].Name != "unit" {
+		t.Fatalf("Checks = %+v, want [image:go-ci unit]", rec.Checks)
+	}
+	if rec.Checks[0].Image != localID {
+		t.Errorf("build row Image = %q, want the ID the script wrote", rec.Checks[0].Image)
+	}
+	if rec.Checks[1].Image != localID {
+		t.Errorf("consumer row Image = %q, want the consumed identity (provenance)", rec.Checks[1].Image)
 	}
 }
 
