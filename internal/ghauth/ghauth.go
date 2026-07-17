@@ -186,7 +186,12 @@ func (a *App) Token(ctx context.Context) (string, error) {
 	a.minting = m
 	a.mu.Unlock()
 
-	m.token, m.expiry, m.err = a.exchange(ctx)
+	// The exchange runs detached from the initiating caller's
+	// cancellation (the classic hand-rolled-singleflight footgun): its
+	// result is shared by every waiter, so one caller's dying ctx must
+	// not manufacture a "credential failure" for the healthy ones.
+	// exchange's own mintTimeout keeps it bounded regardless.
+	m.token, m.expiry, m.err = a.exchange(context.WithoutCancel(ctx))
 
 	a.mu.Lock()
 	if m.err == nil {

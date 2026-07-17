@@ -48,11 +48,22 @@ func WithTokenSource(ts TokenSource, host string) Option {
 // case scopes the credential: git's prompt always names the host it is
 // asking for ("Password for 'https://x-access-token@github.com': "), so
 // a prompt for any host other than the configured one — an unexpected
-// redirect, a rogue submodule URL — gets a hard refusal instead of a
-// forwarded token.
+// redirect (git's http.followRedirects default chases them on the
+// initial request), a rogue submodule URL — gets a hard refusal instead
+// of a forwarded token.
+//
+// The match is ANCHORED on the delimiters that bound a host inside git's
+// prompt URL — "://" or "@" before, "'" (prompt quote) or "/" (path,
+// when credential.useHttpPath is set) after — never a bare substring: a
+// substring match would hand the token to "github.com.evil.example" or
+// "evil-github.com", which both CONTAIN "github.com" (review finding on
+// the first cut of this file, empirically reproduced). A hostname can
+// contain neither "/" nor "'", so the anchors can't be smuggled into a
+// hostile host.
 const askpassScript = `#!/bin/sh
 case "$1" in
-*"$GAUNTLET_ASKPASS_HOST"*) ;;
+*"://$GAUNTLET_ASKPASS_HOST'"* | *"@$GAUNTLET_ASKPASS_HOST'"* | \
+*"://$GAUNTLET_ASKPASS_HOST/"* | *"@$GAUNTLET_ASKPASS_HOST/"*) ;;
 *) exit 1 ;;
 esac
 case "$1" in
@@ -105,6 +116,12 @@ func (r *Repo) runAuthed(ctx context.Context, args ...string) (out, token string
 		"GAUNTLET_ASKPASS_HOST="+r.authHost,
 		"GAUNTLET_ASKPASS_USER=x-access-token",
 		"GAUNTLET_ASKPASS_PASS="+tok,
+		// isAuthRejection (and isStaleLease) classify by matching git's
+		// English messages, which git localizes: an operator locale with
+		// git-l10n installed would silently defeat the retry contract.
+		// Appended last, so it wins any earlier LC_ALL (os/exec keeps
+		// the last duplicate).
+		"LC_ALL=C",
 	)
 	out, err = runGitEnv(ctx, r.dir, nil, env, args...)
 	return out, tok, err

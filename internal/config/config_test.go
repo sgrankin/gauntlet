@@ -1782,6 +1782,27 @@ github "acme/widgets" {
 			wantErr: "does not match the github block's host",
 		},
 		{
+			name: "github app auth remote with a percent-encoded slash",
+			kdl: `
+remote "https://github.com/acme%2Fwidgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			// url.Parse decodes %2F, but git sends it raw and GitHub 404s
+			// it — so the escaped path must NOT canonicalize to acme/widgets.
+			wantErr: "does not match",
+		},
+		{
 			name: "github app auth remote repo mismatch",
 			kdl: `
 remote "https://github.com/acme/other.git"

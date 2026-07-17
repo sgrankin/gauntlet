@@ -141,15 +141,26 @@ summarize {
     credential-free, and canonicalize to the same host and owner/repo as
     this block; any mismatch is a startup error, never a silent fallback
     to ambient auth. Credentials reach git through an ephemeral,
-    secretless `GIT_ASKPASS` helper scoped to the configured host (an
-    unexpected redirect to any other host gets nothing) — the token is
-    never in a process argument, the persistent remote URL, git config,
-    or anything a check can read through `GAUNTLET_GIT_DIR`. A clearly
-    rejected credential (HTTP 401) is invalidated and retried exactly
-    once with a fresh mint; a 403 (valid but under-privileged) is not.
-    The private key file must not be group/other-accessible (`chmod
-    0600`); rotating it requires a daemon restart, token refresh does
+    secretless `GIT_ASKPASS` helper whose host match is anchored on the
+    configured host (a credential prompt for any other host — an
+    unexpected redirect, a rogue submodule — is refused, including
+    look-alikes like `github.com.evil.example`). The token is never in a
+    process argument, the persistent remote URL, git config, or anything
+    a check can read through `GAUNTLET_GIT_DIR`. A clearly rejected
+    credential (HTTP 401) is invalidated and retried exactly once with a
+    fresh mint; a 403 (valid but under-privileged) is not. The private
+    key file must not be group/other-accessible (`chmod 0600`, or
+    `0400`); rotating it requires a daemon restart, token refresh does
     not.
+
+    Two deployment notes. Because the permission check rejects any
+    group/other access, a Kubernetes secret volume needs `defaultMode:
+    0400` and must avoid `fsGroup` (which makes kubelet chmod projected
+    files group-readable on a read-only mount you cannot `chmod` back) —
+    a `0400` systemd `LoadCredential` or an init-container copy to a
+    private path both work. And because the askpass helper is `exec`'d, a
+    `noexec` `TMPDIR`/`/tmp` breaks authenticated git; point `TMPDIR` at
+    an exec-capable directory if the host hardens `/tmp`.
 
     Minimal App repository permissions: **Contents: Read and write**
     (fetch, trial-merge pushes, landing the target branch) and **Commit

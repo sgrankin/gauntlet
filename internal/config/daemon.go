@@ -896,7 +896,12 @@ func validateAppRemote(remote, apiURL, repo string) error {
 		return fmt.Errorf("github: auth \"app\": remote host %q does not match the github block's host %q — app credentials are scoped to one host, never forwarded", u.Host, wantHost)
 	}
 
-	got := strings.Trim(u.Path, "/")
+	// EscapedPath, not Path: url.Parse decodes %2F to "/", so a remote
+	// path "acme%2Fwidgets" would otherwise validate equal to owner/repo
+	// "acme/widgets" — yet git sends the raw %2F, which GitHub 404s. The
+	// contract is a startup error, never a runtime surprise, so compare
+	// what git will actually send.
+	got := strings.Trim(u.EscapedPath(), "/")
 	if n := len(got); n >= 4 && strings.EqualFold(got[n-4:], ".git") {
 		got = got[:n-4]
 	}
