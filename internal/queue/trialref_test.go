@@ -45,10 +45,15 @@ func TestTrialRef_PublishVerifyLand(t *testing.T) {
 	if len(merged) != 1 {
 		t.Fatalf("EventTrialMerged count = %d, want 1", len(merged))
 	}
-	if merged[0].Record == nil || merged[0].Record.MergeSHA == "" {
-		t.Fatalf("EventTrialMerged carries no MergeSHA: %+v", merged[0].Record)
+	// A non-terminal event must NOT carry a Record (slack/history key off
+	// that as "terminal"); the merge identity rides on MergeSHA instead.
+	if merged[0].Record != nil {
+		t.Fatalf("EventTrialMerged carries a Record: %+v", merged[0].Record)
 	}
-	publishedMerge := merged[0].Record.MergeSHA
+	if merged[0].MergeSHA == "" {
+		t.Fatal("EventTrialMerged carries no MergeSHA")
+	}
+	publishedMerge := merged[0].MergeSHA
 	if got := h.git.ref(trialRef); got != publishedMerge {
 		t.Fatalf("trial ref = %q, want the published merge %q", got, publishedMerge)
 	}
@@ -59,8 +64,11 @@ func TestTrialRef_PublishVerifyLand(t *testing.T) {
 	if len(verified) != 1 {
 		t.Fatalf("EventVerified count = %d, want 1", len(verified))
 	}
-	if verified[0].Record == nil || verified[0].Record.MergeSHA != publishedMerge {
-		t.Fatalf("EventVerified MergeSHA = %+v, want %q", verified[0].Record, publishedMerge)
+	if verified[0].Record != nil {
+		t.Fatalf("EventVerified carries a Record: %+v", verified[0].Record)
+	}
+	if verified[0].MergeSHA != publishedMerge {
+		t.Fatalf("EventVerified MergeSHA = %q, want %q", verified[0].MergeSHA, publishedMerge)
 	}
 
 	// Landed, and the redundant trial ref is gone.

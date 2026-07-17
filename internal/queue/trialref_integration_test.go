@@ -33,8 +33,8 @@ func TestIntegration_TrialRefPublishedAndLanded(t *testing.T) {
 	// It names the tested merge carried by EventTrialMerged.
 	var mergedSHA string
 	for _, e := range h.ch.Events() {
-		if e.Kind == core.EventTrialMerged && e.Record != nil {
-			mergedSHA = e.Record.MergeSHA
+		if e.Kind == core.EventTrialMerged {
+			mergedSHA = e.MergeSHA
 		}
 	}
 	if mergedSHA != published {

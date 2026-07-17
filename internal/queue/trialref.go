@@ -11,23 +11,6 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// verificationRecord is the *RunRecord a verification event
-// (EventTrialMerged / EventVerified) carries: scoped to the run's
-// CHAIN-TIP merge and its run ID, so the status posts to exactly the
-// tested bytes. For serial/speculate that equals the single member's
-// record; for a batch it is the chain tip (members[0]'s own record names
-// only member 0's merge, an ancestor — not what the one batch status
-// describes).
-func (d *Daemon) verificationRecord(r *run) *core.RunRecord {
-	return &core.RunRecord{
-		RunID:     r.runID,
-		Target:    r.target,
-		Candidate: r.members[0].cand,
-		BaseOID:   r.baseOID,
-		MergeSHA:  r.chainTip,
-	}
-}
-
 // trialRefName is a run's trial-ref name: the configured prefix plus the
 // run ID (the batch chain uses its head run ID). The prefix is a custom
 // namespace (default refs/gauntlet/trials, issue #7), deliberately not

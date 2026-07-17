@@ -189,8 +189,12 @@ func run() error {
 	// schedule is in-memory, so a crash orphans them; sweep the namespace
 	// at startup, same rationale as the pins. Only when the feature is on.
 	if cfg.GitHub.TrialRefPrefix != "" {
+		// Best-effort, NOT fatal: an orphaned trial ref anchors only a
+		// synthetic merge, never correctness, so a delete that fails
+		// (transient network, a server-side ref rule) must not stop the
+		// queue from starting — the reaper and the next boot try again.
 		if _, err := repo.SweepTrialRefs(ctx, cfg.GitHub.TrialRefPrefix); err != nil {
-			return fmt.Errorf("sweep trial refs: %w", err)
+			fmt.Fprintf(os.Stderr, "gauntlet: sweep trial refs: %v\n", err)
 		}
 	}
 

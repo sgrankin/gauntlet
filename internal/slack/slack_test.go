@@ -483,6 +483,32 @@ func TestSlack_TerminalWithoutKnownRootIsANoOp(t *testing.T) {
 	}
 }
 
+// TestSlack_TrialMergedAndVerifiedAreNoOps: the issue-#7 verification
+// events are non-terminal and carry no Record, so Slack must NOT treat
+// them as a finished run — a run whose merge was just published (before
+// any check ran) must never render as landed, and its root must not be
+// forgotten out from under the real terminal event.
+func TestSlack_TrialMergedAndVerifiedAreNoOps(t *testing.T) {
+	s, fake, ctx := newTestSlack(t, nil)
+	cand := core.Candidate{Ref: "refs/heads/for/main/alice/widgets", Target: "main", User: "alice", Topic: "widgets", SHA: "deadbeef"}
+	runID := "run-verify"
+
+	// Establish the root the normal way.
+	mustEmit(t, s, ctx, core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: cand, RunID: runID})
+	fake.waitForPosts(1, testTimeout)
+	waitForStats(t, s, testTimeout, 1, 1)
+
+	// Neither verification event may post anything or drop the root.
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventTrialMerged, Target: "main", Candidate: cand, RunID: runID, MergeSHA: "mergesha"})
+	emitAndDrain(t, s, ctx, core.Event{Kind: core.EventVerified, Target: "main", Candidate: cand, RunID: runID, MergeSHA: "mergesha"})
+
+	if got := fake.snapshotPosts(); len(got) != 1 {
+		t.Fatalf("verification events produced Slack calls: %+v", got[1:])
+	}
+	// The root is still tracked, so the eventual real terminal still lands.
+	waitForStats(t, s, testTimeout, 1, 1)
+}
+
 func TestSlack_RecycleReactionOnOwnedRootProducesRetryCommand(t *testing.T) {
 	s, fake, ctx := newTestSlack(t, nil)
 	cand := core.Candidate{Ref: "refs/heads/for/main/carol/thing", Target: "main", User: "carol", Topic: "thing", SHA: "beadface"}

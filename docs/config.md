@@ -196,7 +196,10 @@ summarize {
   landing deletes the now-redundant ref immediately; a non-landing run
   keeps its ref for `retention` (default 24h) so a failed merge stays
   inspectable, after which a reaper CAS-deletes it. Crash-orphaned refs
-  are swept at daemon startup.
+  are swept at daemon startup. `retention` unset **and** an explicit
+  `"0s"` both resolve to the 24h default (there is no config spelling for
+  immediate deletion — a short window is always kept so a failed merge
+  stays inspectable); set a small duration like `"5m"` for a shorter one.
 
   `prefix` (default `refs/gauntlet/trials`) **must** start with `refs/`
   and is deliberately a **custom namespace, not `refs/heads/**`**: a

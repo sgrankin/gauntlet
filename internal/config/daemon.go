@@ -1249,6 +1249,14 @@ func (d *Daemon) validate() error {
 		if strings.HasSuffix(p, "/") || strings.ContainsAny(p, " \t\n") {
 			return fmt.Errorf("github: trial-refs prefix must have no trailing slash or whitespace, got %q", p)
 		}
+		// The prefix is concatenated with a run ID and pushed as a ref, so
+		// it must itself be a valid ref name — reject git's forbidden
+		// characters (glob metacharacters an operator might copy from a
+		// ls-remote pattern included) at load, loudly, rather than let
+		// every publish fail at run time and park the queue.
+		if strings.ContainsAny(p, "*?[\\~^:") || strings.Contains(p, "..") || strings.Contains(p, "@{") {
+			return fmt.Errorf("github: trial-refs prefix is not a valid ref name (no * ? [ \\ ~ ^ : .. @{ ), got %q", p)
+		}
 		if tr.Retention < 0 {
 			return fmt.Errorf("github: trial-refs retention must not be negative, got %s", tr.Retention)
 		}

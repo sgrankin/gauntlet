@@ -1380,6 +1380,11 @@ func TestStore_Emit_IgnoresNonTerminalEvents(t *testing.T) {
 		{Kind: core.EventTrialClean, Target: "main"},
 		{Kind: core.EventCheckStarted, Target: "main", RunID: "run-1", CheckName: "lint"},
 		{Kind: core.EventCheckFinished, Target: "main", RunID: "run-1", CheckName: "lint"},
+		// The trial-merge/verified events (issue #7) are non-terminal but
+		// carry a MergeSHA; they must NOT write a phantom "landed" row —
+		// they carry no Record, which is what the terminal guard keys on.
+		{Kind: core.EventTrialMerged, Target: "main", RunID: "run-1", MergeSHA: "mergesha"},
+		{Kind: core.EventVerified, Target: "main", RunID: "run-1", MergeSHA: "mergesha"},
 		{Kind: core.EventKind(999), Target: "main"}, // unrecognized kind
 	}
 	for _, ev := range nonTerminal {

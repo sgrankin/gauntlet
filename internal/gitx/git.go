@@ -361,17 +361,28 @@ func (r *Repo) SweepTrialRefs(ctx context.Context, prefix string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("gitx: sweep trial refs: %w", err)
 	}
+	// Best-effort, like every other trial-ref disposal path
+	// (deleteTrialRefNow, reapTrialRefs): one ref that won't delete — a
+	// transient network blip on its push, a server-side ref rule — must
+	// not abort the remaining deletes OR block startup. The first hard
+	// error is returned for the caller to LOG, but the sweep still
+	// finishes, and the caller keeps running (a leftover trial ref anchors
+	// only a synthetic merge, never correctness).
 	n := 0
+	var firstErr error
 	for ref, oid := range refs {
 		if err := r.CASUpdate(ctx, ref, oid, ""); err != nil {
 			if errors.Is(err, core.ErrCASStale) {
 				continue // changed since we listed; not ours to remove
 			}
-			return n, fmt.Errorf("gitx: sweep trial refs: delete %s: %w", ref, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("gitx: sweep trial refs: delete %s: %w", ref, err)
+			}
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, firstErr
 }
 
 // SweepPins deletes every pin ref, returning how many were swept. Startup

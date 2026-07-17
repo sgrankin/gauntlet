@@ -545,8 +545,19 @@ type Event struct {
 	// carry nil here even on what looks like a finished-check line.
 	Check *CheckResult
 
-	// Record is set on terminal events; nil otherwise.
+	// Record is set on terminal events; nil otherwise. Two consumers
+	// (internal/slack, internal/history) treat a non-nil Record as "this
+	// is a finished run — render/persist it", so a non-terminal event must
+	// NOT carry one: the trial-merge/verified events below carry their
+	// merge identity in MergeSHA instead, keeping Record nil.
 	Record *RunRecord
+
+	// MergeSHA is the tested synthetic-merge commit an EventTrialMerged /
+	// EventVerified describes (issue #7) — the SHA a verification commit
+	// status posts to. Meaningful only on those two kinds (the same
+	// additive, kind-specific pattern as CheckName/HookIndex); "" on every
+	// other event, whose merge identity, when it has one, lives on Record.
+	MergeSHA string
 
 	Detail string
 }

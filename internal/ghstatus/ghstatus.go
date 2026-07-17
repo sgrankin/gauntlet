@@ -246,9 +246,15 @@ func (c *Channel) verificationStatusFor(ev core.Event) (s state, description, sh
 	}
 }
 
-// mergeSHAOf returns the tested merge SHA an event's record carries, or ""
-// when absent (no synthetic commit) — the caller then posts nothing.
+// mergeSHAOf returns the tested merge SHA to status: the dedicated
+// Event.MergeSHA field on the non-terminal EventTrialMerged/EventVerified
+// (which carry no Record), falling back to the terminal event's own
+// RunRecord.MergeSHA (EventRejected/EventError). "" when neither is
+// present (no synthetic commit) — the caller then posts nothing.
 func mergeSHAOf(ev core.Event) string {
+	if ev.MergeSHA != "" {
+		return ev.MergeSHA
+	}
 	if ev.Record != nil {
 		return ev.Record.MergeSHA
 	}

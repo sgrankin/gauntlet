@@ -569,15 +569,16 @@ func TestChannel_VerificationMode(t *testing.T) {
 		wantSHA   string
 	}{
 		{
+			// The non-terminal events carry MergeSHA, never a Record.
 			name:      "trial merged -> pending @ merge",
-			ev:        core.Event{Kind: core.EventTrialMerged, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: rec},
+			ev:        core.Event{Kind: core.EventTrialMerged, Target: "main", Candidate: core.Candidate{SHA: "cand"}, MergeSHA: mergeSHA},
 			wantPost:  true,
 			wantState: "pending",
 			wantSHA:   mergeSHA,
 		},
 		{
 			name:      "verified -> success @ merge",
-			ev:        core.Event{Kind: core.EventVerified, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: rec},
+			ev:        core.Event{Kind: core.EventVerified, Target: "main", Candidate: core.Candidate{SHA: "cand"}, MergeSHA: mergeSHA},
 			wantPost:  true,
 			wantState: "success",
 			wantSHA:   mergeSHA,
@@ -676,7 +677,7 @@ func TestChannel_VerificationModeNoMergeSHASkips(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := New(Params{Owner: "a", Repo: "b", Token: "t", APIURL: srv.URL, TrialRefs: true, Log: io.Discard})
-	ev := core.Event{Kind: core.EventVerified, Target: "main", Record: &core.RunRecord{MergeSHA: ""}}
+	ev := core.Event{Kind: core.EventVerified, Target: "main", MergeSHA: ""}
 	if err := c.Emit(context.Background(), ev); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}

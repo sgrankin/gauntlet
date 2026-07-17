@@ -1856,6 +1856,23 @@ github "acme/widgets" {
 			wantErr: "no trailing slash",
 		},
 		{
+			name: "trial-refs prefix with a glob metacharacter",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    trial-refs {
+        prefix "refs/gauntlet/trials/*"
+    }
+}
+`,
+			wantErr: "not a valid ref name",
+		},
+		{
 			name: "trial-refs negative retention",
 			kdl: `
 remote "https://github.com/acme/widgets.git"

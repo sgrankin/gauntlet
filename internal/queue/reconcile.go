@@ -688,7 +688,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 			r.verifiedEmitted = true
 			d.emit(ctx, core.Event{
 				Kind: core.EventVerified, At: d.now(), Target: r.target,
-				Candidate: r.members[0].cand, RunID: r.runID, Record: d.verificationRecord(r),
+				Candidate: r.members[0].cand, RunID: r.runID, MergeSHA: r.chainTip,
 			})
 		}
 	}
@@ -1262,20 +1262,6 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 
-	// One trial ref + one status at the chain-tip merge for the whole
-	// batch (issue #7): a batch verifies one suite over the combined tree,
-	// so member candidates get no separate verification statuses —
-	// attribution stays in the record/dashboard/status target URL.
-	var trialRef string
-	if d.cfg.TrialRefs {
-		ref, err := d.createTrialRef(ctx, runID, chainTip, rootSpan)
-		if err != nil {
-			d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "publish trial ref: "+err.Error(), rootSpan)
-			return
-		}
-		trialRef = ref
-	}
-
 	specData, err := d.git.ReadFileFromTree(ctx, tipTree, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
@@ -1318,6 +1304,22 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		_ = os.RemoveAll(dir)
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "restore mtimes: "+err.Error(), rootSpan)
 		return
+	}
+
+	// One trial ref + one status at the chain-tip merge for the whole
+	// batch (issue #7), published as the LAST fallible pre-check step so
+	// no earlier rejection leaks a ref (a batch verifies one suite over
+	// the combined tree, so member candidates get no separate verification
+	// statuses — attribution stays in the record/dashboard/status URL).
+	var trialRef string
+	if d.cfg.TrialRefs {
+		ref, err := d.createTrialRef(ctx, runID, chainTip, rootSpan)
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "publish trial ref: "+err.Error(), rootSpan)
+			return
+		}
+		trialRef = ref
 	}
 
 	now := d.now()
@@ -1368,7 +1370,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 	if d.cfg.TrialRefs {
 		d.emit(ctx, core.Event{
 			Kind: core.EventTrialMerged, At: d.now(), Target: t.Name,
-			Candidate: members[0].cand, RunID: runID, Record: d.verificationRecord(r),
+			Candidate: members[0].cand, RunID: runID, MergeSHA: r.chainTip,
 		})
 	}
 	l := d.lanes[t.Name]
@@ -1703,20 +1705,6 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		return nil, false
 	}
 
-	// Publish the trial ref (issue #7) after the merge exists and is
-	// pinned, before any check starts — a synchronous CAS round trip. A
-	// publish failure is infrastructure, not a bad candidate: OutcomeError,
-	// like the pin/export failures around it.
-	var trialRef string
-	if d.cfg.TrialRefs {
-		ref, err := d.createTrialRef(ctx, runID, link.mergeOID, rootSpan)
-		if err != nil {
-			d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "publish trial ref: "+err.Error(), rootSpan)
-			return nil, false
-		}
-		trialRef = ref
-	}
-
 	specData, err := d.git.ReadFileFromTree(ctx, trial.TreeOID, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
@@ -1769,6 +1757,23 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		return nil, false
 	}
 
+	// Publish the trial ref (issue #7) as the LAST fallible pre-check
+	// step, so every earlier rejection (bad spec, capability gate, export
+	// failure) happens before any ref exists — a ref is published only for
+	// a run that actually starts checks, and the run struct built just
+	// below always owns it and disposes it on every terminal path. A
+	// publish failure is infrastructure, not a bad candidate: OutcomeError.
+	var trialRef string
+	if d.cfg.TrialRefs {
+		ref, err := d.createTrialRef(ctx, runID, link.mergeOID, rootSpan)
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "publish trial ref: "+err.Error(), rootSpan)
+			return nil, false
+		}
+		trialRef = ref
+	}
+
 	rec := &core.RunRecord{
 		RunID:      runID,
 		Target:     t.Name,
@@ -1806,7 +1811,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	if d.cfg.TrialRefs {
 		d.emit(ctx, core.Event{
 			Kind: core.EventTrialMerged, At: d.now(), Target: t.Name,
-			Candidate: cand, RunID: runID, Record: d.verificationRecord(r),
+			Candidate: cand, RunID: runID, MergeSHA: r.chainTip,
 		})
 	}
 	l := d.lanes[t.Name]
