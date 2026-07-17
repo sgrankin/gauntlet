@@ -598,7 +598,15 @@ func (d *Daemon) resolveExecutors() error {
 	for _, e := range d.Executors {
 		if e.Kind == "" {
 			// Legacy/default spelling: `executor "container" { ... }` —
-			// the argument is the kind.
+			// the argument is the kind. An argument that isn't a kind word
+			// is caught HERE, not left for the kind validator: it is far
+			// more likely a named profile missing its kind= (or a kind
+			// typo) than a deliberate default block, and "kind must be
+			// local or container, got \"ci\"" would send the operator
+			// hunting in exactly the wrong place.
+			if e.Arg != "" && e.Arg != "local" && e.Arg != "container" {
+				return fmt.Errorf("executor %q: not a kind — the argument of a kind-less executor block must be \"local\" or \"container\"; a named profile needs kind=, e.g. executor %q kind=\"container\"", e.Arg, e.Arg)
+			}
 			if seenDefault {
 				return fmt.Errorf("executor: more than one default (kind-less) executor block; name additional ones with kind=, e.g. executor \"ci\" kind=\"container\"")
 			}

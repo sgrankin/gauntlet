@@ -345,10 +345,17 @@ target "main" branch="main" {
 
 - Hooks are nested inside their `target` block, in the order they should
   run. A target with no `hook` nodes has no post-land behavior.
-- Each hook runs on the daemon host via the configured executor (`local` or
-  `container`, same as checks), against an export of the landed merge
-  commit's tree. It gets the same `GAUNTLET_*` environment contract a check
-  does (see [checks.md](checks.md#check-environment-reference)) —
+- Each hook runs via the daemon's **default** executor — always, with no
+  profile selection: hooks are operator config with no repo-side spec to
+  name a profile from. Mind this when restructuring a single `executor
+  "container" {...}` into named profiles: if every check moves to a
+  profile and the kind-less default block disappears, the default becomes
+  the implicit *local* executor — and your hooks, written for the
+  container image, silently start exec'ing on the daemon host. Keep the
+  default block shaped for the hooks. Each hook runs against an export of
+  the landed merge commit's tree and gets the same `GAUNTLET_*`
+  environment contract a check does (see
+  [checks.md](checks.md#check-environment-reference)) —
   `GAUNTLET_MERGE_SHA` is the commit that just landed.
 - Hooks for one landing run **in order**, and **stop at the first
   failure**: a deploy step shouldn't run if an earlier step (say, a

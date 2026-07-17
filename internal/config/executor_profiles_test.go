@@ -147,6 +147,14 @@ func TestLoadDaemon_ExecutorProfileErrors(t *testing.T) {
 			wantErr: "needs a name argument",
 		},
 		{
+			name: "named-looking block missing kind is diagnosed as such",
+			kdl:  "executor \"ci\" {\n    image \"x\"\n}\n",
+			// NOT "kind must be local or container, got \"ci\"" — that
+			// error blames the profile NAME as a kind and sends the
+			// operator hunting in the wrong place.
+			wantErr: `executor "ci": not a kind`,
+		},
+		{
 			name:    "duplicate profile names",
 			kdl:     "executor \"a\" kind=\"local\"\nexecutor \"a\" kind=\"local\"\n",
 			wantErr: `executor "a": duplicate profile name`,
