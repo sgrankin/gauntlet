@@ -97,6 +97,74 @@ func TestParams_RunArgs_ProfileOptions(t *testing.T) {
 	}
 }
 
+func TestLocalExecutor_ImageBuildResultProtocol(t *testing.T) {
+	const id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	dir := t.TempDir()
+	cmd := script(t, dir, "build.sh", `#!/bin/sh
+set -eu
+[ -n "$GAUNTLET_IMAGE_RESULT_FILE" ] || { echo "no image result file"; exit 1; }
+[ -z "${GAUNTLET_RESULT_FILE+x}" ] || { echo "check result file leaked into a build"; exit 1; }
+printf '%s\n' "`+id+`" > "$GAUNTLET_IMAGE_RESULT_FILE"
+`)
+	job := baseJob(t, cmd)
+	job.ImageBuild = true
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+	if res.Err != nil || res.Status != core.CheckPassed {
+		t.Fatalf("res = %+v (output %q)", res, res.Output)
+	}
+	if res.Image != id {
+		t.Fatalf("res.Image = %q, want the file content read back verbatim", res.Image)
+	}
+}
+
+func TestLocalExecutor_ImageBuildNonZeroExitIgnoresFile(t *testing.T) {
+	dir := t.TempDir()
+	cmd := script(t, dir, "build.sh", `#!/bin/sh
+printf 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' > "$GAUNTLET_IMAGE_RESULT_FILE"
+exit 1
+`)
+	job := baseJob(t, cmd)
+	job.ImageBuild = true
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+	if res.Status != core.CheckFailed || res.Image != "" {
+		t.Fatalf("res = %+v, want a plain failure with no image captured (non-zero exit is a build failure regardless of the file)", res)
+	}
+}
+
+func TestParams_RunArgs_ImageOverride(t *testing.T) {
+	p, err := New(Params{Runtime: "docker", Image: "static:latest", Workdir: "/workspace"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	job := containerJob([]string{"true"})
+	job.Dir = t.TempDir()
+	job.Image = id
+
+	args := p.params.runArgs(job, "name", t.TempDir())
+	if !contains(args, id) {
+		t.Fatalf("argv %v missing the captured image ID", args)
+	}
+	if contains(args, "static:latest") {
+		t.Fatalf("argv %v still names the profile's static image alongside the override", args)
+	}
+	// And an image-build job swaps the result-file variable.
+	buildJob := containerJob([]string{"true"})
+	buildJob.Dir = t.TempDir()
+	buildJob.ImageBuild = true
+	buildArgs := p.params.runArgs(buildJob, "name", t.TempDir())
+	if !containsPair(buildArgs, "-e", core.EnvImageResultFile+"="+containerResultFile) {
+		t.Fatalf("build argv %v missing %s", buildArgs, core.EnvImageResultFile)
+	}
+	for i := 0; i+1 < len(buildArgs); i++ {
+		if buildArgs[i] == "-e" && strings.HasPrefix(buildArgs[i+1], core.EnvResultFile+"=") {
+			t.Fatalf("build argv exports the CHECK result file too: %v", buildArgs)
+		}
+	}
+}
+
 func TestLocalExecutor_ProfileEnvPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	cmd := script(t, dir, "check.sh", `#!/bin/sh

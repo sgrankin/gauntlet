@@ -139,16 +139,25 @@ type Config struct {
 	Slots *core.Slots
 
 	// KnownExecutorProfile reports whether a repo-selected executor
-	// profile name (config.Check.Executor) resolves to a configured
-	// profile. Consulted once per run at spec load, right beside the
-	// RequiresServices gate: a spec naming an unknown profile is rejected
-	// loudly before any of its commands start — a configuration error,
-	// never a red check verdict. nil means no named profiles exist, so
-	// only the default ("", never consulted) is legal. This is a
-	// predicate, not an executor registry, on purpose: the queue core
-	// stays executor-agnostic (Invariant 8) — actual routing lives in the
-	// Executor implementation (executor.Mux).
+	// profile name (config.Check.Executor / config.Image.Executor)
+	// resolves to a configured profile. Consulted once per run at spec
+	// load, right beside the RequiresServices gate: a spec naming an
+	// unknown profile is rejected loudly before any of its commands
+	// start — a configuration error, never a red check verdict. nil means
+	// no named profiles exist, so only the default ("", never consulted)
+	// is legal. This is a predicate, not an executor registry, on
+	// purpose: the queue core stays executor-agnostic (Invariant 8) —
+	// actual routing lives in the Executor implementation (executor.Mux).
 	KnownExecutorProfile func(name string) bool
+
+	// ImageCapableProfile reports whether profile name ("" = the default
+	// executor) can run a candidate-built image — i.e. is a container
+	// profile. Gated at spec load like KnownExecutorProfile: a check
+	// naming an image (config.Check.Image) on a local-kind profile can
+	// never work (there is no rootfs to swap), so it rejects before any
+	// command starts. nil means no profile can (a daemon wired without
+	// this predicate predates or disables candidate images).
+	ImageCapableProfile func(name string) bool
 
 	// AutoRetryErrors enables the auto-retry-once behavior (DESIGN.md
 	// decision ledger, "Auto-retry once on infra-error parks"; see also
@@ -298,6 +307,14 @@ type run struct {
 	// is healthy. Set once; never inferred from whichever result happened
 	// to land last (parallel completion makes that ordering meaningless).
 	culprit string
+
+	// imageRefs maps image name -> the build node's VALIDATED immutable
+	// identity (config.CheckSpec.Images; nil when the spec declares
+	// none). Written when an "image:<name>" node's result is consumed
+	// green, read by startCheck to stamp consumer jobs. A consumer can
+	// only become ready once its implicit edge onto the build node is
+	// green, so a ready consumer always finds its ref here.
+	imageRefs map[string]string
 
 	// materialized guards materializeChecks's one-time fill of the member
 	// records' Checks slices.

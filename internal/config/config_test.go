@@ -2057,6 +2057,51 @@ check "test" {
 `,
 			wantErr: `max-parallel 1000 exceeds`,
 		},
+		{
+			name: "check consumes undeclared image",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+    image "go-ci"
+}
+`,
+			wantErr: `check "unit": image "go-ci": no such image declared`,
+		},
+		{
+			name: "image without command",
+			kdl: `
+image "go-ci" {
+}
+check "unit" {
+    command "./ci/unit"
+}
+`,
+			wantErr: `image "go-ci": command must not be empty`,
+		},
+		{
+			name: "duplicate image names",
+			kdl: `
+image "go-ci" {
+    command "./a"
+}
+image "go-ci" {
+    command "./b"
+}
+check "unit" {
+    command "./ci/unit"
+}
+`,
+			wantErr: `image "go-ci": duplicate`,
+		},
+		{
+			name: "check squats on the image node prefix",
+			kdl: `
+check "image:go-ci" {
+    command "./ci/unit"
+}
+`,
+			wantErr: `the "image:" name prefix is reserved`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

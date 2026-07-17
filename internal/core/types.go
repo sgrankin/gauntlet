@@ -54,6 +54,20 @@ type CheckJob struct {
 	// executor-agnostic).
 	Executor string
 
+	// ImageBuild marks this job as a candidate-image BUILD
+	// (config.Image): the executor exports EnvImageResultFile instead of
+	// EnvResultFile and returns the file's content verbatim in
+	// CheckResult.Image for the queue to validate. Never set together
+	// with Image below.
+	ImageBuild bool
+
+	// Image, when non-empty, is the captured immutable identity a
+	// CONSUMER check runs in — the container executor uses it in place of
+	// its profile's static image. Stamped by the queue from the build
+	// node's validated result; meaningless to the local executor (specs
+	// naming an image are gated onto container profiles at run start).
+	Image string
+
 	// Dir is the exported trial tree the check runs against.
 	Dir string
 
@@ -142,6 +156,14 @@ const (
 // exiting non-zero. Those are verdicts (CheckFailed), not Err.
 type CheckResult struct {
 	Name string
+
+	// Image is the immutable image identity this row is about: for an
+	// image-BUILD node, the result-file content the build produced (read
+	// back verbatim by the executor, validated by the queue); for a
+	// consumer check, the identity it actually ran in (stamped by the
+	// queue alongside Command). "" everywhere else. Provenance — history
+	// records exactly which bytes ran (issue #2's "explain what ran").
+	Image string
 
 	// Seq is the check's 1-based SPEC-DECLARATION position — the durable
 	// per-check identity history's seq column and the log filename prefix
@@ -238,6 +260,18 @@ const (
 	// distinguishes them, and the run ID is the one identity already
 	// unique per run that a check couldn't otherwise see.
 	EnvRunID = "GAUNTLET_RUN_ID"
+
+	// EnvImageResultFile is the path an IMAGE-BUILD job (CheckJob.
+	// ImageBuild) must write its captured immutable image identity to —
+	// a local image ID (`sha256:...`, e.g. docker buildx's --iidfile
+	// output) or a digest-pinned registry reference
+	// (`registry/repo@sha256:...`). Exported INSTEAD of EnvResultFile:
+	// builds have no skipped verdict, and the two protocols must not be
+	// conflated. A non-zero exit is a build failure regardless of the
+	// file; exit 0 with a missing, empty, or mutable (tag-shaped) result
+	// is ALSO a build failure — the queue validates the content, the
+	// executor only reads it back (CheckResult.Image).
+	EnvImageResultFile = "GAUNTLET_IMAGE_RESULT_FILE"
 
 	// EnvGitDir is a git dir (usable as GIT_DIR or `git --git-dir`) holding
 	// every object the *_SHA vars above name — the daemon's own bare repo,

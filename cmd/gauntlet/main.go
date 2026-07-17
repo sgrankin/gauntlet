@@ -514,6 +514,19 @@ func run() error {
 		// undefined profile before any of its commands start; nil (no
 		// profiles configured) means only the default ("") is legal.
 		KnownExecutorProfile: func(name string) bool { return profileNames[name] },
+		// ImageCapableProfile: candidate-built images need a container
+		// rootfs to swap, so only container-kind profiles qualify.
+		ImageCapableProfile: func(name string) bool {
+			if name == "" {
+				return cfg.Executor.Kind == "container"
+			}
+			for _, p := range cfg.Profiles {
+				if p.Name == name {
+					return p.Kind == "container"
+				}
+			}
+			return false
+		},
 		// AutoRetryErrors is a *bool defaulted true in config.applyDefaults
 		// (absent-vs-explicit-false needs the pointer); the queue takes the
 		// resolved value.

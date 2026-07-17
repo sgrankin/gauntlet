@@ -1326,6 +1326,9 @@ func checkRowDetail(c history.CheckRow) string {
 	if c.Waited > 0 {
 		parts = append(parts, "waited "+formatDuration(c.Waited)+" for an execution slot")
 	}
+	if c.Image != "" {
+		parts = append(parts, "image "+shortImageRef(c.Image))
+	}
 	return strings.Join(parts, " \u00b7 ")
 }
 
@@ -1354,6 +1357,17 @@ func runningDisplay(rs *queue.RunSnapshot, at time.Time) (names, elapsed string)
 		}
 	}
 	return strings.Join(ns, ", "), formatDuration(at.Sub(oldest))
+}
+
+// shortImageRef abbreviates an immutable image reference for display: the
+// 64-hex digest tail is truncated to 12 characters (the docker CLI's own
+// short-ID convention); everything else passes through. The full
+// reference stays in history/API for exactness.
+func shortImageRef(ref string) string {
+	if i := strings.Index(ref, "sha256:"); i != -1 && len(ref) >= i+7+64 {
+		return ref[:i+7+12]
+	}
+	return ref
 }
 
 type checkView struct {

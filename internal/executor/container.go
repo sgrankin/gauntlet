@@ -355,6 +355,23 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		}
 	}
 
+	if job.ImageBuild {
+		// Mirrors LocalExecutor: exit 0 hands the result file's content
+		// back verbatim; validation (and the single-root-cause failure on
+		// a bad result) is the queue's job.
+		var image string
+		if data, err := os.ReadFile(resultFile); err == nil {
+			image = strings.TrimSpace(string(data))
+		}
+		return core.CheckResult{
+			Name:     job.Name,
+			Status:   core.CheckPassed,
+			Image:    image,
+			Output:   out.String(),
+			LogPath:  logPath,
+			Duration: duration,
+		}
+	}
 	status := core.CheckPassed
 	if data, err := os.ReadFile(resultFile); err == nil && strings.TrimSpace(string(data)) == "skipped" {
 		status = core.CheckSkipped
@@ -418,7 +435,7 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		"-e", core.EnvMergeSHA+"="+job.MergeSHA,
 		"-e", core.EnvCandidateSHA+"="+job.Candidate.SHA,
 		"-e", core.EnvRef+"="+job.Candidate.Ref,
-		"-e", core.EnvResultFile+"="+containerResultFile,
+		"-e", resultFileEnv(job)+"="+containerResultFile,
 		"-e", core.EnvRunID+"="+job.RunID,
 	)
 	if p.GitDir != "" {
@@ -442,7 +459,14 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 	for _, kv := range job.ServiceEnv {
 		args = append(args, "-e", kv)
 	}
-	args = append(args, p.Image)
+	// A consumer of a candidate-built image runs by the build's captured
+	// IMMUTABLE identity instead of the profile's static image — never by
+	// a mutable tag (the queue validated the reference before stamping it).
+	image := p.Image
+	if job.Image != "" {
+		image = job.Image
+	}
+	args = append(args, image)
 	args = append(args, job.Command...)
 	return args
 }

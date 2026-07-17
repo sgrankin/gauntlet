@@ -67,6 +67,9 @@ CREATE TABLE checks (
   -- daemon-wide max-executions cap before starting — capacity starvation,
   -- as distinct from duration_ms (the command's own cost).
   waited_ms   INTEGER NOT NULL DEFAULT 0,
+  -- image (v10+): the immutable candidate-built image identity — a build
+  -- node's captured result, or the identity a consumer check ran in.
+  image       TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

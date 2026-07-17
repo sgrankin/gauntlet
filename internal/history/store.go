@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 9
+const schemaVersion = 10
 
 var _ core.Channel = (*Store)(nil)
 
@@ -105,6 +105,10 @@ func Open(path string) (*Store, error) {
 //     TABLE checks ADD COLUMN blocked_by (comma-joined prerequisite names
 //     for a CheckBlocked row) and waited_ms (CheckResult.Waited — slot-
 //     starvation wait, distinct from duration), stamp user_version=9, loop.
+//   - 9 (schema v9: checks has no image column): ALTER TABLE checks ADD
+//     COLUMN image (the immutable candidate-built image identity a build
+//     node produced / a consumer ran in — CheckResult.Image), stamp
+//     user_version=10, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -238,6 +242,13 @@ CREATE TABLE hook_runs (
 			}
 			if _, err := db.Exec(`PRAGMA user_version = 9`); err != nil {
 				return fmt.Errorf("history: set user_version=9: %w", err)
+			}
+		case 9:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN image TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v9->v10 (checks.image): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 10`); err != nil {
+				return fmt.Errorf("history: set user_version=10: %w", err)
 			}
 		case schemaVersion:
 			return nil
@@ -376,6 +387,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			// terminal event's Record) — set only on CheckBlocked rows.
 			strings.Join(cr.BlockedBy, ","),
 			cr.Waited.Milliseconds(),
+			cr.Image,
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

@@ -17,6 +17,20 @@ type CheckSpec struct {
 	Checks   []Check   `kdl:"check,multiple"`
 	Services []Service `kdl:"service,multiple"`
 
+	// Images declares candidate-built check images: named, opaque build
+	// commands whose captured IMMUTABLE result (a local image ID or a
+	// digest-pinned registry reference — never a mutable tag) is the
+	// rootfs consumer checks run in (Check.Image). A trial that changes
+	// its Dockerfile/toolchain proves that change in the same merge
+	// transaction — no operator pre-publish step, no global mutable tag
+	// silently meaning different bytes to two checks. Gauntlet never
+	// learns Dockerfiles, contexts, or cache keys: the build command owns
+	// all of that (docker buildx --iidfile "$GAUNTLET_IMAGE_RESULT_FILE"
+	// is the whole typical body). Builds are scheduled through the same
+	// dependency/capacity machinery as checks — one build per image per
+	// run, an implicit prerequisite of every consumer.
+	Images []Image `kdl:"image,multiple"`
+
 	// MaxParallel is how many of this candidate's ready checks may run
 	// concurrently. Unset (zero) means 1 — the pre-parallelism contract,
 	// preserved exactly: checks run one at a time in declaration order, so
@@ -69,6 +83,34 @@ type Check struct {
 	// operator-owned in daemon config. An unknown name rejects the spec
 	// at run start (like an undeclared `needs` service): a configuration
 	// error, never a red check verdict.
+	Executor string `kdl:"executor"`
+
+	// Image names a candidate-built image (CheckSpec.Images) this check
+	// runs in, overriding its container profile's static image with the
+	// build's captured immutable identity. The image build becomes an
+	// implicit `after` prerequisite: this check is ready only once the
+	// build succeeded and its result validated. Requires a container-kind
+	// executor profile (gated at run start against daemon config, like an
+	// unknown profile). "" (the default) keeps the profile's static image.
+	Image string `kdl:"image"`
+}
+
+// Image is one named candidate-built check image (CheckSpec.Images): an
+// opaque build command run against the trial tree exactly like a check,
+// except its success additionally requires writing one immutable image
+// reference to $GAUNTLET_IMAGE_RESULT_FILE. Scheduled as a node named
+// "image:<name>" in the run's dependency graph — the prefix is reserved
+// (no check may be named "image:...") so build rows in history/events can
+// never collide with check rows.
+type Image struct {
+	Name    string   `kdl:",arg"`
+	Command []string `kdl:"command,child"`
+
+	// Executor is the operator profile the BUILD command runs on — the
+	// bootstrap environment, typically the default executor or a profile
+	// with the docker socket. Structurally it can never be a
+	// candidate-built image (Image has no image field): no recursive
+	// bootstrapping, per the issue-#2 boundary.
 	Executor string `kdl:"executor"`
 }
 
@@ -261,6 +303,20 @@ func (cs *CheckSpec) validate() error {
 		}
 	}
 
+	imageNames := make(map[string]bool, len(cs.Images))
+	for _, img := range cs.Images {
+		if img.Name == "" {
+			return fmt.Errorf("image: name must not be empty")
+		}
+		if imageNames[img.Name] {
+			return fmt.Errorf("image %q: duplicate", img.Name)
+		}
+		imageNames[img.Name] = true
+		if len(img.Command) == 0 {
+			return fmt.Errorf("image %q: command must not be empty", img.Name)
+		}
+	}
+
 	// Two passes over the checks: names first, so `after` may reference a
 	// check declared later in the file (edges form a graph, not a
 	// sequence), then per-check fields and edges against the full name set.
@@ -268,6 +324,13 @@ func (cs *CheckSpec) validate() error {
 	for _, c := range cs.Checks {
 		if c.Name == "" {
 			return fmt.Errorf("check: name must not be empty")
+		}
+		// "image:" is the reserved node-name prefix candidate-built image
+		// builds occupy in the run's dependency graph (history rows,
+		// events, blocked attributions) — a check squatting on it would
+		// alias a build node.
+		if strings.HasPrefix(c.Name, "image:") {
+			return fmt.Errorf("check %q: the \"image:\" name prefix is reserved for image-build nodes", c.Name)
 		}
 		if seen[c.Name] {
 			return fmt.Errorf("check %q: duplicate", c.Name)
@@ -289,6 +352,10 @@ func (cs *CheckSpec) validate() error {
 				return fmt.Errorf("check %q: needs %q: duplicate", c.Name, n)
 			}
 			seenNeed[n] = true
+		}
+
+		if c.Image != "" && !imageNames[c.Image] {
+			return fmt.Errorf("check %q: image %q: no such image declared", c.Name, c.Image)
 		}
 
 		seenAfter := make(map[string]bool, len(c.After))

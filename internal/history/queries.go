@@ -17,8 +17,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -131,6 +131,10 @@ type CheckRow struct {
 	// daemon-wide max-executions cap before starting
 	// (core.CheckResult.Waited); zero for immediate starts and pre-v9 rows.
 	Waited time.Duration
+	// Image is the immutable candidate-built image identity this row is
+	// about (core.CheckResult.Image): a build node's captured result, or
+	// the identity a consumer check ran in. "" otherwise and pre-v10.
+	Image string
 }
 
 // HookRow is one row of the hooks table, as read back for the dashboard:
@@ -273,7 +277,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -285,7 +289,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	for rows.Next() {
 		var c CheckRow
 		var durationMS, waitedMS int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond

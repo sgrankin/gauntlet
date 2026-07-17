@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -540,6 +541,24 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		case res := <-inf.result:
 			obs.EndCheck(inf.span, res)
 			res.Waited = inf.waited
+			// An image-build node's green is conditional on its captured
+			// result validating as one IMMUTABLE reference — validated
+			// HERE, before the result is stored or evented, so a bad
+			// result is the build's own red verdict (one root cause;
+			// consumers block on it) and never N consumer failures.
+			if imgName, isImage := imageNodeName(name); isImage && res.Err == nil && res.Status == core.CheckPassed {
+				if ref, err := validImageRef(res.Image); err != nil {
+					res.Status = core.CheckFailed
+					res.Image = ""
+					if res.Output != "" {
+						res.Output += "\n"
+					}
+					res.Output += "gauntlet: " + err.Error()
+				} else {
+					res.Image = ref
+					r.imageRefs[imgName] = ref
+				}
+			}
 			delete(r.inflight, name)
 			r.results[name] = res
 			// Check is the just-finished result itself, so channels can
@@ -715,10 +734,17 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		Command:   check.Command,
 		Executor:  check.Executor,
 		Dir:       r.dir,
+		Image:     r.imageRefs[check.Image], // "" unless this check consumes a candidate-built image (readiness guarantees the ref exists by now)
 		BaseSHA:   r.baseOID,
 		MergeSHA:  r.chainTip,
 		Candidate: r.members[0].cand,
 		Clean:     false, // reserved for a future clean-build cache escape hatch; see docs/design/core.md ("Deliberately not built")
+	}
+	// An "image:<name>" node is a BUILD: the executor swaps the result-
+	// file protocol (GAUNTLET_IMAGE_RESULT_FILE) and hands the captured
+	// reference back on the result for advanceChecks to validate.
+	if _, isImage := imageNodeName(check.Name); isImage {
+		job.ImageBuild = true
 	}
 	// LogDir == "" disables per-check log files entirely (job.LogPath stays
 	// ""); see DESIGN.md ("Full per-check log files"). The check name is
@@ -776,6 +802,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		if len(needs) == 0 || d.cfg.Services == nil {
 			res := d.exec.RunCheck(spanCtx, job) // unchanged path: hooks & needs-free checks
 			res.Command = job.Command
+			stampConsumedImage(&res, job)
 			result <- res
 			return
 		}
@@ -788,6 +815,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		job.ServiceEnv, job.Networks = ens.Env, ens.Networks
 		res := d.exec.RunCheck(spanCtx, job)
 		res.Command = job.Command
+		stampConsumedImage(&res, job)
 		if res.Err == nil && res.Status == core.CheckFailed {
 			// Only a genuinely red verdict re-probes — a passing check
 			// never touches AnyDead.
@@ -802,6 +830,17 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	r.inflight[check.Name] = &checkInFlight{name: check.Name, cancel: cancel, result: result, span: span, start: start, waited: waited}
 
 	d.emit(ctx, core.Event{Kind: core.EventCheckStarted, At: d.now(), Target: r.target, Candidate: r.members[0].cand, RunID: r.runID, CheckName: check.Name})
+}
+
+// stampConsumedImage records, for provenance, the exact immutable image a
+// CONSUMER check ran in (CheckResult.Image; history's image column). Build
+// nodes are untouched — the executor already set res.Image to the build's
+// captured result there, and overwriting it with job.Image ("" for
+// builds) would destroy it.
+func stampConsumedImage(res *core.CheckResult, job core.CheckJob) {
+	if !job.ImageBuild && job.Image != "" {
+		res.Image = job.Image
+	}
 }
 
 // cancelRun aborts every in-flight check of r (Invariant 5 for a move,
@@ -1208,9 +1247,13 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
 		return
 	}
-	// Same gate for executor profiles as startRun's (see there).
+	// Same gates as startRun's (see there).
 	if chk, prof := unknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
+		return
+	}
+	if chk, img := imageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img), rootSpan)
 		return
 	}
 
@@ -1256,11 +1299,12 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		batchID:     runID,
 		runID:       runID,
 		dir:         dir,
-		checks:      spec.Checks,
+		checks:      buildRunNodes(spec),
 		maxParallel: effectiveMaxParallel(spec),
 		inflight:    make(map[string]*checkInFlight),
 		results:     make(map[string]core.CheckResult),
 		readyAt:     make(map[string]time.Time),
+		imageRefs:   make(map[string]string, len(spec.Images)),
 		services:    spec.Services,
 		verdict:     verdictNone,
 		rootCtx:     rootCtx,
@@ -1623,6 +1667,12 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
 		return nil, false
 	}
+	// And for candidate-built images: a consumer on a non-container
+	// profile can never swap its rootfs (Config.ImageCapableProfile's doc).
+	if chk, img := imageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img), rootSpan)
+		return nil, false
+	}
 
 	// Trial-tree export dirs are created under cfg.WorkDir when it's set.
 	// os.MkdirTemp treats an empty dir argument as "use the OS default temp
@@ -1658,11 +1708,12 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		batchID:     "",
 		runID:       runID,
 		dir:         dir,
-		checks:      spec.Checks,
+		checks:      buildRunNodes(spec),
 		maxParallel: effectiveMaxParallel(spec),
 		inflight:    make(map[string]*checkInFlight),
 		results:     make(map[string]core.CheckResult),
 		readyAt:     make(map[string]time.Time),
+		imageRefs:   make(map[string]string, len(spec.Images)),
 		services:    spec.Services,
 		verdict:     verdictNone,
 		rootCtx:     rootCtx,
@@ -1692,8 +1743,104 @@ func unknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (ch
 			return c.Name, c.Executor
 		}
 	}
+	// Image BUILD commands select profiles too (config.Image.Executor) —
+	// same vocabulary, same gate; the offender is reported under its
+	// node name so the message matches what history/events would show.
+	for _, img := range spec.Images {
+		if img.Executor == "" {
+			continue
+		}
+		if known == nil || !known(img.Executor) {
+			return imageNodePrefix + img.Name, img.Executor
+		}
+	}
 	return "", ""
 }
+
+// imageNodePrefix is the reserved node-name prefix image builds occupy in
+// a run's dependency graph (config.ParseChecks rejects check names under
+// it, so the two row kinds can never alias).
+const imageNodePrefix = "image:"
+
+// imageNodeName reports whether node is an image-build node, and for
+// which declared image.
+func imageNodeName(node string) (image string, ok bool) {
+	return strings.CutPrefix(node, imageNodePrefix)
+}
+
+// imageOnIncapableProfile returns the first check (spec order) that names
+// a candidate-built image but runs on a profile that cannot swap its
+// rootfs — a non-container profile (Config.ImageCapableProfile). ("", "")
+// when every image consumer is capable.
+func imageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) (check, image string) {
+	for _, c := range spec.Checks {
+		if c.Image == "" {
+			continue
+		}
+		if capable == nil || !capable(c.Executor) {
+			return c.Name, c.Image
+		}
+	}
+	return "", ""
+}
+
+// buildRunNodes flattens a spec into the run's scheduling node list: one
+// synthetic "image:<name>" node per declared image (spec order, before
+// every check — a declared image is built once per run whether or not a
+// check consumes it, so a candidate changing only its Dockerfile still
+// proves the build), then every check, with an implicit `after` edge from
+// each consumer onto its image's node. The whole point of this shape is
+// that NOTHING downstream is new: readiness, max-parallel, the execution
+// cap, fail-fast, blocked rows, history rows, and events all treat a
+// build exactly as they treat a check (issue #2: "the same dependency and
+// capacity machinery, not a second scheduler").
+func buildRunNodes(spec *config.CheckSpec) []config.Check {
+	if len(spec.Images) == 0 {
+		return spec.Checks
+	}
+	nodes := make([]config.Check, 0, len(spec.Images)+len(spec.Checks))
+	for _, img := range spec.Images {
+		nodes = append(nodes, config.Check{
+			Name:     imageNodePrefix + img.Name,
+			Command:  img.Command,
+			Executor: img.Executor,
+		})
+	}
+	for _, c := range spec.Checks {
+		if c.Image != "" {
+			// Clone the edge slice: c is a copy but After's backing array
+			// is shared with the parsed spec.
+			c.After = append(append([]string(nil), c.After...), imageNodePrefix+c.Image)
+		}
+		nodes = append(nodes, c)
+	}
+	return nodes
+}
+
+// validImageRef validates an image build's captured result: exactly one
+// IMMUTABLE reference — a local image ID (docker buildx --iidfile output)
+// or a digest-pinned registry reference. A mutable tag is rejected
+// outright: "same configuration, different bytes" races are the exact
+// failure this feature exists to close, so accepting a tag and resolving
+// it later would re-open the time-of-check/time-of-use hole.
+func validImageRef(raw string) (string, error) {
+	ref := strings.TrimSpace(raw)
+	if ref == "" {
+		return "", fmt.Errorf("build wrote no image reference to $%s (e.g. docker buildx --iidfile \"$%s\")", core.EnvImageResultFile, core.EnvImageResultFile)
+	}
+	if strings.ContainsAny(ref, " \t\n\r") {
+		return "", fmt.Errorf("image result must be exactly one reference, got %q", ref)
+	}
+	if localImageIDPattern.MatchString(ref) || digestRefPattern.MatchString(ref) {
+		return ref, nil
+	}
+	return "", fmt.Errorf("image result %q is not immutable: need a local image ID (sha256:<64 hex>) or a digest-pinned reference (<repo>@sha256:<64 hex>), never a tag", ref)
+}
+
+var (
+	localImageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	digestRefPattern    = regexp.MustCompile(`^[a-zA-Z0-9._/:-]+@sha256:[0-9a-f]{64}$`)
+)
 
 // effectiveMaxParallel normalizes a spec's max-parallel for run
 // construction: zero (unset) is the serial default of 1, per

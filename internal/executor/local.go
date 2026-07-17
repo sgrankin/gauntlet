@@ -88,7 +88,7 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		core.EnvMergeSHA+"="+job.MergeSHA,
 		core.EnvCandidateSHA+"="+job.Candidate.SHA,
 		core.EnvRef+"="+job.Candidate.Ref,
-		core.EnvResultFile+"="+resultFile,
+		resultFileEnv(job)+"="+resultFile,
 		core.EnvRunID+"="+job.RunID,
 	)
 	if e.GitDir != "" {
@@ -181,6 +181,24 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		}
 	}
 
+	if job.ImageBuild {
+		// An image build has no skipped verdict; exit 0 hands the result
+		// file's content back verbatim for the QUEUE to validate (a
+		// missing/empty/mutable result is a build failure there, with one
+		// root cause — never N consumer failures here).
+		var image string
+		if data, err := os.ReadFile(resultFile); err == nil {
+			image = strings.TrimSpace(string(data))
+		}
+		return core.CheckResult{
+			Name:     job.Name,
+			Status:   core.CheckPassed,
+			Image:    image,
+			Output:   out.String(),
+			LogPath:  logPath,
+			Duration: duration,
+		}
+	}
 	status := core.CheckPassed
 	if data, err := os.ReadFile(resultFile); err == nil && strings.TrimSpace(string(data)) == "skipped" {
 		status = core.CheckSkipped
@@ -192,6 +210,17 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		LogPath:  logPath,
 		Duration: duration,
 	}
+}
+
+// resultFileEnv picks which result-file variable a job's command sees:
+// image builds get EnvImageResultFile INSTEAD of EnvResultFile — a build
+// has no skipped verdict, and the two protocols must never be conflated
+// (core.EnvImageResultFile's doc).
+func resultFileEnv(job core.CheckJob) string {
+	if job.ImageBuild {
+		return core.EnvImageResultFile
+	}
+	return core.EnvResultFile
 }
 
 // tailBuffer is an io.Writer that keeps only the last cap bytes written to
