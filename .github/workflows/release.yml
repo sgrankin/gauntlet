@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - 'v*'
-  # Manual dispatch is the release path when a local `git push <tag>` is
-  # unavailable (e.g. an environment whose git relay only permits branch
-  # pushes): the runner itself creates and pushes the tag with its own
-  # GITHUB_TOKEN, then goreleaser runs exactly as it does for a pushed tag.
-  # Dispatch this on the commit you want released (normally the default
-  # branch tip).
+    # Branch-push release path: pushing a `release/vX.Y.Z` branch cuts that
+    # release. This is the trigger available to environments whose git relay
+    # permits branch pushes but denies tag pushes (and denies workflow_dispatch
+    # via the API) — the runner derives the version from the branch name,
+    # creates and pushes the real tag with its own GITHUB_TOKEN, runs
+    # goreleaser, then deletes the release branch. Branch the release point
+    # (normally the default branch tip) into `release/vX.Y.Z` and push it.
+    branches:
+      - 'release/v*'
+  # Manual dispatch does the same from a chosen ref, when the API caller has
+  # actions:write. The runner creates and pushes the tag, then goreleaser runs
+  # exactly as it does for a pushed tag.
   workflow_dispatch:
     inputs:
       version:
@@ -31,18 +37,25 @@ jobs:
           # history, not the default shallow clone.
           fetch-depth: 0
 
-      # On manual dispatch there is no tag yet: validate the requested
-      # version, refuse to clobber an existing tag, then create and push it on
-      # the checked-out commit so goreleaser sees the same tagged git state a
-      # `push: tags` event would present. Tags pushed with GITHUB_TOKEN do not
-      # re-trigger this workflow (GitHub's recursion guard), so there is no
-      # double release.
+      # For the branch-push and workflow_dispatch paths there is no tag yet:
+      # derive the version (from the release/* branch name, or the dispatch
+      # input), validate it, refuse to clobber an existing tag, then create and
+      # push it on the checked-out commit so goreleaser sees the same tagged
+      # git state a `push: tags` event would present. Tags pushed with
+      # GITHUB_TOKEN do not re-trigger this workflow (GitHub's recursion
+      # guard), so there is no double release. Skipped on a real tag push
+      # (github.ref is refs/tags/*), where the tag already exists.
       - name: Create and push tag
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
         env:
-          VERSION: ${{ inputs.version }}
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          if [ -n "${DISPATCH_VERSION:-}" ]; then
+            VERSION="$DISPATCH_VERSION"
+          else
+            VERSION="${GITHUB_REF_NAME#release/}"
+          fi
           case "$VERSION" in
             v[0-9]*) ;;
             *) echo "version must match ^v[0-9] (got '$VERSION')" >&2; exit 1 ;;
@@ -76,3 +89,10 @@ jobs:
       - run: go tool goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The release/* branch is a one-shot trigger, not durable state; delete
+      # it once the release has published so these branches don't accumulate.
+      # Best-effort — a failure here must not fail an otherwise-good release.
+      - name: Delete release branch
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+        run: git push origin --delete "$GITHUB_REF_NAME" || true
