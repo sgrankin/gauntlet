@@ -185,6 +185,15 @@ func run() error {
 		return fmt.Errorf("sweep gc pins: %w", err)
 	}
 
+	// Trial refs (issue #7) live on the REMOTE and their retention
+	// schedule is in-memory, so a crash orphans them; sweep the namespace
+	// at startup, same rationale as the pins. Only when the feature is on.
+	if cfg.GitHub.TrialRefPrefix != "" {
+		if _, err := repo.SweepTrialRefs(ctx, cfg.GitHub.TrialRefPrefix); err != nil {
+			return fmt.Errorf("sweep trial refs: %w", err)
+		}
+	}
+
 	// The trials dir only ever holds ephemeral trial-tree exports for the
 	// run currently in flight, never anything that needs to survive a
 	// restart, so sweeping it at startup cleans up anything orphaned by a
@@ -543,6 +552,12 @@ func run() error {
 		// (absent-vs-explicit-false needs the pointer); the queue takes the
 		// resolved value.
 		AutoRetryErrors: *cfg.AutoRetryErrors,
+
+		// Trial-ref publication (issue #7): the resolved prefix being
+		// non-empty is the enable signal, mirroring the github block.
+		TrialRefs:         cfg.GitHub.TrialRefPrefix != "",
+		TrialRefPrefix:    cfg.GitHub.TrialRefPrefix,
+		TrialRefRetention: cfg.GitHub.TrialRefRetention,
 	}
 	// pool is a *services.Pool; assigning it into the queue.ServicePool
 	// interface field unconditionally (even when nil) would leave a

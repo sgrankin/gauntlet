@@ -1822,6 +1822,57 @@ github "acme/widgets" {
 			wantErr: `remote repository "acme/other" does not match`,
 		},
 		{
+			name: "trial-refs prefix not under refs/",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    trial-refs {
+        prefix "gauntlet/trials"
+    }
+}
+`,
+			wantErr: `prefix must start with "refs/"`,
+		},
+		{
+			name: "trial-refs prefix with a trailing slash",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    trial-refs {
+        prefix "refs/gauntlet/trials/"
+    }
+}
+`,
+			wantErr: "no trailing slash",
+		},
+		{
+			name: "trial-refs negative retention",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    trial-refs {
+        retention "-1h"
+    }
+}
+`,
+			wantErr: "retention must not be negative",
+		},
+		{
 			name: "export mtimes with an unknown mode",
 			kdl: `
 remote "https://example.com/repo.git"
@@ -1932,6 +1983,55 @@ github "acme/widgets"
 	}
 	if d.GitHub.Auth != nil {
 		t.Errorf("Auth = %+v with no auth block, want nil", d.GitHub.Auth)
+	}
+}
+
+// TestLoadDaemon_GitHubTrialRefs covers the `trial-refs` block (issue #7):
+// a bare node takes both defaults; explicit values resolve; absent stays
+// disabled.
+func TestLoadDaemon_GitHubTrialRefs(t *testing.T) {
+	load := func(t *testing.T, gh string) *Daemon {
+		t.Helper()
+		kdl := `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+` + gh
+		path := t.TempDir() + "/gauntlet.kdl"
+		if err := os.WriteFile(path, []byte(kdl), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := LoadDaemon(path)
+		if err != nil {
+			t.Fatalf("LoadDaemon: %v", err)
+		}
+		return d
+	}
+
+	// Absent: disabled.
+	if d := load(t, `github "acme/widgets"`); d.GitHub.TrialRefPrefix != "" {
+		t.Errorf("TrialRefPrefix = %q with no trial-refs node, want empty", d.GitHub.TrialRefPrefix)
+	}
+
+	// Bare node: both defaults.
+	d := load(t, "github \"acme/widgets\" {\n    trial-refs {}\n}\n")
+	if d.GitHub.TrialRefPrefix != "refs/gauntlet/trials" {
+		t.Errorf("default prefix = %q", d.GitHub.TrialRefPrefix)
+	}
+	if d.GitHub.TrialRefRetention != 24*time.Hour {
+		t.Errorf("default retention = %s, want 24h", d.GitHub.TrialRefRetention)
+	}
+
+	// Explicit values.
+	d = load(t, "github \"acme/widgets\" {\n    trial-refs {\n        prefix \"refs/gauntlet/probes\"\n        retention \"1h\"\n    }\n}\n")
+	if d.GitHub.TrialRefPrefix != "refs/gauntlet/probes" {
+		t.Errorf("prefix = %q", d.GitHub.TrialRefPrefix)
+	}
+	if d.GitHub.TrialRefRetention != time.Hour {
+		t.Errorf("retention = %s, want 1h", d.GitHub.TrialRefRetention)
 	}
 }
 

@@ -68,6 +68,10 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 	return nil
 }
 
+func (f *fakeGitRepo) ListRemoteRefs(ctx context.Context, pattern string) (map[string]string, error) {
+	return nil, nil
+}
+
 func (f *fakeGitRepo) RestoreMtimes(ctx context.Context, commit, dir string) (core.MtimeStats, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

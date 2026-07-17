@@ -93,9 +93,17 @@ type GitRepo interface {
 	Unpin(ctx context.Context, oid string) error
 
 	// CASUpdate compare-and-swaps remoteRef from oldOID to newOID.
-	// newOID == "" deletes the ref. Returns ErrCASStale if the ref's
+	// newOID == "" deletes the ref. oldOID == "" asserts the ref must not
+	// currently exist (CAS-create). Returns ErrCASStale if the ref's
 	// actual value did not match oldOID (Invariants 2 and 3).
 	CASUpdate(ctx context.Context, remoteRef, oldOID, newOID string) error
+
+	// ListRemoteRefs returns every remote ref matching pattern (a git
+	// ref-glob) as name -> OID, from the remote directly (ls-remote), not
+	// the local remote-tracking view. The trial-ref reaper (issue #7)
+	// uses it to find its own published refs under a custom namespace the
+	// daemon never fetches. An empty match is not an error.
+	ListRemoteRefs(ctx context.Context, pattern string) (map[string]string, error)
 }
 
 // MtimeStats reports what one RestoreMtimes pass did, for instrumentation:

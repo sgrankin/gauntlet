@@ -411,6 +411,95 @@ func TestCASUpdateDelete(t *testing.T) {
 	}
 }
 
+// TestTrialRefLifecycle exercises issue #7's ref plumbing against real git
+// under the custom namespace: CAS-create (idempotent on a re-create to the
+// same SHA, stale on a conflicting one), ls-remote listing of a namespace
+// the fetch refspec never mirrors, and race-safe CAS-delete.
+func TestTrialRefLifecycle(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	base := remote.Ref("refs/heads/main")
+	who := core.Identity{Name: "Gauntlet", Email: "gauntlet@ci.example"}
+	tm, err := repo.MergeTree(ctx, base, base)
+	if err != nil || !tm.Clean {
+		t.Fatalf("MergeTree: %+v %v", tm, err)
+	}
+	merge, err := repo.CommitTree(ctx, tm.TreeOID, []string{base}, "trial\n", who)
+	if err != nil {
+		t.Fatalf("CommitTree: %v", err)
+	}
+
+	const trialRef = "refs/gauntlet/trials/r123"
+	const absent = ""
+
+	// CAS-create: the ref must not exist yet (old == "").
+	if err := repo.CASUpdate(ctx, trialRef, absent, merge); err != nil {
+		t.Fatalf("CAS-create trial ref: %v", err)
+	}
+	if got := remote.Ref(trialRef); got != merge {
+		t.Fatalf("trial ref = %q, want %q", got, merge)
+	}
+
+	// ls-remote sees it even though the daemon never fetches this
+	// namespace (Fetch mirrors only refs/heads/*).
+	refs, err := repo.ListRemoteRefs(ctx, "refs/gauntlet/trials/*")
+	if err != nil {
+		t.Fatalf("ListRemoteRefs: %v", err)
+	}
+	if refs[trialRef] != merge {
+		t.Fatalf("ListRemoteRefs = %v, want %s -> %s", refs, trialRef, merge)
+	}
+
+	// Re-creating to the SAME SHA is idempotent: git treats the push as
+	// up-to-date and the lease is satisfied, so a crash-retry of the same
+	// run's publish is a no-op success, not a collision.
+	if err := repo.CASUpdate(ctx, trialRef, absent, merge); err != nil {
+		t.Fatalf("idempotent re-create to the same SHA: %v", err)
+	}
+
+	// Creating the SAME ref at a DIFFERENT SHA is the operational
+	// collision (a second daemon, a run-id reuse): the absent-lease fails,
+	// stale, and the ref is NOT overwritten (never force a trial ref).
+	merge2, err := repo.CommitTree(ctx, tm.TreeOID, []string{base}, "different trial\n", who)
+	if err != nil {
+		t.Fatalf("CommitTree 2: %v", err)
+	}
+	if merge2 == merge {
+		t.Fatal("precondition: the two trial merges must differ")
+	}
+	if err := repo.CASUpdate(ctx, trialRef, absent, merge2); !errors.Is(err, core.ErrCASStale) {
+		t.Fatalf("create-at-conflicting-SHA: err = %v, want ErrCASStale", err)
+	}
+	if got := remote.Ref(trialRef); got != merge {
+		t.Fatalf("trial ref overwritten by a conflicting create: %q, want %q", got, merge)
+	}
+
+	// CAS-delete keyed on the wrong SHA must not remove it (race safety).
+	const zero = "0000000000000000000000000000000000000000"
+	if err := repo.CASUpdate(ctx, trialRef, zero, ""); !errors.Is(err, core.ErrCASStale) {
+		t.Fatalf("delete with wrong old-OID: err = %v, want ErrCASStale", err)
+	}
+	if got := remote.Ref(trialRef); got != merge {
+		t.Fatalf("trial ref removed despite stale delete: %q", got)
+	}
+
+	// CAS-delete keyed on the real SHA removes it.
+	if err := repo.CASUpdate(ctx, trialRef, merge, ""); err != nil {
+		t.Fatalf("CAS-delete trial ref: %v", err)
+	}
+	refs, err = repo.ListRemoteRefs(ctx, "refs/gauntlet/trials/*")
+	if err != nil {
+		t.Fatalf("ListRemoteRefs after delete: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("trial refs after delete = %v, want none", refs)
+	}
+}
+
 func TestFetchPrunesDeletedRefs(t *testing.T) {
 	ctx := context.Background()
 	repo, remote, _ := newRepo(t)

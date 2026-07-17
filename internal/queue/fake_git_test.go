@@ -52,12 +52,14 @@ type fakeGitRepo struct {
 	// for. (This fake models the didn't-apply half; the did-apply half is a
 	// beforeCAS-style ref mutation plus a plain error, which no current
 	// test needs.)
-	casErr error
+	casErr      error
+	lsRemoteErr error
 
 	mergeTreeCalls  int
 	mtimeCalls      int
 	commitTreeCalls int
 	exportCalls     int
+	lsRemoteCalls   int
 
 	// casLog records every CASUpdate call in order, so tests can assert
 	// ordering (e.g. land pushes the target before deleting the slot)
@@ -296,6 +298,26 @@ func (f *fakeGitRepo) Unpin(ctx context.Context, oid string) error {
 	defer f.mu.Unlock()
 	delete(f.pins, oid)
 	return nil
+}
+
+// ListRemoteRefs matches f.refs against a "<prefix>/*" or "<prefix>*"
+// glob (the trailing-star form gitx passes), returning name -> OID. An
+// injectable lsRemoteErr models a remote round-trip failure.
+func (f *fakeGitRepo) ListRemoteRefs(ctx context.Context, pattern string) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lsRemoteCalls++
+	if f.lsRemoteErr != nil {
+		return nil, f.lsRemoteErr
+	}
+	prefix := strings.TrimSuffix(pattern, "*")
+	out := make(map[string]string)
+	for ref, oid := range f.refs {
+		if strings.HasPrefix(ref, prefix) {
+			out[ref] = oid
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID string) error {

@@ -179,6 +179,31 @@ type Config struct {
 	// Daemon.AutoRetryErrors defaults to true at the config-loading layer,
 	// and cmd/gauntlet wires the resolved value straight through.
 	AutoRetryErrors bool
+
+	// TrialRefs enables trial-ref publication (issue #7, config's `github
+	// { trial-ref-prefix ... }`): after CommitTree, the run's chain-tip
+	// merge is CAS-published under an immutable remote ref
+	// (TrialRefPrefix/<run-id>) so its MergeSHA is resolvable on the
+	// remote and can carry a verification commit status. Off ⇒ today's
+	// behavior verbatim (no ref, no EventTrialMerged/EventVerified,
+	// candidate-SHA statuses). A publish failure is an infrastructure
+	// error (OutcomeError park), never a candidate rejection.
+	TrialRefs bool
+
+	// TrialRefPrefix is the ref namespace trial merges publish under —
+	// e.g. "refs/gauntlet/trials" (the default; a custom namespace,
+	// deliberately NOT refs/heads/**, to avoid UI clutter and workflow
+	// triggers — see the issue #7 spike). Each run's ref is
+	// TrialRefPrefix + "/" + runID. Meaningful only when TrialRefs is set.
+	TrialRefPrefix string
+
+	// TrialRefRetention is how long a NON-landing run's trial ref is kept
+	// after its terminal outcome before the reaper CAS-deletes it, so a
+	// failed synthetic merge stays inspectable briefly. A landing deletes
+	// its ref immediately (the target now reaches the merge). Zero means
+	// delete on terminal, no retention. Meaningful only when TrialRefs is
+	// set.
+	TrialRefRetention time.Duration
 }
 
 // ServicePool is the subset of *services.Pool the queue consumes. Its
@@ -337,6 +362,20 @@ type run struct {
 
 	verdict runVerdict // set by advanceChecks, consumed by advanceLane
 
+	// verifiedEmitted guards the once-per-run EventVerified emit (the
+	// verdict-goes-green transition, issue #7): advanceChecks can re-run
+	// the green-detection block on a tick where the run isn't landed the
+	// same pass, so the emit is edge-triggered, not level.
+	verifiedEmitted bool
+
+	// trialRef, when non-empty, is the published immutable remote ref
+	// naming this run's chain-tip merge (issue #7's trial-ref publication,
+	// Config.TrialRefs). Set once in startRun/finishBatchStart after the
+	// CAS-create push confirms; CAS-deleted at land (landRun) and, for a
+	// non-landing terminal, retained for Config.TrialRefRetention then
+	// reaped. Empty when the feature is off or the merge never published.
+	trialRef string
+
 	rootCtx  context.Context
 	rootSpan trace.Span
 }
@@ -442,6 +481,17 @@ type Daemon struct {
 	// still needs). In-memory only, reconstructible in that same weak sense.
 	landedPins map[string]string
 
+	// trialReap holds published trial refs (issue #7) awaiting deletion
+	// after their run's non-landing terminal — keyed by ref name, valued
+	// by the merge SHA the ref names and the instant it may be reaped
+	// (now + Config.TrialRefRetention). reapTrialRefs CAS-deletes each on
+	// or after its instant, keyed on the stored SHA so a ref recreated or
+	// changed by another daemon/operator is never removed. A landing
+	// deletes its ref immediately (landRun) and never enters here.
+	// In-memory only: crash orphans are swept at boot by cmd, mirroring
+	// the pin sweep.
+	trialReap map[string]trialReapEntry
+
 	// idleSince is buildSnapshot's own tracked idle-transition instant (see
 	// docs/design/scaling.md, "Axis 2 — park the builder"; and
 	// Snapshot.IdleSince's own doc): zero while the
@@ -524,7 +574,15 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		batchFallback: make(map[string]bool),
 		seeded:        make(map[string]bool),
 		landedPins:    make(map[string]string),
+		trialReap:     make(map[string]trialReapEntry),
 	}, nil
+}
+
+// trialReapEntry is one retained trial ref: the merge SHA it names (the
+// CAS-delete key) and the earliest instant it may be reaped.
+type trialReapEntry struct {
+	sha string
+	at  time.Time
 }
 
 // headRun returns the head run of target's lane (lane.runs[0]) — the run a
@@ -654,6 +712,11 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	for i := range d.cfg.Targets {
 		d.reconcileTarget(ctx, d.cfg.Targets[(off+i)%len(d.cfg.Targets)], refs)
 	}
+
+	// Reap trial refs whose retention window elapsed (issue #7). No-op
+	// (and no remote round trip) unless the feature is on and something is
+	// actually due.
+	d.reapTrialRefs(ctx)
 
 	// Arm the services reaper once this pass has swept every target: by
 	// now, any in-flight work recovered from a restart has had this

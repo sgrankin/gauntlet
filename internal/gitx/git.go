@@ -346,6 +346,34 @@ func (r *Repo) Unpin(ctx context.Context, oid string) error {
 	return nil
 }
 
+// SweepTrialRefs deletes every REMOTE trial ref under prefix (issue #7),
+// returning how many were removed. Startup calls this to clear refs a
+// crashed previous process orphaned: the in-memory retention schedule
+// (Daemon.trialReap) does not survive a restart, so without this, orphans
+// would leak on the remote forever. Each delete is CAS-keyed on the SHA
+// just observed (race-safe — a ref changed since the listing is left
+// alone); an individual delete failure is returned so the caller can
+// decide, but does not undo the ones that succeeded. This assumes one
+// daemon owns the remote (gauntlet's "one daemon, N queues" model): with
+// multiple daemons sharing it, a boot sweep would race a peer's live refs.
+func (r *Repo) SweepTrialRefs(ctx context.Context, prefix string) (int, error) {
+	refs, err := r.ListRemoteRefs(ctx, prefix+"/*")
+	if err != nil {
+		return 0, fmt.Errorf("gitx: sweep trial refs: %w", err)
+	}
+	n := 0
+	for ref, oid := range refs {
+		if err := r.CASUpdate(ctx, ref, oid, ""); err != nil {
+			if errors.Is(err, core.ErrCASStale) {
+				continue // changed since we listed; not ours to remove
+			}
+			return n, fmt.Errorf("gitx: sweep trial refs: delete %s: %w", ref, err)
+		}
+		n++
+	}
+	return n, nil
+}
+
 // SweepPins deletes every pin ref, returning how many were swept. Startup
 // calls this before the first reconcile pass: a crash can strand pins, and
 // every in-flight run is re-derived from refs and re-run from scratch
@@ -370,6 +398,30 @@ func (r *Repo) SweepPins(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("gitx: sweep pins: %w", err)
 	}
 	return len(refs), nil
+}
+
+// ListRemoteRefs returns every remote ref matching pattern (a git
+// ref-glob, e.g. "refs/gauntlet/trials/*") as name -> OID, straight from
+// the remote via ls-remote — NOT the local remote-tracking view, which
+// only mirrors refs/heads/* (the fetch refspec). The trial-ref reaper
+// (issue #7) needs the authoritative remote state under a custom
+// namespace the daemon never fetches, so this is its own round trip.
+// Empty result (no match) is not an error.
+func (r *Repo) ListRemoteRefs(ctx context.Context, pattern string) (map[string]string, error) {
+	out, err := r.runRemote(ctx, "ls-remote", "origin", pattern)
+	if err != nil {
+		return nil, fmt.Errorf("gitx: ls-remote %s: %w", pattern, err)
+	}
+	refs := make(map[string]string)
+	for _, ln := range splitLines(out) {
+		// "<oid>\t<refname>"
+		oid, name, ok := strings.Cut(ln, "\t")
+		if !ok {
+			continue
+		}
+		refs[name] = oid
+	}
+	return refs, nil
 }
 
 // CASUpdate compare-and-swaps remoteRef from oldOID to newOID (newOID == ""

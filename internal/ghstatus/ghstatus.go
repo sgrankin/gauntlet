@@ -62,6 +62,17 @@ type Params struct {
 	// expire hourly) flow in; see internal/ghauth.
 	Tokens TokenSource
 
+	// TrialRefs selects merge-SHA VERIFICATION statuses (issue #7) over
+	// today's candidate-SHA statuses. When set, the rollup describes
+	// verification of the exact synthetic merge: pending when the merge is
+	// published (EventTrialMerged), success when its required graph is
+	// green (EventVerified), failure on a source rejection, error on
+	// infrastructure — all posted to the merge SHA, never repainted by the
+	// subsequent landing. A trial conflict, which has no synthetic commit,
+	// still reports against the candidate SHA. Off ⇒ today's exact
+	// behavior (candidate SHA, EventTrialClean/EventLanded lifecycle).
+	TrialRefs bool
+
 	// APIURL is the GitHub REST API base URL. Defaults to
 	// "https://api.github.com" when empty.
 	APIURL string
@@ -92,6 +103,7 @@ type Channel struct {
 	tokens       TokenSource
 	apiURL       string
 	dashboardURL string
+	trialRefs    bool
 
 	client *http.Client
 	cmds   chan core.Command
@@ -120,6 +132,7 @@ func New(p Params) *Channel {
 		tokens:       tokens,
 		apiURL:       apiURL,
 		dashboardURL: p.DashboardURL,
+		trialRefs:    p.TrialRefs,
 		client:       &http.Client{Timeout: requestTimeout},
 		cmds:         make(chan core.Command),
 		log:          logw,
@@ -136,11 +149,11 @@ func New(p Params) *Channel {
 // dropped status must never stop the queue. The error return exists only to
 // satisfy core.Channel.
 func (c *Channel) Emit(ctx context.Context, ev core.Event) error {
-	state, description, ok := statusFor(ev)
-	if !ok {
+	state, description, sha, ok := c.statusFor(ev)
+	if !ok || sha == "" {
 		return nil
 	}
-	if err := c.post(ctx, ev, state, description); err != nil {
+	if err := c.post(ctx, ev, state, description, sha); err != nil {
 		c.logf("ghstatus: %v", err)
 	}
 	return nil
@@ -163,20 +176,31 @@ const (
 	stateError   state = "error"
 )
 
-// statusFor maps ev to the state and description to post. ok is false for
-// event kinds that post nothing.
-func statusFor(ev core.Event) (s state, description string, ok bool) {
+// statusFor maps ev to the state, description, and target SHA to post. ok
+// is false for event kinds that post nothing; the caller also skips an
+// empty SHA. Two modes: candidate-SHA (today's default) and merge-SHA
+// verification (Config/Params.TrialRefs, issue #7).
+func (c *Channel) statusFor(ev core.Event) (s state, description, sha string, ok bool) {
+	if c.trialRefs {
+		return c.verificationStatusFor(ev)
+	}
+	return candidateStatusFor(ev)
+}
+
+// candidateStatusFor is the pre-#7 behavior: one rollup on the CANDIDATE
+// SHA, pending at trial-clean through success at landing.
+func candidateStatusFor(ev core.Event) (s state, description, sha string, ok bool) {
 	switch ev.Kind {
 	case core.EventTrialClean:
-		return statePending, "running checks", true
+		return statePending, "running checks", ev.Candidate.SHA, true
 	case core.EventLanded:
-		return stateSuccess, "landed", true
+		return stateSuccess, "landed", ev.Candidate.SHA, true
 	case core.EventRejected:
-		return stateFailure, capDescription(detailOf(ev)), true
+		return stateFailure, capDescription(detailOf(ev)), ev.Candidate.SHA, true
 	case core.EventTrialConflict:
-		return stateFailure, "trial merge conflict", true
+		return stateFailure, "trial merge conflict", ev.Candidate.SHA, true
 	case core.EventError:
-		return stateError, capDescription(detailOf(ev)), true
+		return stateError, capDescription(detailOf(ev)), ev.Candidate.SHA, true
 	case core.EventHookFinished:
 		// Deliberately ignored: the commit status describes the LANDING,
 		// and a post-land hook failure must not
@@ -184,12 +208,51 @@ func statusFor(ev core.Event) (s state, description string, ok bool) {
 		// hand-off boundary (DESIGN.md's decision ledger, "Deployments as
 		// post-land hooks"). A failed hook is Slack's and the log
 		// channel's job to surface, not ghstatus's.
-		return "", "", false
+		return "", "", "", false
 	default:
 		// core.EventSkipped and every non-terminal kind (Queued,
 		// CheckStarted, CheckFinished, IgnoredRef): no post.
-		return "", "", false
+		return "", "", "", false
 	}
+}
+
+// verificationStatusFor is the #7 behavior: the rollup describes
+// verification of the exact synthetic MERGE, on the merge SHA. Pending
+// when published, success when the graph is green (BEFORE landing),
+// failure/error on rejection/infra. EventLanded and EventTrialClean post
+// nothing here — verification is not landing, and the pending status came
+// from EventTrialMerged with the real MergeSHA. EventSkipped posts nothing
+// (a superseded/re-tested merge, e.g. a batch falling back to serial: the
+// per-member serial re-runs carry the definitive statuses).
+func (c *Channel) verificationStatusFor(ev core.Event) (s state, description, sha string, ok bool) {
+	switch ev.Kind {
+	case core.EventTrialMerged:
+		return statePending, "verifying merge", mergeSHAOf(ev), true
+	case core.EventVerified:
+		return stateSuccess, "merge verified", mergeSHAOf(ev), true
+	case core.EventRejected:
+		return stateFailure, capDescription(detailOf(ev)), mergeSHAOf(ev), true
+	case core.EventError:
+		return stateError, capDescription(detailOf(ev)), mergeSHAOf(ev), true
+	case core.EventTrialConflict:
+		// The documented exception: a conflict produces no synthetic
+		// commit, so there is no merge SHA to status — report against the
+		// candidate, as candidate mode does.
+		return stateFailure, "trial merge conflict", ev.Candidate.SHA, true
+	default:
+		// EventTrialClean, EventLanded, EventSkipped, EventHookFinished,
+		// and every non-terminal kind: no verification post.
+		return "", "", "", false
+	}
+}
+
+// mergeSHAOf returns the tested merge SHA an event's record carries, or ""
+// when absent (no synthetic commit) — the caller then posts nothing.
+func mergeSHAOf(ev core.Event) string {
+	if ev.Record != nil {
+		return ev.Record.MergeSHA
+	}
+	return ""
 }
 
 // detailOf extracts the human-readable detail for a terminal event: the
@@ -230,7 +293,7 @@ type statusPayload struct {
 // "this token is expired or revoked" — invalidates the token and retries
 // exactly once with a freshly minted one; every other failure (403
 // permission, 5xx, network) surfaces immediately, never retried here.
-func (c *Channel) post(ctx context.Context, ev core.Event, s state, description string) error {
+func (c *Channel) post(ctx context.Context, ev core.Event, s state, description, sha string) error {
 	payload := statusPayload{
 		State:       string(s),
 		TargetURL:   runURL(c.dashboardURL, ev.RunID),
@@ -242,7 +305,7 @@ func (c *Channel) post(ctx context.Context, ev core.Event, s state, description 
 		return fmt.Errorf("marshal status: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", c.apiURL, c.owner, c.repo, ev.Candidate.SHA)
+	url := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", c.apiURL, c.owner, c.repo, sha)
 
 	tok, err := c.tokens.Token(ctx)
 	if err != nil {

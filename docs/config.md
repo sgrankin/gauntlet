@@ -168,6 +168,49 @@ summarize {
     `.github/workflows/`, GitHub additionally requires **Workflows:
     Read and write** to push those — without it the land push is
     rejected.
+
+  A `trial-refs` child block enables trial-ref publication (issue #7):
+
+    ```kdl
+    github "acme/widgets" {
+        trial-refs {
+            prefix "refs/gauntlet/trials"
+            retention "24h"
+        }
+    }
+    ```
+
+  The commit Gauntlet actually tests is a synthetic merge of the
+  candidate and a specific target tip — a commit that initially exists
+  only in Gauntlet's bare repository. With `trial-refs` on, each run
+  publishes that merge under an immutable ref `<prefix>/<run-id>` before
+  its checks start, so GitHub can display and status **exactly the bytes
+  that ran**, and the rollup commit status moves from the candidate SHA
+  to the **merge SHA** — a statement about verification of that exact
+  merge, not the queue slot and not post-land deployment: pending once
+  the merge is published, success when the required checks pass (posted
+  *before* the landing CAS, so a "tested SHA must be green before the ref
+  moves" branch-protection rule can key on it), failure on a source
+  rejection, error on infrastructure. A trial *conflict* produces no
+  synthetic commit, so it still reports against the candidate SHA. A
+  landing deletes the now-redundant ref immediately; a non-landing run
+  keeps its ref for `retention` (default 24h) so a failed merge stays
+  inspectable, after which a reaper CAS-deletes it. Crash-orphaned refs
+  are swept at daemon startup.
+
+  `prefix` (default `refs/gauntlet/trials`) **must** start with `refs/`
+  and is deliberately a **custom namespace, not `refs/heads/**`**: a
+  `refs/heads/**` prefix is accepted but publishes branches that clutter
+  branch UIs and **can match repository workflow triggers** (a
+  `push`-triggered Action would fire on every trial) — a verified spike
+  confirmed a custom `refs/gauntlet/*` push is accepted by GitHub,
+  resolvable, statusable, and triggers no workflow. The publish is a
+  synchronous CAS round trip per run start (latency recorded on the run
+  span as `gauntlet.trialref.publish_ms`); a publish failure is an
+  infrastructure error (park + retry), never a candidate rejection. Trial
+  refs add to the repository's ref count and assume a single daemon owns
+  the remote (Gauntlet's model). With App auth configured, publication
+  uses the same refreshable credential provider.
 - **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
   threaded run messages in the given channel ID, root edited to a
   pass/fail mark on landing, `:recycle:` on the root re-queues via retry,

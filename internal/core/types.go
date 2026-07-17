@@ -466,6 +466,35 @@ const (
 	// erroring.
 	EventHookSkipped
 
+	// EventTrialMerged reports that a run's synthetic merge commit now
+	// exists and (when trial-ref publication is enabled, issue #7) has
+	// been published under an immutable remote ref — so its MergeSHA is
+	// resolvable on the remote and can carry a commit status. Target,
+	// Candidate, and RunID identify the run; Record is set and carries the
+	// MergeSHA/BaseOID, the same *RunRecord the run's terminal event will
+	// later carry (so the pending verification status posts to exactly the
+	// bytes that ran). Fired once per run, after CommitTree and the ref
+	// push, before any check starts — a non-terminal, additive event
+	// (channels that don't render it ignore it). Unlike EventTrialClean
+	// (emitted before CommitTree, when no MergeSHA exists yet), this
+	// carries the merge identity, which is the whole point: the candidate
+	// SHA and the tested-merge SHA are different claims.
+	EventTrialMerged
+
+	// EventVerified reports that a run's required check graph went green —
+	// the tested merge is verified — BEFORE the landing CAS that makes it
+	// the target tip. It is deliberately distinct from EventLanded:
+	// verification is a true statement about the exact MergeSHA, whereas
+	// landing is a subsequent compare-and-swap that can still fail (or be
+	// skipped) if the target moved. This ordering is what lets a "tested
+	// SHA must be green before the ref update" policy exist — posting
+	// success only after landing could never satisfy it. Target,
+	// Candidate, and RunID identify the run; Record carries the MergeSHA.
+	// Fired once per run, when the verdict first becomes green. Additive
+	// and non-terminal (the run's own terminal EventLanded/EventRejected
+	// still follows) — channels that don't recognize it ignore it.
+	EventVerified
+
 	// EventRetryRequested reports an operator's explicit retry of a parked
 	// (ref, SHA) (queue/command.go's applyRetry, a persisted retry
 	// intent): Target and Candidate (Ref, SHA set; User/Topic as parsed)

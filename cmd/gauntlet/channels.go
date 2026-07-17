@@ -56,6 +56,7 @@ func buildGHStatusChannel(cfg *config.Daemon, appTokens *ghauth.App) (*ghstatus.
 		Repo:         repo,
 		APIURL:       cfg.GitHub.APIURL,
 		DashboardURL: cfg.Dashboard.URL,
+		TrialRefs:    cfg.GitHub.TrialRefPrefix != "",
 	}
 	if appTokens != nil {
 		p.Tokens = appTokens

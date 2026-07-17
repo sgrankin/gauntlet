@@ -675,6 +675,22 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	if len(r.results) == len(r.checks) && len(r.inflight) == 0 {
 		d.materializeChecks(r)
 		r.verdict = verdictGreen
+		// The tested merge is verified — a true statement about this exact
+		// MergeSHA, emitted BEFORE the landing CAS (which can still fail or
+		// be skipped if the target moved). advanceChecks's verdictNone
+		// guard makes this the sole green transition, so the emit is
+		// once-per-run; verifiedEmitted is belt-and-braces. One member
+		// carries the run's MergeSHA in every mode (batch's chain tip
+		// included) — members[0].rec is the head record. Gated with
+		// EventTrialMerged behind TrialRefs so disabled-mode event streams
+		// stay byte-identical to today's.
+		if d.cfg.TrialRefs && !r.verifiedEmitted {
+			r.verifiedEmitted = true
+			d.emit(ctx, core.Event{
+				Kind: core.EventVerified, At: d.now(), Target: r.target,
+				Candidate: r.members[0].cand, RunID: r.runID, Record: d.verificationRecord(r),
+			})
+		}
 	}
 }
 
@@ -1246,6 +1262,20 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 
+	// One trial ref + one status at the chain-tip merge for the whole
+	// batch (issue #7): a batch verifies one suite over the combined tree,
+	// so member candidates get no separate verification statuses —
+	// attribution stays in the record/dashboard/status target URL.
+	var trialRef string
+	if d.cfg.TrialRefs {
+		ref, err := d.createTrialRef(ctx, runID, chainTip, rootSpan)
+		if err != nil {
+			d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "publish trial ref: "+err.Error(), rootSpan)
+			return
+		}
+		trialRef = ref
+	}
+
 	specData, err := d.git.ReadFileFromTree(ctx, tipTree, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
@@ -1329,8 +1359,17 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		imageRefs:   make(map[string]string, len(spec.Images)),
 		services:    spec.Services,
 		verdict:     verdictNone,
+		trialRef:    trialRef,
 		rootCtx:     rootCtx,
 		rootSpan:    rootSpan,
+	}
+	// One pending verification status at the chain tip, carrying the head
+	// member's record (Position 0), before checks start.
+	if d.cfg.TrialRefs {
+		d.emit(ctx, core.Event{
+			Kind: core.EventTrialMerged, At: d.now(), Target: t.Name,
+			Candidate: members[0].cand, RunID: runID, Record: d.verificationRecord(r),
+		})
 	}
 	l := d.lanes[t.Name]
 	if l == nil {
@@ -1664,6 +1703,20 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		return nil, false
 	}
 
+	// Publish the trial ref (issue #7) after the merge exists and is
+	// pinned, before any check starts — a synchronous CAS round trip. A
+	// publish failure is infrastructure, not a bad candidate: OutcomeError,
+	// like the pin/export failures around it.
+	var trialRef string
+	if d.cfg.TrialRefs {
+		ref, err := d.createTrialRef(ctx, runID, link.mergeOID, rootSpan)
+		if err != nil {
+			d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeError, "publish trial ref: "+err.Error(), rootSpan)
+			return nil, false
+		}
+		trialRef = ref
+	}
+
 	specData, err := d.git.ReadFileFromTree(ctx, trial.TreeOID, d.cfg.CheckSpec)
 	if err != nil {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
@@ -1743,8 +1796,18 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		imageRefs:   make(map[string]string, len(spec.Images)),
 		services:    spec.Services,
 		verdict:     verdictNone,
+		trialRef:    trialRef,
 		rootCtx:     rootCtx,
 		rootSpan:    rootSpan,
+	}
+	// The merge is published (when enabled): its MergeSHA now carries the
+	// pending verification status. Emitted before checks start, after
+	// EventTrialClean (which fires pre-CommitTree, without a MergeSHA).
+	if d.cfg.TrialRefs {
+		d.emit(ctx, core.Event{
+			Kind: core.EventTrialMerged, At: d.now(), Target: t.Name,
+			Candidate: cand, RunID: runID, Record: d.verificationRecord(r),
+		})
 	}
 	l := d.lanes[t.Name]
 	if l == nil {
@@ -1985,6 +2048,11 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	// Unobservable today (no event or record carries the dir path,
 	// and spans are no-op), but don't write a consumer — or a batch-chunk
 	// extension — that assumes the dir is gone by EventLanded time.
+	// The trial ref is now redundant — the target reaches the merge — so
+	// delete it immediately (issue #7). Clears r.trialRef so finalizeRun's
+	// retention path skips it.
+	d.deleteTrialRefNow(ctx, r)
+
 	obs.EndSpan(landSpan, nil) // the land itself (target push) succeeded regardless of any slot-delete outcome
 	d.finalizeRun(ctx, r)
 }
@@ -2068,6 +2136,14 @@ func (d *Daemon) finalizeRun(ctx context.Context, r *run) {
 
 	if _, deferred := d.landedPins[r.chainTip]; !deferred {
 		d.unpin(ctx, r.chainTip)
+	}
+
+	// A landing already deleted its trial ref (landRun, clearing
+	// r.trialRef); any other terminal disposes by retention — deleted now
+	// when retention is zero, otherwise kept briefly for diagnosis and
+	// reaped by reapTrialRefs. No-op when the feature is off.
+	if r.trialRef != "" {
+		d.scheduleTrialReap(ctx, r.trialRef, r.chainTip)
 	}
 
 	if r.dir != "" {

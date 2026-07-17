@@ -555,6 +555,133 @@ func TestChannel_Non401FailureIsNotRetried(t *testing.T) {
 	}
 }
 
+// TestChannel_VerificationMode covers issue #7's merge-SHA statuses: in
+// TrialRefs mode the rollup describes the synthetic MERGE, posted to the
+// merge SHA, with EventLanded/EventTrialClean posting nothing.
+func TestChannel_VerificationMode(t *testing.T) {
+	const mergeSHA = "0f17merge17merge17merge17merge17merge170"
+	rec := &core.RunRecord{MergeSHA: mergeSHA}
+	cases := []struct {
+		name      string
+		ev        core.Event
+		wantPost  bool
+		wantState string
+		wantSHA   string
+	}{
+		{
+			name:      "trial merged -> pending @ merge",
+			ev:        core.Event{Kind: core.EventTrialMerged, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: rec},
+			wantPost:  true,
+			wantState: "pending",
+			wantSHA:   mergeSHA,
+		},
+		{
+			name:      "verified -> success @ merge",
+			ev:        core.Event{Kind: core.EventVerified, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: rec},
+			wantPost:  true,
+			wantState: "success",
+			wantSHA:   mergeSHA,
+		},
+		{
+			name:      "rejected -> failure @ merge",
+			ev:        core.Event{Kind: core.EventRejected, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: &core.RunRecord{MergeSHA: mergeSHA, Detail: "test failed"}},
+			wantPost:  true,
+			wantState: "failure",
+			wantSHA:   mergeSHA,
+		},
+		{
+			name:      "error -> error @ merge",
+			ev:        core.Event{Kind: core.EventError, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: &core.RunRecord{MergeSHA: mergeSHA, Detail: "export failed"}},
+			wantPost:  true,
+			wantState: "error",
+			wantSHA:   mergeSHA,
+		},
+		{
+			name:      "trial conflict -> failure @ candidate (no merge exists)",
+			ev:        core.Event{Kind: core.EventTrialConflict, Target: "main", Candidate: core.Candidate{SHA: "candconflict"}},
+			wantPost:  true,
+			wantState: "failure",
+			wantSHA:   "candconflict",
+		},
+		{
+			// The landing must NOT repaint the verification status: success
+			// already posted on EventVerified.
+			name:     "landed posts nothing",
+			ev:       core.Event{Kind: core.EventLanded, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: rec},
+			wantPost: false,
+		},
+		{
+			// The pre-merge pending came from EventTrialMerged; the candidate
+			// pending must not double-post.
+			name:     "trial clean posts nothing",
+			ev:       core.Event{Kind: core.EventTrialClean, Target: "main", Candidate: core.Candidate{SHA: "cand"}},
+			wantPost: false,
+		},
+		{
+			// A superseded/re-tested merge (e.g. batch -> serial fallback):
+			// the serial re-runs carry the definitive statuses.
+			name:     "skipped posts nothing",
+			ev:       core.Event{Kind: core.EventSkipped, Target: "main", Candidate: core.Candidate{SHA: "cand"}, Record: rec},
+			wantPost: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			posted := false
+			var gotState, gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, _ := io.ReadAll(r.Body)
+				var p statusPayload
+				_ = json.Unmarshal(data, &p)
+				mu.Lock()
+				posted = true
+				gotState = p.State
+				gotPath = r.URL.Path
+				mu.Unlock()
+				w.WriteHeader(http.StatusCreated)
+			}))
+			defer srv.Close()
+
+			c := New(Params{Owner: "acme", Repo: "widgets", Token: "t", APIURL: srv.URL, TrialRefs: true, Log: io.Discard})
+			if err := c.Emit(context.Background(), tc.ev); err != nil {
+				t.Fatalf("Emit: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if posted != tc.wantPost {
+				t.Fatalf("posted = %v, want %v", posted, tc.wantPost)
+			}
+			if !tc.wantPost {
+				return
+			}
+			if gotState != tc.wantState {
+				t.Errorf("state = %q, want %q", gotState, tc.wantState)
+			}
+			if want := "/repos/acme/widgets/statuses/" + tc.wantSHA; gotPath != want {
+				t.Errorf("path = %q, want %q", gotPath, want)
+			}
+		})
+	}
+}
+
+// TestChannel_VerificationModeNoMergeSHASkips: a terminal event whose
+// record carries no MergeSHA (defensive — should not happen for a
+// published run) posts nothing rather than to an empty SHA.
+func TestChannel_VerificationModeNoMergeSHASkips(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	c := New(Params{Owner: "a", Repo: "b", Token: "t", APIURL: srv.URL, TrialRefs: true, Log: io.Discard})
+	ev := core.Event{Kind: core.EventVerified, Target: "main", Record: &core.RunRecord{MergeSHA: ""}}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+}
+
 func TestChannel_DefaultAPIURL(t *testing.T) {
 	c := New(Params{Owner: "a", Repo: "b", Token: "t"})
 	if c.apiURL != "https://api.github.com" {

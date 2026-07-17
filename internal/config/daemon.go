@@ -34,13 +34,15 @@ const (
 // Defaults for the optional sections below; applied only when the section
 // is enabled (its required key non-empty) and the defaulted field is unset.
 const (
-	defaultGitHubTokenEnv = "GITHUB_TOKEN"
-	defaultGitHubAPIURL   = "https://api.github.com"
-	defaultSlackAppEnv    = "SLACK_APP_TOKEN"
-	defaultSlackBotEnv    = "SLACK_BOT_TOKEN"
-	defaultExecutorKind   = "local"
-	defaultRuntime        = "container"
-	defaultWorkdir        = "/workspace"
+	defaultGitHubTokenEnv    = "GITHUB_TOKEN"
+	defaultGitHubAPIURL      = "https://api.github.com"
+	defaultTrialRefPrefix    = "refs/gauntlet/trials"
+	defaultTrialRefRetention = 24 * time.Hour
+	defaultSlackAppEnv       = "SLACK_APP_TOKEN"
+	defaultSlackBotEnv       = "SLACK_BOT_TOKEN"
+	defaultExecutorKind      = "local"
+	defaultRuntime           = "container"
+	defaultWorkdir           = "/workspace"
 
 	// defaultHooksPolicy is applied to a target's hooks-policy whenever
 	// the target has at least one hook and left hooks-policy unset (see
@@ -277,6 +279,37 @@ type GitHub struct {
 	TokenEnv string      `kdl:"token-env"` // default "GITHUB_TOKEN" (unless Auth set)
 	APIURL   string      `kdl:"api-url"`   // default "https://api.github.com"
 	Auth     *GitHubAuth `kdl:"auth"`      // nil ⇒ static-token mode
+
+	// TrialRefPrefix, when non-empty, enables trial-ref publication
+	// (issue #7): each run's tested synthetic merge is published under an
+	// immutable ref TrialRefPrefix/<run-id> so GitHub can display and
+	// status exactly the bytes that ran, and the commit status moves to
+	// the MERGE SHA (verification), not the candidate SHA. Empty ⇒
+	// disabled (today's candidate-SHA behavior). The default when the
+	// `trial-refs` node is present but bare is refs/gauntlet/trials — a
+	// CUSTOM namespace, deliberately NOT refs/heads/**, to avoid branch-UI
+	// clutter and workflow triggers (a refs/heads/** prefix is allowed but
+	// documented as trigger-prone).
+	TrialRefPrefix string `kdl:"-"`
+
+	// TrialRefRetention is how long a non-landing run's trial ref is kept
+	// for diagnosis before the reaper deletes it (a landing deletes its
+	// ref at once). Zero ⇒ delete on terminal. Meaningful only when
+	// TrialRefPrefix is set.
+	TrialRefRetention time.Duration `kdl:"-"`
+
+	// TrialRefs is the raw parse target for the optional `trial-refs`
+	// child node; resolveGitHubTrialRefs lifts it into TrialRefPrefix/
+	// TrialRefRetention. A pointer so presence is unambiguous (a bare
+	// `trial-refs` node with defaults still enables the feature), like
+	// Daemon.Summarize.
+	TrialRefs *GitHubTrialRefs `kdl:"trial-refs"`
+}
+
+// GitHubTrialRefs is the `trial-refs { prefix ...; retention ... }` block.
+type GitHubTrialRefs struct {
+	Prefix    string        `kdl:"prefix"`    // default "refs/gauntlet/trials"
+	Retention time.Duration `kdl:"retention"` // default 24h (unset/zero both take the default)
 }
 
 // GitHubAuth is the `auth "app" { ... }` block: GitHub App installation
@@ -763,6 +796,18 @@ func (d *Daemon) applyDefaults() {
 		if d.GitHub.APIURL == "" {
 			d.GitHub.APIURL = defaultGitHubAPIURL
 		}
+		// Trial-ref publication (issue #7): the block's presence enables
+		// it; a bare `trial-refs` node takes both defaults.
+		if tr := d.GitHub.TrialRefs; tr != nil {
+			d.GitHub.TrialRefPrefix = tr.Prefix
+			if d.GitHub.TrialRefPrefix == "" {
+				d.GitHub.TrialRefPrefix = defaultTrialRefPrefix
+			}
+			d.GitHub.TrialRefRetention = tr.Retention
+			if d.GitHub.TrialRefRetention == 0 {
+				d.GitHub.TrialRefRetention = defaultTrialRefRetention
+			}
+		}
 	}
 
 	if d.Slack.Channel != "" {
@@ -1188,6 +1233,24 @@ func (d *Daemon) validate() error {
 		owner, name, ok := strings.Cut(d.GitHub.Repo, "/")
 		if !ok || owner == "" || name == "" {
 			return fmt.Errorf("github: repo must be in \"owner/name\" form, got %q", d.GitHub.Repo)
+		}
+	}
+	if tr := d.GitHub.TrialRefs; tr != nil {
+		if d.GitHub.Repo == "" {
+			return fmt.Errorf("github: trial-refs requires the github block to name a repo")
+		}
+		// The resolved prefix is what the ref name is built from; validate
+		// the resolved value so a bare `trial-refs {}` (defaulted) and an
+		// explicit prefix are held to the same rule.
+		p := d.GitHub.TrialRefPrefix
+		if !strings.HasPrefix(p, "refs/") {
+			return fmt.Errorf("github: trial-refs prefix must start with \"refs/\", got %q", p)
+		}
+		if strings.HasSuffix(p, "/") || strings.ContainsAny(p, " \t\n") {
+			return fmt.Errorf("github: trial-refs prefix must have no trailing slash or whitespace, got %q", p)
+		}
+		if tr.Retention < 0 {
+			return fmt.Errorf("github: trial-refs retention must not be negative, got %s", tr.Retention)
 		}
 	}
 	if a := d.GitHub.Auth; a != nil {
