@@ -12,6 +12,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,11 +259,37 @@ type Dashboard struct {
 	URL  string `kdl:"url"`  // optional public base URL for outbound links
 }
 
-// GitHub configures the optional commit-status channel. Repo=="" disables it.
+// GitHub configures the optional GitHub integration. Repo=="" disables it.
+// Two authentication modes, mutually exclusive:
+//
+//   - token-env (the default, "GITHUB_TOKEN"): a static PAT read from the
+//     environment; it authenticates the commit-status channel only, and
+//     git keeps whatever ambient auth (SSH, credential helper) the host
+//     already has — today's behavior, unchanged.
+//   - auth "app": GitHub App installation tokens (issue #6). The same
+//     refreshable provider authenticates BOTH the status channel and git
+//     fetch/push against the configured remote, which must be an HTTPS
+//     URL canonicalizing to the same host and owner/repo as this block —
+//     a mismatch is a startup error, never a silent fallback to ambient
+//     auth.
 type GitHub struct {
-	Repo     string `kdl:",arg"`      // "owner/name"
-	TokenEnv string `kdl:"token-env"` // default "GITHUB_TOKEN"
-	APIURL   string `kdl:"api-url"`   // default "https://api.github.com"
+	Repo     string      `kdl:",arg"`      // "owner/name"
+	TokenEnv string      `kdl:"token-env"` // default "GITHUB_TOKEN" (unless Auth set)
+	APIURL   string      `kdl:"api-url"`   // default "https://api.github.com"
+	Auth     *GitHubAuth `kdl:"auth"`      // nil ⇒ static-token mode
+}
+
+// GitHubAuth is the `auth "app" { ... }` block: GitHub App installation
+// authentication. A pointer field for the same presence-signalling reason
+// as Daemon.Summarize — the block's presence itself selects the mode. The
+// private key stays in a file (never inline in config, never an
+// installation token); cmd validates and loads it at startup via
+// ghauth.LoadPrivateKey.
+type GitHubAuth struct {
+	Mode           string `kdl:",arg"`             // must be "app"
+	AppID          int64  `kdl:"app-id"`           // the App's numeric ID
+	InstallationID int64  `kdl:"installation-id"`  // the installation on Repo
+	PrivateKeyFile string `kdl:"private-key-file"` // PEM, PKCS#1 or PKCS#8
 }
 
 // Slack configures the optional Slack channel. Channel=="" disables it.
@@ -726,7 +753,11 @@ func (d *Daemon) applyDefaults() {
 	}
 
 	if d.GitHub.Repo != "" {
-		if d.GitHub.TokenEnv == "" {
+		// TokenEnv only defaults in static-token mode: under auth "app"
+		// there is no PAT, and an explicitly-set token-env alongside the
+		// app block is a validation error — defaulting it here would make
+		// that conflict undetectable.
+		if d.GitHub.TokenEnv == "" && d.GitHub.Auth == nil {
 			d.GitHub.TokenEnv = defaultGitHubTokenEnv
 		}
 		if d.GitHub.APIURL == "" {
@@ -828,6 +859,53 @@ func (d *Daemon) applyDefaults() {
 // ever "" for kind "local", where mounts have no effect at all (see
 // cmd/gauntlet's buildExecutor), and a "" root would otherwise wrongly
 // match every absolute path via the separator-prefix check below.
+// validateAppRemote enforces issue #6's app-mode remote contract: the App
+// automatically authenticates git against the configured remote, so the
+// remote must be (a) HTTPS — installation tokens cannot authenticate SSH —
+// (b) credential-free — the ledger already flags URL-embedded credentials
+// as readable by checks through the mounted GAUNTLET_GIT_DIR — and (c) the
+// SAME host and owner/repo the github block names, canonicalized. A
+// mismatch is a startup error, never a silent fallback to ambient auth: an
+// operator who selected app auth must never discover months later that git
+// was quietly using something else.
+func validateAppRemote(remote, apiURL, repo string) error {
+	u, err := url.Parse(remote)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		// Covers scp-style SSH syntax (git@host:owner/repo.git), which
+		// url.Parse reads as a bare opaque path.
+		return fmt.Errorf(`github: auth "app" requires an HTTPS remote URL, got %q`, remote)
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf(`github: auth "app" requires an HTTPS remote (installation tokens cannot authenticate %s)`, u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf(`github: auth "app": remote must be credential-free (found userinfo in the URL); the token is injected per operation, never persisted`)
+	}
+
+	api, err := url.Parse(apiURL)
+	if err != nil || api.Host == "" {
+		return fmt.Errorf("github: api-url %q does not parse as a URL", apiURL)
+	}
+	// github.com's API lives on its own subdomain; GHES serves the API
+	// under the primary host (https://HOST/api/v3).
+	wantHost := api.Host
+	if strings.EqualFold(wantHost, "api.github.com") {
+		wantHost = "github.com"
+	}
+	if !strings.EqualFold(u.Host, wantHost) {
+		return fmt.Errorf("github: auth \"app\": remote host %q does not match the github block's host %q — app credentials are scoped to one host, never forwarded", u.Host, wantHost)
+	}
+
+	got := strings.Trim(u.Path, "/")
+	if n := len(got); n >= 4 && strings.EqualFold(got[n-4:], ".git") {
+		got = got[:n-4]
+	}
+	if !strings.EqualFold(got, repo) {
+		return fmt.Errorf("github: auth \"app\": remote repository %q does not match the github block's %q", got, repo)
+	}
+	return nil
+}
+
 // validateExecutor validates one executor profile (the default profile or
 // a named one); label prefixes every error ("executor" for the default,
 // `executor "ci"` for a profile) so an operator can tell which block is at
@@ -1105,6 +1183,29 @@ func (d *Daemon) validate() error {
 		owner, name, ok := strings.Cut(d.GitHub.Repo, "/")
 		if !ok || owner == "" || name == "" {
 			return fmt.Errorf("github: repo must be in \"owner/name\" form, got %q", d.GitHub.Repo)
+		}
+	}
+	if a := d.GitHub.Auth; a != nil {
+		if d.GitHub.Repo == "" {
+			return fmt.Errorf(`github: auth "app" requires the github block to name a repo`)
+		}
+		if a.Mode != "app" {
+			return fmt.Errorf("github: auth mode must be \"app\", got %q", a.Mode)
+		}
+		if a.AppID <= 0 {
+			return fmt.Errorf("github: auth \"app\": app-id must be positive, got %d", a.AppID)
+		}
+		if a.InstallationID <= 0 {
+			return fmt.Errorf("github: auth \"app\": installation-id must be positive, got %d", a.InstallationID)
+		}
+		if a.PrivateKeyFile == "" {
+			return fmt.Errorf("github: auth \"app\": private-key-file is required")
+		}
+		if d.GitHub.TokenEnv != "" {
+			return fmt.Errorf(`github: token-env and auth "app" are mutually exclusive — pick one authentication mode`)
+		}
+		if err := validateAppRemote(d.Remote, d.GitHub.APIURL, d.GitHub.Repo); err != nil {
+			return err
 		}
 	}
 

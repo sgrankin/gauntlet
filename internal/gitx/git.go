@@ -23,6 +23,11 @@ import (
 // "origin" remote is the configured remote URL.
 type Repo struct {
 	dir string // bare repo path (--git-dir)
+
+	// tokens/authHost, when set (WithTokenSource), authenticate every
+	// remote operation via an ephemeral askpass helper — see auth.go.
+	tokens   TokenSource
+	authHost string
 }
 
 var _ core.GitRepo = (*Repo)(nil)
@@ -33,7 +38,7 @@ var _ core.GitRepo = (*Repo)(nil)
 // refs/heads/* into this repo's refs/remotes/origin/* — the fixed point
 // Fetch and ListRefs rely on. It does not fetch; callers should Fetch
 // before relying on any ref state.
-func New(ctx context.Context, dir, remoteURL string) (*Repo, error) {
+func New(ctx context.Context, dir, remoteURL string, opts ...Option) (*Repo, error) {
 	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("gitx: stat %s: %w", dir, err)
@@ -46,6 +51,9 @@ func New(ctx context.Context, dir, remoteURL string) (*Repo, error) {
 		}
 	}
 	r := &Repo{dir: dir}
+	for _, opt := range opts {
+		opt(r)
+	}
 	if _, err := r.run(ctx, "remote", "get-url", "origin"); err != nil {
 		if _, err := r.run(ctx, "remote", "add", "origin", remoteURL); err != nil {
 			return nil, fmt.Errorf("gitx: add origin: %w", err)
@@ -64,7 +72,7 @@ func New(ctx context.Context, dir, remoteURL string) (*Repo, error) {
 // Fetch updates refs/remotes/origin/* from the remote, pruning any that
 // vanished there. This is the tick's snapshot of ground truth.
 func (r *Repo) Fetch(ctx context.Context) error {
-	if _, err := r.run(ctx, "fetch", "--prune", "origin"); err != nil {
+	if _, err := r.runRemote(ctx, "fetch", "--prune", "origin"); err != nil {
 		return fmt.Errorf("gitx: fetch: %w", err)
 	}
 	return nil
@@ -375,7 +383,7 @@ func (r *Repo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID string) 
 		refspec = newOID + ":" + remoteRef
 	}
 	lease := "--force-with-lease=" + remoteRef + ":" + oldOID
-	_, err := r.run(ctx, "push", "origin", refspec, lease)
+	_, err := r.runRemote(ctx, "push", "origin", refspec, lease)
 	if err == nil {
 		return nil
 	}
@@ -395,12 +403,22 @@ func (r *Repo) run(ctx context.Context, args ...string) (string, error) {
 }
 
 func runGit(ctx context.Context, gitDir string, stdin io.Reader, args ...string) (string, error) {
+	return runGitEnv(ctx, gitDir, stdin, nil, args...)
+}
+
+// runGitEnv is runGit with an explicit subprocess environment (nil
+// inherits the daemon's). The credential-injection path (auth.go) is the
+// only caller that passes one: the token rides in the git subprocess's
+// env, read back by the askpass helper — never in argv, never in the
+// persistent remote URL.
+func runGitEnv(ctx context.Context, gitDir string, stdin io.Reader, env []string, args ...string) (string, error) {
 	full := args
 	if gitDir != "" {
 		full = append([]string{"--git-dir=" + gitDir}, args...)
 	}
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Stdin = stdin
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

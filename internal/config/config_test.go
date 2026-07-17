@@ -1632,6 +1632,175 @@ services {
 			wantErr: `runtime "docker" conflicts with executor runtime "podman"`,
 		},
 		{
+			name: "github auth with an unknown mode",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "oauth" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: `auth mode must be "app"`,
+		},
+		{
+			name: "github app auth missing app-id",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: "app-id must be positive",
+		},
+		{
+			name: "github app auth missing installation-id",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: "installation-id must be positive",
+		},
+		{
+			name: "github app auth missing private key",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+    }
+}
+`,
+			wantErr: "private-key-file is required",
+		},
+		{
+			name: "github app auth alongside token-env",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    token-env "GITHUB_TOKEN"
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "github app auth with an SSH remote",
+			kdl: `
+remote "git@github.com:acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: "requires an HTTPS remote",
+		},
+		{
+			name: "github app auth with a credentialed remote URL",
+			kdl: `
+remote "https://x:secret@github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: "credential-free",
+		},
+		{
+			name: "github app auth remote host mismatch",
+			kdl: `
+remote "https://gitlab.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: "does not match the github block's host",
+		},
+		{
+			name: "github app auth remote repo mismatch",
+			kdl: `
+remote "https://github.com/acme/other.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`,
+			wantErr: `remote repository "acme/other" does not match`,
+		},
+		{
 			name: "export mtimes with an unknown mode",
 			kdl: `
 remote "https://example.com/repo.git"
@@ -1662,6 +1831,86 @@ export {
 				t.Errorf("LoadDaemon error = %q, want substring %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestLoadDaemon_GitHubAppAuth covers the `auth "app"` block (issue #6):
+// a valid github.com config, the GHES same-host shape, path
+// canonicalization (.git suffix, case), and that token-env keeps its
+// default ONLY in static mode.
+func TestLoadDaemon_GitHubAppAuth(t *testing.T) {
+	load := func(t *testing.T, kdl string) *Daemon {
+		t.Helper()
+		path := t.TempDir() + "/gauntlet.kdl"
+		if err := os.WriteFile(path, []byte(kdl), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := LoadDaemon(path)
+		if err != nil {
+			t.Fatalf("LoadDaemon: %v", err)
+		}
+		return d
+	}
+
+	d := load(t, `
+remote "https://github.com/Acme/Widgets.GIT"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    auth "app" {
+        app-id 12345
+        installation-id 67890
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`)
+	a := d.GitHub.Auth
+	if a == nil {
+		t.Fatal("GitHub.Auth is nil, want the parsed app block")
+	}
+	if a.Mode != "app" || a.AppID != 12345 || a.InstallationID != 67890 || a.PrivateKeyFile != "/run/creds/app.pem" {
+		t.Errorf("Auth = %+v", a)
+	}
+	if d.GitHub.TokenEnv != "" {
+		t.Errorf("TokenEnv = %q in app mode, want empty (no PAT default)", d.GitHub.TokenEnv)
+	}
+
+	// GHES: API under the primary host; remote host must match it.
+	load(t, `
+remote "https://ghe.example.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    api-url "https://ghe.example.com/api/v3"
+    auth "app" {
+        app-id 1
+        installation-id 2
+        private-key-file "/run/creds/app.pem"
+    }
+}
+`)
+
+	// Static mode still defaults token-env.
+	d = load(t, `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets"
+`)
+	if d.GitHub.TokenEnv != "GITHUB_TOKEN" {
+		t.Errorf("static-mode TokenEnv = %q, want the GITHUB_TOKEN default", d.GitHub.TokenEnv)
+	}
+	if d.GitHub.Auth != nil {
+		t.Errorf("Auth = %+v with no auth block, want nil", d.GitHub.Auth)
 	}
 }
 

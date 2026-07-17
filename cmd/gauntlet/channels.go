@@ -11,6 +11,7 @@ import (
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/ghauth"
 	"github.com/sgrankin/gauntlet/internal/ghstatus"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/queue"
@@ -35,10 +36,11 @@ func buildHistoryStore(cfg *config.Daemon) (*history.Store, error) {
 
 // buildGHStatusChannel constructs the GitHub commit-status channel per
 // cfg.GitHub. A Repo=="" section (disabled) returns a nil channel and no
-// error. Since the section was explicitly configured (Repo != ""), an empty
-// token is a loud config error, not a silent no-op: the admin turned the
-// feature on and gave it no way to authenticate.
-func buildGHStatusChannel(cfg *config.Daemon) (*ghstatus.Channel, error) {
+// error. In app mode (appTokens non-nil) the shared refreshable provider
+// authenticates every POST; in static mode an empty env token is a loud
+// config error, not a silent no-op: the admin turned the feature on and
+// gave it no way to authenticate.
+func buildGHStatusChannel(cfg *config.Daemon, appTokens *ghauth.App) (*ghstatus.Channel, error) {
 	if cfg.GitHub.Repo == "" {
 		return nil, nil
 	}
@@ -49,17 +51,22 @@ func buildGHStatusChannel(cfg *config.Daemon) (*ghstatus.Channel, error) {
 		// stays a real error rather than an unreachable panic.
 		return nil, fmt.Errorf("github: repo must be \"owner/name\", got %q", cfg.GitHub.Repo)
 	}
-	token := os.Getenv(cfg.GitHub.TokenEnv)
-	if token == "" {
-		return nil, fmt.Errorf("github: %s is empty or unset, but github is configured for %s", cfg.GitHub.TokenEnv, cfg.GitHub.Repo)
-	}
-	return ghstatus.New(ghstatus.Params{
+	p := ghstatus.Params{
 		Owner:        owner,
 		Repo:         repo,
-		Token:        token,
 		APIURL:       cfg.GitHub.APIURL,
 		DashboardURL: cfg.Dashboard.URL,
-	}), nil
+	}
+	if appTokens != nil {
+		p.Tokens = appTokens
+	} else {
+		token := os.Getenv(cfg.GitHub.TokenEnv)
+		if token == "" {
+			return nil, fmt.Errorf("github: %s is empty or unset, but github is configured for %s", cfg.GitHub.TokenEnv, cfg.GitHub.Repo)
+		}
+		p.Token = token
+	}
+	return ghstatus.New(p), nil
 }
 
 // buildSlackChannel constructs the Slack channel per cfg.Slack. A

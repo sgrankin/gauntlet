@@ -159,7 +159,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve repo dir under %s: %w", *statePath, err)
 	}
-	repo, err := gitx.New(ctx, repoDir, cfg.Remote)
+	// App-mode GitHub credentials (issue #6): one refreshable provider,
+	// built before the repo so git fetch/push and the status channel
+	// share it. nil in static-token/disabled mode.
+	appTokens, err := buildAppTokens(cfg)
+	if err != nil {
+		return err
+	}
+	gitOpts, err := gitAuthOptions(cfg, appTokens)
+	if err != nil {
+		return err
+	}
+	repo, err := gitx.New(ctx, repoDir, cfg.Remote, gitOpts...)
 	if err != nil {
 		return fmt.Errorf("open repo at %s: %w", repoDir, err)
 	}
@@ -353,7 +364,7 @@ func run() error {
 		chans = append(chans, dashCh)
 	}
 
-	ghStatus, err := buildGHStatusChannel(cfg)
+	ghStatus, err := buildGHStatusChannel(cfg, appTokens)
 	if err != nil {
 		return fmt.Errorf("build github status channel: %w", err)
 	}

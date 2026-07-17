@@ -452,6 +452,109 @@ func TestChannel_BatchLandingPostsOneStatusPerMemberSHA(t *testing.T) {
 	}
 }
 
+// scriptedTokens is a TokenSource handing out a fixed sequence; it
+// records invalidations and advances only when the CURRENT token is the
+// one invalidated (the ghauth.App guard).
+type scriptedTokens struct {
+	mu          sync.Mutex
+	seq         []string
+	i           int
+	invalidated []string
+}
+
+func (s *scriptedTokens) Token(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seq[s.i], nil
+}
+
+func (s *scriptedTokens) Invalidate(tok string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invalidated = append(s.invalidated, tok)
+	if s.seq[s.i] == tok && s.i+1 < len(s.seq) {
+		s.i++
+	}
+}
+
+// TestChannel_401InvalidatesAndRetriesOnce: an expired installation token
+// gets exactly one fresh-mint retry; the second attempt must carry the
+// NEW token.
+func TestChannel_401InvalidatesAndRetriesOnce(t *testing.T) {
+	var mu sync.Mutex
+	var auths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		if r.Header.Get("Authorization") != "token ghs_FAKENEW" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	tokens := &scriptedTokens{seq: []string{"ghs_FAKEOLD", "ghs_FAKENEW"}}
+	var logBuf bytes.Buffer
+	c := New(Params{Owner: "a", Repo: "b", Tokens: tokens, APIURL: srv.URL, Log: &logBuf})
+
+	ev := core.Event{Kind: core.EventLanded, Target: "main", Candidate: core.Candidate{SHA: "deadbeef"}}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auths) != 2 || auths[0] != "token ghs_FAKEOLD" || auths[1] != "token ghs_FAKENEW" {
+		t.Fatalf("auths = %v, want the old token then exactly one retry with the new one", auths)
+	}
+	if len(tokens.invalidated) != 1 || tokens.invalidated[0] != "ghs_FAKEOLD" {
+		t.Fatalf("invalidated = %v, want exactly [ghs_FAKEOLD]", tokens.invalidated)
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("log = %q after a recovered 401, want nothing (the retry succeeded)", logBuf.String())
+	}
+}
+
+// TestChannel_Non401FailureIsNotRetried: only a clear credential
+// rejection triggers the retry; a 500 (or 403) posts once and logs.
+func TestChannel_Non401FailureIsNotRetried(t *testing.T) {
+	var mu sync.Mutex
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		posts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	tokens := &scriptedTokens{seq: []string{"ghs_FAKEA"}}
+	var logBuf bytes.Buffer
+	c := New(Params{Owner: "a", Repo: "b", Tokens: tokens, APIURL: srv.URL, Log: &logBuf})
+
+	ev := core.Event{Kind: core.EventLanded, Target: "main", Candidate: core.Candidate{SHA: "deadbeef"}}
+	if err := c.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("Emit must swallow POST errors, got: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 1 {
+		t.Fatalf("posts = %d, want 1 (no retry on 403)", posts)
+	}
+	if len(tokens.invalidated) != 0 {
+		t.Fatalf("invalidated = %v, want none", tokens.invalidated)
+	}
+	if logBuf.Len() == 0 {
+		t.Error("expected the dropped 403 to be logged")
+	}
+	if strings.Contains(logBuf.String(), "ghs_FAKEA") {
+		t.Errorf("token leaked into the log: %q", logBuf.String())
+	}
+}
+
 func TestChannel_DefaultAPIURL(t *testing.T) {
 	c := New(Params{Owner: "a", Repo: "b", Token: "t"})
 	if c.apiURL != "https://api.github.com" {

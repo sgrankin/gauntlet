@@ -25,6 +25,24 @@ import (
 
 var _ core.Channel = (*Channel)(nil)
 
+// TokenSource supplies the credential for each status POST. Implemented
+// by internal/ghauth (App installation tokens and static PATs); declared
+// here so the dependency points the right way, mirroring gitx.TokenSource.
+type TokenSource interface {
+	// Token returns a currently valid token; called once per POST — the
+	// provider owns caching and refresh.
+	Token(ctx context.Context) (string, error)
+	// Invalidate reports that token was rejected (401), so the provider
+	// drops it before the caller's single retry.
+	Invalidate(token string)
+}
+
+// staticToken adapts Params.Token, the fixed-PAT shorthand.
+type staticToken string
+
+func (s staticToken) Token(ctx context.Context) (string, error) { return string(s), nil }
+func (staticToken) Invalidate(string)                           {}
+
 // Params configures a Channel. It is a package-local struct: mapping
 // from parsed config lives only in cmd, so this package never imports
 // internal/config.
@@ -34,8 +52,15 @@ type Params struct {
 	Owner string
 	Repo  string
 
-	// Token is the PAT sent as "Authorization: token <Token>".
+	// Token is a fixed PAT sent as "Authorization: token <Token>" —
+	// static-mode shorthand for Tokens.
 	Token string
+
+	// Tokens, when non-nil, overrides Token: every POST requests a
+	// current credential from it, and a 401 invalidates + retries once
+	// with a fresh one. This is how App installation tokens (which
+	// expire hourly) flow in; see internal/ghauth.
+	Tokens TokenSource
 
 	// APIURL is the GitHub REST API base URL. Defaults to
 	// "https://api.github.com" when empty.
@@ -64,7 +89,7 @@ const descriptionCap = 140
 // (see statusFor). It is output-only.
 type Channel struct {
 	owner, repo  string
-	token        string
+	tokens       TokenSource
 	apiURL       string
 	dashboardURL string
 
@@ -85,10 +110,14 @@ func New(p Params) *Channel {
 	if logw == nil {
 		logw = os.Stderr
 	}
+	tokens := p.Tokens
+	if tokens == nil {
+		tokens = staticToken(p.Token)
+	}
 	return &Channel{
 		owner:        p.Owner,
 		repo:         p.Repo,
-		token:        p.Token,
+		tokens:       tokens,
 		apiURL:       apiURL,
 		dashboardURL: p.DashboardURL,
 		client:       &http.Client{Timeout: requestTimeout},
@@ -196,7 +225,11 @@ type statusPayload struct {
 	Context     string `json:"context"`
 }
 
-// post sends one commit-status POST for ev.
+// post sends one commit-status POST for ev, requesting a current
+// credential per attempt. A 401 — the one response that clearly means
+// "this token is expired or revoked" — invalidates the token and retries
+// exactly once with a freshly minted one; every other failure (403
+// permission, 5xx, network) surfaces immediately, never retried here.
 func (c *Channel) post(ctx context.Context, ev core.Event, s state, description string) error {
 	payload := statusPayload{
 		State:       string(s),
@@ -211,26 +244,54 @@ func (c *Channel) post(ctx context.Context, ev core.Event, s state, description 
 
 	url := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", c.apiURL, c.owner, c.repo, ev.Candidate.SHA)
 
+	tok, err := c.tokens.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("credential: %w", err)
+	}
+	code, status, err := c.doPost(ctx, url, body, tok)
+	if err != nil {
+		return err
+	}
+	if code == http.StatusUnauthorized {
+		c.tokens.Invalidate(tok)
+		tok, err = c.tokens.Token(ctx)
+		if err != nil {
+			return fmt.Errorf("credential after 401: %w", err)
+		}
+		code, status, err = c.doPost(ctx, url, body, tok)
+		if err != nil {
+			return err
+		}
+	}
+	if code >= 300 {
+		return fmt.Errorf("post %s: unexpected status %s", url, status)
+	}
+	return nil
+}
+
+// doPost performs one status POST attempt with the given token, returning
+// the HTTP status. The response body is never quoted anywhere: GitHub
+// error bodies are not needed for the log-and-drop diagnostic, and never
+// reading them is the cheapest way to guarantee nothing secret-adjacent
+// leaks into logs.
+func (c *Channel) doPost(ctx context.Context, url string, body []byte, token string) (int, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("new request: %w", err)
+		return 0, "", fmt.Errorf("new request: %w", err)
 	}
-	req.Header.Set("Authorization", "token "+c.token)
+	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post %s: %w", url, err)
+		return 0, "", fmt.Errorf("post %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("post %s: unexpected status %s", url, resp.Status)
-	}
-	return nil
+	return resp.StatusCode, resp.Status, nil
 }
 
 // runURL builds target_url = "<base>/run/<runID>", or "" when base or runID

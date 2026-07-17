@@ -108,13 +108,55 @@ summarize {
 - **`github <owner/repo>`** — enables the GitHub commit-status channel
   (`internal/ghstatus`): one rollup status context `gauntlet/<target>`
   posted to the candidate SHA via the plain REST statuses API.
-  `token-env` names the environment variable holding a PAT (default
-  `GITHUB_TOKEN`); `api-url` is the REST API base (default
-  `https://api.github.com`; override for GitHub Enterprise). **Repo absent
-  ⇒ disabled**: no channel is constructed, no requests made. Once `repo` is
-  set, an empty/unset `token-env` is a startup error, not a silent no-op —
-  the daemon refuses to start rather than run a channel it can't
-  authenticate.
+  `api-url` is the REST API base (default `https://api.github.com`;
+  override for GitHub Enterprise, e.g. `https://ghe.example.com/api/v3`).
+  **Repo absent ⇒ disabled**: no channel is constructed, no requests
+  made. Two authentication modes, mutually exclusive:
+
+  - **Static token** (the default): `token-env` names the environment
+    variable holding a PAT (default `GITHUB_TOKEN`). It authenticates
+    the status channel only; git fetch/push keeps whatever ambient
+    authentication the host already has (SSH, a credential helper).
+    Once `repo` is set, an empty/unset `token-env` is a startup error,
+    not a silent no-op — the daemon refuses to start rather than run a
+    channel it can't authenticate.
+  - **GitHub App** (`internal/ghauth`, issue #6):
+
+    ```kdl
+    github "acme/widgets" {
+        auth "app" {
+            app-id 12345
+            installation-id 67890
+            private-key-file "/run/credentials/gauntlet-app.pem"
+        }
+    }
+    ```
+
+    Short-lived installation tokens are minted lazily from an RS256 App
+    JWT, cached until a safety window before their one-hour expiry, and
+    refreshed without restart; concurrent operations share one mint. The
+    same provider authenticates **both** the status channel and git
+    fetch/push against the configured `remote` — which must therefore be
+    an HTTPS URL (installation tokens cannot authenticate SSH),
+    credential-free, and canonicalize to the same host and owner/repo as
+    this block; any mismatch is a startup error, never a silent fallback
+    to ambient auth. Credentials reach git through an ephemeral,
+    secretless `GIT_ASKPASS` helper scoped to the configured host (an
+    unexpected redirect to any other host gets nothing) — the token is
+    never in a process argument, the persistent remote URL, git config,
+    or anything a check can read through `GAUNTLET_GIT_DIR`. A clearly
+    rejected credential (HTTP 401) is invalidated and retried exactly
+    once with a fresh mint; a 403 (valid but under-privileged) is not.
+    The private key file must not be group/other-accessible (`chmod
+    0600`); rotating it requires a daemon restart, token refresh does
+    not.
+
+    Minimal App repository permissions: **Contents: Read and write**
+    (fetch, trial-merge pushes, landing the target branch) and **Commit
+    statuses: Read and write**. If candidates may change files under
+    `.github/workflows/`, GitHub additionally requires **Workflows:
+    Read and write** to push those — without it the land push is
+    rejected.
 - **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
   threaded run messages in the given channel ID, root edited to a
   pass/fail mark on landing, `:recycle:` on the root re-queues via retry,
