@@ -38,6 +38,7 @@ const (
 	defaultGitHubAPIURL      = "https://api.github.com"
 	defaultTrialRefPrefix    = "refs/gauntlet/trials"
 	defaultTrialRefRetention = 24 * time.Hour
+	defaultShutdown          = "drain"
 	defaultSlackAppEnv       = "SLACK_APP_TOKEN"
 	defaultSlackBotEnv       = "SLACK_BOT_TOKEN"
 	defaultExecutorKind      = "local"
@@ -189,6 +190,13 @@ type Daemon struct {
 	// from "written false" (non-nil, respected) without stomping the
 	// latter.
 	AutoRetryErrors *bool `kdl:"auto-retry-errors"`
+
+	// Shutdown selects the first-SIGTERM behavior (issue #8): "drain"
+	// (the default) stops admitting new candidates and lets the in-flight
+	// set finish before exiting — a second signal forces the immediate
+	// kill; "kill" restores the legacy behavior where the first signal
+	// cancels everything at once. Empty defaults to "drain".
+	Shutdown string `kdl:"shutdown"`
 
 	History   History   `kdl:"history"`   // Path=="" ⇒ disabled
 	Dashboard Dashboard `kdl:"dashboard"` // Bind=="" ⇒ disabled
@@ -751,6 +759,9 @@ func (d *Daemon) applyDefaults() {
 	}
 	if d.CheckSpec == "" {
 		d.CheckSpec = defaultCheckSpec
+	}
+	if d.Shutdown == "" {
+		d.Shutdown = defaultShutdown
 	}
 	// LogRetention defaults unconditionally (see its doc): there is no
 	// "log-retention section absent -> disabled" state to preserve, unlike
@@ -1315,6 +1326,11 @@ func (d *Daemon) validate() error {
 	// value — never a meaningful cap — is rejected.
 	if d.MaxExecutions < 0 {
 		return fmt.Errorf("max-executions must not be negative, got %d", d.MaxExecutions)
+	}
+	switch d.Shutdown {
+	case "", "drain", "kill":
+	default:
+		return fmt.Errorf("shutdown must be \"drain\" or \"kill\", got %q", d.Shutdown)
 	}
 
 	if len(d.Services.Allow) > 0 {

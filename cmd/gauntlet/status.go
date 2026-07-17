@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 const defaultDashboardURL = "http://localhost:8080"
@@ -584,6 +585,103 @@ func runHooksCancel(args []string) error {
 	}
 	fmt.Fprintln(os.Stdout, string(bytes.TrimSpace(body)))
 	return nil
+}
+
+// --- gauntlet drain ---------------------------------------------------------
+
+type drainFlags struct {
+	url      string
+	deadline time.Duration
+	wait     bool
+}
+
+func parseDrainFlags(args []string) (drainFlags, error) {
+	fs := flag.NewFlagSet("drain", flag.ContinueOnError)
+	var f drainFlags
+	fs.StringVar(&f.url, "url", defaultDashboardURL, "dashboard base URL")
+	fs.DurationVar(&f.deadline, "deadline", 0, "force the immediate kill this long from now if the drain hasn't finished (0 = no deadline)")
+	fs.BoolVar(&f.wait, "wait", false, "block until the daemon reports lifecycle=drained")
+	if err := fs.Parse(args); err != nil {
+		return drainFlags{}, err
+	}
+	return f, nil
+}
+
+// drainRequestBody mirrors dashboard.drainRequest's JSON shape.
+type drainRequestBody struct {
+	Deadline string `json:"deadline,omitempty"`
+}
+
+// statusLifecycle is the subset of GET /api/v1/status the drain client
+// reads to follow the lifecycle transition.
+type statusLifecycle struct {
+	Lifecycle    string `json:"lifecycle"`
+	ActiveRuns   int    `json:"activeRuns"`
+	ActiveChecks int    `json:"activeChecks"`
+}
+
+// runDrain implements "gauntlet drain": POST /api/v1/drain to begin a
+// graceful shutdown drain, optionally waiting until the daemon reports
+// lifecycle=drained. A connection failure surfaces as a clear error rather
+// than pretending a drain began (the CLI is a thin client; a daemon with
+// no dashboard bind simply isn't reachable this way — use a signal).
+func runDrain(args []string) error {
+	f, err := parseDrainFlags(args)
+	if err != nil {
+		return err
+	}
+
+	body := drainRequestBody{}
+	if f.deadline > 0 {
+		body.Deadline = time.Now().Add(f.deadline).UTC().Format(time.RFC3339)
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	res, err := http.Post(f.url+"/api/v1/drain", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("no reachable admin endpoint at %s (%w); a daemon without a dashboard bind drains by signal only", f.url, err)
+	}
+	defer res.Body.Close()
+	respBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode >= 300 {
+		return fmt.Errorf("%s: %s", res.Status, bytes.TrimSpace(respBody))
+	}
+	fmt.Fprintln(os.Stdout, string(bytes.TrimSpace(respBody)))
+	if !f.wait {
+		return nil
+	}
+
+	// Poll the lifecycle until it reaches "drained". Once drained, the
+	// daemon exits and the status endpoint stops answering — a connection
+	// failure AFTER we have seen draining is itself the completion signal.
+	seenDraining := false
+	for {
+		raw, err := httpGetBody(f.url + "/api/v1/status")
+		if err != nil {
+			if seenDraining {
+				fmt.Fprintln(os.Stdout, "drained")
+				return nil
+			}
+			return err
+		}
+		var s statusLifecycle
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return err
+		}
+		switch s.Lifecycle {
+		case "drained":
+			fmt.Fprintln(os.Stdout, "drained")
+			return nil
+		case "draining":
+			seenDraining = true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // --- shared HTTP helper ----------------------------------------------------

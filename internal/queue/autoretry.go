@@ -55,6 +55,12 @@ func (d *Daemon) maybeAutoRetry(ctx context.Context, target string, cand core.Ca
 	if outcome != core.OutcomeError || !d.cfg.AutoRetryErrors {
 		return
 	}
+	// No re-admission while draining (issue #8): an auto-retry would put
+	// fresh work into the finite drain set. The park stands; a restart
+	// resumes normal auto-retry against the still-parked (ref, SHA).
+	if d.draining {
+		return
+	}
 	m := d.autoRetried[target]
 	if m == nil {
 		m = make(map[string]string)

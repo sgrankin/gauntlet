@@ -787,6 +787,80 @@ func TestAPICancel_MethodNotAllowed405(t *testing.T) {
 	}
 }
 
+// --- POST /api/v1/drain (graceful drain) ----------------------------------
+
+func TestAPIDrain_NoDrainWiredIs503(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
+	resp, body := postJSON(t, h, "/api/v1/drain", `{}`)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+}
+
+func TestAPIDrain_BeginsDrain(t *testing.T) {
+	var called int
+	var gotDeadline time.Time
+	drain := func(deadline time.Time) {
+		called++
+		gotDeadline = deadline
+	}
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithDrain(drain))
+
+	// Empty body: drain with no deadline.
+	resp, body := postJSON(t, h, "/api/v1/drain", ``)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	if called != 1 || !gotDeadline.IsZero() {
+		t.Fatalf("drain called=%d deadline=%v, want one call with no deadline", called, gotDeadline)
+	}
+
+	// With an explicit deadline.
+	resp, body = postJSON(t, h, "/api/v1/drain", `{"deadline":"2030-01-01T00:00:00Z"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	if called != 2 || gotDeadline.IsZero() {
+		t.Fatalf("drain called=%d deadline=%v, want a second call with a deadline", called, gotDeadline)
+	}
+}
+
+func TestAPIDrain_BadDeadlineIs400(t *testing.T) {
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithDrain(func(time.Time) {}))
+	resp, body := postJSON(t, h, "/api/v1/drain", `{"deadline":"soon"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+}
+
+// TestAPIStatus_LifecycleFields: the status endpoint surfaces the drain
+// lifecycle and active-set counts from the snapshot.
+func TestAPIStatus_LifecycleFields(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	snap := &queue.Snapshot{
+		At:           now,
+		Lifecycle:    queue.LifecycleDraining,
+		ActiveRuns:   2,
+		ActiveChecks: 3,
+		DrainSince:   now.Add(-time.Minute),
+	}
+	h := dashboard.New(func() *queue.Snapshot { return snap }, nil)
+	resp, body := get(t, h, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+	m := decodeJSON(t, body)
+	if m["lifecycle"] != "draining" {
+		t.Errorf("lifecycle = %v, want draining", m["lifecycle"])
+	}
+	if m["activeRuns"] != float64(2) || m["activeChecks"] != float64(3) {
+		t.Errorf("activeRuns=%v activeChecks=%v, want 2/3", m["activeRuns"], m["activeChecks"])
+	}
+	if m["drainSince"] == nil || m["drainSince"] == "" {
+		t.Errorf("drainSince missing: %v", m["drainSince"])
+	}
+}
+
 // --- POST /api/v1/hooks/cancel (hook cancellation) ------------------------
 
 func TestAPIHookCancel_NoHookCancelWiredIs503(t *testing.T) {

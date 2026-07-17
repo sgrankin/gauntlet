@@ -183,6 +183,16 @@ type Runner struct {
 	queue chan core.Event
 	cmds  chan core.Command
 
+	// drain is closed by Drain to begin a graceful hook-backlog drain
+	// (issue #8): Run finishes every landing already queued, then returns.
+	// drained is closed by Run once that is complete, so Drain can block
+	// the caller until the backlog is truly empty. The two Onces guard
+	// each close against a repeated/racing Drain and a force overlap.
+	drain            chan struct{}
+	drained          chan struct{}
+	closeDrainOnce   sync.Once
+	closeDrainedOnce sync.Once
+
 	// monitors holds, for each target currently executing a PolicyCancel
 	// landing, the inbox execLanding's monitor goroutine is watching for
 	// a superseding landing. Emit consults this (under mu) to decide
@@ -258,6 +268,8 @@ func New(p Params) *Runner {
 		queue:    make(chan core.Event, queueBuffer),
 		cmds:     make(chan core.Command),
 		monitors: make(map[string]chan core.Event),
+		drain:    make(chan struct{}),
+		drained:  make(chan struct{}),
 	}
 }
 
@@ -346,6 +358,18 @@ func (r *Runner) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-r.drain:
+			// Graceful drain (issue #8): the queue has stopped landing
+			// (cmd calls this only after the queue's own drain completed),
+			// so every landing whose hooks are owed is already sitting in
+			// r.queue. Run the whole remaining backlog — the entire queued
+			// backlog is part of the drain set, since hooks have no
+			// post-restart replay and dropping them would be silent
+			// permanent loss — then signal completion and exit. A force
+			// (ctx cancel) mid-drain still short-circuits via ctx.Err().
+			r.runBacklog(ctx)
+			r.closeDrainedOnce.Do(func() { close(r.drained) })
+			return nil
 		case ev := <-r.queue:
 			batch := append([]core.Event{ev}, r.drainAvailable()...)
 			for _, e := range r.applyBacklogPolicy(batch) {
@@ -355,6 +379,35 @@ func (r *Runner) Run(ctx context.Context) error {
 				r.execLanding(ctx, e)
 			}
 		}
+	}
+}
+
+// runBacklog executes every landing currently queued, applying each
+// target's backlog Policy once over the whole set — the drain-time
+// counterpart of the Run loop's per-burst processing.
+func (r *Runner) runBacklog(ctx context.Context) {
+	batch := r.drainAvailable()
+	if len(batch) == 0 {
+		return
+	}
+	for _, e := range r.applyBacklogPolicy(batch) {
+		if ctx.Err() != nil {
+			return
+		}
+		r.execLanding(ctx, e)
+	}
+}
+
+// Drain begins a graceful hook-backlog drain and BLOCKS until the backlog
+// is empty (Run has finished it) or ctx is cancelled (a force). Idempotent
+// — a repeated call is a no-op close and waits on the same completion.
+// cmd calls this only after the queue has fully drained, so no new landing
+// can arrive after the close.
+func (r *Runner) Drain(ctx context.Context) {
+	r.closeDrainOnce.Do(func() { close(r.drain) })
+	select {
+	case <-r.drained:
+	case <-ctx.Done():
 	}
 }
 

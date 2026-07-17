@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"text/template"
 	"time"
@@ -512,6 +513,21 @@ type Daemon struct {
 	// snap holds the most recently published Snapshot; nil until the first
 	// successful ReconcileOnce pass completes.
 	snap atomic.Pointer[Snapshot]
+
+	// Graceful-drain state (issue #8). Drain() is called from a signal or
+	// HTTP goroutine, so the REQUEST is mutex-guarded (drainReqMu); the
+	// LIVE state (draining/drainSince/drainDeadline) is reconcile-
+	// goroutine-only like idleSince/order/lanes, synced from the request
+	// once per tick by syncDrainRequest. Once draining, no new candidate
+	// is admitted and no speculation window extends (refill gating), and
+	// infra parks are not auto-retried, so the active set is finite; the
+	// Run loop exits cleanly once it empties.
+	drainReqMu    sync.Mutex
+	drainReq      bool
+	drainReqDL    time.Time
+	draining      bool
+	drainSince    time.Time
+	drainDeadline time.Time
 }
 
 // Snapshot returns the most recently published Snapshot, or nil if no
@@ -627,6 +643,12 @@ func (d *Daemon) Run(ctx context.Context, tick <-chan time.Time) error {
 			if err := d.ReconcileOnce(ctx); err != nil {
 				d.emit(ctx, core.Event{Kind: core.EventError, At: d.now(), Detail: err.Error()})
 			}
+			// A graceful drain (issue #8) exits cleanly the moment its
+			// finite admitted set has emptied — no force, no lost work.
+			// cmd then drains the hook backlog and tears down in order.
+			if d.drainComplete() {
+				return nil
+			}
 		}
 	}
 }
@@ -664,6 +686,9 @@ func (d *Daemon) Run(ctx context.Context, tick <-chan time.Time) error {
 // (every production caller, via Run) should pass a ctx that isn't cancelled
 // between ticks; only cancel it to shut the whole daemon down.
 func (d *Daemon) ReconcileOnce(ctx context.Context) error {
+	// Fold any external drain request into the tick's live state first, so
+	// admission gating and this tick's Snapshot agree (issue #8).
+	d.syncDrainRequest()
 	if err := d.git.Fetch(ctx); err != nil {
 		return fmt.Errorf("queue: fetch: %w", err)
 	}

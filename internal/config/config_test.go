@@ -179,6 +179,9 @@ target "main" branch="main"
 	if d.CheckSpec != defaultCheckSpec {
 		t.Errorf("CheckSpec = %q, want default %q", d.CheckSpec, defaultCheckSpec)
 	}
+	if d.Shutdown != defaultShutdown {
+		t.Errorf("Shutdown = %q, want default %q", d.Shutdown, defaultShutdown)
+	}
 	// LogRetention defaults unconditionally (no "section absent" state to
 	// preserve, unlike the optional sections below) — 30 days even though
 	// the "log-retention" node is absent from this config.
@@ -1854,6 +1857,19 @@ github "acme/widgets" {
 }
 `,
 			wantErr: "no trailing slash",
+		},
+		{
+			name: "shutdown with an unknown mode",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+shutdown "pause"
+`,
+			wantErr: `shutdown must be "drain" or "kill"`,
 		},
 		{
 			name: "trial-refs prefix with a glob metacharacter",

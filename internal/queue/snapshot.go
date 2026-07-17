@@ -40,6 +40,18 @@ type Snapshot struct {
 	// surfaces (internal/dashboard/api.go's idleSince, internal/mcp/
 	// server.go's idleSince).
 	IdleSince time.Time
+
+	// Drain-lifecycle fields (issue #8), for status/readiness. Lifecycle
+	// is running/draining/drained (forcing is cmd cancelling the root ctx,
+	// observed only as Run returning). DrainSince/DrainDeadline are the
+	// zero time outside a drain. ActiveRuns/ActiveChecks are the in-flight
+	// drain set — a live gauge, like IdleSince — so an operator can see
+	// what is still preventing exit.
+	Lifecycle     Lifecycle
+	DrainSince    time.Time
+	DrainDeadline time.Time
+	ActiveRuns    int
+	ActiveChecks  int
 }
 
 // TargetSnapshot is one target's live queue state.
@@ -159,6 +171,13 @@ func (d *Daemon) buildSnapshot(refs map[string]string) *Snapshot {
 	} else {
 		d.idleSince = time.Time{}
 	}
+
+	// Drain lifecycle (issue #8): all reconcile-goroutine-only reads.
+	snap.Lifecycle = d.lifecycle()
+	snap.DrainSince = d.drainSince
+	snap.DrainDeadline = d.drainDeadline
+	snap.ActiveRuns = d.activeRuns()
+	snap.ActiveChecks = d.activeChecks()
 	return snap
 }
 

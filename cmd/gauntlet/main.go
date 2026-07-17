@@ -71,6 +71,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "drain":
+			if err := runDrain(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet drain:", err)
+				os.Exit(1)
+			}
+			return
 		case "version":
 			fmt.Println(versionString())
 			return
@@ -131,7 +137,13 @@ func run() error {
 	}
 	defer lock.Close()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// The root ctx is cancelled only on a FORCE shutdown (issue #8):
+	// normal exit (defer), a second signal, a drain deadline, or — in
+	// "kill" shutdown mode — the very first signal. A graceful first
+	// SIGTERM does NOT cancel it; it requests a drain and the daemon exits
+	// cleanly once the in-flight set empties. Signal wiring is installed
+	// below, after the Daemon exists.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// obs.InstallProvider must run before queue.New: queue.New's Daemon
@@ -584,7 +596,56 @@ func run() error {
 	// store.Close() runs (deferred above) keeps that Close from racing any
 	// of them: Slack/hooks/sampler/pruner exit, the dashboard's graceful
 	// Shutdown completes, then — only then — the store closes.
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, &wg)
+	// Graceful-drain coordinator (issue #8): beginDrain stops the queue
+	// admitting new work (d.Drain) and, when given a deadline, arms a timer
+	// that forces the immediate-kill path (cancel) at that instant. Shared
+	// by the shutdown signal and POST /api/v1/drain, idempotent, and only
+	// ever shortens the effective deadline — never resumes admission.
+	var drainMu sync.Mutex
+	var drainTimer *time.Timer
+	beginDrain := func(deadline time.Time) {
+		drainMu.Lock()
+		defer drainMu.Unlock()
+		d.Drain(deadline)
+		if !deadline.IsZero() && drainTimer == nil {
+			drainTimer = time.AfterFunc(time.Until(deadline), cancel)
+		}
+	}
+	defer func() {
+		drainMu.Lock()
+		if drainTimer != nil {
+			drainTimer.Stop()
+		}
+		drainMu.Unlock()
+	}()
+
+	// Signal wiring. "kill" shutdown mode restores the legacy behavior
+	// (first signal cancels everything); "drain" (the default) makes the
+	// first signal begin a graceful drain and the second force the kill.
+	// Signals are a COMPLETE drain interface on their own, so this works
+	// with no HTTP admin surface configured.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+		case <-ctx.Done():
+			return
+		}
+		if cfg.Shutdown == "kill" {
+			cancel()
+			return
+		}
+		beginDrain(time.Time{}) // no queue deadline from a signal; systemd TimeoutStopSec is the outer bound
+		select {
+		case <-sigCh:
+			cancel() // second signal forces
+		case <-ctx.Done():
+		}
+	}()
+
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, beginDrain, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}
@@ -594,6 +655,17 @@ func run() error {
 	defer ticker.Stop()
 
 	runErr := d.Run(ctx, ticker.C)
+
+	// A graceful drain (Run returned cleanly, not forced) finishes the
+	// hook backlog before teardown: the queue has stopped landing, so the
+	// entire already-queued backlog is bounded, and hooks have no
+	// post-restart replay — dropping them would be silent permanent loss
+	// (issue #8). A force (ctx already cancelled) skips this: hr.Run
+	// already returned on ctx.Done, today's crash-equivalent behavior.
+	if runErr == nil && ctx.Err() == nil && hr != nil {
+		hr.Drain(ctx)
+	}
+	cancel() // stop the remaining background goroutines (Slack, dashboard, sampler, pruner)
 	wg.Wait()
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {

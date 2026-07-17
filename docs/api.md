@@ -117,11 +117,28 @@ errors are always `{"error": "..."}`.
     -d '{"target":"main"}'
   ```
 
+- **`POST /api/v1/drain`** — begins a graceful shutdown drain (see
+  [config.md's `shutdown`](config.md)): stop admitting new candidates, let
+  the in-flight set finish, then the daemon exits. Body is optional; an
+  empty body drains with no deadline, or `{"deadline": "<RFC3339>"}` forces
+  the immediate kill at that instant. `202 {"status":"draining"}`;
+  idempotent (a repeat never resumes admission and only ever shortens the
+  deadline); `400` if the deadline isn't RFC3339 or the body isn't valid
+  JSON; `503 {"error":"drain unavailable"}` if no drain surface was wired;
+  `405` for any method but `POST`. Poll `GET /api/v1/status`'s `lifecycle`
+  field (`running` → `draining` → `drained`) to follow it; `activeRuns`/
+  `activeChecks` show what's still in flight.
+
+  ```sh
+  curl -s -X POST http://localhost:8080/api/v1/drain \
+    -H 'content-type: application/json' -d '{}'
+  ```
+
 ## CLI
 
-**`gauntlet status`**, **`gauntlet retry`**, **`gauntlet cancel`**, and
-**`gauntlet hooks-cancel`** are thin CLI wrappers over the same API
-(client-side porcelain, like `gauntlet land`):
+**`gauntlet status`**, **`gauntlet retry`**, **`gauntlet cancel`**,
+**`gauntlet hooks-cancel`**, and **`gauntlet drain`** are thin CLI wrappers
+over the same API (client-side porcelain, like `gauntlet land`):
 
 ```sh
 gauntlet status -url http://localhost:8080                  # compact per-target summary
@@ -131,7 +148,15 @@ gauntlet status -url http://localhost:8080 -json            # raw API response
 gauntlet retry -url http://localhost:8080 -target main -ref refs/heads/for/main/alice/my-feature
 gauntlet cancel -url http://localhost:8080 -target main -ref refs/heads/for/main/alice/my-feature
 gauntlet hooks-cancel -url http://localhost:8080 -target main
+
+gauntlet drain -url http://localhost:8080                   # begin a graceful drain, return
+gauntlet drain -url http://localhost:8080 -wait             # block until lifecycle=drained
+gauntlet drain -url http://localhost:8080 -deadline 30m     # force the kill 30m out if unfinished
 ```
+
+`gauntlet drain` fails with a clear error if there is no reachable admin
+endpoint (a daemon with no `dashboard` bind drains by signal only — a first
+SIGTERM), rather than pretending a drain began.
 
 ## Idle signal
 

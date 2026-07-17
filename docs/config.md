@@ -313,6 +313,26 @@ summarize {
   what actually bounds it. A check that sits ready waiting for a slot
   records that wait in history (`waited` vs `duration`), so capacity
   starvation is visible rather than mistaken for slow commands.
+- **`shutdown`** (top level) — the first-SIGTERM behavior (issue #8).
+  `"drain"` (the default) begins a **graceful drain**: the daemon stops
+  admitting new candidates and extending speculation, lets the
+  already-admitted set finish its required checks and one landing CAS
+  each, runs the entire queued post-land hook backlog, then exits in the
+  normal teardown order. A **second signal** forces the immediate kill (a
+  crash-equivalent stop, healed on restart by the idempotent reconcile).
+  `"kill"` restores the legacy behavior where the first signal cancels
+  everything at once. Because a drain waits for in-flight work,
+  systemd's `TimeoutStopSec` is the outer hard bound — set it long enough
+  for your slowest expected checks. A drain is also reachable without a
+  signal (so orchestration can begin it and poll before stopping the
+  service) via `POST /api/v1/drain` (optional `{"deadline": "<RFC3339>"}`
+  to force the kill at a chosen instant), the MCP `drain` tool, and
+  `gauntlet drain [--wait] [--deadline <dur>]`; the lifecycle
+  (`running`/`draining`/`drained`), the in-flight run/check counts, and
+  the drain window appear in `GET /api/v1/status` and the MCP `status`
+  tool, so a readiness probe can tell "draining — alive but not admitting
+  new work" from an unhealthy daemon. There is no undrain — a restart
+  resumes admission.
 - **`export`** (top level) — configures how trial trees are materialized
   on disk, for *every* export: check trees, candidate-built image trees,
   and hook trees.

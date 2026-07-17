@@ -1045,6 +1045,15 @@ func (d *Daemon) specChanged(ctx context.Context, prevTree, newTree string) bool
 // fallback"), in which case — and for "serial"/"" the default —
 // refillSerialOne runs instead, picking one candidate at a time.
 func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
+	// The admission boundary (issue #8): once draining, admit no new
+	// candidate and extend no speculation window. Already-admitted runs
+	// (advanceLane/advanceChecks/landing) keep running to a terminal
+	// outcome — the drain set is what was in flight at drain entry, and it
+	// is finite because nothing new enters here. Queue refs for
+	// unadmitted candidates stay untouched and re-queue on the next start.
+	if d.draining {
+		return
+	}
 	l := d.lanes[t.Name]
 
 	if t.Mode == "speculate" {

@@ -139,6 +139,14 @@ func WithHookCancel(fn func(target string) bool) Option {
 	return func(d *dash) { d.hookCancel = fn }
 }
 
+// WithDrain wires fn so POST /api/v1/drain can begin a graceful shutdown
+// drain (issue #8, cmd/gauntlet's beginDrain). Without this option the
+// route responds 503 "drain unavailable" — the drain is still reachable
+// by signal, but no HTTP admin surface was wired for it.
+func WithDrain(fn func(deadline time.Time)) Option {
+	return func(d *dash) { d.drain = fn }
+}
+
 // LiveHook mirrors hooks.LiveState (internal/hooks) as a dashboard-local
 // struct, so this package never needs to import internal/hooks just to read
 // one target's live post-land hook progress. Target is included even
@@ -231,6 +239,7 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
 	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
+	mux.HandleFunc("/api/v1/drain", d.handleAPIDrain)
 }
 
 // --- GET /api/v1/status ------------------------------------------------------
@@ -261,6 +270,17 @@ type statusResponse struct {
 	// internal/queue; hook idleness lives outside it entirely, Invariant 8,
 	// so only this layer — which holds both — can combine them).
 	IdleSince string `json:"idleSince,omitempty"`
+
+	// Lifecycle is the daemon's shutdown phase (issue #8):
+	// running/draining/drained. ActiveRuns/ActiveChecks are the in-flight
+	// drain set; DrainSince/DrainDeadline (RFC3339, omitted outside a
+	// drain) frame it. Readiness integrations distinguish "draining"
+	// (alive, no longer admitting new work) from an unhealthy daemon.
+	Lifecycle     string `json:"lifecycle"`
+	ActiveRuns    int    `json:"activeRuns"`
+	ActiveChecks  int    `json:"activeChecks"`
+	DrainSince    string `json:"drainSince,omitempty"`
+	DrainDeadline string `json:"drainDeadline,omitempty"`
 }
 
 type targetStatus struct {
@@ -401,6 +421,18 @@ func (d *dash) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if since := d.idleSince(snap); !since.IsZero() {
 		resp.IdleSince = formatRFC3339(since)
+	}
+	resp.Lifecycle = string(snap.Lifecycle)
+	if resp.Lifecycle == "" {
+		resp.Lifecycle = string(queue.LifecycleRunning) // pre-#8 snapshots
+	}
+	resp.ActiveRuns = snap.ActiveRuns
+	resp.ActiveChecks = snap.ActiveChecks
+	if !snap.DrainSince.IsZero() {
+		resp.DrainSince = formatRFC3339(snap.DrainSince)
+	}
+	if !snap.DrainDeadline.IsZero() {
+		resp.DrainDeadline = formatRFC3339(snap.DrainDeadline)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1058,6 +1090,55 @@ func (d *dash) handleAPIHookCancel(w http.ResponseWriter, r *http.Request) {
 		status = "cancelled"
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
+}
+
+// --- POST /api/v1/drain -------------------------------------------------------
+
+// drainRequest is POST /api/v1/drain's body. deadline is an optional
+// RFC3339 instant at which an unfinished drain is forced (the immediate
+// kill), so orchestration can bound how long it waits; absent means no
+// queue-level deadline (the operator, a second signal, or systemd's
+// TimeoutStopSec still force it).
+type drainRequest struct {
+	Deadline string `json:"deadline,omitempty"`
+}
+
+// handleAPIDrain begins a graceful drain (issue #8): stop admitting new
+// candidates, let the in-flight set finish, then exit. Idempotent — a
+// repeat call never resumes admission and only ever shortens the deadline.
+// Returns 202 with the drain start acknowledged; the caller polls GET
+// /api/v1/status for the lifecycle transition to "drained". 503 when no
+// drain callback was wired (WithDrain absent).
+func (d *dash) handleAPIDrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req drainRequest
+	// An empty body is valid (drain with no deadline); only malformed JSON
+	// is an error.
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	var deadline time.Time
+	if req.Deadline != "" {
+		t, err := time.Parse(time.RFC3339, req.Deadline)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "deadline must be an RFC3339 timestamp")
+			return
+		}
+		deadline = t
+	}
+	if d.drain == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "drain unavailable")
+		return
+	}
+	d.drain(deadline)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "draining"})
 }
 
 // --- shared JSON helpers -----------------------------------------------------

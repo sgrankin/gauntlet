@@ -132,6 +132,12 @@ type dash struct {
 	// /api/v1/hooks/cancel responds 503 "hooks disabled" in that case (api.go).
 	hookCancel func(target string) bool
 
+	// drain is nil unless New was called with WithDrain: POST
+	// /api/v1/drain responds 503 "drain unavailable" in that case (issue
+	// #8). Invoked with a zero deadline for "no queue deadline", or a
+	// caller-supplied one.
+	drain func(deadline time.Time)
+
 	// hookSnapshot is nil unless New was called with WithHookSnapshot: both
 	// GET /api/v1/status's per-target liveHook field and the target page's
 	// "Post-land hooks" live section simply omit live-hook data in that case

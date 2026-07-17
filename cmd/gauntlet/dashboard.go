@@ -67,7 +67,7 @@ const dashboardShutdownTimeout = 5 * time.Second
 // ServicesSnapshot (the services tool) — services.Pool.Snapshot itself,
 // nil-safely mirroring hookSnapshot: nil here means both surfaces simply
 // omit the pool entirely (design §10's tuning instrument, S5-style parity).
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, wg *sync.WaitGroup) {
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, drain func(time.Time), wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -116,6 +116,12 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 			return dashboardServicesStatus(servicesSnapshot())
 		}))
 	}
+	// drain (main.go's beginDrain) backs POST /api/v1/drain; the lifecycle
+	// it produces is already in the Snapshot, so GET /api/v1/status needs
+	// no extra wiring (issue #8).
+	if drain != nil {
+		opts = append(opts, dashboard.WithDrain(drain))
+	}
 
 	// The MCP server (chunk E5) is mounted at /mcp on the same listener as
 	// the dashboard, since it's meant for agents that already know the
@@ -126,6 +132,7 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	mcpParams := gauntletmcp.Params{
 		Snapshot: snapshot, Store: store, LogRoot: logDir,
 		Retry: retryOrCancel, Cancel: retryOrCancel, HookCancel: hookCancel,
+		Drain: drain,
 	}
 	if hookSnapshot != nil {
 		mcpParams.HookSnapshot = func(target string) (gauntletmcp.LiveHook, bool) {

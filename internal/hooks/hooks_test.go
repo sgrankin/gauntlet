@@ -735,6 +735,53 @@ func TestRunner_RunDrainsQueueInOrder(t *testing.T) {
 	}
 }
 
+// TestRunner_DrainRunsBacklogThenExits: a graceful drain (issue #8) runs
+// every landing already queued — the whole backlog is part of the drain
+// set, since hooks have no post-restart replay — then Run returns.
+func TestRunner_DrainRunsBacklogThenExits(t *testing.T) {
+	git := &fakeGitRepo{}
+	exec := &fakeExecutor{}
+	r := New(Params{
+		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},
+		Git:     git,
+		Exec:    exec,
+		Emit:    (&recordingEmit{}).fn,
+		WorkDir: t.TempDir(),
+		Log:     io.Discard,
+	})
+
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	// Queue three landings' hooks, then drain. All three must run before
+	// Run exits — a backlog dropped on drain would be silent permanent
+	// loss.
+	for i := 0; i < 3; i++ {
+		rec := &core.RunRecord{RunID: "run", Target: "main", MergeSHA: "merge-sha"}
+		if err := r.Emit(ctx, landedEvent("main", rec)); err != nil {
+			t.Fatalf("Emit: %v", err)
+		}
+	}
+
+	r.Drain(ctx) // blocks until the backlog is finished
+
+	if got := exec.callCount(); got != 3 {
+		t.Fatalf("exec called %d times after drain, want all 3 backlog landings", got)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after Drain")
+	}
+
+	// A repeated Drain is a harmless no-op (idempotent close guard).
+	r.Drain(ctx)
+}
+
 func TestRunner_CtxShutdownDrainsCleanly(t *testing.T) {
 	r := New(Params{
 		Hooks:   map[string][]Hook{"main": {{Name: "deploy", Command: []string{"true"}}}},

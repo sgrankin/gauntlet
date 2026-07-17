@@ -81,6 +81,12 @@ type Params struct {
 	// hook_cancel tool.
 	HookCancel func(target string) bool
 
+	// Drain begins a graceful shutdown drain (issue #8, cmd/gauntlet's
+	// beginDrain): stop admitting new candidates, finish the in-flight
+	// set, then exit. The deadline argument (zero for none) forces the
+	// immediate kill at that instant. Nil disables the drain tool.
+	Drain func(deadline time.Time)
+
 	// LogRoot mirrors dashboard.WithLogRoot: when non-empty, the run tool's
 	// checks gain a logUrl pointing at the dashboard's
 	// GET /run/{id}/log/{check} route (mounted on the same HTTP server this
@@ -210,6 +216,18 @@ func New(p Params) http.Handler {
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "drain",
+		Description: "Begin a graceful shutdown drain: stop admitting new candidates and extending " +
+			"speculation, let the in-flight set finish (checks + one landing each), then the daemon exits. " +
+			"Same effect as POST /api/v1/drain. Idempotent. Optional deadline (RFC3339) forces the " +
+			"immediate kill at that instant. Poll the status tool's lifecycle field for the transition " +
+			"to \"drained\".",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in drainIn) (*sdkmcp.CallToolResult, drainOut, error) {
+		out, err := handleDrain(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "batch",
 		Description: "Batch membership for a batch ID: every member run (runID, ref, position, outcome, sha). " +
 			"Mirrors GET /api/v1/batch/{id}. Requires run history to be enabled.",
@@ -268,6 +286,16 @@ type statusOut struct {
 	// either — this endpoint has none). Omitted whenever the daemon isn't
 	// idle right now.
 	IdleSince string `json:"idleSince,omitempty"`
+
+	// Lifecycle mirrors dashboard/api.go's statusResponse lifecycle fields
+	// (issue #8): running/draining/drained, plus the in-flight drain set
+	// counts and the drain window. Lets an agent watch a graceful shutdown
+	// progress.
+	Lifecycle     string `json:"lifecycle"`
+	ActiveRuns    int    `json:"activeRuns"`
+	ActiveChecks  int    `json:"activeChecks"`
+	DrainSince    string `json:"drainSince,omitempty"`
+	DrainDeadline string `json:"drainDeadline,omitempty"`
 }
 
 // targetStatus, inFlightStatus, waitingStatus, and parkedStatus mirror
@@ -401,6 +429,18 @@ func handleStatus(p Params, in statusIn) statusOut {
 	}
 	if since := idleSince(p, snap); !since.IsZero() {
 		out.IdleSince = formatRFC3339(since)
+	}
+	out.Lifecycle = string(snap.Lifecycle)
+	if out.Lifecycle == "" {
+		out.Lifecycle = string(queue.LifecycleRunning)
+	}
+	out.ActiveRuns = snap.ActiveRuns
+	out.ActiveChecks = snap.ActiveChecks
+	if !snap.DrainSince.IsZero() {
+		out.DrainSince = formatRFC3339(snap.DrainSince)
+	}
+	if !snap.DrainDeadline.IsZero() {
+		out.DrainDeadline = formatRFC3339(snap.DrainDeadline)
 	}
 	return out
 }
@@ -807,6 +847,32 @@ func handleHookCancel(p Params, in hookCancelIn) (hookCancelOut, error) {
 		return hookCancelOut{Status: "cancelled"}, nil
 	}
 	return hookCancelOut{Status: "no-op"}, nil
+}
+
+// --- drain ------------------------------------------------------------------
+
+type drainIn struct {
+	Deadline string `json:"deadline,omitempty" jsonschema:"optional RFC3339 instant to force the immediate kill if the drain has not finished by then"`
+}
+
+type drainOut struct {
+	Status string `json:"status"` // "draining"
+}
+
+func handleDrain(p Params, in drainIn) (drainOut, error) {
+	if p.Drain == nil {
+		return drainOut{}, errors.New("drain is disabled")
+	}
+	var deadline time.Time
+	if in.Deadline != "" {
+		t, err := time.Parse(time.RFC3339, in.Deadline)
+		if err != nil {
+			return drainOut{}, errors.New("deadline must be an RFC3339 timestamp")
+		}
+		deadline = t
+	}
+	p.Drain(deadline)
+	return drainOut{Status: "draining"}, nil
 }
 
 // --- batch ------------------------------------------------------------------
