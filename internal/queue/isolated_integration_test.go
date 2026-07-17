@@ -115,6 +115,40 @@ func TestIntegration_IsolatedHistoryMtimesDeterministic(t *testing.T) {
 	}
 }
 
+// TestIntegration_IsolatedExportSubstUsesTreeNotCommit is the exact-tree
+// regression (issue #9): isolated materialization must archive the run's
+// TREE OID, never the merge COMMIT. `git archive <commit>` applies
+// .gitattributes `export-subst` (rewriting $Format:%H$ into the commit
+// SHA), while `git archive <tree>` leaves the blob bytes literal — the same
+// bytes shared-mode export produces. If materializeNode archived the commit
+// (the pre-fix bug), version.txt would hold a 40-hex SHA and the check
+// below would fail; archiving the tree keeps it literal and the run lands.
+// Driven through the full run wiring (not GitRepo.ExportTree directly) so a
+// batch/speculate call site passing the commit OID would also be caught.
+func TestIntegration_IsolatedExportSubstUsesTreeNotCommit(t *testing.T) {
+	h := newIntegrationHarness(t, nil, executor.LocalExecutor{})
+	h.remote.Seed("main", map[string]string{"README.md": "seed\n"})
+
+	spec := map[string]string{
+		testCheckSpecPath: "workspace \"isolated\"\nmax-parallel 1\n" +
+			"check \"verify\" {\n    command \"/bin/sh\" \"verify.sh\"\n}\n",
+		".gitattributes": "version.txt export-subst\n",
+		"version.txt":    "$Format:%H$\n",
+		// Passes iff version.txt is the LITERAL export-subst placeholder —
+		// i.e. the tree bytes, not a commit-substituted SHA. -F fixed
+		// string, -x whole line, -q quiet.
+		"verify.sh": "grep -qxF '$Format:%H$' version.txt\n",
+	}
+	h.remote.PushCandidate("main", "alice", "widget", spec)
+
+	before := len(h.ch.Records())
+	h.reconcile()
+	rec := h.pumpUntilRecord(before)
+	if rec.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v (detail %q), want Landed — isolated materialization must archive the tree (literal $Format:%%H$), not the commit (substituted SHA)", rec.Outcome, rec.Detail)
+	}
+}
+
 func readMtime(t *testing.T, path string) int64 {
 	t.Helper()
 	raw, err := os.ReadFile(path)

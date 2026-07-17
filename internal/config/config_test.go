@@ -2524,6 +2524,31 @@ check "test" {
 			wantErr: `workspace must be "isolated"`,
 		},
 		{
+			// Duplicate top-level singleton: kdl-go would bind last-wins,
+			// silently swallowing the invalid first declaration. Issue #9
+			// makes rejecting this an explicit acceptance criterion.
+			name: "duplicate workspace declaration",
+			kdl: `
+workspace "sandboxed"
+workspace "isolated"
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `"workspace" declared more than once`,
+		},
+		{
+			name: "duplicate max-parallel declaration",
+			kdl: `
+max-parallel 2
+max-parallel 4
+check "test" {
+    command "go" "test" "./..."
+}
+`,
+			wantErr: `"max-parallel" declared more than once`,
+		},
+		{
 			name: "check consumes undeclared image",
 			kdl: `
 check "unit" {

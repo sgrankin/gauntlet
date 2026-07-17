@@ -20,6 +20,15 @@ const nodeWorkspacePrefix = "gauntlet-node-"
 // own goroutine AFTER it holds an execution slot, so the daemon-wide cap
 // bounds simultaneous archives/mtime walks as well as commands.
 //
+// treeOID is the exact tree object to export; chainTip is the merge commit
+// the tree belongs to, used only as the mtime history anchor. These MUST
+// be kept distinct: `git archive <commit>` applies `.gitattributes`
+// export-subst (substituting $Format:%H$ etc. against the commit), while
+// `git archive <tree>` does not — so archiving the commit would put bytes
+// in the workspace that are not in the tested tree and that differ from
+// shared mode, breaking the exact-tree invariant. Shared-mode setup
+// likewise exports trial.TreeOID (the tree), never the merge commit.
+//
 // Returns the directory (the caller removes it after the executor child
 // stops) and how long materialization took — wall time, like the
 // command's own Duration, since this runs off the reconcile goroutine and
@@ -27,16 +36,16 @@ const nodeWorkspacePrefix = "gauntlet-node-"
 // an OutcomeError result (park-as-error), never a silent fallback to a
 // shared dir or wall-clock mtimes; partial state is cleaned before
 // returning.
-func (d *Daemon) materializeNode(ctx context.Context, chainTip string) (dir string, took time.Duration, err error) {
+func (d *Daemon) materializeNode(ctx context.Context, treeOID, chainTip string) (dir string, took time.Duration, err error) {
 	start := time.Now()
 	dir, err = os.MkdirTemp(d.cfg.WorkDir, nodeWorkspacePrefix)
 	if err != nil {
 		return "", 0, fmt.Errorf("mkdir: %w", err)
 	}
-	// git archive accepts a commit-ish and materializes its tree, so the
-	// chain-tip merge commit yields the exact tested tree — the same
-	// content the shared-mode run export produces.
-	if err := d.git.ExportTree(ctx, chainTip, dir); err != nil {
+	// Export the tree OID, not the merge commit: this is the exact tested
+	// tree the shared-mode run export produces, with no commit-scoped
+	// export-subst rewriting.
+	if err := d.git.ExportTree(ctx, treeOID, dir); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", 0, fmt.Errorf("export tree: %w", err)
 	}

@@ -109,8 +109,12 @@ Details worth knowing:
   single writable export, including intentional sequential filesystem
   handoff, byte-for-byte — even at `max-parallel 1`.
 - **Export, not clone.** The private workspace is a `git archive` of the
-  chain-tip tree with no `.git`; git queries still go through
-  `GAUNTLET_GIT_DIR` and the exact `GAUNTLET_*_SHA` values, as always.
+  chain-tip **tree** with no `.git`; git queries still go through
+  `GAUNTLET_GIT_DIR` and the exact `GAUNTLET_*_SHA` values, as always. It is
+  the same tree object shared mode exports — archiving the merge *commit*
+  would differ under `.gitattributes` `export-subst` (which rewrites
+  `$Format:…$` placeholders against the commit), so isolated nodes see the
+  literal tree bytes, byte-for-byte identical to shared mode.
 - **Stable container path.** Distinct host directories are still bound at
   the profile's fixed `workdir` (normally `/workspace`), so tools whose
   caches embed absolute source paths see the same in-container path across

@@ -822,7 +822,8 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	needs := check.Needs
 	svcs := r.services
 	isolated := r.isolated
-	chainTip := r.chainTip // captured by value; the goroutine never touches r
+	chainTip := r.chainTip   // captured by value; the goroutine never touches r
+	chainTree := r.chainTree // the exact tree to materialize (not the commit — export-subst)
 	go func() {
 		// The execution slot advanceChecks acquired for this check is
 		// released only when this goroutine exits — RunCheck has returned
@@ -838,7 +839,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		// RunCheck returns (child stopped), covering pass/fail/cancel.
 		var materialized time.Duration
 		if isolated {
-			wsDir, took, err := d.materializeNode(spanCtx, chainTip)
+			wsDir, took, err := d.materializeNode(spanCtx, chainTree, chainTip)
 			if err != nil {
 				result <- core.CheckResult{Name: check.Name, Command: job.Command, Err: fmt.Errorf("materialize workspace: %w", err)}
 				return
@@ -1389,6 +1390,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		members:     members,
 		baseOID:     base,
 		chainTip:    chainTip,
+		chainTree:   tipTree,
 		batchID:     runID,
 		runID:       runID,
 		dir:         dir,
@@ -1836,6 +1838,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		members:     []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
 		baseOID:     base,
 		chainTip:    link.mergeOID,
+		chainTree:   trial.TreeOID,
 		predicted:   predicted,
 		batchID:     "",
 		runID:       runID,

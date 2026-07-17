@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
@@ -242,9 +243,48 @@ func envSafeName(name string) string {
 	return b.String()
 }
 
+// singletonNodes are the top-level check-spec nodes that carry a single
+// scalar value (not a `,multiple` collection like check/service/image).
+// kdl-go binds a repeated scalar node last-wins, which would silently
+// swallow a malformed-then-valid declaration such as `workspace "sandbox";
+// workspace "isolated"` — so ParseChecks rejects any of these appearing
+// more than once, before validate() ever inspects the (last-wins) bound
+// value. Issue #9 makes this an explicit acceptance criterion for
+// `workspace`; max-parallel gets the same treatment for consistency, since
+// they are the spec's only top-level singleton scalars.
+var singletonNodes = map[string]bool{"workspace": true, "max-parallel": true}
+
+// rejectDuplicateSingletons fails if any singletonNodes name appears more
+// than once at the document's top level. It re-parses the raw KDL (kdl-go's
+// Unmarshal discards node multiplicity), which is cheap relative to the
+// trial-merge/export work a spec load sits behind.
+func rejectDuplicateSingletons(data []byte) error {
+	doc, err := kdl.Parse(bytes.NewReader(data))
+	if err != nil {
+		return nil // a genuine syntax error surfaces from Unmarshal below
+	}
+	counts := make(map[string]int, len(singletonNodes))
+	for _, n := range doc.Nodes {
+		if n.Name == nil {
+			continue
+		}
+		name := n.Name.ValueString()
+		if singletonNodes[name] {
+			counts[name]++
+			if counts[name] == 2 {
+				return fmt.Errorf("%q declared more than once (a single value is expected)", name)
+			}
+		}
+	}
+	return nil
+}
+
 // ParseChecks parses and validates a check spec's raw content, as read from
 // a git tree via GitRepo.ReadFileFromTree — this does not take a file path.
 func ParseChecks(data []byte) (*CheckSpec, error) {
+	if err := rejectDuplicateSingletons(data); err != nil {
+		return nil, fmt.Errorf("config: check spec: %w", err)
+	}
 	var cs CheckSpec
 	if err := kdl.Unmarshal(data, &cs); err != nil {
 		return nil, fmt.Errorf("config: check spec: %w", err)

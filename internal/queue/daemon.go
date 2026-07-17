@@ -304,6 +304,7 @@ type run struct {
 	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
 	baseOID   string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto
 	chainTip  string      // the tested merge commit == members[len-1].mergeOID (== members[0].mergeOID for len(members)==1)
+	chainTree string      // the exact tested tree OID (chainTip^{tree}); what shared-mode export and isolated materialization both archive — NOT the commit, to avoid export-subst divergence
 	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false for serial/batch and speculate's own head run
 	batchID   string      // "" unless batch; shared across member records (runID reused verbatim)
 	runID     string
@@ -363,8 +364,9 @@ type run struct {
 
 	// isolated selects per-node private workspaces (issue #9,
 	// CheckSpec.Workspace == "isolated"): when set, dir is "" (no shared
-	// export) and each check materializes its own copy of chainTip's tree
-	// in startCheck. Read-only for the run's life, set once at start.
+	// export) and each check materializes its own copy of chainTree (the
+	// exact tested tree) in startCheck. Read-only for the run's life, set
+	// once at start.
 	isolated bool
 
 	verdict runVerdict // set by advanceChecks, consumed by advanceLane
