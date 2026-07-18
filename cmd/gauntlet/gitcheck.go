@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -22,9 +23,12 @@ const (
 )
 
 // checkGitVersion probes `git --version` and fails loudly if git is missing,
-// its version output is unparseable, or the version is below 2.38.
-func checkGitVersion() error {
-	out, err := exec.Command("git", "--version").Output()
+// its version output is unparseable, or the version is below 2.38. Takes
+// ctx so a hanging `git` on $PATH can never block a caller forever — both
+// doctor's per-probe timeout and run()'s own startup call depend on this
+// being bounded.
+func checkGitVersion(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "git", "--version").Output()
 	if err != nil {
 		return fmt.Errorf("git --version failed (is git installed and on $PATH?): %w; gauntlet requires git %d.%d or newer (git merge-tree --write-tree)", err, minGitMajor, minGitMinor)
 	}

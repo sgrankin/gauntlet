@@ -142,6 +142,11 @@ func TestLoadDaemon_ExecutorProfileErrors(t *testing.T) {
 			wantErr: `may not be named "local"`,
 		},
 		{
+			name:    "profile named default",
+			kdl:     "executor \"default\" kind=\"local\"\n",
+			wantErr: `may not be named "default"`,
+		},
+		{
 			name:    "profile with kind but no name",
 			kdl:     "executor kind=\"local\"\n",
 			wantErr: "needs a name argument",

@@ -367,7 +367,10 @@ type OTLP struct {
 // The presence of the `kind` property is the discriminator — applyDefaults
 // resolves Arg into Kind (legacy) or Name (profile) and never leaves the
 // raw Arg for consumers. Profile names "local" and "container" are
-// rejected outright so the two spellings can never be confused.
+// rejected outright so the two spellings can never be confused; "default"
+// is rejected too, since gauntlet doctor prints the default (kind-less)
+// profile under exactly that label and a same-named profile would make
+// its probe output ambiguous.
 //
 // A profile is an operational guardrail, not a sandbox: selecting one in a
 // repo spec grants the check everything attached to it (mounts, fixed env,
@@ -726,6 +729,9 @@ func (d *Daemon) resolveExecutors() error {
 		}
 		if e.Arg == "local" || e.Arg == "container" {
 			return fmt.Errorf("executor: profile may not be named %q — that word in the argument position means the DEFAULT executor's kind; pick another name", e.Arg)
+		}
+		if e.Arg == "default" {
+			return fmt.Errorf("executor: profile may not be named %q — gauntlet doctor prints the default (kind-less) profile under that label; pick another name", e.Arg)
 		}
 		e.Name = e.Arg
 		e.Arg = ""

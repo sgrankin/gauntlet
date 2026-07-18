@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -83,6 +84,56 @@ func TestOpen_AppliesSchemaOnceAndSurvivesReopen(t *testing.T) {
 	}
 	if len(points) != 1 {
 		t.Fatalf("DepthSeries after reopen = %d points, want 1", len(points))
+	}
+}
+
+// TestReadSchemaVersion_ReadOnlyDirectory proves ReadSchemaVersion's
+// "immutable=1" actually does its job: opening a WAL database (Open always
+// sets journal_mode(WAL), persistent in the file header) with plain
+// "mode=ro" would still try to create -shm/-wal sidecars next to it, which
+// both writes to the directory and fails outright when the directory isn't
+// writable ("attempt to write a readonly database"). ReadSchemaVersion must
+// succeed here and must create no new files at all.
+func TestReadSchemaVersion_ReadOnlyDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.db")
+
+	s, err := Open(path) // real Open: sets WAL, exactly what the daemon does
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir before: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) // restore so TempDir removal works
+
+	version, err := ReadSchemaVersion(path)
+	if err != nil {
+		t.Fatalf("ReadSchemaVersion on a read-only directory: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("version = %d, want %d", version, schemaVersion)
+	}
+
+	after, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("ReadSchemaVersion created new files in %s: before = %v, after = %v", dir, before, after)
 	}
 }
 

@@ -143,8 +143,11 @@ func run() error {
 
 	// Fail loudly, before touching any git plumbing, if the git on $PATH is
 	// missing or too old for `git merge-tree --write-tree`, which the
-	// trial-merge mechanism rests on.
-	if err := checkGitVersion(); err != nil {
+	// trial-merge mechanism rests on. context.Background(): the root ctx
+	// (below) doesn't exist yet at this point in startup, and a hanging
+	// `git --version` should fail this check on its own rather than being
+	// tied to a cancellation scope that isn't wired up yet.
+	if err := checkGitVersion(context.Background()); err != nil {
 		return fmt.Errorf("git version check: %w", err)
 	}
 

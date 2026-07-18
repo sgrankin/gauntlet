@@ -35,12 +35,17 @@ import (
 	"github.com/sgrankin/gauntlet/internal/history"
 )
 
-// doctorProbeTimeout bounds every network/subprocess probe (ls-remote, the
-// App JWT/token exchange, a runtime's `... ps`/`... info` reachability
-// check) so a wedged host or network can never hang doctor. Shared via
-// doctorEnv.timeout, which tests override to a short duration so a
-// deliberately-stalled fake (a listener that accepts and never answers)
-// proves the bound without a real ~10s wait.
+// doctorProbeTimeout bounds every network/subprocess probe (ls-remote, a
+// runtime's `... ps`/`... info` reachability check) so a wedged host or
+// network can never hang doctor. Shared via doctorEnv.timeout, which tests
+// override to a short duration so a deliberately-stalled fake (a listener
+// that accepts and never answers) proves the bound without a real ~10s
+// wait.
+//
+// The auth-mint probe is the one exception: ghauth.App.Token deliberately
+// mints on context.WithoutCancel (issue #6 — a shared in-flight mint must
+// outlive any single caller's ctx), so this timeout does not bound it. The
+// mint is instead bounded by ghauth's own mintTimeout (30s).
 const doctorProbeTimeout = 10 * time.Second
 
 // status is one probe's verdict.
@@ -216,8 +221,34 @@ func buildProbes(env *doctorEnv) []probe {
 		return probeRemote(ctx, env.cfg, env.appTokens, env.appErr)
 	}})
 
+	// Slack/summarize: gated exactly like buildSlackChannel/buildSummarizer
+	// (channels.go) gate the daemon's own startup — a configured block with
+	// its env var unset fails the daemon loudly at boot today, with no
+	// probe to catch it ahead of time before this.
+	if env.cfg.Slack.Channel != "" {
+		cfg := env.cfg
+		probes = append(probes, probe{"slack-token-env", func(ctx context.Context) probeResult { return probeSlackTokenEnv(cfg) }})
+	}
+	if env.cfg.Summarize != nil {
+		cfg := env.cfg
+		probes = append(probes, probe{"summarize-token-env", func(ctx context.Context) probeResult { return probeSummarizeTokenEnv(cfg) }})
+	}
+
 	profiles := containerProfiles(env.cfg)
-	for _, u := range runtimeUsages(profiles) {
+	// Runtime usages are derived from container-kind executor profiles PLUS
+	// (when configured) the services pool, which shells out to a runtime of
+	// its own via internal/services but is not itself a container-kind
+	// executor profile — a services-only config (local executor, no
+	// container profiles) would otherwise get zero runtime probes despite
+	// the daemon depending on that runtime being reachable. Fed through the
+	// same runtimeUsages grouping as profiles, not a bolted-on duplicate
+	// probe, so a services runtime that coincides with a profile's (e.g.
+	// both on "docker") still probes it exactly once, naming both usages.
+	runtimeProfiles := profiles
+	if len(env.cfg.Services.Allow) > 0 {
+		runtimeProfiles = append(runtimeProfiles, containerProfile{label: "services", runtime: servicesRuntime(env.cfg)})
+	}
+	for _, u := range runtimeUsages(runtimeProfiles) {
 		u := u
 		probes = append(probes, probe{"executor-runtime:" + u.runtime, func(ctx context.Context) probeResult {
 			return probeExecutorRuntime(ctx, u)
@@ -244,7 +275,7 @@ func buildProbes(env *doctorEnv) []probe {
 // daemon runs at startup — rather than re-deriving the version comparison
 // here.
 func probeGit(ctx context.Context) probeResult {
-	if err := checkGitVersion(); err != nil {
+	if err := checkGitVersion(ctx); err != nil {
 		return fail(err.Error(), fmt.Sprintf("install or upgrade git to %d.%d or newer and ensure it is on $PATH", minGitMajor, minGitMinor))
 	}
 	out, _ := exec.CommandContext(ctx, "git", "--version").Output()
@@ -324,7 +355,10 @@ func probeHistory(path string) probeResult {
 	}
 	dbVersion, err := history.ReadSchemaVersion(path)
 	if err != nil {
-		return fail(fmt.Sprintf("%s: %v", path, err), "confirm the file is a gauntlet history database and not corrupted")
+		return fail(
+			fmt.Sprintf("%s: %v", path, err),
+			"confirm the file is a gauntlet history database, that no filesystem error (permissions, missing directory) is blocking the read, and that it isn't corrupted — a live daemon writing to it concurrently is not itself a problem (ReadSchemaVersion is immutable-mode)",
+		)
 	}
 	switch {
 	case dbVersion > history.SchemaVersion:
@@ -417,6 +451,44 @@ func probeAuthTokenEnv(cfg *config.Daemon) probeResult {
 	return pass(fmt.Sprintf("%s is set", env))
 }
 
+// --- channels -----------------------------------------------------------------
+
+// probeSlackTokenEnv mirrors buildSlackChannel's own gating exactly
+// (cmd/gauntlet/channels.go): a configured slack block (Channel != "")
+// requires both cfg.Slack.AppTokenEnv (default SLACK_APP_TOKEN) and
+// cfg.Slack.BotTokenEnv (default SLACK_BOT_TOKEN) to be set, checked in the
+// same order buildSlackChannel checks them, before the daemon will start
+// Slack at all — no Slack API call here, same rationale as
+// probeAuthTokenEnv.
+func probeSlackTokenEnv(cfg *config.Daemon) probeResult {
+	if os.Getenv(cfg.Slack.AppTokenEnv) == "" {
+		return fail(
+			fmt.Sprintf("%s is empty or unset", cfg.Slack.AppTokenEnv),
+			fmt.Sprintf("export %s with a valid Slack app-level token before starting the daemon", cfg.Slack.AppTokenEnv),
+		)
+	}
+	if os.Getenv(cfg.Slack.BotTokenEnv) == "" {
+		return fail(
+			fmt.Sprintf("%s is empty or unset", cfg.Slack.BotTokenEnv),
+			fmt.Sprintf("export %s with a valid Slack bot token before starting the daemon", cfg.Slack.BotTokenEnv),
+		)
+	}
+	return pass(fmt.Sprintf("%s and %s are set", cfg.Slack.AppTokenEnv, cfg.Slack.BotTokenEnv))
+}
+
+// probeSummarizeTokenEnv mirrors buildSummarizer's own gating exactly
+// (cmd/gauntlet/channels.go): a configured summarize block requires
+// cfg.Summarize.APIKeyEnv (default ANTHROPIC_API_KEY) to be set before the
+// daemon will start the summarizer at all — no Messages API call here,
+// same rationale as probeAuthTokenEnv.
+func probeSummarizeTokenEnv(cfg *config.Daemon) probeResult {
+	env := cfg.Summarize.APIKeyEnv
+	if os.Getenv(env) == "" {
+		return fail(fmt.Sprintf("%s is empty or unset", env), fmt.Sprintf("export %s with a valid API key before starting the daemon", env))
+	}
+	return pass(fmt.Sprintf("%s is set", env))
+}
+
 // --- remote -----------------------------------------------------------------
 
 // probeRemote performs a read-only `ls-remote` against the configured
@@ -479,6 +551,21 @@ func containerProfiles(cfg *config.Daemon) []containerProfile {
 	return out
 }
 
+// servicesRuntime returns the runtime the services pool will actually shell
+// out to, mirroring main.go's run() mode/runtime derivation exactly: the
+// local executor has no runtime of its own, so cfg.Services.Runtime
+// (defaulted docker/podman by config.Daemon.applyDefaults when the executor
+// is local) supplies it; under a container executor, the executor's own
+// Runtime wins instead (config.Services.Runtime's field doc — validate()
+// only requires it to agree when both are set, and applyDefaults leaves it
+// "" otherwise).
+func servicesRuntime(cfg *config.Daemon) string {
+	if cfg.Executor.Kind == "container" {
+		return cfg.Executor.Runtime
+	}
+	return cfg.Services.Runtime
+}
+
 // runtimeUsage groups containerProfiles by distinct runtime, so
 // probeExecutorRuntime runs (and names) each runtime exactly once even when
 // several profiles share it.
@@ -525,11 +612,16 @@ func probeExecutorRuntime(ctx context.Context, u runtimeUsage) probeResult {
 // image store — `<runtime> image inspect <image>`, the docker-compatible
 // shape all three supported runtimes share (container.go's runtimeSpec doc:
 // "flags themselves are docker-compatible across all three") — and WARNs,
-// never FAILs, when it's absent: an absent image is not a host problem, it
-// just means the first real run pays a pull. This never pulls.
+// never FAILs, on any failure: an absent image is not a host problem, it
+// just means the first real run pays a pull, and this never pulls to find
+// out. `image inspect` failing is NOT proof the image is absent, though —
+// an unreachable runtime fails the exact same way, so the WARN names both
+// possibilities rather than asserting the image-absent one as fact; the
+// executor-runtime probe is what actually tells reachability apart from
+// absence.
 func probeImagePresent(ctx context.Context, runtime, image string) probeResult {
 	if err := exec.CommandContext(ctx, runtime, "image", "inspect", image).Run(); err != nil {
-		return warn(fmt.Sprintf("image %s not present locally on %s; the first run will pull it (doctor never pulls)", image, runtime))
+		return warn(fmt.Sprintf("image %s not present locally on %s, or %s is unreachable (see the executor-runtime probe above); if absent, the first run will pull it (doctor never pulls)", image, runtime, runtime))
 	}
 	return pass(fmt.Sprintf("image %s present locally on %s", image, runtime))
 }

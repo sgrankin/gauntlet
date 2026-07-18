@@ -62,6 +62,33 @@ func TestProbeGit_PassAndFail(t *testing.T) {
 	})
 }
 
+// TestProbeGit_Timeout proves probeGit actually honors its ctx: a `git` on
+// $PATH that hangs forever must still make probeGit return once ctx is
+// done, not block indefinitely (checkGitVersion previously used
+// exec.Command with no context at all, ignoring the deadline entirely).
+func TestProbeGit_Timeout(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nwhile true; do sleep 1; done\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	res := probeGit(ctx)
+	elapsed := time.Since(start)
+
+	if res.status != statusFail {
+		t.Fatalf("status = %v, detail = %q, want FAIL", res.status, res.detail)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("probeGit took %s, want it bounded by the injected ~500ms timeout (no hang)", elapsed)
+	}
+}
+
 // --- state ------------------------------------------------------------------
 
 func TestProbeState_Writable(t *testing.T) {
@@ -291,6 +318,111 @@ func TestProbeAuthMint_Failure(t *testing.T) {
 	}
 }
 
+// TestProbeAuthMint_SharedProviderMintsOnce proves the doctorEnv.appTokens
+// sharing contract end to end: probeAuthMint mints through app, and a
+// SECOND caller against that SAME provider — standing in for the remote
+// probe's own askpass token fetch, since gitx's private test harness
+// (internal/gitx/auth_test.go) is unexported and this package must not
+// duplicate it — must reuse the cached installation token rather than
+// minting again. A full git-over-HTTPS remote e2e proving the askpass leg
+// itself is already covered by gitx's own TestAuth_TokenSourceAuthenticates
+// FetchAndPush; what's missing without this test is proof that doctor's
+// two consumers (auth-mint, remote) actually share one mint the way
+// probeAuthMint's doc comment claims.
+func TestProbeAuthMint_SharedProviderMintsOnce(t *testing.T) {
+	key := testRSAKey(t)
+	keyPath := writeKeyFile(t, key, 0o600)
+	issuer := ghauthtest.New(t, 12345, 67890, key)
+
+	cfg := &config.Daemon{
+		GitHub: config.GitHub{
+			APIURL: issuer.URL(),
+			Auth: &config.GitHubAuth{
+				Mode: "app", AppID: 12345, InstallationID: 67890,
+				PrivateKeyFile: keyPath,
+			},
+		},
+	}
+
+	app, appErr := buildAppTokens(cfg)
+	if appErr != nil {
+		t.Fatalf("buildAppTokens: %v", appErr)
+	}
+
+	res := probeAuthMint(t.Context(), app, appErr)
+	if res.status != statusPass {
+		t.Fatalf("status = %v, detail = %q, want PASS", res.status, res.detail)
+	}
+
+	if _, err := app.Token(t.Context()); err != nil {
+		t.Fatalf("Token (second consumer, standing in for the remote probe): %v", err)
+	}
+	if issuer.Mints() != 1 {
+		t.Errorf("issuer.Mints() = %d, want 1 (auth-mint and a subsequent Token() consumer must share one mint via the SHARED provider)", issuer.Mints())
+	}
+}
+
+// TestBuildProbes_AppModeVsStaticMode drives buildProbes itself (not just
+// the individual probe functions) with an `auth "app"` config, asserting
+// the probe table contains exactly the app-mode probes (auth-key-perms,
+// auth-tmpdir-exec, auth-mint, remote) and none of static mode's
+// (auth-token-env) — and the reverse for a static-token config.
+func TestBuildProbes_AppModeVsStaticMode(t *testing.T) {
+	probeNames := func(env *doctorEnv) []string {
+		var names []string
+		for _, p := range buildProbes(env) {
+			names = append(names, p.name)
+		}
+		return names
+	}
+	contains := func(names []string, want string) bool {
+		for _, n := range names {
+			if n == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("app mode", func(t *testing.T) {
+		key := testRSAKey(t)
+		keyPath := writeKeyFile(t, key, 0o600)
+		cfg := &config.Daemon{
+			GitHub: config.GitHub{
+				Repo: "acme/widgets",
+				Auth: &config.GitHubAuth{Mode: "app", AppID: 1, InstallationID: 2, PrivateKeyFile: keyPath},
+			},
+		}
+		env := &doctorEnv{cfg: cfg, timeout: time.Second}
+		env.appTokens, env.appErr = buildAppTokens(cfg)
+		names := probeNames(env)
+
+		for _, want := range []string{"auth-key-perms", "auth-tmpdir-exec", "auth-mint", "remote"} {
+			if !contains(names, want) {
+				t.Errorf("buildProbes = %v, missing %q", names, want)
+			}
+		}
+		if contains(names, "auth-token-env") {
+			t.Errorf("buildProbes = %v, app mode must not include the static-only auth-token-env probe", names)
+		}
+	})
+
+	t.Run("static mode", func(t *testing.T) {
+		cfg := &config.Daemon{GitHub: config.GitHub{Repo: "acme/widgets", TokenEnv: "GH_TOKEN"}}
+		env := &doctorEnv{cfg: cfg, timeout: time.Second}
+		names := probeNames(env)
+
+		if !contains(names, "auth-token-env") {
+			t.Errorf("buildProbes = %v, missing auth-token-env", names)
+		}
+		for _, unwanted := range []string{"auth-key-perms", "auth-tmpdir-exec", "auth-mint"} {
+			if contains(names, unwanted) {
+				t.Errorf("buildProbes = %v, static mode must not include app-only probe %q", names, unwanted)
+			}
+		}
+	})
+}
+
 func TestProbeAuthTokenEnv(t *testing.T) {
 	cfg := &config.Daemon{GitHub: config.GitHub{TokenEnv: "GAUNTLET_DOCTOR_TEST_TOKEN"}}
 
@@ -310,6 +442,104 @@ func TestProbeAuthTokenEnv(t *testing.T) {
 			t.Fatalf("status = %v, want PASS", res.status)
 		}
 	})
+}
+
+// --- channels -----------------------------------------------------------------
+
+func TestProbeSlackTokenEnv(t *testing.T) {
+	cfg := &config.Daemon{Slack: config.Slack{
+		Channel:     "#builds",
+		AppTokenEnv: "GAUNTLET_DOCTOR_TEST_SLACK_APP",
+		BotTokenEnv: "GAUNTLET_DOCTOR_TEST_SLACK_BOT",
+	}}
+
+	t.Run("both unset", func(t *testing.T) {
+		os.Unsetenv("GAUNTLET_DOCTOR_TEST_SLACK_APP")
+		os.Unsetenv("GAUNTLET_DOCTOR_TEST_SLACK_BOT")
+		res := probeSlackTokenEnv(cfg)
+		if res.status != statusFail {
+			t.Fatalf("status = %v, want FAIL", res.status)
+		}
+		if !strings.Contains(res.detail, "GAUNTLET_DOCTOR_TEST_SLACK_APP") {
+			t.Errorf("detail = %q, want it to name the app token env var (checked first)", res.detail)
+		}
+	})
+
+	t.Run("app set, bot unset", func(t *testing.T) {
+		t.Setenv("GAUNTLET_DOCTOR_TEST_SLACK_APP", "xapp-fake")
+		os.Unsetenv("GAUNTLET_DOCTOR_TEST_SLACK_BOT")
+		res := probeSlackTokenEnv(cfg)
+		if res.status != statusFail {
+			t.Fatalf("status = %v, want FAIL", res.status)
+		}
+		if !strings.Contains(res.detail, "GAUNTLET_DOCTOR_TEST_SLACK_BOT") {
+			t.Errorf("detail = %q, want it to name the bot token env var", res.detail)
+		}
+	})
+
+	t.Run("both set", func(t *testing.T) {
+		t.Setenv("GAUNTLET_DOCTOR_TEST_SLACK_APP", "xapp-fake")
+		t.Setenv("GAUNTLET_DOCTOR_TEST_SLACK_BOT", "xoxb-fake")
+		res := probeSlackTokenEnv(cfg)
+		if res.status != statusPass {
+			t.Fatalf("status = %v, want PASS", res.status)
+		}
+	})
+}
+
+func TestProbeSummarizeTokenEnv(t *testing.T) {
+	cfg := &config.Daemon{Summarize: &config.Summarize{APIKeyEnv: "GAUNTLET_DOCTOR_TEST_SUMMARIZE_KEY"}}
+
+	t.Run("unset", func(t *testing.T) {
+		os.Unsetenv("GAUNTLET_DOCTOR_TEST_SUMMARIZE_KEY")
+		res := probeSummarizeTokenEnv(cfg)
+		if res.status != statusFail {
+			t.Fatalf("status = %v, want FAIL", res.status)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Setenv("GAUNTLET_DOCTOR_TEST_SUMMARIZE_KEY", "sk-fake")
+		res := probeSummarizeTokenEnv(cfg)
+		if res.status != statusPass {
+			t.Fatalf("status = %v, want PASS", res.status)
+		}
+	})
+}
+
+// TestBuildProbes_ChannelGating proves slack-token-env/summarize-token-env
+// are only included when their block is actually configured, mirroring
+// buildSlackChannel/buildSummarizer's own presence signal (Channel != ""/
+// Summarize != nil), same as every other optional probe in buildProbes.
+func TestBuildProbes_ChannelGating(t *testing.T) {
+	cfg := &config.Daemon{}
+	env := &doctorEnv{cfg: cfg, timeout: time.Second}
+	for _, p := range buildProbes(env) {
+		if p.name == "slack-token-env" || p.name == "summarize-token-env" {
+			t.Errorf("buildProbes included %q with no slack/summarize block configured", p.name)
+		}
+	}
+
+	cfg = &config.Daemon{
+		Slack:     config.Slack{Channel: "#builds", AppTokenEnv: "A", BotTokenEnv: "B"},
+		Summarize: &config.Summarize{APIKeyEnv: "K"},
+	}
+	env = &doctorEnv{cfg: cfg, timeout: time.Second}
+	var names []string
+	for _, p := range buildProbes(env) {
+		names = append(names, p.name)
+	}
+	for _, want := range []string{"slack-token-env", "summarize-token-env"} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("buildProbes = %v, missing %q", names, want)
+		}
+	}
 }
 
 // --- remote -----------------------------------------------------------------
@@ -415,6 +645,64 @@ func TestContainerProfiles_None(t *testing.T) {
 			t.Errorf("buildProbes included %q with no container profiles configured", p.name)
 		}
 	}
+}
+
+// TestBuildProbes_ServicesRuntime proves the services pool's runtime gets
+// probed even though it's not a container-kind executor profile: a
+// services-only config (local executor) must still get exactly one
+// executor-runtime probe, and a services runtime that coincides with a
+// container profile's must be grouped into that same probe rather than
+// duplicated.
+func TestBuildProbes_ServicesRuntime(t *testing.T) {
+	runtimeProbeNames := func(env *doctorEnv) []probe {
+		var out []probe
+		for _, p := range buildProbes(env) {
+			if strings.HasPrefix(p.name, "executor-runtime:") {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
+	t.Run("services-only config", func(t *testing.T) {
+		cfg := &config.Daemon{
+			Executor: config.Executor{Kind: "local"},
+			Services: config.Services{Allow: []string{"container"}, Runtime: "docker"},
+		}
+		env := &doctorEnv{cfg: cfg, timeout: time.Second}
+		probes := runtimeProbeNames(env)
+		if len(probes) != 1 {
+			t.Fatalf("runtime probes = %+v, want exactly 1", probes)
+		}
+		if probes[0].name != "executor-runtime:docker" {
+			t.Errorf("probe name = %q, want executor-runtime:docker", probes[0].name)
+		}
+		t.Setenv("PATH", t.TempDir()) // nothing resolves; exercise it to inspect the detail text
+		res := probes[0].fn(t.Context())
+		if !strings.Contains(res.detail, "services") {
+			t.Errorf("detail = %q, want it to name the \"services\" usage", res.detail)
+		}
+	})
+
+	t.Run("services sharing docker with a container profile", func(t *testing.T) {
+		cfg := &config.Daemon{
+			Executor: config.Executor{Kind: "container", Runtime: "docker", Image: "img"},
+			Services: config.Services{Allow: []string{"container"}}, // Runtime left "" — the executor's wins
+		}
+		env := &doctorEnv{cfg: cfg, timeout: time.Second}
+		probes := runtimeProbeNames(env)
+		if len(probes) != 1 {
+			t.Fatalf("runtime probes = %+v, want exactly 1 (docker shared by the default profile and services)", probes)
+		}
+		if probes[0].name != "executor-runtime:docker" {
+			t.Errorf("probe name = %q, want executor-runtime:docker", probes[0].name)
+		}
+		t.Setenv("PATH", t.TempDir())
+		res := probes[0].fn(t.Context())
+		if !strings.Contains(res.detail, "default") || !strings.Contains(res.detail, "services") {
+			t.Errorf("detail = %q, want it to name both the default profile and services", res.detail)
+		}
+	})
 }
 
 func TestProbeExecutorRuntime(t *testing.T) {

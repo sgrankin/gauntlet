@@ -285,10 +285,13 @@ summarize {
   reserved and gauntlet's values win any other collision), and — container
   only — `add-host` aliases and `--memory`/`--cpus` ceilings. Profile
   names `local`/`container` are rejected (that spelling means the default
-  block's kind). **Defining a profile is what allows repos to select it**,
-  and selecting one grants the check everything attached to it (a socket
-  mount is host-authoritative — same trust math as the default executor's
-  mounts), so prefer several small profiles over one all-powerful one. The
+  block's kind), and `default` is rejected too (`gauntlet doctor` prints
+  the default profile under that label; a same-named profile would make
+  its probe output ambiguous). **Defining a profile is what allows repos
+  to select it**, and selecting one grants the check everything attached
+  to it (a socket mount is host-authoritative — same trust math as the
+  default executor's mounts), so prefer several small profiles over one
+  all-powerful one. The
   repo side can only *name* a profile; mounts, images, env, and resource
   ceilings all stay here, operator-owned. A spec naming an undefined
   profile is rejected before any of its commands start. One caveat: the

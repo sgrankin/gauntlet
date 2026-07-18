@@ -281,13 +281,27 @@ func (s *Store) Close() error {
 }
 
 // ReadSchemaVersion opens the sqlite database at path READ-ONLY (the sqlite3
-// URI "mode=ro", which overrides this driver's default open flags) and
-// returns its PRAGMA user_version, applying no migration and writing
-// nothing — unlike Open, which upgrades the schema in place. This is
-// gauntlet doctor's history probe: it must be able to inspect a database's
-// schema version without ever mutating the daemon's own state.
+// URI "mode=ro") and returns its PRAGMA user_version, applying no migration
+// and writing nothing — unlike Open, which upgrades the schema in place.
+// This is gauntlet doctor's history probe: it must be able to inspect a
+// database's schema version without ever mutating the daemon's own state.
+//
+// "immutable=1" is required alongside "mode=ro", not redundant with it:
+// Open sets journal_mode(WAL), which is persistent in the database header,
+// so any later open of this file — even mode=ro — still tries to check for
+// and create the "-shm"/"-wal" sidecar files WAL needs, which both writes
+// to the directory (violating "probe never writes") and outright fails
+// with "attempt to write a readonly database" if the directory itself
+// isn't writable. "immutable=1" tells sqlite the file will not change for
+// the life of the connection, skipping that sidecar dance entirely — the
+// open becomes filesystem-inert. Caveat: an immutable read racing a live
+// writing daemon can observe a stale-but-valid header (the version as of
+// the last checkpoint, not the very latest write) rather than the true
+// instantaneous value — harmless for a version probe, which only cares
+// about "old enough to migrate" vs. "too new to touch", never the exact
+// live number.
 func ReadSchemaVersion(path string) (int, error) {
-	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
+	dsn := "file:" + path + "?mode=ro&immutable=1&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return 0, fmt.Errorf("history: open %s read-only: %w", path, err)
