@@ -365,6 +365,30 @@ Gauntlet hands you the SHAs and the object store; which paths matter to
 which check is repo-owned code, same as everything else about what a check
 does.
 
+## Self-checking your spec
+
+`gauntlet validate -checks .gauntlet.kdl` parses and validates a check spec
+with no daemon, no network, and no side effects — the same
+`config.ParseChecks` the daemon itself runs against every trial tree. A repo
+can declare a check that runs it against its own spec, so an edit that
+breaks the spec (a typo'd `after`, a dependency cycle, a duplicate
+`workspace`) fails its own merge trial instead of silently landing a broken
+spec for the next candidate to trip over:
+
+```kdl
+check "validate-spec" {
+    command "gauntlet" "validate" "-checks" ".gauntlet.kdl"
+}
+```
+
+Without `-config`, only the spec's own internal validity is checked.
+Cross-file properties — whether an `executor` name it references actually
+exists, whether an `image` runs on a container-kind profile, whether
+`service`/`needs` are usable at all — depend on the daemon's config and
+can't be checked from the spec alone; run `gauntlet validate -config
+gauntlet.kdl -checks .gauntlet.kdl` (with the operator's real config) to
+catch those too. See `gauntlet validate -h` for the full set of modes.
+
 ## Shared services
 
 Some test suites need a real backing service — SQL Server, a message

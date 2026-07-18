@@ -34,11 +34,12 @@ import (
 )
 
 func main() {
-	// "land", "status", "retry", "cancel", "hooks-cancel", and "version" are
-	// client-side porcelain (cmd/gauntlet/land.go, cmd/gauntlet/status.go,
-	// cmd/gauntlet/version.go): thin HTTP/git clients (or, for "version",
-	// pure local info) that don't run the daemon. Everything else is the
-	// daemon itself.
+	// "land", "status", "retry", "cancel", "hooks-cancel", "drain",
+	// "validate", and "version" are client-side porcelain (cmd/gauntlet/
+	// land.go, cmd/gauntlet/status.go, cmd/gauntlet/validate.go,
+	// cmd/gauntlet/version.go): thin HTTP/git clients, pure config
+	// validation ("validate"), or (for "version") pure local info — none of
+	// them run the daemon. Everything else is the daemon itself.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "land":
@@ -74,6 +75,12 @@ func main() {
 		case "drain":
 			if err := runDrain(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "gauntlet drain:", err)
+				os.Exit(1)
+			}
+			return
+		case "validate":
+			if err := runValidate(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet validate:", err)
 				os.Exit(1)
 			}
 			return
@@ -305,7 +312,7 @@ func run() error {
 		}
 	}
 
-	ex, profileNames, err := buildExecutor(cfg, scratchDir, token, repoDir)
+	ex, err := buildExecutor(cfg, scratchDir, token, repoDir)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
 	}
@@ -536,34 +543,26 @@ func run() error {
 		seedParks = buildSeedParks(store)
 	}
 
+	// KnownExecutorProfile/ImageCapableProfile: the queue rejects a spec
+	// naming an undefined profile, or an `image` on a non-container
+	// profile, before any of its commands start. Derived by
+	// executorPredicates (executor.go), shared with `gauntlet validate`'s
+	// cross-check mode so the two gates can't drift apart.
+	known, imageCapable := executorPredicates(cfg)
+
 	qcfg := queue.Config{
-		Targets:       cfg.Targets,
-		CheckSpec:     cfg.CheckSpec,
-		Committer:     cfg.Committer,
-		MergeMessage:  cfg.MergeMsg,
-		MergeBody:     mergeBody,
-		WorkDir:       trialsDir,
-		LogDir:        logsDir,
-		SeedParks:     seedParks,
-		Slots:         slots,
-		HistoryMtimes: cfg.Export.Mtimes == "history",
-		// KnownExecutorProfile: the queue rejects a spec naming an
-		// undefined profile before any of its commands start; nil (no
-		// profiles configured) means only the default ("") is legal.
-		KnownExecutorProfile: func(name string) bool { return profileNames[name] },
-		// ImageCapableProfile: candidate-built images need a container
-		// rootfs to swap, so only container-kind profiles qualify.
-		ImageCapableProfile: func(name string) bool {
-			if name == "" {
-				return cfg.Executor.Kind == "container"
-			}
-			for _, p := range cfg.Profiles {
-				if p.Name == name {
-					return p.Kind == "container"
-				}
-			}
-			return false
-		},
+		Targets:              cfg.Targets,
+		CheckSpec:            cfg.CheckSpec,
+		Committer:            cfg.Committer,
+		MergeMessage:         cfg.MergeMsg,
+		MergeBody:            mergeBody,
+		WorkDir:              trialsDir,
+		LogDir:               logsDir,
+		SeedParks:            seedParks,
+		Slots:                slots,
+		HistoryMtimes:        cfg.Export.Mtimes == "history",
+		KnownExecutorProfile: known,
+		ImageCapableProfile:  imageCapable,
 		// AutoRetryErrors is a *bool defaulted true in config.applyDefaults
 		// (absent-vs-explicit-false needs the pointer); the queue takes the
 		// resolved value.

@@ -1315,11 +1315,11 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 	// Same gates as startRun's (see there).
-	if chk, prof := unknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
+	if chk, prof := UnknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
 		return
 	}
-	if chk, img := imageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
+	if chk, img := ImageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img), rootSpan)
 		return
 	}
@@ -1768,13 +1768,13 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// Same gate for executor profiles: an unknown selection is a
 	// configuration error rejected before any command starts, never a red
 	// verdict mid-run (Config.KnownExecutorProfile's doc).
-	if chk, prof := unknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
+	if chk, prof := UnknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
 		return nil, false
 	}
 	// And for candidate-built images: a consumer on a non-container
 	// profile can never swap its rootfs (Config.ImageCapableProfile's doc).
-	if chk, img := imageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
+	if chk, img := ImageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img), rootSpan)
 		return nil, false
 	}
@@ -1875,12 +1875,14 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	return r, true
 }
 
-// unknownExecutorProfile returns the first check (spec order) whose
+// UnknownExecutorProfile returns the first check (spec order) whose
 // Executor selection doesn't resolve against known, with the offending
 // profile name; ("", "") when every selection resolves. known == nil means
 // the daemon defines no named profiles, so any non-empty selection is
-// unknown.
-func unknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (check, profile string) {
+// unknown. Exported (with ImageOnIncapableProfile) for `gauntlet
+// validate`'s cross-check mode: the CLI applies the daemon's own gate,
+// never a reimplementation that could drift from it.
+func UnknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (check, profile string) {
 	for _, c := range spec.Checks {
 		if c.Executor == "" {
 			continue
@@ -1914,11 +1916,12 @@ func imageNodeName(node string) (image string, ok bool) {
 	return strings.CutPrefix(node, imageNodePrefix)
 }
 
-// imageOnIncapableProfile returns the first check (spec order) that names
+// ImageOnIncapableProfile returns the first check (spec order) that names
 // a candidate-built image but runs on a profile that cannot swap its
 // rootfs — a non-container profile (Config.ImageCapableProfile). ("", "")
-// when every image consumer is capable.
-func imageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) (check, image string) {
+// when every image consumer is capable. Exported for `gauntlet validate`;
+// see UnknownExecutorProfile.
+func ImageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) (check, image string) {
 	for _, c := range spec.Checks {
 		if c.Image == "" {
 			continue
