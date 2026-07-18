@@ -1306,21 +1306,9 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return
 	}
-	// Capability gating: a spec that declares service/needs on a daemon
-	// with no services block is a spec validation error, never a silent
-	// no-op — loud like a malformed check (see docs/design/services.md,
-	// "The model: a cache entry, not a supervised unit").
-	if spec.RequiresServices() && d.cfg.Services == nil {
-		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
-		return
-	}
-	// Same gates as startRun's (see there).
-	if chk, prof := UnknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
-		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
-		return
-	}
-	if chk, img := ImageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
-		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img), rootSpan)
+	// Spec-load gates, same as startRun's (see SpecRejectReason).
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile); reason != "" {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, reason, rootSpan)
 		return
 	}
 
@@ -1757,25 +1745,15 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec %q: %v", d.cfg.CheckSpec, err), rootSpan)
 		return nil, false
 	}
-	// Capability gating: a spec that declares service/needs on a daemon
-	// with no services block is a spec validation error, never a silent
-	// no-op — loud like a malformed check (see docs/design/services.md,
-	// "The model: a cache entry, not a supervised unit").
-	if spec.RequiresServices() && d.cfg.Services == nil {
-		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, "check spec declares services but this daemon has no services block", rootSpan)
-		return nil, false
-	}
-	// Same gate for executor profiles: an unknown selection is a
-	// configuration error rejected before any command starts, never a red
-	// verdict mid-run (Config.KnownExecutorProfile's doc).
-	if chk, prof := UnknownExecutorProfile(spec, d.cfg.KnownExecutorProfile); prof != "" {
-		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof), rootSpan)
-		return nil, false
-	}
-	// And for candidate-built images: a consumer on a non-container
-	// profile can never swap its rootfs (Config.ImageCapableProfile's doc).
-	if chk, img := ImageOnIncapableProfile(spec, d.cfg.ImageCapableProfile); img != "" {
-		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img), rootSpan)
+	// Spec-load gates (SpecRejectReason): services declared with no
+	// services block, an unknown executor profile, or a candidate-built
+	// image on a non-container profile are configuration errors rejected
+	// before any command starts — never a red verdict mid-run
+	// (Config.KnownExecutorProfile's / ImageCapableProfile's docs;
+	// docs/design/services.md, "The model: a cache entry, not a
+	// supervised unit").
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile); reason != "" {
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, reason, rootSpan)
 		return nil, false
 	}
 
@@ -1875,14 +1853,35 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	return r, true
 }
 
-// UnknownExecutorProfile returns the first check (spec order) whose
+// SpecRejectReason is the daemon's whole spec-load gate: the reason a
+// parsed check spec is rejected against this daemon's capabilities ("" =
+// accepted) — services declared with no services block, an unknown
+// executor profile selection, or a candidate-built image on a profile
+// with no rootfs to swap. Both run-start paths (startRun,
+// finishBatchStart) and `gauntlet validate`'s cross-check mode call THIS
+// function, so the gates and their wording cannot drift between the
+// daemon and the CLI. hasServices is whether the daemon has a services
+// pool (queue.Config.Services != nil; for validate, whether the config's
+// services block allows anything).
+func SpecRejectReason(spec *config.CheckSpec, hasServices bool, known, imageCapable func(string) bool) string {
+	if spec.RequiresServices() && !hasServices {
+		return "check spec declares services but this daemon has no services block"
+	}
+	if chk, prof := unknownExecutorProfile(spec, known); prof != "" {
+		return fmt.Sprintf("check spec: check %q selects unknown executor profile %q", chk, prof)
+	}
+	if chk, img := imageOnIncapableProfile(spec, imageCapable); img != "" {
+		return fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img)
+	}
+	return ""
+}
+
+// unknownExecutorProfile returns the first check (spec order) whose
 // Executor selection doesn't resolve against known, with the offending
 // profile name; ("", "") when every selection resolves. known == nil means
 // the daemon defines no named profiles, so any non-empty selection is
-// unknown. Exported (with ImageOnIncapableProfile) for `gauntlet
-// validate`'s cross-check mode: the CLI applies the daemon's own gate,
-// never a reimplementation that could drift from it.
-func UnknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (check, profile string) {
+// unknown.
+func unknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (check, profile string) {
 	for _, c := range spec.Checks {
 		if c.Executor == "" {
 			continue
@@ -1916,12 +1915,11 @@ func imageNodeName(node string) (image string, ok bool) {
 	return strings.CutPrefix(node, imageNodePrefix)
 }
 
-// ImageOnIncapableProfile returns the first check (spec order) that names
+// imageOnIncapableProfile returns the first check (spec order) that names
 // a candidate-built image but runs on a profile that cannot swap its
 // rootfs — a non-container profile (Config.ImageCapableProfile). ("", "")
-// when every image consumer is capable. Exported for `gauntlet validate`;
-// see UnknownExecutorProfile.
-func ImageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) (check, image string) {
+// when every image consumer is capable.
+func imageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) (check, image string) {
 	for _, c := range spec.Checks {
 		if c.Image == "" {
 			continue

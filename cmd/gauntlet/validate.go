@@ -63,7 +63,10 @@ func runValidateTo(w io.Writer, args []string) error {
 	if *checksPath != "" {
 		data, err := os.ReadFile(*checksPath)
 		if err != nil {
-			return err
+			// LoadDaemon prefixes its own errors "config:"; give the
+			// checks file the matching context so a two-flag invocation
+			// says which input failed to read.
+			return fmt.Errorf("checks: %w", err)
 		}
 		s, err := config.ParseChecks(data)
 		if err != nil {
@@ -83,32 +86,19 @@ func runValidateTo(w io.Writer, args []string) error {
 }
 
 // crossCheck applies the spec-vs-daemon gates the queue applies when a
-// spec is loaded against a live daemon (internal/queue/reconcile.go's
-// pre-run gates, run right after config.ParseChecks): a services
-// dependency with no services block configured, an unknown executor
-// profile, and a candidate-built image on a non-container profile. The
-// profile gates ARE the queue's own — queue.UnknownExecutorProfile and
-// queue.ImageOnIncapableProfile, fed the same executorPredicates
-// (executor.go) that run() wires into queue.Config — and the messages
-// match reconcile.go's rejectBatch/rejectRun wording verbatim, so an
-// operator sees the identical error whether it's caught here or at run
-// time.
+// spec is loaded against a live daemon: queue.SpecRejectReason, THE
+// function both of the daemon's run-start paths call, fed the same
+// executorPredicates (executor.go) that run() wires into queue.Config —
+// so neither the gates nor their wording can drift between this command
+// and a rejection at run time.
 //
-// The services condition len(cfg.Services.Allow) == 0 is equivalent to the
-// queue's Services == nil gate: run() leaves queue.Config.Services nil
-// exactly when Allow is empty.
+// The hasServices condition len(cfg.Services.Allow) > 0 is equivalent to
+// the queue's Services != nil: run() populates queue.Config.Services
+// exactly when Allow is non-empty.
 func crossCheck(cfg *config.Daemon, spec *config.CheckSpec) error {
-	if spec.RequiresServices() && len(cfg.Services.Allow) == 0 {
-		return errors.New("check spec declares services but this daemon has no services block")
-	}
-
 	known, imageCapable := executorPredicates(cfg)
-
-	if chk, prof := queue.UnknownExecutorProfile(spec, known); prof != "" {
-		return fmt.Errorf("check spec: check %q selects unknown executor profile %q", chk, prof)
-	}
-	if chk, img := queue.ImageOnIncapableProfile(spec, imageCapable); img != "" {
-		return fmt.Errorf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img)
+	if reason := queue.SpecRejectReason(spec, len(cfg.Services.Allow) > 0, known, imageCapable); reason != "" {
+		return errors.New(reason)
 	}
 	return nil
 }
