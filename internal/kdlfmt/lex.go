@@ -19,6 +19,9 @@ type state struct {
 	rawCloseSeen int  // hashes matched so far while rawSeekClose
 	rawStart     int  // line the open raw string began (error messages only)
 
+	quotedActive bool // next line starts inside a multi-line quoted string
+	quotedStart  int  // line the open quoted string began (error messages only)
+
 	continuation bool // previous line ended with a line-continuation backslash
 }
 
@@ -71,11 +74,18 @@ func scanLine(line []byte, ln int, st state) (lineDepth int, next state, err err
 	rawSeekClose := st.rawSeekClose
 	rawCloseSeen := st.rawCloseSeen
 	rawStart := st.rawStart
+	quotedStart := st.quotedStart
 	switch {
 	case blockDepth > 0:
 		sub = subBlockComment
 	case st.rawActive:
 		sub = subRawString
+	case st.quotedActive:
+		// A quoted string left open at the previous EOL: the newline was
+		// string content (or was consumed by a trailing backslash's
+		// whitespace escape — either way the escape ended with the line, so
+		// this line starts unescaped).
+		sub = subQuoted
 	}
 
 	// leadingRun tracks the "first token(s) are closing braces" run
@@ -158,6 +168,7 @@ scan:
 			case c == '"':
 				sub = subQuoted
 				quotedEscaped = false
+				quotedStart = ln
 				leadingRun = false
 				contPending = false
 				i++
@@ -179,7 +190,9 @@ scan:
 				i = j + 1
 			case c == '/' && i+1 < n && line[i+1] == '/':
 				leadingRun = false
-				contPending = false
+				// contPending deliberately survives: KDL allows a line
+				// comment after a continuation backslash (`node \ // note`),
+				// and the continuation still stands.
 				break scan // rest of line is comment text; nothing more to track
 			case c == '/' && i+1 < n && line[i+1] == '*':
 				sub = subBlockComment
@@ -217,10 +230,6 @@ scan:
 		}
 	}
 
-	if sub == subQuoted {
-		return 0, state{}, fmt.Errorf("kdlfmt: line %d: unterminated string", ln)
-	}
-
 	next = state{
 		depth:        depth,
 		blockDepth:   blockDepth,
@@ -230,11 +239,20 @@ scan:
 		rawSeekClose: rawSeekClose,
 		rawCloseSeen: rawCloseSeen,
 		rawStart:     rawStart,
+		// A quoted string still open at EOL is a KDL multi-line string
+		// (plain newline-spanning, `"""` triple-quoted — which lexes here
+		// as empty-string, open, ..., close, empty-string — or a trailing
+		// backslash whitespace-escape): its interior lines pass through
+		// untouched, exactly like a raw string's. A genuinely unterminated
+		// string swallows the rest of the file and is refused at EOF by
+		// normalize (or by Format's input parse guard before that).
+		quotedActive: sub == subQuoted,
+		quotedStart:  quotedStart,
 		// A continuation only carries when the line ended lexically
-		// normal: a line that ends mid comment/raw-string is already
-		// forcing the next line to pass through via blockDepth/rawActive,
-		// and a trailing backslash inside either is just content, not a
-		// continuation marker.
+		// normal: a line that ends mid comment/string is already forcing
+		// the next line to pass through via blockDepth/rawActive/
+		// quotedActive, and a trailing backslash inside either is just
+		// content, not a continuation marker.
 		continuation: sub == subNormal && contPending,
 	}
 	return st.depth - leadingCloses, next, nil
@@ -249,8 +267,12 @@ scan:
 func rawStringStart(line []byte, i int) bool {
 	if i > 0 {
 		switch line[i-1] {
-		case ' ', '\t', '\r', '{', '}', '(', ')', ';', '=', '"':
-			// boundary: 'r' may start a new token here
+		case ' ', '\t', '\r', '{', '}', '(', ')', ';', '=', '"', '-':
+			// boundary: 'r' may start a new token here. '-' is the
+			// slashdash case: `/-r#"..."#` puts a raw string directly
+			// after the dash, and missing it would re-lex the raw
+			// content as barewords and quoted strings — any brace in
+			// there would then miscount structural depth.
 		default:
 			return false
 		}

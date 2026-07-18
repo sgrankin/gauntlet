@@ -22,6 +22,11 @@ const (
 type diffOp struct {
 	kind opKind
 	line string
+	// noNL marks the final line of a file that does not end in a newline;
+	// writeTo renders the conventional "\ No newline at end of file"
+	// marker after it, so a run whose ONLY change is fmt's added final
+	// newline still produces a visible (and patch-appliable) hunk.
+	noNL bool
 }
 
 // unifiedDiff renders a minimal unified diff between before and after —
@@ -49,7 +54,10 @@ func unifiedDiff(path string, before, after []byte) []byte {
 // splitLinesKeepingNone splits data on "\n" into lines with no trailing
 // newline markers, dropping the single spurious empty element a trailing
 // "\n" produces (matching the same "not a real line" reasoning as
-// internal/kdlfmt's normalize doc).
+// internal/kdlfmt's normalize doc). A final line NOT followed by a newline
+// is tagged with noNLSentinel so diffLines sees it as distinct from the
+// same text WITH one — "add the missing final newline" is a real change
+// (transform 4) and must not vanish from the diff as a spurious equality.
 func splitLinesKeepingNone(data []byte) []string {
 	s := string(data)
 	if s == "" {
@@ -58,9 +66,16 @@ func splitLinesKeepingNone(data []byte) []string {
 	lines := strings.Split(s, "\n")
 	if lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
+	} else {
+		lines[len(lines)-1] += noNLSentinel
 	}
 	return lines
 }
+
+// noNLSentinel tags a split line that ended the file without a trailing
+// newline. NUL can't come from splitting on "\n", and both diff inputs are
+// Format-validated KDL, so a collision is not a practical concern.
+const noNLSentinel = "\x00"
 
 // diffLines computes an edit script turning a into b via a classic
 // dynamic-programming LCS (longest common subsequence) over whole lines,
@@ -84,19 +99,25 @@ func diffLines(a, b []string) []diffOp {
 		}
 	}
 
+	mk := func(kind opKind, s string) diffOp {
+		if strings.HasSuffix(s, noNLSentinel) {
+			return diffOp{kind: kind, line: strings.TrimSuffix(s, noNLSentinel), noNL: true}
+		}
+		return diffOp{kind: kind, line: s}
+	}
 	var rev []diffOp
 	i, j := n, m
 	for i > 0 || j > 0 {
 		switch {
 		case i > 0 && j > 0 && a[i-1] == b[j-1]:
-			rev = append(rev, diffOp{opEqual, a[i-1]})
+			rev = append(rev, mk(opEqual, a[i-1]))
 			i--
 			j--
 		case j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]):
-			rev = append(rev, diffOp{opInsert, b[j-1]})
+			rev = append(rev, mk(opInsert, b[j-1]))
 			j--
 		default:
-			rev = append(rev, diffOp{opDelete, a[i-1]})
+			rev = append(rev, mk(opDelete, a[i-1]))
 			i--
 		}
 	}
@@ -221,6 +242,9 @@ func (h hunk) writeTo(buf *strings.Builder) {
 			fmt.Fprintf(buf, "-%s\n", op.line)
 		case opInsert:
 			fmt.Fprintf(buf, "+%s\n", op.line)
+		}
+		if op.noNL {
+			buf.WriteString("\\ No newline at end of file\n")
 		}
 	}
 }

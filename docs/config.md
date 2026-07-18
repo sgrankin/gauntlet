@@ -698,8 +698,10 @@ builds one. It never drops, merges, splits, or reorders a line; it only:
 
 Because comments and `/-` slashdash nodes are only ever whitespace-
 adjusted, never reparsed, they always survive untouched — including
-multi-line block comments and raw strings, whose interior lines are passed
-through completely as-is (never reindented or trimmed).
+multi-line block comments and multi-line strings (raw, plain
+newline-spanning, or `"""` triple-quoted), whose interior lines are
+passed through completely as-is (never reindented or trimmed — a
+string's interior whitespace is content).
 
 It deliberately leaves everything else alone: intra-line spacing (`a  1`
 stays `a  1`), brace placement (`a {` on the node's own line vs. a

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/sgrankin/gauntlet/internal/kdlfmt"
 )
@@ -96,11 +97,7 @@ func runFmtTo(stdout, stderr io.Writer, args []string) error {
 			// Only ever written when changed, per the package doc: an
 			// already-formatted file is never touched, so its mtime is
 			// preserved for free by simply not opening it for write.
-			perm := os.FileMode(0o644)
-			if info, statErr := os.Stat(path); statErr == nil {
-				perm = info.Mode().Perm()
-			}
-			if err := os.WriteFile(path, out, perm); err != nil {
+			if err := writeFileAtomic(path, out); err != nil {
 				fmt.Fprintf(stderr, "gauntlet fmt: %s: write: %v\n", path, err)
 				anyErr = true
 			}
@@ -111,4 +108,41 @@ func runFmtTo(stdout, stderr io.Writer, args []string) error {
 		return errFmtFailed
 	}
 	return nil
+}
+
+// writeFileAtomic replaces path's content via a temp file in the same
+// directory plus rename, so a disk-full or crash mid-write can never leave
+// the source file truncated — the old content survives any failure before
+// the rename, and rename itself is atomic. Symlinks are resolved first so
+// the rename replaces the TARGET, preserving write-through-the-link
+// semantics (a plain rename at the link's path would silently turn the
+// symlink into a regular file). The target's existing permission bits are
+// carried onto the temp file before the rename.
+func writeFileAtomic(path string, data []byte) error {
+	target := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		target = resolved
+	}
+	perm := os.FileMode(0o644)
+	if info, err := os.Stat(target); err == nil {
+		perm = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".fmt-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
 }

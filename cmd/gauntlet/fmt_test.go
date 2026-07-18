@@ -269,3 +269,61 @@ func TestRunFmt_ReadErrorIsIsolated(t *testing.T) {
 		t.Fatalf("stdout = %q, want ok.kdl's formatted content despite the earlier read error", stdout.String())
 	}
 }
+
+// TestRunFmt_DiffShowsFinalNewlineOnlyChange pins -d against the change
+// transform 4 routinely makes: a file whose ONLY difference is the missing
+// final newline must produce a visible hunk (with the conventional
+// "\ No newline at end of file" marker), not bare headers with no body —
+// a "diff" claiming the file differs while showing nothing.
+func TestRunFmt_DiffShowsFinalNewlineOnlyChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonl.kdl")
+	if err := os.WriteFile(path, []byte(`a 1`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	err := runFmtTo(&stdout, &stderr, []string{"-d", path})
+	if err != nil {
+		t.Fatalf("runFmtTo(-d) = %v, stderr = %q", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "@@") {
+		t.Fatalf("-d output has no hunk:\n%s", out)
+	}
+	if !strings.Contains(out, "\\ No newline at end of file") {
+		t.Fatalf("-d output lacks the no-final-newline marker:\n%s", out)
+	}
+	if !strings.Contains(out, "-a 1") || !strings.Contains(out, "+a 1") {
+		t.Fatalf("-d output should rewrite the final line:\n%s", out)
+	}
+}
+
+// TestRunFmt_WriteThroughSymlink pins -w's atomic-write path as preserving
+// write-through-the-link semantics: the symlink must survive as a symlink
+// and the TARGET's content must change — a naive rename at the link's path
+// would silently replace the link with a regular file.
+func TestRunFmt_WriteThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.kdl")
+	if err := os.WriteFile(target, []byte("a 1\n\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.kdl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	if err := runFmtTo(&stdout, &stderr, []string{"-w", link}); err != nil {
+		t.Fatalf("runFmtTo(-w) = %v, stderr = %q", err, stderr.String())
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link is no longer a symlink (mode %v, err %v)", fi.Mode(), err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "a 1\n" {
+		t.Fatalf("target content = %q, want %q", got, "a 1\n")
+	}
+}

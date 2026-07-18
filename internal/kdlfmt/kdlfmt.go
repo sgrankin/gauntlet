@@ -88,8 +88,9 @@ type renderedLine struct {
 // blank-line runs across the whole rendered sequence.
 //
 // Blank-line collapsing only ever considers/removes non-passthrough blank
-// lines. A blank line that is itself inside a multi-line block comment or
-// raw string is a passthrough line (see scanLine) and is therefore NEVER
+// lines. A blank line that is itself inside a multi-line block comment,
+// raw string, or multi-line quoted string is a passthrough line (see
+// scanLine) and is therefore NEVER
 // dropped or merged into a neighboring collapse run — deleting it would
 // violate "a comment's interior is content, not code" for no formatting
 // benefit. A passthrough line does, however, still flush (collapse to at
@@ -108,7 +109,7 @@ func normalize(data []byte) ([]byte, error) {
 	var st state
 	for idx, raw := range rawLines {
 		ln := idx + 1
-		passthrough := st.blockDepth > 0 || st.rawActive || st.continuation
+		passthrough := st.blockDepth > 0 || st.rawActive || st.quotedActive || st.continuation
 
 		depth, next, err := scanLine(raw, ln, st)
 		if err != nil {
@@ -129,6 +130,9 @@ func normalize(data []byte) ([]byte, error) {
 	}
 	if st.rawActive {
 		return nil, fmt.Errorf("kdlfmt: line %d: unterminated raw string", st.rawStart)
+	}
+	if st.quotedActive {
+		return nil, fmt.Errorf("kdlfmt: line %d: unterminated string", st.quotedStart)
 	}
 
 	var lines []string

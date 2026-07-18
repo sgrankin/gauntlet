@@ -69,7 +69,10 @@ func corpusFixtures(t *testing.T) []kdlFixture {
 	if err != nil {
 		t.Fatalf("walk %s: %v", docsDir, err)
 	}
-	if len(fixtures) < 3 {
+	// The repo has 2 root .kdl files and ~20 docs fences today; a floor
+	// well above the .kdl count alone means a broken fence extractor
+	// cannot silently pass on just the root configs.
+	if len(fixtures) < 15 {
 		t.Fatalf("corpusFixtures found only %d fixtures — extraction likely broken", len(fixtures))
 	}
 	return fixtures
@@ -95,7 +98,12 @@ func extractKDLFences(t *testing.T, path string) [][]byte {
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
-		case cur == nil && strings.TrimSpace(line) == "```kdl":
+		// Prefix match, not equality: an info string may carry attributes
+		// after the language ("```kdl title=...") and those fences are
+		// still KDL corpus material — silently skipping them would shrink
+		// the corpus without any test noticing.
+		case cur == nil && (strings.TrimSpace(line) == "```kdl" ||
+			strings.HasPrefix(strings.TrimSpace(line), "```kdl ")):
 			cur = &bytes.Buffer{}
 		case cur != nil && strings.TrimSpace(line) == "```":
 			fences = append(fences, cur.Bytes())

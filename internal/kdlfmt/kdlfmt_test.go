@@ -84,8 +84,8 @@ func TestFormatIdempotent(t *testing.T) {
 func TestFormatCommentAndSlashdashRetention(t *testing.T) {
 	in := "" +
 		"// leading comment\n" +
-		"a \"1\" {   \n" +
-		"      b 1\n" +
+		"a \"1\" {   // trailing-inline comment\n" +
+		"      b 1   // trailing-inline on a child\n" +
 		"  // comment between children\n" +
 		"        c 2\n" +
 		"  // dangling comment after last child\n" +
@@ -98,8 +98,8 @@ func TestFormatCommentAndSlashdashRetention(t *testing.T) {
 
 	want := "" +
 		"// leading comment\n" +
-		"a \"1\" {\n" +
-		"    b 1\n" +
+		"a \"1\" {   // trailing-inline comment\n" +
+		"    b 1   // trailing-inline on a child\n" +
 		"    // comment between children\n" +
 		"    c 2\n" +
 		"    // dangling comment after last child\n" +
@@ -144,5 +144,61 @@ func TestFormatCommentAndSlashdashRetention(t *testing.T) {
 	}
 	if string(again) != want {
 		t.Fatalf("Format is not idempotent on its own output:\n%s", again)
+	}
+}
+
+// TestFormatMultiLineStrings pins the multi-line quoted-string forms kdl-go
+// accepts — plain newline-spanning, `"""` triple-quoted, and the trailing
+// backslash whitespace-escape — as formattable: their interior lines are
+// passthrough content (byte-preserved, never reindented, braces inside
+// never counted), exactly like a raw string's, rather than the spurious
+// "unterminated string" refusal an earlier lexer produced.
+func TestFormatMultiLineStrings(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{
+			name: "plain newline-spanning",
+			in:   "node \"line1\nline2 { not a brace\"\n  after 1\n",
+			want: "node \"line1\nline2 { not a brace\"\nafter 1\n",
+		},
+		{
+			name: "triple-quoted",
+			in:   "node \"\"\"\n  hello {\n\"\"\"\n   after 1\n",
+			want: "node \"\"\"\n  hello {\n\"\"\"\nafter 1\n",
+		},
+		{
+			name: "backslash whitespace escape",
+			in:   "node \"long \\\ncontinued\"\n   after 1\n",
+			want: "node \"long \\\ncontinued\"\nafter 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Format([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("Format refused: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("Format = %q, want %q", got, tc.want)
+			}
+			again, err := Format(got)
+			if err != nil || string(again) != tc.want {
+				t.Fatalf("not idempotent: %q, %v", again, err)
+			}
+		})
+	}
+}
+
+// TestFormatSlashdashRawString pins the `/-r#"..."#` shape: the raw string
+// abuts the slashdash's '-', and mis-lexing it as barewords once let an
+// interior `{` count as structural depth, stably over-indenting every
+// following sibling (written to disk by -w, then reported clean by -l).
+func TestFormatSlashdashRawString(t *testing.T) {
+	in := "node /-r#\"a \" { \" b\"# 1\nsibling 2\nchild-of-nothing 3\n"
+	got, err := Format([]byte(in))
+	if err != nil {
+		t.Fatalf("Format refused: %v", err)
+	}
+	if string(got) != in {
+		t.Fatalf("Format = %q, want unchanged %q (siblings must stay at column 0)", got, in)
 	}
 }
