@@ -680,3 +680,38 @@ target "staging" branch="staging" {
   these three on any target is a load-time error (same "reserved for a
   future release" rationale as `on-batch-red "bisect"`), so a config that
   names them fails loudly rather than silently no-opping.
+
+## Formatting
+
+`gauntlet fmt` (issue #12) normalizes whitespace in `gauntlet.kdl` and
+`.gauntlet.kdl` files. It's deliberately dumb: a **line-based** whitespace
+normalizer, not a KDL pretty-printer built on a parse/re-emit round trip —
+kdl-go's document model loses/mangles comments on emit, so `fmt` never
+builds one. It never drops, merges, splits, or reorders a line; it only:
+
+- re-indents each line by brace depth, 4 spaces per level (a line whose
+  first token(s) are closing braces dedents for them, gofmt-style);
+- strips trailing whitespace;
+- collapses runs of 2+ blank lines to exactly 1, and drops blank lines at
+  the very start of the file and just before EOF;
+- normalizes the file to exactly one final newline.
+
+Because comments and `/-` slashdash nodes are only ever whitespace-
+adjusted, never reparsed, they always survive untouched — including
+multi-line block comments and raw strings, whose interior lines are passed
+through completely as-is (never reindented or trimmed).
+
+It deliberately leaves everything else alone: intra-line spacing (`a  1`
+stays `a  1`), brace placement (`a {` on the node's own line vs. a
+hypothetical single-line form — though see the `checks.md`/DESIGN.md note
+that kdl-go itself rejects single-line child blocks), and quoting style.
+There are no style options — like `gofmt`, one canonical layout.
+
+`gauntlet fmt <files...>` prints formatted output to stdout (the default —
+safe to pipe/preview); `-w` rewrites files in place, only touching ones
+that actually change; `-l` lists files whose formatting differs and exits
+1 if any do — wire this into CI (`gauntlet fmt -l gauntlet.kdl` or your
+repo's `.gauntlet.kdl`) so a config drifts out of canonical form loudly,
+not silently; `-d` prints a unified diff per differing file. `fmt` refuses
+(errors, writes nothing) rather than guessing on invalid KDL or malformed
+input it can't safely reindent.

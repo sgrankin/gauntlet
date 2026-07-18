@@ -35,17 +35,19 @@ import (
 
 func main() {
 	// "land", "status", "retry", "cancel", "hooks-cancel", "drain",
-	// "validate", and "version" are client-side porcelain (cmd/gauntlet/
-	// land.go, cmd/gauntlet/status.go, cmd/gauntlet/validate.go,
+	// "validate", "fmt", and "version" are client-side porcelain
+	// (cmd/gauntlet/land.go, cmd/gauntlet/status.go,
+	// cmd/gauntlet/validate.go, cmd/gauntlet/fmt.go,
 	// cmd/gauntlet/version.go): thin HTTP/git clients, pure config
-	// validation ("validate"), or (for "version") pure local info — none of
-	// them run the daemon. "doctor" (cmd/gauntlet/doctor.go) is NOT pure
-	// porcelain like the rest of this list: it actively probes the host and
-	// network the daemon is about to run on/against (git, -state, auth,
-	// remote, executor runtimes, the dashboard port) — read-only except for
-	// minting a real GitHub App token in app-auth mode — but like them, it
-	// never runs the daemon loop itself. Everything else is the daemon
-	// itself.
+	// validation ("validate"), a pure line-based whitespace normalizer over
+	// internal/kdlfmt ("fmt" — see that package's doc; issue #12), or (for
+	// "version") pure local info — none of them run the daemon. "doctor"
+	// (cmd/gauntlet/doctor.go) is NOT pure porcelain like the rest of this
+	// list: it actively probes the host and network the daemon is about to
+	// run on/against (git, -state, auth, remote, executor runtimes, the
+	// dashboard port) — read-only except for minting a real GitHub App
+	// token in app-auth mode — but like them, it never runs the daemon loop
+	// itself. Everything else is the daemon itself.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "land":
@@ -87,6 +89,19 @@ func main() {
 		case "validate":
 			if err := runValidate(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "gauntlet validate:", err)
+				os.Exit(1)
+			}
+			return
+		case "fmt":
+			if err := runFmt(os.Args[2:]); err != nil {
+				// errFmtFailed means the per-file detail (a refuse-to-
+				// format error, an I/O error, or -l's listing) was
+				// already written by runFmtTo; nothing more to say beyond
+				// the exit code. Any other error (bad flags, no files
+				// given) gets the usual "gauntlet fmt: <err>" treatment.
+				if !errors.Is(err, errFmtFailed) {
+					fmt.Fprintln(os.Stderr, "gauntlet fmt:", err)
+				}
 				os.Exit(1)
 			}
 			return

@@ -89,8 +89,12 @@ workspace per node**:
 workspace "isolated"
 max-parallel 4
 
-check "test" { command "./ci/test" }
-check "lint" { command "./ci/lint" }
+check "test" {
+    command "./ci/test"
+}
+check "lint" {
+    command "./ci/lint"
+}
 ```
 
 Each node gets a fresh materialization of the run's exact chain-tip tree —
