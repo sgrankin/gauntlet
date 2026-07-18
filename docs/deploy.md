@@ -258,13 +258,17 @@ name. Getting this backwards (expecting a versioned filename) produces a
   [azure-vm.md](runbooks/azure-vm.md) for the exact fetch commands.
 - **Topology (b)** (container): `docker pull ghcr.io/sgrankin/gauntlet:<version>`
   (or `:latest`) instead of `make image`; the `docker run` invocation and
-  volume/state layout above are identical either way.
+  volume/state layout above are identical either way. Image tags carry **no
+  `v` prefix** — the release tag `v1.4.0` publishes `:1.4.0` (goreleaser's
+  `{{ .Version }}` strips the `v`); pulling `:v1.4.0` is a manifest-unknown
+  error, the docker-tag cousin of the asset-naming 404 above.
 - **Why the release image isn't built from the top-level [`Dockerfile`](../Dockerfile):**
-  goreleaser's docker builder copies a prebuilt binary into a throwaway
-  context rather than running a multi-stage build, so releases use a
-  separate, runtime-stage-only `Dockerfile.release` that mirrors this
-  Dockerfile's runtime contract (packages, fixed UID, `/data` volume,
-  entrypoint) byte-for-byte; the original `Dockerfile` stays the one used for
+  goreleaser's docker builder (`dockers_v2`, one buildx multi-platform
+  build) copies the prebuilt per-platform binaries into a throwaway context
+  rather than running a multi-stage build, so releases use a separate,
+  runtime-stage-only `Dockerfile.release` that mirrors this Dockerfile's
+  runtime contract (packages, fixed UID, `/data` volume, entrypoint)
+  byte-for-byte; the original `Dockerfile` stays the one used for
   from-source builds (`make image`). A plain `ko` build was rejected instead,
   since ko's default base images ship no `git`, and the daemon shells out to
   `git` at runtime for every trial merge.

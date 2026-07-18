@@ -1,12 +1,15 @@
 # goreleaser's release-time image. Unlike the top-level Dockerfile (a
-# multi-stage from-source build), this one only ever runs against a
-# prebuilt binary goreleaser drops into the build context — see
-# .goreleaser.yaml's `dockers` blocks. Runtime contract (packages, fixed
-# UID, volume, entrypoint) is intentionally identical to the top-level
-# Dockerfile's runtime stage; keep the two in sync by hand if either
-# changes (see docs/deploy.md "Releases").
+# multi-stage from-source build), this one only ever runs against prebuilt
+# binaries goreleaser drops into the build context — see .goreleaser.yaml's
+# `dockers_v2` block. That context is laid out per platform
+# (linux/amd64/gauntlet, linux/arm64/gauntlet), hence the $TARGETPLATFORM
+# COPY below. Runtime contract (packages, fixed UID, volume, entrypoint) is
+# intentionally identical to the top-level Dockerfile's runtime stage; keep
+# the two in sync by hand if either changes (see docs/deploy.md "Releases").
 
 FROM alpine:latest
+
+ARG TARGETPLATFORM
 
 RUN apk add --no-cache \
         git \
@@ -18,7 +21,7 @@ RUN apk add --no-cache \
     && mkdir -p /data \
     && chown gauntlet:gauntlet /data
 
-COPY gauntlet /usr/local/bin/gauntlet
+COPY $TARGETPLATFORM/gauntlet /usr/local/bin/gauntlet
 
 VOLUME /data
 USER gauntlet
