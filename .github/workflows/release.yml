@@ -37,29 +37,37 @@ jobs:
           # history, not the default shallow clone.
           fetch-depth: 0
 
-      # For the branch-push and workflow_dispatch paths there is no tag yet:
-      # derive the version (from the release/* branch name, or the dispatch
-      # input), validate it, refuse to clobber an existing tag, then create and
-      # push it on the checked-out commit so goreleaser sees the same tagged
-      # git state a `push: tags` event would present. Tags pushed with
-      # GITHUB_TOKEN do not re-trigger this workflow (GitHub's recursion
-      # guard), so there is no double release. Skipped on a real tag push
-      # (github.ref is refs/tags/*), where the tag already exists.
-      - name: Create and push tag
-        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
+      # Resolve the release version for every trigger — the tag name on a tag
+      # push, the dispatch input, or the release/* branch suffix — and export
+      # it for the tag and goreleaser steps below.
+      - name: Resolve version
         env:
           DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [ -n "${DISPATCH_VERSION:-}" ]; then
-            VERSION="$DISPATCH_VERSION"
+            V="$DISPATCH_VERSION"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            V="$GITHUB_REF_NAME"
           else
-            VERSION="${GITHUB_REF_NAME#release/}"
+            V="${GITHUB_REF_NAME#release/}"
           fi
-          case "$VERSION" in
+          case "$V" in
             v[0-9]*) ;;
-            *) echo "version must match ^v[0-9] (got '$VERSION')" >&2; exit 1 ;;
+            *) echo "version must match ^v[0-9] (got '$V')" >&2; exit 1 ;;
           esac
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      # For the branch-push and workflow_dispatch paths there is no tag yet:
+      # refuse to clobber an existing tag, then create and push it on the
+      # checked-out commit so goreleaser sees the same tagged git state a
+      # `push: tags` event would present. Tags pushed with GITHUB_TOKEN do not
+      # re-trigger this workflow (GitHub's recursion guard), so there is no
+      # double release. Skipped on a real tag push, where the tag exists.
+      - name: Create and push tag
+        if: github.ref_type != 'tag'
+        run: |
+          set -euo pipefail
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
             echo "tag $VERSION already exists on origin — pick a new version" >&2
             exit 1
@@ -86,9 +94,25 @@ jobs:
       # goreleaser is a go.mod tool dependency, so `go tool` resolves the
       # exact pinned version — CI and `make release-snapshot` can never
       # drift apart the way an action-managed binary could.
-      - run: go tool goreleaser release --clean
+      #
+      # Notes are auto-generated (grouped, per .goreleaser.yaml's changelog)
+      # by default. The optional escape hatch: if docs/releases/<version>.md
+      # exists, it overrides the generated changelog for this release — so a
+      # release you want to hand-polish just needs that file committed, no
+      # separate step. Absent, nothing manual is required.
+      - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${VERSION}.md"
+          if [ -f "$notes" ]; then
+            echo "Using curated release notes: $notes"
+            go tool goreleaser release --clean --release-notes="$notes"
+          else
+            echo "No curated notes for $VERSION; using the generated changelog"
+            go tool goreleaser release --clean
+          fi
 
       # The release/* branch is a one-shot trigger, not durable state; delete
       # it once the release has published so these branches don't accumulate.

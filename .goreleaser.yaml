@@ -49,6 +49,17 @@ changelog:
       - '^test:'
       - '^chore:'
       - 'typo'
+  # The house commit style is `area: subject`, not conventional commits, so
+  # the split is a light heuristic: subjects that mention a fix land under
+  # Fixes, everything else under Changes. The last group has no regexp and so
+  # catches the remainder. (Overridden entirely when a curated
+  # docs/releases/<tag>.md is passed via --release-notes.)
+  groups:
+    - title: Fixes
+      regexp: '(?i)\b(fix|fixes|fixed|bugfix|hotfix|revert)\b'
+      order: 0
+    - title: Changes
+      order: 1
 
 release:
   github:
