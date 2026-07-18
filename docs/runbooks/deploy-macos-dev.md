@@ -126,6 +126,11 @@ timeout 2 gauntlet -config ~/gauntlet.kdl -state ~/.cache/gauntlet; echo "exit: 
 # expect: no config-parse error before the timeout kills it (exit 124 is fine)
 ```
 
+For a fuller host preflight beyond config parsing (git version, `-state`,
+GitHub auth, remote reachability, executor runtimes, dashboard port), run
+`gauntlet doctor -config ~/gauntlet.kdl -state ~/.cache/gauntlet` instead —
+see [deploy.md](../deploy.md#preflight-gauntlet-doctor).
+
 ## Phase 5 — Run it
 
 **Foreground** (simplest for a dev loop — Ctrl-C stops it cleanly, `SIGINT`

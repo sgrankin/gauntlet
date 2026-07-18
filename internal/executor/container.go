@@ -590,3 +590,18 @@ func probeRuntime(ctx context.Context, spec runtimeSpec) error {
 	}
 	return nil
 }
+
+// ProbeRuntime is probeRuntime, exported for gauntlet doctor's executors
+// probe: same binary-on-$PATH-plus-reachable check RunCheck's own preflight
+// runs (spec.ProbeArgs — "docker ps", "podman ps", "container system
+// status" — never a pull, never a container start), so doctor and the
+// daemon can never drift on what "reachable" means. runtime must be one of
+// runtimeSpecs' keys ("docker", "podman", "container"); anything else
+// returns an error naming it.
+func ProbeRuntime(ctx context.Context, runtime string) error {
+	spec, ok := runtimeSpecs[runtime]
+	if !ok {
+		return fmt.Errorf("container runtime: unknown runtime %q", runtime)
+	}
+	return probeRuntime(ctx, spec)
+}

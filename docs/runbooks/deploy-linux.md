@@ -154,6 +154,11 @@ read that doc for the *why*; this is the *how*, in order.
    # expect: no config-parse error printed before the timeout kills it (exit: 124 is fine — that's the timeout, not a config error)
    ```
 
+   For a fuller host preflight beyond config parsing (git version, `-state`,
+   GitHub auth, remote reachability, executor runtimes, dashboard port), run
+   `ssh <TARGET_HOST> gauntlet doctor -config /etc/gauntlet/gauntlet.kdl
+   -state /var/lib/gauntlet/state` instead — see [deploy.md](../deploy.md#preflight-gauntlet-doctor).
+
 ### Phase 3b — Container executor + a real backing service (optional)
 
 If a check needs a real SQL Server (or similar) instead of a fake, declare

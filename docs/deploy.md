@@ -275,6 +275,24 @@ name. Getting this backwards (expecting a versioned filename) produces a
 - `gauntlet -version` prints the same version either way — ldflags-stamped
   from the pushed tag by goreleaser, or from `git describe` by `make build`.
 
+## Preflight: `gauntlet doctor`
+
+Before starting the daemon on a new box (or after changing config, secrets,
+or the host itself), run `gauntlet doctor -config /etc/gauntlet/gauntlet.kdl
+-state /var/lib/gauntlet/state` — a host preflight covering exactly what
+both topologies above need working: the git version requirement below,
+`-state` existing/writable (plus an existing history database's schema
+compatibility), GitHub authentication (a private-key-file's permissions and
+a real token mint in `auth "app"` mode, or just the token-env var in
+static-PAT mode), a read-only reachability check against the configured
+remote, each configured executor profile's container runtime, and the
+dashboard bind address. It prints one `PASS`/`WARN`/`FAIL` line per check,
+only checks what the given config actually uses, and exits nonzero only on
+a `FAIL` — a `WARN` (an already-in-use dashboard port, a container image
+not yet pulled locally) is advisory. It is read-only except for one
+deliberate exception: `auth "app"` mode mints a real, short-lived
+installation token to prove the credential actually works end to end.
+
 ## Required git version
 
 Gauntlet needs **git ≥ 2.38** on `$PATH` for `git merge-tree --write-tree`,

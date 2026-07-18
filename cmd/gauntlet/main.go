@@ -39,7 +39,13 @@ func main() {
 	// land.go, cmd/gauntlet/status.go, cmd/gauntlet/validate.go,
 	// cmd/gauntlet/version.go): thin HTTP/git clients, pure config
 	// validation ("validate"), or (for "version") pure local info — none of
-	// them run the daemon. Everything else is the daemon itself.
+	// them run the daemon. "doctor" (cmd/gauntlet/doctor.go) is NOT pure
+	// porcelain like the rest of this list: it actively probes the host and
+	// network the daemon is about to run on/against (git, -state, auth,
+	// remote, executor runtimes, the dashboard port) — read-only except for
+	// minting a real GitHub App token in app-auth mode — but like them, it
+	// never runs the daemon loop itself. Everything else is the daemon
+	// itself.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "land":
@@ -81,6 +87,18 @@ func main() {
 		case "validate":
 			if err := runValidate(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "gauntlet validate:", err)
+				os.Exit(1)
+			}
+			return
+		case "doctor":
+			if err := runDoctor(os.Args[2:]); err != nil {
+				// errDoctorFailed means one or more probes already printed
+				// their own FAIL line; nothing more to say beyond the exit
+				// code. Any other error (bad flags, missing -config) gets
+				// the usual "gauntlet doctor: <err>" treatment.
+				if !errors.Is(err, errDoctorFailed) {
+					fmt.Fprintln(os.Stderr, "gauntlet doctor:", err)
+				}
 				os.Exit(1)
 			}
 			return

@@ -26,6 +26,12 @@ var schemaSQL string
 // to migrate's switch whenever schema.sql changes.
 const schemaVersion = 11
 
+// SchemaVersion is schemaVersion, exported so a caller outside this package
+// (gauntlet doctor's history probe) can compare an existing database's
+// on-disk PRAGMA user_version against what this binary implements, without
+// duplicating the number.
+const SchemaVersion = schemaVersion
+
 var _ core.Channel = (*Store)(nil)
 
 // Store is a core.Channel backed by a SQLite database: Emit writes terminal
@@ -272,6 +278,26 @@ CREATE TABLE hook_runs (
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// ReadSchemaVersion opens the sqlite database at path READ-ONLY (the sqlite3
+// URI "mode=ro", which overrides this driver's default open flags) and
+// returns its PRAGMA user_version, applying no migration and writing
+// nothing — unlike Open, which upgrades the schema in place. This is
+// gauntlet doctor's history probe: it must be able to inspect a database's
+// schema version without ever mutating the daemon's own state.
+func ReadSchemaVersion(path string) (int, error) {
+	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return 0, fmt.Errorf("history: open %s read-only: %w", path, err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("history: read user_version from %s: %w", path, err)
+	}
+	return version, nil
 }
 
 // Emit writes ev's carried RunRecord, or — for EventHookFinished — one
