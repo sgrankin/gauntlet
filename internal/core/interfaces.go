@@ -11,6 +11,32 @@ import (
 // treat it as a signal to re-derive state and retry, never as corruption.
 var ErrCASStale = errors.New("gitx: CAS failed, ref moved")
 
+// NotePublishResult reports what GitRepo.PublishNote did (issue #13's
+// publication protocol). The canonical shape lives here, in core, rather
+// than in gitx (its sole implementer) or duplicated in queue: gitx adapts
+// its real git-notes plumbing to return this exact type, and the queue's
+// fakeGitRepo test double returns it directly — one public shape, no
+// mechanical conversion at the queue/gitx boundary.
+type NotePublishResult struct {
+	// Published is true for a fresh publish (a new note commit was created
+	// and CAS-pushed), false when the target SHA already carried this
+	// EXACT payload (AlreadyPublished) — a crash-retried or duplicate
+	// publish of the SAME receipt is substantive success, not an edge
+	// case, and must not create an empty commit or touch the remote again.
+	Published bool
+	// NoteBlobSHA is the note's content identity (the blob SHA) for
+	// provenance, whether this call created it or found it already there.
+	NoteBlobSHA string
+}
+
+// ErrNoteConflict is returned by GitRepo.PublishNote when the target SHA
+// already carries a DIFFERENT payload than the one being published.
+// Fail-closed: gauntlet never overwrites or force-pushes a note, so this is
+// a caller-visible invariant violation (two disjoint receipts computed for
+// the same tested SHA) the queue treats as terminal (an OutcomeError park
+// naming the conflict), never something retried or silently resolved.
+var ErrNoteConflict = errors.New("gauntlet: a different note already exists for this SHA")
+
 // GitRepo is gauntlet's entire VCS surface: plumbing only, no working copy.
 // Every mutating method is compare-and-swap or additive-only, per Invariants
 // 1, 2, 3, and 6.
@@ -104,6 +130,16 @@ type GitRepo interface {
 	// uses it to find its own published refs under a custom namespace the
 	// daemon never fetches. An empty match is not an error.
 	ListRemoteRefs(ctx context.Context, pattern string) (map[string]string, error)
+
+	// PublishNote publishes payload as a git note for sha on remoteRef
+	// (issue #13's pre-land receipt protocol): fetch-check-add-CAS,
+	// idempotent on an exact re-publish (NotePublishResult.Published ==
+	// false, "AlreadyPublished") and fail-closed on a pre-existing note
+	// with DIFFERENT content for the same sha (ErrNoteConflict, remote
+	// untouched). who is the identity attached to a freshly created note
+	// commit; unused when the note already exists. See gitx.Repo.
+	// PublishNote's doc for the full retry/CAS mechanics.
+	PublishNote(ctx context.Context, remoteRef, sha string, payload []byte, who Identity) (NotePublishResult, error)
 }
 
 // MtimeStats reports what one RestoreMtimes pass did, for instrumentation:

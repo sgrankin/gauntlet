@@ -369,6 +369,19 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 			Duration: duration,
 		}
 	}
+	if job.ReceiptCapture {
+		// Mirrors LocalExecutor: exit 0 hands the result file's raw bytes
+		// back verbatim (bounded read); validation is the queue's job.
+		receipt := readReceiptResult(resultFile, job.ReceiptMaxBytes)
+		return core.CheckResult{
+			Name:     job.Name,
+			Status:   core.CheckPassed,
+			Receipt:  receipt,
+			Output:   out.String(),
+			LogPath:  logPath,
+			Duration: duration,
+		}
+	}
 	status := core.CheckPassed
 	if data, err := os.ReadFile(resultFile); err == nil && strings.TrimSpace(string(data)) == "skipped" {
 		status = core.CheckSkipped

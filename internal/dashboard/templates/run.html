@@ -54,6 +54,12 @@
 <tr><th>base</th><td><code class="nowrap" title="{{.Run.BaseOID}}">{{shortSHA .Run.BaseOID}}</code></td></tr>
 <tr><th>merge sha</th><td><code class="nowrap" title="{{.Run.MergeSHA}}">{{shortSHA .Run.MergeSHA}}</code></td></tr>
 <tr><th>trial merge</th><td>{{if .Run.TrialClean}}clean{{else}}conflict{{end}}</td></tr>
+{{if .Run.ReceiptRef}}
+<!-- Receipt-notes provenance (issue #13): only present on a landed run that
+     published one — the note's ref, a short blob SHA, and whether this was
+     a fresh publish or an idempotent AlreadyPublished re-publish. -->
+<tr><th>receipt</th><td class="mono" title="{{.Run.ReceiptRef}}">{{.Run.ReceiptRef}} &middot; <code class="nowrap" title="{{.Run.ReceiptBlob}}">{{shortSHA .Run.ReceiptBlob}}</code> &middot; {{.Run.ReceiptPublished}}</td></tr>
+{{end}}
 <tr><th>detail</th><td>{{.Run.Detail}}</td></tr>
 <tr><th>started</th><td>{{.Run.StartedAt}}</td></tr>
 <tr><th>ended</th><td>{{.Run.EndedAt}}</td></tr>

@@ -152,29 +152,6 @@ func (r *Repo) blobID(ctx context.Context, payload []byte) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// PublishResult reports what PublishNote did.
-type PublishResult struct {
-	// Published is true for a fresh publish (a new note commit was
-	// created and CAS-pushed), false when sha already carried this exact
-	// payload (AlreadyPublished) — issue #13's idempotent-republish path
-	// is substantive success, not an edge case: a crash-retried or
-	// duplicate publish of the SAME receipt must return success without
-	// creating an empty commit or touching the remote.
-	Published bool
-	// NoteBlobSHA is the note's content identity (the blob SHA) for
-	// provenance, whether this call created it or found it already
-	// there.
-	NoteBlobSHA string
-}
-
-// ErrNoteConflict is returned by PublishNote when sha already carries a
-// DIFFERENT payload than the one being published. Fail-closed: gauntlet
-// never overwrites or force-pushes a note, so this is a caller-visible
-// invariant violation (two disjoint receipts computed for the same tested
-// SHA) for the queue to treat as terminal, not something PublishNote
-// retries or silently resolves.
-var ErrNoteConflict = errors.New("gitx: a different note already exists for this SHA")
-
 // publishNoteMaxAttempts bounds PublishNote's fetch/CAS retry loop. A CAS
 // rejection means remoteRef advanced concurrently since the fetch — most
 // often a disjoint receipt (a different SHA) that must survive right
@@ -197,19 +174,19 @@ const publishNoteMaxAttempts = 4
 var publishNoteTestHook func(attempt int, tip string)
 
 // PublishNote is the composed, idempotent publish protocol the queue
-// drives (issue #13, requirement 8): fetch remoteRef, check whether sha
-// already carries this exact payload (success, no-op — AlreadyPublished),
-// and if not, add a note commit and CAS-push it — retrying on CAS
-// staleness (a concurrent writer moved remoteRef) up to
-// publishNoteMaxAttempts times. who is used only when a new note commit
-// is actually created.
+// drives (issue #13, requirement 8), implementing core.GitRepo.PublishNote:
+// fetch remoteRef, check whether sha already carries this exact payload
+// (success, no-op — AlreadyPublished), and if not, add a note commit and
+// CAS-push it — retrying on CAS staleness (a concurrent writer moved
+// remoteRef) up to publishNoteMaxAttempts times. who is used only when a
+// new note commit is actually created.
 //
 // A pre-existing note for sha with DIFFERENT payload is fail-closed:
-// ErrNoteConflict, remote untouched, no retry — this is an invariant
+// core.ErrNoteConflict, remote untouched, no retry — this is an invariant
 // violation for the caller to surface, never something to force through.
-func (r *Repo) PublishNote(ctx context.Context, remoteRef, sha string, payload []byte, who core.Identity) (PublishResult, error) {
+func (r *Repo) PublishNote(ctx context.Context, remoteRef, sha string, payload []byte, who core.Identity) (core.NotePublishResult, error) {
 	if len(payload) == 0 {
-		return PublishResult{}, fmt.Errorf("gitx: publish note %s on %s: empty payload", sha, remoteRef)
+		return core.NotePublishResult{}, fmt.Errorf("gitx: publish note %s on %s: empty payload", sha, remoteRef)
 	}
 	localRef := NotesWorkRef(remoteRef)
 
@@ -217,7 +194,7 @@ func (r *Repo) PublishNote(ctx context.Context, remoteRef, sha string, payload [
 	for attempt := 0; attempt < publishNoteMaxAttempts; attempt++ {
 		tip, err := r.FetchNotesRef(ctx, remoteRef)
 		if err != nil {
-			return PublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
+			return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
 		}
 		if publishNoteTestHook != nil {
 			publishNoteTestHook(attempt, tip)
@@ -225,39 +202,39 @@ func (r *Repo) PublishNote(ctx context.Context, remoteRef, sha string, payload [
 
 		existing, exists, err := r.ReadNote(ctx, localRef, sha)
 		if err != nil {
-			return PublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
+			return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
 		}
 		if exists {
 			if bytes.Equal(existing, payload) {
 				blobSHA, err := r.blobID(ctx, payload)
 				if err != nil {
-					return PublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
+					return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
 				}
-				return PublishResult{Published: false, NoteBlobSHA: blobSHA}, nil
+				return core.NotePublishResult{Published: false, NoteBlobSHA: blobSHA}, nil
 			}
-			return PublishResult{}, fmt.Errorf("%w: sha %s on %s", ErrNoteConflict, sha, remoteRef)
+			return core.NotePublishResult{}, fmt.Errorf("%w: sha %s on %s", core.ErrNoteConflict, sha, remoteRef)
 		}
 
 		blobSHA, err := r.AddNote(ctx, localRef, sha, payload, who)
 		if err != nil {
-			return PublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
+			return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
 		}
 		newTipOut, err := r.run(ctx, "rev-parse", localRef)
 		if err != nil {
-			return PublishResult{}, fmt.Errorf("gitx: publish note: resolve new tip: %w", err)
+			return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: resolve new tip: %w", err)
 		}
 		newTip := strings.TrimSpace(newTipOut)
 
 		err = r.CASUpdate(ctx, remoteRef, tip, newTip)
 		if err == nil {
-			return PublishResult{Published: true, NoteBlobSHA: blobSHA}, nil
+			return core.NotePublishResult{Published: true, NoteBlobSHA: blobSHA}, nil
 		}
 		if errors.Is(err, core.ErrCASStale) {
 			lastErr = err
 			continue // remoteRef moved (likely a disjoint receipt); refetch and retry
 		}
-		return PublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
+		return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: %w", err)
 	}
-	return PublishResult{}, fmt.Errorf("gitx: publish note %s on %s: exhausted %d attempts under contention: %w",
+	return core.NotePublishResult{}, fmt.Errorf("gitx: publish note %s on %s: exhausted %d attempts under contention: %w",
 		sha, remoteRef, publishNoteMaxAttempts, lastErr)
 }

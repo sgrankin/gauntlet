@@ -182,7 +182,7 @@ func TestPublishNoteConflictFailsClosed(t *testing.T) {
 	tipAfterA := remote.Ref(testNotesRef)
 
 	_, err := repo.PublishNote(ctx, testNotesRef, sha, []byte("payload B (different)"), testWho)
-	if !errors.Is(err, gitx.ErrNoteConflict) {
+	if !errors.Is(err, core.ErrNoteConflict) {
 		t.Fatalf("PublishNote (B, conflicting): err = %v, want ErrNoteConflict", err)
 	}
 

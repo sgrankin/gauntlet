@@ -695,6 +695,15 @@ type runDetailResponse struct {
 	// these.
 	Speculated bool `json:"speculated,omitempty"`
 	Recovered  bool `json:"recovered,omitempty"`
+
+	// ReceiptRef/ReceiptBlob/ReceiptPublished mirror history.RunRow's own
+	// fields of the same names (v12+, issue #13): the receipt-notes
+	// publication provenance of a landed run. Omitted (rather than
+	// present-and-empty) when the run never published one — same
+	// omitempty convention as BatchID/Speculated above.
+	ReceiptRef       string `json:"receiptRef,omitempty"`
+	ReceiptBlob      string `json:"receiptBlob,omitempty"`
+	ReceiptPublished string `json:"receiptPublished,omitempty"`
 }
 
 type checkJSON struct {
@@ -748,6 +757,10 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 		Checks:     make([]checkJSON, 0, len(checks)),
 		Speculated: row.Speculated,
 		Recovered:  row.Recovered,
+
+		ReceiptRef:       row.ReceiptRef,
+		ReceiptBlob:      row.ReceiptBlob,
+		ReceiptPublished: row.ReceiptPublished,
 	}
 	if row.BatchID != "" {
 		resp.BatchID, resp.Position, resp.BatchSize = row.BatchID, row.Position, row.BatchSize

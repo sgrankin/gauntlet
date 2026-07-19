@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 11).
+-- schema.sql: gauntlet history store schema (user_version = 12).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -40,7 +40,23 @@ CREATE TABLE runs (
   -- purely informational (see RunRecord's own field docs) — surfaced only
   -- on the run-detail dashboard/API/MCP view, never read by queue logic.
   speculated   INTEGER NOT NULL DEFAULT 0,
-  recovered    INTEGER NOT NULL DEFAULT 0
+  recovered    INTEGER NOT NULL DEFAULT 0,
+  -- receipt_ref/receipt_blob/receipt_published (v12+): the receipt-notes
+  -- publication provenance of a LANDED run (issue #13; core.RunRecord.
+  -- ReceiptRef/ReceiptBlob/ReceiptPublished verbatim). receipt_ref is the
+  -- configured notes ref the receipt was published under; receipt_blob is
+  -- the published note's blob SHA; receipt_published is a small vocabulary
+  -- ("published" for a fresh note commit, "already-present" for
+  -- PublishNote's idempotent AlreadyPublished outcome — still a landing
+  -- success). All three are '' when receipt-notes policy is disabled, the
+  -- spec declares no receipt, or the run did not land. The receipt node's
+  -- own execution (its command's pass/fail) already lands as an ordinary
+  -- row in the checks table below, under "receipt:<name>" — these three
+  -- columns are ONLY the post-land publication fact, not a duplicate of
+  -- that row.
+  receipt_ref       TEXT NOT NULL DEFAULT '',
+  receipt_blob      TEXT NOT NULL DEFAULT '',
+  receipt_published TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
 CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';

@@ -609,6 +609,13 @@ func run() error {
 		TrialRefs:         cfg.GitHub.TrialRefPrefix != "",
 		TrialRefPrefix:    cfg.GitHub.TrialRefPrefix,
 		TrialRefRetention: cfg.GitHub.TrialRefRetention,
+
+		// Receipt-notes policy (issue #13): config.ReceiptNotes IS
+		// queue.Config.ReceiptNotes's type (the queue reuses config's
+		// struct rather than a parallel core type — see that field's doc),
+		// so this is a direct assignment; nil carries straight through as
+		// "disabled".
+		ReceiptNotes: cfg.GitHub.ReceiptNotes,
 	}
 	// pool is a *services.Pool; assigning it into the queue.ServicePool
 	// interface field unconditionally (even when nil) would leave a

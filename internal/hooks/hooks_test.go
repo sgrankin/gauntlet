@@ -84,6 +84,14 @@ func (f *fakeGitRepo) RestoreMtimes(ctx context.Context, commit, dir string) (co
 func (f *fakeGitRepo) Pin(ctx context.Context, oid string) error   { return nil }
 func (f *fakeGitRepo) Unpin(ctx context.Context, oid string) error { return nil }
 
+// PublishNote is never exercised by internal/hooks (post-land hooks don't
+// touch receipt notes) — a minimal stub, same "unused by this package's
+// tests" treatment as every other method above whose body is just `return
+// nil`/`return nil, nil`.
+func (f *fakeGitRepo) PublishNote(ctx context.Context, remoteRef, sha string, payload []byte, who core.Identity) (core.NotePublishResult, error) {
+	return core.NotePublishResult{}, nil
+}
+
 func (f *fakeGitRepo) exportedDir() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

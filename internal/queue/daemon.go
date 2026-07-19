@@ -207,21 +207,25 @@ type Config struct {
 	TrialRefRetention time.Duration
 
 	// ReceiptNotes mirrors config.GitHub.ReceiptNotes's presence (issue
-	// #13, config's `github { receipt-notes { ... } }`): whether this
-	// daemon has a receipt-notes policy configured. Consulted only by
-	// SpecRejectReason's load-time gate, both directions — a spec
-	// declaring no receipt is rejected when this is true, and a spec
-	// declaring one is rejected when this is false — via startRun and
-	// finishBatchStart. False is this package's own zero-value default
-	// (queue's policy-free stance, matching AutoRetryErrors's doc above).
+	// #13, config's `github { receipt-notes { ... } }`): nil disables the
+	// feature entirely, byte-identical to today's behavior — a spec
+	// declaring a receipt is rejected (SpecRejectReason), no "receipt:*"
+	// node is ever scheduled (buildRunNodes), and landRun never calls
+	// GitRepo.PublishNote. Non-nil both enables the policy (SpecRejectReason
+	// then also rejects a spec declaring NO receipt) and carries the two
+	// knobs publication itself needs: Ref (the notes ref every receipt is
+	// published under) and MaxBytes (the captured-result size ceiling — the
+	// executor's bounded read and the queue's own validation both key off
+	// it). Reusing config.ReceiptNotes directly (rather than a parallel core
+	// type) costs no new import boundary: the queue already depends on
+	// internal/config for config.Target/config.Check/config.CheckSpec
+	// throughout this package.
 	//
-	// This slice does not wire actual note publication or receipt-node
-	// scheduling: cmd/gauntlet does not yet populate this field from a
-	// loaded config (that wiring, and the scheduling it gates, is a later
-	// slice) — a hand-built queue.Config (tests, or a daemon run before
-	// that wiring lands) simply leaves it false, matching every other
-	// unwired bool default in this struct.
-	ReceiptNotes bool
+	// cmd/gauntlet wires this straight from cfg.GitHub.ReceiptNotes; a
+	// hand-built queue.Config (tests, or any caller that never sets it)
+	// simply leaves it nil, matching every other unwired optional-feature
+	// default in this struct.
+	ReceiptNotes *config.ReceiptNotes
 }
 
 // ServicePool is the subset of *services.Pool the queue consumes. Its
@@ -372,6 +376,26 @@ type run struct {
 	// records' Checks slices.
 	materialized bool
 
+	// receiptPayload holds the receipt node's validated captured bytes
+	// (issue #13), in memory only, once its "receipt:<name>" node finishes
+	// green (advanceChecks) — nil for a spec with no receipt, or before the
+	// node finishes. receiptProducer names the node that produced it
+	// (always "receipt:<name>" today; carried explicitly rather than
+	// re-derived, for provenance). Publication (landRun) reads these
+	// immediately before the target CAS and never earlier — a non-head
+	// speculative run, or one later invalidated, may hold a validated
+	// payload it never publishes, which is correct: publication happens
+	// only at the moment a run actually lands (see landRun's doc).
+	receiptPayload  []byte
+	receiptProducer string
+
+	// receiptBlobSHA and receiptPublished are filled by landRun immediately
+	// after a successful PublishNote call, mirroring onto every member's
+	// RunRecord (core.RunRecord.ReceiptBlob/ReceiptPublished) right before
+	// each EventLanded — see landRun for the exact sequencing.
+	receiptBlobSHA   string
+	receiptPublished string
+
 	// services is spec.Services verbatim — set once in startRun/
 	// finishBatchStart, read-only for the rest of the run's life: no
 	// cross-goroutine mutation, no race. startCheck's per-check goroutine
@@ -405,6 +429,16 @@ type run struct {
 	rootCtx  context.Context
 	rootSpan trace.Span
 }
+
+// receiptPublishedFresh and receiptPublishedAlready are run.receiptPublished's
+// (and core.RunRecord.ReceiptPublished's) small vocabulary — landRun's own
+// distinction between a freshly created note commit and PublishNote's
+// idempotent AlreadyPublished outcome (issue #13). "" (the zero value) means
+// "no receipt-notes policy, or the run never reached landing".
+const (
+	receiptPublishedFresh   = "published"
+	receiptPublishedAlready = "already-present"
+)
 
 // lane is a target's in-flight pipeline, FIFO: runs[0] is the head (next to
 // land). Serial and batch hold ≤ 1 run; speculate grows it up to

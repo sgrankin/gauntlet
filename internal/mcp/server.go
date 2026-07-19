@@ -688,6 +688,14 @@ type runOut struct {
 	// and batch tools don't carry these.
 	Speculated bool `json:"speculated,omitempty"`
 	Recovered  bool `json:"recovered,omitempty"`
+
+	// ReceiptRef/ReceiptBlob/ReceiptPublished mirror dashboard/api.go's
+	// runDetailResponse additions field-for-field (v12+, issue #13): the
+	// receipt-notes publication provenance of a landed run, omitted when
+	// the run never published one.
+	ReceiptRef       string `json:"receiptRef,omitempty"`
+	ReceiptBlob      string `json:"receiptBlob,omitempty"`
+	ReceiptPublished string `json:"receiptPublished,omitempty"`
 }
 
 // checkDetail is api.go's checkJSON plus Output: an agent debugging a red
@@ -738,6 +746,10 @@ func handleRun(p Params, in runIn) (runOut, error) {
 		Checks:     make([]checkDetail, 0, len(checks)),
 		Speculated: row.Speculated,
 		Recovered:  row.Recovered,
+
+		ReceiptRef:       row.ReceiptRef,
+		ReceiptBlob:      row.ReceiptBlob,
+		ReceiptPublished: row.ReceiptPublished,
 	}
 	if row.BatchID != "" {
 		out.BatchID, out.Position, out.BatchSize = row.BatchID, row.Position, row.BatchSize

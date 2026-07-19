@@ -196,6 +196,23 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 			Duration: duration,
 		}
 	}
+	if job.ReceiptCapture {
+		// A receipt has no skipped verdict either; exit 0 hands the result
+		// file's RAW bytes back verbatim (bounded to job.ReceiptMaxBytes+1
+		// so the queue can detect an oversized result) for the queue to
+		// validate — empty/unreadable/oversized are all rejected there,
+		// with one root cause on the receipt node itself, never a check
+		// running against a payload that was never actually captured.
+		receipt := readReceiptResult(resultFile, job.ReceiptMaxBytes)
+		return core.CheckResult{
+			Name:     job.Name,
+			Status:   core.CheckPassed,
+			Receipt:  receipt,
+			Output:   out.String(),
+			LogPath:  logPath,
+			Duration: duration,
+		}
+	}
 	status := core.CheckPassed
 	if data, err := os.ReadFile(resultFile); err == nil && strings.TrimSpace(string(data)) == "skipped" {
 		status = core.CheckSkipped
@@ -234,14 +251,62 @@ func readImageResult(path string) string {
 }
 
 // resultFileEnv picks which result-file variable a job's command sees:
-// image builds get EnvImageResultFile INSTEAD of EnvResultFile — a build
-// has no skipped verdict, and the two protocols must never be conflated
-// (core.EnvImageResultFile's doc).
+// image builds get EnvImageResultFile INSTEAD of EnvResultFile, and receipt
+// jobs get EnvReceiptResultFile INSTEAD of either — each protocol is
+// distinct and must never be conflated (core.EnvImageResultFile's and
+// core.EnvReceiptResultFile's docs).
 func resultFileEnv(job core.CheckJob) string {
-	if job.ImageBuild {
+	switch {
+	case job.ImageBuild:
 		return core.EnvImageResultFile
+	case job.ReceiptCapture:
+		return core.EnvReceiptResultFile
+	default:
+		return core.EnvResultFile
 	}
-	return core.EnvResultFile
+}
+
+// maxReceiptResultBytesFallback bounds readReceiptResult's read when a
+// ReceiptCapture job somehow carries no ReceiptMaxBytes (defense in depth —
+// SpecRejectReason's symmetric gate means a receipt node only ever runs
+// with a configured policy, so job.ReceiptMaxBytes should always be
+// positive by construction). Matches config's maxAllowedReceiptBytes hard
+// ceiling (internal/config/daemon.go), not duplicated by import — this
+// package doesn't depend on internal/config — so a fallback read can never
+// exceed what a legitimately configured max-bytes could ever have allowed
+// anyway.
+const maxReceiptResultBytesFallback = 1 << 20
+
+// readReceiptResult reads a receipt node's captured result file, bounded to
+// maxBytes+1 bytes so the QUEUE can tell a legitimate payload from an
+// oversized one (len(result) > maxBytes) without this executor ever loading
+// more than one byte past the configured limit into memory. maxBytes<=0
+// falls back to maxReceiptResultBytesFallback.
+//
+// Returns nil when the file cannot be opened or read at all (missing, a
+// permission error, or the command left something unreadable in its
+// place) — deliberately distinct from a non-nil EMPTY slice, which means
+// the file was opened and read successfully but is genuinely zero bytes;
+// core.CheckResult.Receipt's doc and the queue's validReceipt tell the two
+// apart with different one-line messages.
+func readReceiptResult(path string, maxBytes int) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	bound := maxBytes
+	if bound <= 0 {
+		bound = maxReceiptResultBytesFallback
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(bound)+1))
+	if err != nil {
+		return nil
+	}
+	if data == nil {
+		data = []byte{} // guarantee non-nil for "successfully read", even for a genuinely empty file
+	}
+	return data
 }
 
 // tailBuffer is an io.Writer that keeps only the last cap bytes written to

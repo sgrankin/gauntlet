@@ -342,6 +342,10 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			BatchID:    row.BatchID,
 			Speculated: row.Speculated,
 			Recovered:  row.Recovered,
+
+			ReceiptRef:       row.ReceiptRef,
+			ReceiptBlob:      row.ReceiptBlob,
+			ReceiptPublished: row.ReceiptPublished,
 		},
 	}
 	if row.BatchID != "" {
@@ -1566,6 +1570,15 @@ type runSummaryFull struct {
 	// outcome — see run.html.
 	Speculated bool
 	Recovered  bool
+
+	// Receipt mirrors history.RunRow's own ReceiptRef/ReceiptBlob/
+	// ReceiptPublished fields (v12+, issue #13): "" on ReceiptRef when the
+	// run never published one (policy disabled, no declared receipt, or a
+	// non-landing outcome) — run.html only renders the receipt row when
+	// ReceiptRef is non-empty.
+	ReceiptRef       string
+	ReceiptBlob      string
+	ReceiptPublished string
 }
 
 // batchData is /batch/{id}'s view model: the members of one batch run,

@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -119,6 +119,10 @@ func Open(path string) (*Store, error) {
 //     checks ADD COLUMN materialize_ms (isolated-workspace materialization
 //     cost — CheckResult.Materialized, issue #9), stamp user_version=11,
 //     loop.
+//   - 11 (schema v11: runs has no receipt_* columns): ALTER TABLE runs ADD
+//     COLUMN receipt_ref/receipt_blob/receipt_published (the receipt-notes
+//     publication provenance of a landed run — core.RunRecord.ReceiptRef/
+//     ReceiptBlob/ReceiptPublished, issue #13), stamp user_version=12, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -267,6 +271,19 @@ CREATE TABLE hook_runs (
 			if _, err := db.Exec(`PRAGMA user_version = 11`); err != nil {
 				return fmt.Errorf("history: set user_version=11: %w", err)
 			}
+		case 11:
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN receipt_ref TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v11->v12 (runs.receipt_ref): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN receipt_blob TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v11->v12 (runs.receipt_blob): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN receipt_published TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v11->v12 (runs.receipt_published): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 12`); err != nil {
+				return fmt.Errorf("history: set user_version=12: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -390,6 +407,9 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		batchSizeOrDefault(rec.BatchSize),
 		boolToInt(rec.Speculated),
 		boolToInt(rec.Recovered),
+		rec.ReceiptRef,
+		rec.ReceiptBlob,
+		rec.ReceiptPublished,
 	); err != nil {
 		return fmt.Errorf("history: insert run: %w", err)
 	}

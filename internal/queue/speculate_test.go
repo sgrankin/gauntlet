@@ -595,7 +595,13 @@ func TestSpeculateGreenPrefixDrain_MultipleRunsOneTick(t *testing.T) {
 		{ref: "refs/heads/main", old: run1.chainTip, new: run2.chainTip},
 	}
 	for i, want := range wantPushes {
-		if targetPushes[i] != want {
+		// Compare ref/old/new only: casCall.seq (issue #13's cross-log
+		// ordering affordance, shared with publishNoteCalls) is a real,
+		// always-increasing call counter here, not a value this fixture's
+		// zero-valued wantPushes entries could ever match.
+		got := targetPushes[i]
+		got.seq = 0
+		if got != want {
 			t.Errorf("push %d = %+v, want %+v", i, targetPushes[i], want)
 		}
 	}

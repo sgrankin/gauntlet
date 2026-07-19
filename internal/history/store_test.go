@@ -1474,6 +1474,83 @@ func TestMigrate_V10ToV11(t *testing.T) {
 	}
 }
 
+// TestMigrate_V11ToV12 seeds a v11 database (materialize_ms present, no
+// receipt_* columns) and confirms Open migrates it in place: user_version
+// lands on schemaVersion, the pre-existing run row survives with the new
+// receipt_ref/receipt_blob/receipt_published columns defaulted to "" (issue
+// #13's history-provenance slice), and a fresh Emit populates and round-trips
+// non-empty values for all three.
+func TestMigrate_V11ToV12(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v11.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		schemaV7SQL,
+		`ALTER TABLE checks ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN waited_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE checks ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN materialize_ms INTEGER NOT NULL DEFAULT 0`,
+		`PRAGMA user_version = 11`,
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size, speculated, recovered)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1, 0, 0)`,
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '', 'true')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed v11 db: %q: %v", stmt, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v11 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+	oldRow, _, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if oldRow.ReceiptRef != "" || oldRow.ReceiptBlob != "" || oldRow.ReceiptPublished != "" {
+		t.Errorf("pre-v12 row receipt fields = %+v, want all empty", oldRow)
+	}
+
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC))
+	rec.Outcome = core.OutcomeLanded
+	rec.ReceiptRef = "refs/notes/gauntlet/receipts"
+	rec.ReceiptBlob = "blob0000000000000000000000000000000000000"
+	rec.ReceiptPublished = "published"
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	newRow, _, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if newRow.ReceiptRef != rec.ReceiptRef || newRow.ReceiptBlob != rec.ReceiptBlob || newRow.ReceiptPublished != rec.ReceiptPublished {
+		t.Errorf("round-tripped receipt fields = %+v, want ref=%q blob=%q published=%q",
+			newRow, rec.ReceiptRef, rec.ReceiptBlob, rec.ReceiptPublished)
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }

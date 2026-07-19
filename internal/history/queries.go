@@ -13,8 +13,9 @@ const (
 INSERT OR REPLACE INTO runs (
 	run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
 	base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
-	batch_id, position, batch_size, speculated, recovered
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	batch_id, position, batch_size, speculated, recovered,
+	receipt_ref, receipt_blob, receipt_published
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
 INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms)
@@ -87,6 +88,16 @@ type RunRow struct {
 	// view, not the runs listing.
 	Speculated bool
 	Recovered  bool
+
+	// ReceiptRef, ReceiptBlob, and ReceiptPublished are core.RunRecord's
+	// own fields of the same names verbatim (v12+): the receipt-notes
+	// publication provenance of a landed run (issue #13) — the notes ref,
+	// the published note's blob SHA, and "published"/"already-present".
+	// All three are "" when receipt-notes policy is disabled, the spec
+	// declared no receipt, the run didn't land, or the row predates v12.
+	ReceiptRef       string
+	ReceiptBlob      string
+	ReceiptPublished string
 
 	// ChecksTotal and ChecksPassed are this run's own check pass/total
 	// counts, populated only by RecentRuns (via correlated scalar
@@ -184,7 +195,8 @@ type DepthPoint struct {
 
 const selectRunColumns = `run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
 	base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
-	batch_id, position, batch_size, speculated, recovered`
+	batch_id, position, batch_size, speculated, recovered,
+	receipt_ref, receipt_blob, receipt_published`
 
 // RecentRuns returns target's most recent runs, newest first, capped at
 // limit. Each row also carries its own ChecksTotal/ChecksPassed — see
@@ -661,7 +673,7 @@ type rowScanner interface {
 }
 
 // scanRunRow scans one selectRunColumns-shaped row into a RunRow. extra, when
-// given, is appended to the Scan destination list after the fixed 19 —
+// given, is appended to the Scan destination list after the fixed 22 —
 // RecentRuns' query below additionally selects a check-count aggregate that
 // no other RunRow-returning method needs, so its caller passes pointers for
 // those trailing columns rather than this function knowing about them itself.
@@ -675,6 +687,7 @@ func scanRunRow(row rowScanner, extra ...any) (RunRow, error) {
 		&r.BaseOID, &r.MergeSHA, &trialClean, &r.Outcome, &r.Detail,
 		&startedMS, &endedMS, &durationMS,
 		&r.BatchID, &r.Position, &r.BatchSize, &speculated, &recovered,
+		&r.ReceiptRef, &r.ReceiptBlob, &r.ReceiptPublished,
 	}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return RunRow{}, err

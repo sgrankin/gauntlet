@@ -576,6 +576,43 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 					res.Output += "gauntlet: an image build cannot report skipped"
 				}
 			}
+			// The receipt node's (issue #13) green is likewise conditional
+			// on its captured result validating — non-empty, readable, and
+			// within the configured max-bytes ceiling — validated HERE for
+			// the same one-root-cause reason as an image build above. On
+			// success the validated payload moves onto the run struct (in
+			// memory only, never persisted onto this CheckResult/history
+			// row); the transient captured bytes are dropped either way.
+			if rcpName, isReceipt := receiptNodeName(name); isReceipt && res.Err == nil {
+				switch res.Status {
+				case core.CheckPassed:
+					maxBytes := 0
+					if d.cfg.ReceiptNotes != nil {
+						maxBytes = d.cfg.ReceiptNotes.MaxBytes
+					}
+					if payload, err := validReceipt(res.Receipt, maxBytes); err != nil {
+						res.Status = core.CheckFailed
+						if res.Output != "" {
+							res.Output += "\n"
+						}
+						res.Output += "gauntlet: " + err.Error()
+					} else {
+						r.receiptPayload = payload
+						r.receiptProducer = rcpName
+					}
+				case core.CheckSkipped:
+					// Same defensive flip as an image build: a receipt has
+					// no skipped verdict, so a green-shaped result with no
+					// validated payload must not silently release the run
+					// toward landing with nothing to publish.
+					res.Status = core.CheckFailed
+					if res.Output != "" {
+						res.Output += "\n"
+					}
+					res.Output += "gauntlet: a receipt cannot report skipped"
+				}
+				res.Receipt = nil // never carried past this validation step
+			}
 			delete(r.inflight, name)
 			r.results[name] = res
 			// Check is the just-finished result itself, so channels can
@@ -778,6 +815,17 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	// reference back on the result for advanceChecks to validate.
 	if _, isImage := imageNodeName(check.Name); isImage {
 		job.ImageBuild = true
+	}
+	// The receipt node (issue #13) gets the same env-var-swap treatment,
+	// plus the configured size ceiling so the executor's own bounded read
+	// (MaxBytes+1) can detect an oversized result before this job's
+	// ephemeral scratch dir is removed — the queue never gets a second
+	// chance to read the file itself.
+	if _, isReceipt := receiptNodeName(check.Name); isReceipt {
+		job.ReceiptCapture = true
+		if d.cfg.ReceiptNotes != nil {
+			job.ReceiptMaxBytes = d.cfg.ReceiptNotes.MaxBytes
+		}
 	}
 	// LogDir == "" disables per-check log files entirely (job.LogPath stays
 	// ""); see DESIGN.md ("Full per-check log files"). The check name is
@@ -1307,7 +1355,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 	// Spec-load gates, same as startRun's (see SpecRejectReason).
-	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes); reason != "" {
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil); reason != "" {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, reason, rootSpan)
 		return
 	}
@@ -1752,7 +1800,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// (Config.KnownExecutorProfile's / ImageCapableProfile's docs;
 	// docs/design/services.md, "The model: a cache entry, not a
 	// supervised unit").
-	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes); reason != "" {
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil); reason != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, reason, rootSpan)
 		return nil, false
 	}
@@ -1948,6 +1996,12 @@ func imageNodeName(node string) (image string, ok bool) {
 	return strings.CutPrefix(node, imageNodePrefix)
 }
 
+// receiptNodeName reports whether node is the receipt node, and its
+// declared name — mirroring imageNodeName above.
+func receiptNodeName(node string) (name string, ok bool) {
+	return strings.CutPrefix(node, receiptNodePrefix)
+}
+
 // imageOnIncapableProfile returns the first check (spec order) that names
 // a candidate-built image but runs on a profile that cannot swap its
 // rootfs — a non-container profile (Config.ImageCapableProfile). ("", "")
@@ -1978,16 +2032,28 @@ func imageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) 
 // every check — a declared image is built once per run whether or not a
 // check consumes it, so a candidate changing only its Dockerfile still
 // proves the build), then every check, with an implicit `after` edge from
-// each consumer onto its image's node. The whole point of this shape is
-// that NOTHING downstream is new: readiness, max-parallel, the execution
-// cap, fail-fast, blocked rows, history rows, and events all treat a
-// build exactly as they treat a check (issue #2: "the same dependency and
-// capacity machinery, not a second scheduler").
+// each consumer onto its image's node, and finally — when the spec
+// declares one — a single "receipt:<name>" node (issue #13) after every
+// check, carrying its own declared `after` edges plus, exactly like a
+// consumer check, an implicit edge onto its own image build when it names
+// one. The whole point of this shape is that NOTHING downstream is new:
+// readiness, max-parallel, the execution cap, fail-fast, blocked rows,
+// history rows, and events all treat a build or a receipt exactly as they
+// treat a check (issue #2: "the same dependency and capacity machinery,
+// not a second scheduler").
+//
+// Defensive by construction: the receipt node is appended only when
+// spec.Receipt() != nil, which SpecRejectReason already guarantees is in
+// lockstep with the daemon's own receipt-notes policy (both directions
+// gated before any run reaches this function) — but this function does not
+// itself re-check the policy, so a hand-built spec (a test, or any future
+// caller that skips the gate) never gets a receipt node it didn't declare.
 func buildRunNodes(spec *config.CheckSpec) []config.Check {
-	if len(spec.Images) == 0 {
+	rcp := spec.Receipt()
+	if len(spec.Images) == 0 && rcp == nil {
 		return spec.Checks
 	}
-	nodes := make([]config.Check, 0, len(spec.Images)+len(spec.Checks))
+	nodes := make([]config.Check, 0, len(spec.Images)+len(spec.Checks)+1)
 	for _, img := range spec.Images {
 		nodes = append(nodes, config.Check{
 			Name:     imageNodePrefix + img.Name,
@@ -2002,6 +2068,19 @@ func buildRunNodes(spec *config.CheckSpec) []config.Check {
 			c.After = append(append([]string(nil), c.After...), imageNodePrefix+c.Image)
 		}
 		nodes = append(nodes, c)
+	}
+	if rcp != nil {
+		node := config.Check{
+			Name:     receiptNodePrefix + rcp.Name,
+			Command:  rcp.Command,
+			Executor: rcp.Executor,
+			Image:    rcp.Image,
+			After:    append([]string(nil), rcp.After...),
+		}
+		if rcp.Image != "" {
+			node.After = append(node.After, imageNodePrefix+rcp.Image)
+		}
+		nodes = append(nodes, node)
 	}
 	return nodes
 }
@@ -2024,6 +2103,30 @@ func validImageRef(raw string) (string, error) {
 		return ref, nil
 	}
 	return "", fmt.Errorf("image result %q is not immutable: need a local image ID (sha256:<64 hex>) or a digest-pinned reference (<repo>@sha256:<64 hex>), never a tag", truncateForError(ref))
+}
+
+// validReceipt validates a receipt node's captured result (issue #13):
+// raw is exactly what the executor read back from the result file
+// (core.CheckResult.Receipt) — nil when the file could not be read at all
+// (distinct from a successfully-read empty file, a non-nil zero-length
+// slice; see CheckResult.Receipt's doc), maxBytes<=0 means no configured
+// ceiling to check against (defensive; SpecRejectReason's symmetric gate
+// means a receipt node only ever runs with a non-nil Config.ReceiptNotes,
+// so this is normally always positive by the time a receipt node exists at
+// all). The executor bounds its own read to maxBytes+1 (CheckJob.
+// ReceiptMaxBytes), so len(raw) > maxBytes is exactly the oversize signal,
+// never a false positive from a legitimately maxBytes-sized payload.
+func validReceipt(raw []byte, maxBytes int) ([]byte, error) {
+	if raw == nil {
+		return nil, fmt.Errorf("receipt result file could not be read (missing, or left unwritten/unreadable by the command)")
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("receipt result file is empty")
+	}
+	if maxBytes > 0 && len(raw) > maxBytes {
+		return nil, fmt.Errorf("receipt result exceeds the configured max-bytes %d (got at least %d bytes)", maxBytes, len(raw))
+	}
+	return raw, nil
 }
 
 // truncateForError bounds captured result content quoted into an error
@@ -2069,6 +2172,49 @@ func effectiveMaxParallel(spec *config.CheckSpec) int {
 // (Invariant 3); the run is still a Landed outcome.
 func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	_, landSpan := obs.StartLand(r.rootCtx, d.tr)
+
+	// Receipt-notes publication (issue #13) is a GATE on landing, not a
+	// parallel step: when policy is enabled, this run is structurally
+	// unable to reach the target CAS below without publication first
+	// confirmed — the call sits in this same function, immediately before
+	// that CAS, so there is no path from here to a landed target that
+	// skips it. Publishes on r.chainTip, the tested CHAIN TIP merge commit
+	// (== the batch's own chain tip for a batch run, whose single receipt
+	// node already keyed capture to this same run) — never the candidate
+	// SHA, never chainTree. A speculative run's captured payload sits
+	// harmlessly on r.receiptPayload until (unless) it reaches HERE as the
+	// lane head; a non-head or later-invalidated run never calls this.
+	if d.cfg.ReceiptNotes != nil {
+		res, err := d.git.PublishNote(ctx, d.cfg.ReceiptNotes.Ref, r.chainTip, r.receiptPayload, d.cfg.Committer)
+		if err != nil {
+			// Any failure here — transport, contention exhaustion, or a
+			// fail-closed ErrNoteConflict — is infrastructure: OutcomeError
+			// park, subject to the existing auto-retry-once, target CAS
+			// never attempted, nothing lands. ErrNoteConflict gets its own
+			// wording naming the invariant it violates (two disjoint
+			// receipts computed for the same tested SHA), distinct from an
+			// ordinary transport error.
+			detail := "publish receipt note: " + err.Error()
+			if errors.Is(err, core.ErrNoteConflict) {
+				detail = "publish receipt note: invariant violation (a different receipt already exists for this tested SHA): " + err.Error()
+			}
+			obs.EndSpan(landSpan, err)
+			d.finishRun(ctx, t, r, core.OutcomeError, detail, true)
+			return
+		}
+		// Both Published (fresh) and !Published (AlreadyPublished) are
+		// landing successes — AlreadyPublished is substantive (an
+		// idempotent crash-retried or duplicate publish of the SAME
+		// receipt), logged distinctly here via the span attribute
+		// EndRun/runAttributes attaches from the record below, and
+		// mirrored onto every member's RunRecord for history's v12
+		// provenance columns.
+		r.receiptBlobSHA = res.NoteBlobSHA
+		r.receiptPublished = receiptPublishedFresh
+		if !res.Published {
+			r.receiptPublished = receiptPublishedAlready
+		}
+	}
 
 	err := d.git.CASUpdate(ctx, targetRefName(t), r.baseOID, r.chainTip)
 	if err != nil {
@@ -2130,6 +2276,15 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		m.rec.Outcome = core.OutcomeLanded
 		m.rec.Detail = detail
 		m.rec.EndedAt = d.now()
+		// Receipt provenance (issue #13): "" on every field when the policy
+		// is off (r.receiptPublished is "" unless landRun's publish gate
+		// above ran), so a disabled-policy landing's record is
+		// byte-identical to today's.
+		if d.cfg.ReceiptNotes != nil {
+			m.rec.ReceiptRef = d.cfg.ReceiptNotes.Ref
+			m.rec.ReceiptBlob = r.receiptBlobSHA
+			m.rec.ReceiptPublished = r.receiptPublished
+		}
 		d.emit(ctx, core.Event{
 			Kind:      core.EventLanded,
 			At:        d.now(),

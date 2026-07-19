@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"fmt"
@@ -89,10 +90,51 @@ type fakeGitRepo struct {
 	// catch; this hook is how a single-threaded fake can provoke it
 	// deterministically without real concurrency.
 	beforeCAS func(remoteRef string)
+
+	// notes is fakeGitRepo's real (if tiny) git-notes store, keyed by
+	// (remoteRef, sha): PublishNote's default behavior — fresh publish,
+	// idempotent AlreadyPublished on an exact re-publish, ErrNoteConflict
+	// on a differing re-publish — is computed against it exactly like
+	// gitx's real fetch-check-add-CAS protocol, minus the actual git
+	// plumbing. Tests that need a pre-existing note in place before their
+	// own PublishNote call (an AlreadyPublished or a conflict fixture) use
+	// seedNote to populate it directly, the same "real implementation,
+	// scriptable from outside" style as seed/pushCandidate above.
+	notes map[[2]string][]byte
+
+	// publishNoteErr, when non-nil, makes every PublishNote call return it
+	// (persistently, sticky like fetchErr/mergeTreeErr/... above) instead
+	// of consulting notes — how tests exercise the transport-failure park
+	// path without a real network.
+	publishNoteErr error
+
+	// publishNoteCalls records every PublishNote call's exact
+	// (ref, sha, payload) — a defensive COPY of payload, so a caller that
+	// mutates its buffer after the call can't retroactively corrupt what
+	// the fake recorded — each stamped with the same opSeq sequence
+	// casLog entries share, so a test can assert PublishNote fired
+	// strictly before a specific CASUpdate (landRun's publish-then-CAS
+	// gate) by comparing seq values directly, not merely slice position.
+	publishNoteCalls []notePublishCall
+
+	// opSeq is a single shared call counter, incremented (under f.mu) by
+	// both CASUpdate and PublishNote — the ordering affordance issue #13's
+	// landing-gate tests need: two independently-appended logs (casLog,
+	// publishNoteCalls) would otherwise lose their relative interleaving.
+	opSeq int
 }
 
 type casCall struct {
 	ref, old, new string
+	seq           int
+}
+
+// notePublishCall is one recorded PublishNote call (fakeGitRepo.
+// publishNoteCalls) — see that field's doc.
+type notePublishCall struct {
+	remoteRef, sha string
+	payload        []byte
+	seq            int
 }
 
 type fakeCommit struct {
@@ -350,7 +392,8 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.casLog = append(f.casLog, casCall{ref: remoteRef, old: oldOID, new: newOID})
+	f.opSeq++
+	f.casLog = append(f.casLog, casCall{ref: remoteRef, old: oldOID, new: newOID, seq: f.opSeq})
 	if f.casErr != nil {
 		return f.casErr
 	}
@@ -363,6 +406,60 @@ func (f *fakeGitRepo) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID s
 		f.refs[remoteRef] = newOID
 	}
 	return nil
+}
+
+// PublishNote is a real (if tiny) implementation of core.GitRepo.
+// PublishNote against f.notes, not a mock: fresh publish, idempotent
+// AlreadyPublished on an exact re-publish, and fail-closed ErrNoteConflict
+// on a differing one, mirroring gitx.Repo.PublishNote's own semantics
+// closely enough for the queue's own tests (issue #13). publishNoteErr, when
+// set, short-circuits every call — the transport-failure affordance.
+//
+// NoteBlobSHA is a deterministic content hash of payload alone (never of
+// remoteRef/sha), matching real git's content-addressed blobs: two
+// PublishNote calls with identical payload bytes — whether or not for the
+// same sha — get the same NoteBlobSHA, exactly as gitx's blobID does.
+func (f *fakeGitRepo) PublishNote(ctx context.Context, remoteRef, sha string, payload []byte, who core.Identity) (core.NotePublishResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opSeq++
+	f.publishNoteCalls = append(f.publishNoteCalls, notePublishCall{
+		remoteRef: remoteRef, sha: sha,
+		payload: append([]byte(nil), payload...),
+		seq:     f.opSeq,
+	})
+	if f.publishNoteErr != nil {
+		return core.NotePublishResult{}, f.publishNoteErr
+	}
+	if len(payload) == 0 {
+		return core.NotePublishResult{}, fmt.Errorf("fakeGitRepo: publish note %s on %s: empty payload", sha, remoteRef)
+	}
+	if f.notes == nil {
+		f.notes = make(map[[2]string][]byte)
+	}
+	key := [2]string{remoteRef, sha}
+	blobSHA := hashString("noteblob", string(payload))
+	if existing, ok := f.notes[key]; ok {
+		if bytes.Equal(existing, payload) {
+			return core.NotePublishResult{Published: false, NoteBlobSHA: blobSHA}, nil
+		}
+		return core.NotePublishResult{}, fmt.Errorf("%w: sha %s on %s", core.ErrNoteConflict, sha, remoteRef)
+	}
+	f.notes[key] = append([]byte(nil), payload...)
+	return core.NotePublishResult{Published: true, NoteBlobSHA: blobSHA}, nil
+}
+
+// seedNote plants a pre-existing note directly into f.notes, bypassing
+// PublishNote/its call log entirely — for tests constructing an
+// AlreadyPublished or ErrNoteConflict fixture without an extra scripted
+// call of their own.
+func (f *fakeGitRepo) seedNote(remoteRef, sha string, payload []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.notes == nil {
+		f.notes = make(map[[2]string][]byte)
+	}
+	f.notes[[2]string{remoteRef, sha}] = append([]byte(nil), payload...)
 }
 
 // --- test-only helpers: a tiny working git, scripted from the outside ---

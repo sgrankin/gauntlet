@@ -68,6 +68,26 @@ type CheckJob struct {
 	// naming an image are gated onto container profiles at run start).
 	Image string
 
+	// ReceiptCapture marks this job as the RECEIPT node (issue #13,
+	// config.CheckSpec.Receipt): the executor exports EnvReceiptResultFile
+	// instead of EnvResultFile and returns the file's raw captured bytes
+	// verbatim in CheckResult.Receipt for the queue to validate (empty,
+	// unreadable, and oversized are all the RECEIPT node's own red
+	// verdict — one root cause, mirroring ImageBuild's validation
+	// boundary). Never set together with ImageBuild — a spec's receipt and
+	// its image builds are distinct nodes.
+	ReceiptCapture bool
+
+	// ReceiptMaxBytes bounds how much of the receipt result file the
+	// executor will ever read (queue.Config.ReceiptNotes.MaxBytes,
+	// threaded through so the bounded read — MaxBytes+1, to let the queue
+	// detect an oversized result — happens before the job's ephemeral
+	// scratch dir is removed, since the queue itself never gets a second
+	// chance to read the file). Meaningful only when ReceiptCapture is
+	// set; zero there falls back to the executor's own generous internal
+	// ceiling (defense in depth against a job built without a bound).
+	ReceiptMaxBytes int
+
 	// Dir is the exported trial tree the check runs against.
 	Dir string
 
@@ -164,6 +184,18 @@ type CheckResult struct {
 	// queue alongside Command). "" everywhere else. Provenance — history
 	// records exactly which bytes ran (issue #2's "explain what ran").
 	Image string
+
+	// Receipt is the RECEIPT node's captured raw payload bytes (issue
+	// #13), set only by an executor handling a ReceiptCapture job and only
+	// consumed by the queue's own validation (advanceChecks) — it is never
+	// persisted onto a stored CheckResult or history row; a validated
+	// payload is moved onto the run struct (in memory only) and this
+	// field is cleared either way. nil means the result file could not be
+	// read at all (missing, or genuinely unreadable) — distinct from a
+	// non-nil EMPTY slice, which means the file was opened and read
+	// successfully but contained zero bytes; the queue's validation
+	// reports a different one-line root cause for each.
+	Receipt []byte
 
 	// Seq is the check's 1-based SPEC-DECLARATION position — the durable
 	// per-check identity history's seq column and the log filename prefix
@@ -282,6 +314,18 @@ const (
 	// executor only reads it back (CheckResult.Image).
 	EnvImageResultFile = "GAUNTLET_IMAGE_RESULT_FILE"
 
+	// EnvReceiptResultFile is the path a RECEIPT job (CheckJob.
+	// ReceiptCapture) must write its captured payload to — exported
+	// INSTEAD of EnvResultFile, the same "distinct protocol, never
+	// conflated" contract as EnvImageResultFile: a receipt has no skipped
+	// verdict, and a non-zero exit is a receipt failure regardless of the
+	// file. The executor reads the file back RAW (bounded to
+	// CheckJob.ReceiptMaxBytes+1) and hands it to the queue verbatim via
+	// CheckResult.Receipt for validation (empty/unreadable/oversized are
+	// all rejected there, not here) — unlike an image reference, a
+	// receipt payload has no shape the executor itself can check.
+	EnvReceiptResultFile = "GAUNTLET_RECEIPT_RESULT_FILE"
+
 	// EnvGitDir is a git dir (usable as GIT_DIR or `git --git-dir`) holding
 	// every object the *_SHA vars above name — the daemon's own bare repo,
 	// which contains the trial merge commit whether or not it ever lands.
@@ -398,6 +442,21 @@ type RunRecord struct {
 	// recovered landing never auto-runs hooks (e.g. re-triggering a deploy)
 	// merely because its merge SHA happened to be identifiable.
 	Recovered bool
+
+	// ReceiptRef, ReceiptBlob, and ReceiptPublished carry the receipt-notes
+	// provenance of a LANDED run (issue #13): ReceiptRef is the configured
+	// notes ref the receipt was published under, ReceiptBlob is the
+	// published note's blob SHA (core.NotePublishResult.NoteBlobSHA), and
+	// ReceiptPublished is a small vocabulary — "published" (a fresh note
+	// commit) or "already-present" (PublishNote's idempotent AlreadyPublished
+	// outcome; still a landing success) — describing which. All three are ""
+	// when receipt-notes policy is disabled, the spec declares no receipt,
+	// or the run did not land (publication happens immediately before the
+	// target CAS, gated on it — see queue's landRun). Purely provenance,
+	// like Speculated/Recovered above: never read back by queue logic.
+	ReceiptRef       string
+	ReceiptBlob      string
+	ReceiptPublished string
 }
 
 // Identity is a git commit identity: a name and an email address.

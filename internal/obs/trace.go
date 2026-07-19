@@ -29,6 +29,16 @@ const (
 	AttrCheckName     = "gauntlet.check.name"
 	AttrCheckStatus   = "gauntlet.check.status"
 	AttrCheckDuration = "gauntlet.check.duration_ms"
+
+	// AttrReceiptRef, AttrReceiptBlob, and AttrReceiptOutcome carry a landed
+	// run's receipt-notes provenance (issue #13, core.RunRecord.ReceiptRef/
+	// ReceiptBlob/ReceiptPublished) alongside the existing landing
+	// attributes — "" on every run that never published one (policy
+	// disabled, no declared receipt, or a non-landing outcome), same as
+	// every other RunRecord-derived attribute here.
+	AttrReceiptRef     = "gauntlet.receipt.ref"
+	AttrReceiptBlob    = "gauntlet.receipt.blob"
+	AttrReceiptOutcome = "gauntlet.receipt.outcome"
 )
 
 // Tracer returns gauntlet's shared tracer. With no provider registered
@@ -135,6 +145,9 @@ func runAttributes(rec *core.RunRecord) []attribute.KeyValue {
 		attribute.String(AttrOutcome, outcomeString(rec.Outcome)),
 		attribute.Int(AttrChecksTotal, len(rec.Checks)),
 		attribute.String(AttrDetail, rec.Detail),
+		attribute.String(AttrReceiptRef, rec.ReceiptRef),
+		attribute.String(AttrReceiptBlob, rec.ReceiptBlob),
+		attribute.String(AttrReceiptOutcome, rec.ReceiptPublished),
 	}
 }
 
