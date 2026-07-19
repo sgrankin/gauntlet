@@ -225,13 +225,60 @@ func TestFetchNotesRefNoRefVsTransportFailure(t *testing.T) {
 	}
 }
 
-// TestPublishNoteFanoutInterop proves interop both directions with stock
+// TestAddNoteIdentityImmuneToAmbientEnv covers issue #13's F1 finding:
+// AddNote previously passed identity via "-c user.name=.../-c
+// user.email=..." only, relying on the (false) claim that this made the
+// note commit immune to the process's ambient environment. It isn't: git's
+// own precedence puts GIT_AUTHOR_*/GIT_COMMITTER_* environment variables
+// ahead of -c config, so an adversarial ambient environment silently won.
+// t.Setenv simulates exactly that; the resulting note commit's author AND
+// committer must still be who, not the environment (mirrors
+// TestCommitTreeIdentityImmuneToAmbientEnv in git_test.go for the other
+// object-creation site).
+func TestAddNoteIdentityImmuneToAmbientEnv(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, dir := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "1\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	sha := remote.Ref("refs/heads/main")
+
+	t.Setenv("GIT_AUTHOR_NAME", "Evil Ambient")
+	t.Setenv("GIT_AUTHOR_EMAIL", "evil-ambient@attacker.example")
+	t.Setenv("GIT_COMMITTER_NAME", "Evil Ambient")
+	t.Setenv("GIT_COMMITTER_EMAIL", "evil-ambient@attacker.example")
+
+	who := core.Identity{Name: "Gauntlet", Email: "gauntlet@ci.example"}
+	localRef := gitx.NotesWorkRef(testNotesRef)
+	if _, err := repo.AddNote(ctx, localRef, sha, []byte("payload under adversarial ambient env"), who); err != nil {
+		t.Fatalf("AddNote: %v", err)
+	}
+
+	tip := rawGit(t, dir, nil, "rev-parse", localRef)
+	raw := rawGit(t, dir, nil, "cat-file", "-p", strings.TrimSpace(tip))
+	if !strings.Contains(raw, "author Gauntlet <gauntlet@ci.example>") {
+		t.Fatalf("note commit author leaked the ambient environment identity, got:\n%s", raw)
+	}
+	if !strings.Contains(raw, "committer Gauntlet <gauntlet@ci.example>") {
+		t.Fatalf("note commit committer leaked the ambient environment identity, got:\n%s", raw)
+	}
+	if strings.Contains(raw, "Evil Ambient") || strings.Contains(raw, "evil-ambient@attacker.example") {
+		t.Fatalf("note commit carries the adversarial ambient identity, got:\n%s", raw)
+	}
+}
+
+// TestPublishNotePorcelainInterop proves interop both directions with stock
 // `git notes` porcelain (issue #13's requirement): a remote notes ref
 // already carrying a note written entirely by stock `git notes add -m`
 // (not through gitx) is correctly read and appended to via PublishNote,
 // and a THIRD, independent clone using stock `git notes show` can read
-// back byte-exact what PublishNote wrote.
-func TestPublishNoteFanoutInterop(t *testing.T) {
+// back byte-exact what PublishNote wrote. Named for what it actually
+// proves — porcelain read/write interop with only two notes ever written,
+// never enough for git to build a fanout tree. Fanout layout is git's own
+// concern (AddNote delegates to `git notes add -C`, never hand-rolling
+// mktree/read-tree) and is not exercised by this test.
+func TestPublishNotePorcelainInterop(t *testing.T) {
 	ctx := context.Background()
 	repo, remote, _ := newRepo(t)
 	remote.Seed("main", map[string]string{"f.txt": "1\n"})

@@ -146,6 +146,17 @@ func parseConflictPaths(lines []string) []string {
 // CommitTree creates a commit object from tree and parents. This is the
 // only object gauntlet ever creates (Invariant 6). message is passed via
 // stdin so multi-paragraph trailers survive intact.
+//
+// who's identity is forced via identityEnv, not just the "-c
+// user.name=.../-c user.email=..." arguments below: git's own precedence
+// puts GIT_AUTHOR_*/GIT_COMMITTER_* environment ahead of -c config, so a
+// daemon process that inherits those variables from its own ambient
+// environment would otherwise get the ENV identity on the commit, not who
+// — empirically confirmed (TestCommitTreeIdentityImmuneToAmbientEnv;
+// before this fix, the equivalent case was the -u-suppressed failure in
+// TestCommitTreeTwoParentsWithTrailers). The -c flags stay for a reader
+// checking `git log --format=%an` against a config-only mental model;
+// identityEnv is what actually decides it.
 func (r *Repo) CommitTree(ctx context.Context, tree string, parents []string, message string, who core.Identity) (string, error) {
 	args := []string{
 		"-c", "user.name=" + who.Name,
@@ -155,11 +166,35 @@ func (r *Repo) CommitTree(ctx context.Context, tree string, parents []string, me
 	for _, p := range parents {
 		args = append(args, "-p", p)
 	}
-	out, err := runGit(ctx, r.dir, strings.NewReader(message), args...)
+	out, err := runGitEnv(ctx, r.dir, strings.NewReader(message), identityEnv(who), args...)
 	if err != nil {
 		return "", fmt.Errorf("gitx: commit-tree: %w", err)
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// identityEnv returns a subprocess environment that forces who as the
+// GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL
+// identity for an object-creating git command, regardless of what the
+// daemon process's own ambient environment carries. Built as
+// os.Environ() with those four appended (never prepended): os/exec keeps
+// the LAST occurrence of a duplicate key, so any ambient
+// GIT_AUTHOR_*/GIT_COMMITTER_* the process inherited is shadowed, not
+// merged with — the same append-last pattern auth.go's runAuthed already
+// uses for GIT_ASKPASS/GIT_TERMINAL_PROMPT/LC_ALL. This is the ONLY
+// reliable way to pin identity: git's own precedence puts these four
+// environment variables ahead of -c user.name/-c user.email, so passing
+// -c alone (CommitTree and AddNote's previous behavior) is silently
+// overridden whenever the ambient environment happens to set them —
+// empirically confirmed by TestCommitTreeIdentityImmuneToAmbientEnv and
+// TestAddNoteIdentityImmuneToAmbientEnv.
+func identityEnv(who core.Identity) []string {
+	return append(os.Environ(),
+		"GIT_AUTHOR_NAME="+who.Name,
+		"GIT_AUTHOR_EMAIL="+who.Email,
+		"GIT_COMMITTER_NAME="+who.Name,
+		"GIT_COMMITTER_EMAIL="+who.Email,
+	)
 }
 
 // ReadFileFromTree reads path out of tree (or any tree-ish, e.g. a commit)

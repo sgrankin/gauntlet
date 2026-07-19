@@ -94,11 +94,16 @@ func isNoNoteFound(err error) bool {
 
 // AddNote attaches payload to sha on localWorkRef, creating a notes commit
 // (blob + tree + commit) with who as both author and committer identity —
-// the same -c user.name/-c user.email pattern CommitTree uses, so the
-// notes commit carries the daemon's identity regardless of the process's
-// ambient git config or GIT_AUTHOR_*/GIT_COMMITTER_* environment. This is
-// the second deliberate object-creation site DESIGN.md's Invariant 6 now
-// names (issue #13; CommitTree remains the first, and unchanged).
+// the same -c user.name/-c user.email arguments CommitTree uses, PLUS an
+// explicit identityEnv (git.go) forcing GIT_AUTHOR_*/GIT_COMMITTER_* to who
+// too, so the notes commit carries the daemon's identity regardless of the
+// process's ambient git config or GIT_AUTHOR_*/GIT_COMMITTER_* environment:
+// git's own precedence puts those four environment variables ahead of -c
+// config, so -c alone is not immune to an ambient leak (identityEnv's doc
+// comment has the empirical proof; TestAddNoteIdentityImmuneToAmbientEnv is
+// the test). This is the second deliberate object-creation site DESIGN.md's
+// Invariant 6 now names (issue #13; CommitTree remains the first, and
+// unchanged).
 //
 // The blob is created with `git hash-object -w` from the raw payload
 // bytes and attached via `git notes add -C <blob>` (reusing an existing
@@ -129,7 +134,7 @@ func (r *Repo) AddNote(ctx context.Context, localWorkRef, sha string, payload []
 		"-c", "user.email=" + who.Email,
 		"notes", "--ref=" + localWorkRef, "add", "-C", blobSHA, sha,
 	}
-	if _, err := r.run(ctx, args...); err != nil {
+	if _, err := runGitEnv(ctx, r.dir, nil, identityEnv(who), args...); err != nil {
 		return "", fmt.Errorf("gitx: add note %s on %s: %w", sha, localWorkRef, err)
 	}
 	return blobSHA, nil

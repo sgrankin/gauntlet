@@ -473,6 +473,57 @@ func TestAPIRun_SpeculatedAndRecoveredOmittedWhenFalse(t *testing.T) {
 	}
 }
 
+// TestAPIRun_ReceiptProvenancePresentNoPayloadLeak confirms GET
+// /api/v1/run/{id} surfaces a landed run's receipt-notes provenance
+// (core.RunRecord.ReceiptRef/ReceiptBlob/ReceiptPublished, v12+, issue
+// #13) as receiptRef/receiptBlob/receiptPublished — mirroring
+// TestAPIRun_SpeculatedAndRecoveredPresentWhenTrue's pattern for the other
+// informational run fields — and, separately, that the raw receipt PAYLOAD
+// bytes the receipt node captured (core.CheckResult.Receipt) never reach
+// the response. history.CheckRow has no column for CheckResult.Receipt at
+// all (only Output, which the store populates from a DIFFERENT field), so
+// this is a real assertion against a real risk (a future change wiring
+// Receipt into Output or similar), not a fabricated one: giving the
+// receipt check a Receipt payload distinct from its Output and asserting
+// the payload's own bytes are absent from the body.
+func TestAPIRun_ReceiptProvenancePresentNoPayloadLeak(t *testing.T) {
+	store := openTestStore(t)
+	const secretPayload = "SECRET-RECEIPT-PAYLOAD-BYTES-cafef00d"
+
+	rec := sampleRecord("run-receipt-api", "main")
+	rec.Outcome = core.OutcomeLanded
+	rec.ReceiptRef = "refs/notes/gauntlet/receipts"
+	rec.ReceiptBlob = "blob1111111111111111111111111111111111"
+	rec.ReceiptPublished = "published"
+	rec.Checks = append(rec.Checks, core.CheckResult{
+		Name: "receipt:deploy", Status: core.CheckPassed, Duration: time.Second,
+		Output:  "deploy script ok",
+		Receipt: []byte(secretPayload),
+	})
+	emitRun(t, store, rec)
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/run/run-receipt-api")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	if m["receiptRef"] != rec.ReceiptRef {
+		t.Errorf("receiptRef = %v, want %q", m["receiptRef"], rec.ReceiptRef)
+	}
+	if m["receiptBlob"] != rec.ReceiptBlob {
+		t.Errorf("receiptBlob = %v, want %q", m["receiptBlob"], rec.ReceiptBlob)
+	}
+	if m["receiptPublished"] != rec.ReceiptPublished {
+		t.Errorf("receiptPublished = %v, want %q", m["receiptPublished"], rec.ReceiptPublished)
+	}
+
+	if strings.Contains(body, secretPayload) {
+		t.Errorf("response body contains the raw receipt payload bytes, want only ref/blob/published provenance:\n%s", body)
+	}
+}
+
 // TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured confirms
 // GET /api/v1/run/{id} exposes logPath (always, when non-empty) and logUrl
 // (only when the dashboard is configured to actually serve it, WithLogRoot)

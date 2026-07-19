@@ -156,6 +156,57 @@ func TestCommitTreeTwoParentsWithTrailers(t *testing.T) {
 	}
 }
 
+// TestCommitTreeIdentityImmuneToAmbientEnv covers issue #13's F1 finding:
+// CommitTree previously passed identity via "-c user.name=.../-c
+// user.email=..." only, but the subprocess inherited the daemon's own
+// environment (runGit's env parameter was nil -> ambient), and git's own
+// precedence puts GIT_AUTHOR_*/GIT_COMMITTER_* environment variables AHEAD
+// of -c config — so an adversarial (or merely stale) ambient environment
+// silently won over the configured committer. t.Setenv here simulates
+// exactly that: all four variables set to values distinct from who, and
+// the resulting commit's author AND committer must still be who, not the
+// environment.
+func TestCommitTreeIdentityImmuneToAmbientEnv(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, dir := newRepo(t)
+	remote.Seed("main", map[string]string{"f.txt": "line1\n"})
+	candRef := remote.PushCandidate("main", "alice", "feat", map[string]string{"g.txt": "new\n"})
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	refs, err := repo.ListRefs(ctx)
+	if err != nil {
+		t.Fatalf("ListRefs: %v", err)
+	}
+	base, cand := refs["refs/heads/main"], refs[candRef]
+	tm, err := repo.MergeTree(ctx, base, cand)
+	if err != nil || !tm.Clean {
+		t.Fatalf("MergeTree: tm=%+v err=%v", tm, err)
+	}
+
+	t.Setenv("GIT_AUTHOR_NAME", "Evil Ambient")
+	t.Setenv("GIT_AUTHOR_EMAIL", "evil-ambient@attacker.example")
+	t.Setenv("GIT_COMMITTER_NAME", "Evil Ambient")
+	t.Setenv("GIT_COMMITTER_EMAIL", "evil-ambient@attacker.example")
+
+	who := core.Identity{Name: "Gauntlet", Email: "gauntlet@ci.example"}
+	commit, err := repo.CommitTree(ctx, tm.TreeOID, []string{base, cand}, "merge under adversarial ambient env\n", who)
+	if err != nil {
+		t.Fatalf("CommitTree: %v", err)
+	}
+
+	raw := catFile(t, dir, commit)
+	if !strings.Contains(raw, "author Gauntlet <gauntlet@ci.example>") {
+		t.Fatalf("commit author leaked the ambient environment identity, got:\n%s", raw)
+	}
+	if !strings.Contains(raw, "committer Gauntlet <gauntlet@ci.example>") {
+		t.Fatalf("commit committer leaked the ambient environment identity, got:\n%s", raw)
+	}
+	if strings.Contains(raw, "Evil Ambient") || strings.Contains(raw, "evil-ambient@attacker.example") {
+		t.Fatalf("commit carries the adversarial ambient identity, got:\n%s", raw)
+	}
+}
+
 func TestReadFileFromTree(t *testing.T) {
 	ctx := context.Background()
 	repo, remote, _ := newRepo(t)

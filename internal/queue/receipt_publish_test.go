@@ -14,9 +14,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sgrankin/gauntlet/internal/channel"
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/executor"
@@ -75,6 +79,55 @@ func TestReceipt_DisabledPolicyNoReceipt_Unchanged(t *testing.T) {
 	}
 	if last.ReceiptRef != "" || last.ReceiptBlob != "" || last.ReceiptPublished != "" {
 		t.Errorf("record receipt provenance = %+v, want all empty", last)
+	}
+}
+
+// TestReceipt_PolicyEnabledSpecMissingReceipt_Parks covers the OTHER half
+// of the rollout gate through the full ReconcileOnce path (the disabled/no-
+// receipt half is TestReceipt_DisabledPolicyNoReceipt_Unchanged above):
+// this daemon has a receipt-notes policy configured, but the pushed
+// candidate's check spec declares no receipt node at all. SpecRejectReason
+// itself is already covered directly (receipt_notes_test.go's
+// TestSpecRejectReason_ReceiptPolicy), but that's a pure-predicate test —
+// nothing before this exercised the gate actually firing through a real
+// run, the same way TestExecutorProfile_UnknownRejectsBeforeAnyCommand and
+// TestServices_Gating_RejectedLoud do for the other two spec-load gates.
+func TestReceipt_PolicyEnabledSpecMissingReceipt_Parks(t *testing.T) {
+	h := newReceiptHarness(t, 65536)
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	sha := h.git.pushCandidate(ref, "", checkSpecFile("unit")) // no receipt node declared
+	base := h.git.ref("refs/heads/main")
+
+	h.reconcile()
+
+	recs := h.ch.Records()
+	if len(recs) == 0 {
+		t.Fatal("expected a terminal record")
+	}
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeRejected {
+		t.Fatalf("Outcome = %v, want Rejected", last.Outcome)
+	}
+	const wantDetail = "this daemon requires a receipt (receipt-notes is configured) but the check spec declares none"
+	if last.Detail != wantDetail {
+		t.Fatalf("Detail = %q, want SpecRejectReason's exact wording %q", last.Detail, wantDetail)
+	}
+	// Rejected before any command started — a config mismatch, never a red
+	// verdict.
+	for _, e := range h.ch.Events() {
+		if e.Kind == core.EventCheckStarted {
+			t.Fatalf("check %q started despite the spec being rejected", e.CheckName)
+		}
+	}
+	if got := h.git.ref("refs/heads/main"); got != base {
+		t.Fatalf("target moved on a receipt-policy rejection: %q, want unchanged %q", got, base)
+	}
+	if entry, ok := h.d.done["main"][ref]; !ok || entry.SHA != sha {
+		t.Fatalf("park entry = %+v ok=%v, want parked at %s", entry, ok, sha)
+	}
+	if len(h.git.publishNoteCalls) != 0 {
+		t.Fatalf("PublishNote calls = %d, want 0", len(h.git.publishNoteCalls))
 	}
 }
 
@@ -565,6 +618,13 @@ func TestIntegration_ReceiptPublishEndToEnd(t *testing.T) {
 	remote := h.remote
 	remote.Seed("main", map[string]string{"README.md": "seed\n"})
 
+	// envDumpPath is OUTSIDE the trial tree (a fresh t.TempDir(), not a
+	// path under the materialized workspace) so it survives past the
+	// trial export's own cleanup — the receipt producer dumps its full
+	// subprocess environment here, letting the assertions below inspect
+	// exactly what LocalExecutor handed it (credential-invisibility, F4).
+	envDumpPath := filepath.Join(t.TempDir(), "receipt-env.dump")
+
 	const payload = "deployment-receipt-sha256-deadbeefcafebabe"
 	files := map[string]string{
 		testCheckSpecPath: "check \"unit\" {\n    command \"/bin/sh\" \"unit.sh\"\n}\n" +
@@ -572,10 +632,11 @@ func TestIntegration_ReceiptPublishEndToEnd(t *testing.T) {
 		"unit.sh": "#!/bin/sh\nexit 0\n",
 		"receipt.sh": fmt.Sprintf(`#!/bin/sh
 set -eu
+env > %q
 [ -n "$%s" ] || exit 1
 [ -z "${%s+x}" ] || { echo "check result file leaked into a receipt"; exit 1; }
 printf '%%s' %q > "$%s"
-`, core.EnvReceiptResultFile, core.EnvResultFile, payload, core.EnvReceiptResultFile),
+`, envDumpPath, core.EnvReceiptResultFile, core.EnvResultFile, payload, core.EnvReceiptResultFile),
 	}
 	remote.PushCandidate("main", "alice", "widget", files)
 
@@ -599,6 +660,72 @@ printf '%%s' %q > "$%s"
 		t.Error("record ReceiptBlob is empty, want the published note's blob SHA")
 	}
 
+	// Credential-invisibility (F4): the receipt producer's own dumped
+	// environment must carry EXACTLY the receipt result-file protocol —
+	// GAUNTLET_RECEIPT_RESULT_FILE present, the plain-check and image
+	// result-file variables absent (LocalExecutor.RunCheck's "distinct
+	// protocol, never conflated" contract for a receipt job) — and gauntlet
+	// itself must never have ADDED anything beyond the documented GAUNTLET_*
+	// vocabulary (core.Env*/job.ServiceEnv) to what the subprocess got.
+	//
+	// This harness (newIntegrationHarness -> gitx.New with no
+	// WithTokenSource) never configures a credential at all, so there is no
+	// real secret value here to search for byte-exact — asserting that
+	// would be dishonest (nothing could ever make it fail). What's asserted
+	// below instead is diffed against THIS test process's own os.Environ():
+	// LocalExecutor.RunCheck deliberately passes the daemon's whole ambient
+	// environment through to every check/receipt job (cmd.Env =
+	// append(os.Environ(), ...) — by design, not a gap this test exists to
+	// close, and this sandbox's own ambient env happens to carry real
+	// GH_TOKEN/GITHUB_TOKEN/etc. vars unrelated to gauntlet, which a naive
+	// "no GITHUB_/TOKEN-suffixed name anywhere" check would misfire on. So
+	// this only flags a name that is BOTH new (not already in the parent's
+	// own environment — i.e. something gauntlet's own code added) AND
+	// outside the GAUNTLET_ vocabulary: exactly the shape a leaked
+	// credential injected by gauntlet's own env-assembly would take. The
+	// deeper guarantee — a real token never reaching a check/receipt
+	// subprocess at all — is enforced by that same shared env-assembly path
+	// (RunCheck only ever appends core.Env*/job.ServiceEnv, never a
+	// credential) plus gitx's own askpass tests (auth_test.go), which prove
+	// a git credential rides ONLY the git subprocess's ephemeral
+	// GIT_ASKPASS environment, never anywhere a check or receipt command
+	// could read it from.
+	envDump, err := os.ReadFile(envDumpPath)
+	if err != nil {
+		t.Fatalf("read receipt env dump: %v", err)
+	}
+	envNames := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimRight(string(envDump), "\n"), "\n") {
+		name, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		envNames[name] = true
+	}
+	if !envNames[core.EnvReceiptResultFile] {
+		t.Errorf("receipt env missing %s: %v", core.EnvReceiptResultFile, envDump)
+	}
+	if envNames[core.EnvResultFile] {
+		t.Errorf("receipt env carries the plain-check result file var %s, want it absent (receipt jobs use %s instead)", core.EnvResultFile, core.EnvReceiptResultFile)
+	}
+	if envNames[core.EnvImageResultFile] {
+		t.Errorf("receipt env carries the image-build result file var %s, want it absent", core.EnvImageResultFile)
+	}
+	ambientNames := make(map[string]bool)
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		ambientNames[name] = true
+	}
+	for name := range envNames {
+		if ambientNames[name] {
+			continue // pass-through of this test process's own environment, not gauntlet's addition
+		}
+		if strings.HasPrefix(name, "GAUNTLET_") {
+			continue // documented vocabulary
+		}
+		t.Errorf("receipt env carries %q: not in this process's own ambient environment and outside the documented GAUNTLET_* vocabulary — looks like something gauntlet's own env-assembly added beyond protocol", name)
+	}
+
 	// The read-path incantation: an explicit fetch of the notes ref into its
 	// local work ref, then a read keyed on the landed merge SHA.
 	ctx := context.Background()
@@ -614,5 +741,156 @@ printf '%%s' %q > "$%s"
 	}
 	if string(got) != payload {
 		t.Fatalf("note payload = %q, want byte-identical %q", got, payload)
+	}
+}
+
+// buildReceiptDaemon builds a Daemon directly against git (not through
+// testHarness, whose h.d/h.exec/h.ch are fixed to ONE daemon instance for
+// its lifetime) — mirrors retryintent_test.go's buildDaemonWithStore, minus
+// the history.Store wiring this suite doesn't need, with a receipt-notes
+// policy configured. Used to construct a SECOND, wholly independent Daemon
+// over the same git state, simulating an actual process restart (a fresh
+// in-memory state machine, everything re-derived from refs) rather than the
+// same daemon instance simply reconciling again.
+func buildReceiptDaemon(t *testing.T, git *fakeGitRepo, clock *time.Time) (*Daemon, *channel.RecordingChannel) {
+	t.Helper()
+	exec := executor.NewGatedExecutor()
+	ch := channel.NewRecordingChannel()
+	now := func() time.Time {
+		*clock = clock.Add(time.Second)
+		return *clock
+	}
+	d, err := New(git, exec, []core.Channel{ch}, Config{
+		Targets:      []config.Target{{Name: "main", Branch: "main"}},
+		CheckSpec:    testCheckSpecPath,
+		Committer:    testCommitter,
+		ReceiptNotes: &config.ReceiptNotes{Ref: testReceiptRef, MaxBytes: 65536},
+	}, now)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })
+	return d, ch
+}
+
+// TestReceipt_RestartAfterPublishBeforeLand_Converges is issue #13's
+// crash-boundary acceptance test: a candidate runs to green and publishes
+// its receipt note, but the LANDING push (the target CAS right after)
+// fails as stale — the exact "published, not yet landed" window a crash
+// could land in. TestReceipt_StaleTargetCASAfterPublish already proves the
+// re-trial half of recovery, but does so by calling h.reconcile() again on
+// the SAME Daemon instance, which still holds the first run's in-memory
+// state; it does not prove recovery survives losing that state entirely.
+// This test's distinct value is the SECOND, independently-constructed
+// Daemon over the same git state (buildReceiptDaemon) — the actual
+// restart shape: a fresh process re-deriving everything from refs
+// (Invariant 4), with no memory of the run buildReceiptDaemon's first
+// instance drove. It must re-trial under a NEW chainTip, publish a SECOND
+// note, and land — with the first (orphaned) note surviving untouched,
+// never deleted or overwritten.
+func TestReceipt_RestartAfterPublishBeforeLand_Converges(t *testing.T) {
+	git := newFakeGitRepo()
+	git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	git.pushCandidate(ref, "", receiptSpecFile("deploy"))
+
+	clock := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
+	d1, ch1 := buildReceiptDaemon(t, git, &clock)
+
+	mustReconcile(t, d1)
+	runID1 := currentRunIDFrom(t, ch1)
+	firstChainTip := d1.headRun("main").chainTip
+
+	// Fail the target CAS exactly once, right after the publish succeeds —
+	// the same stale-lease race TestReceipt_StaleTargetCASAfterPublish
+	// provokes (a human push lands in the window between landRun's publish
+	// and its own target CAS).
+	triggered := false
+	git.beforeCAS = func(remoteRef string) {
+		if remoteRef == "refs/heads/main" && !triggered {
+			triggered = true
+			git.directPush("main", map[string]string{"human.txt": "raced in at land time"})
+		}
+	}
+
+	releaseCheck(t, d1, ch1, runID1, "unit", core.CheckResult{Name: "unit", Status: core.CheckPassed})
+	releaseCheck(t, d1, ch1, runID1, receiptNode, core.CheckResult{Name: receiptNode, Status: core.CheckPassed, Receipt: []byte("payload-v1")})
+
+	if !triggered {
+		t.Fatal("beforeCAS hook never fired; test didn't exercise the race it's meant to")
+	}
+	recs1 := ch1.Records()
+	last1 := recs1[len(recs1)-1]
+	if last1.Outcome != core.OutcomeSkipped {
+		t.Fatalf("first daemon's Outcome = %v, want Skipped (published, then raced on the target CAS)", last1.Outcome)
+	}
+	if len(git.publishNoteCalls) != 1 {
+		t.Fatalf("publishNoteCalls after the first daemon = %d, want 1", len(git.publishNoteCalls))
+	}
+	if git.publishNoteCalls[0].sha != firstChainTip {
+		t.Fatalf("first publish sha = %q, want the first trial's own chainTip %q", git.publishNoteCalls[0].sha, firstChainTip)
+	}
+	if !git.hasRef(ref) {
+		t.Fatal("candidate slot deleted despite a stale target CAS; the re-trial has nothing left to pick up")
+	}
+	git.beforeCAS = nil // already fired once; clear before the "restart" so it doesn't interfere again
+
+	// Simulated crash + restart: a brand new Daemon instance over the SAME
+	// git state, with no memory of d1's run at all.
+	restartClock := clock
+	d2, ch2 := buildReceiptDaemon(t, git, &restartClock)
+
+	mustReconcile(t, d2)
+	runID2 := currentRunIDFrom(t, ch2)
+	if runID2 == runID1 {
+		t.Fatal("second daemon reused the first daemon's run ID; not an independent re-trial")
+	}
+	run2 := d2.headRun("main")
+	if run2 == nil {
+		t.Fatal("second daemon has no head run after reconciling; the candidate was not picked back up")
+	}
+	newChainTip := run2.chainTip
+	if newChainTip == firstChainTip {
+		t.Fatal("restart re-derived the SAME chain tip as the raced-away first attempt, want a fresh trial")
+	}
+	if git.mergeTreeCalls == 0 {
+		t.Error("mergeTreeCalls = 0 after restart, want at least 1 (a genuine re-trial, not a no-op)")
+	}
+
+	releaseCheck(t, d2, ch2, runID2, "unit", core.CheckResult{Name: "unit", Status: core.CheckPassed})
+	releaseCheck(t, d2, ch2, runID2, receiptNode, core.CheckResult{Name: receiptNode, Status: core.CheckPassed, Receipt: []byte("payload-v2")})
+
+	recs2 := ch2.Records()
+	last2 := recs2[len(recs2)-1]
+	if last2.Outcome != core.OutcomeLanded {
+		t.Fatalf("second daemon's Outcome = %v, want Landed", last2.Outcome)
+	}
+	if len(git.publishNoteCalls) != 2 {
+		t.Fatalf("publishNoteCalls after the restart = %d, want 2 (both notes present)", len(git.publishNoteCalls))
+	}
+	second := git.publishNoteCalls[1]
+	if second.sha != newChainTip {
+		t.Fatalf("restart's publish sha = %q, want its own new chainTip %q", second.sha, newChainTip)
+	}
+	if second.sha == firstChainTip {
+		t.Fatal("restart published under the SAME merge SHA as the raced-away first attempt")
+	}
+
+	// The first note — d1's successful publish, orphaned by the raced-away
+	// target CAS — must survive UNTOUCHED: never deleted, never
+	// overwritten by the restart's own (differently-addressed) publish.
+	firstNote, exists := git.notes[[2]string{testReceiptRef, firstChainTip}]
+	if !exists {
+		t.Fatal("first note (the first daemon's orphaned publish) is missing after the restart; it must never be cleaned up")
+	}
+	if string(firstNote) != "payload-v1" {
+		t.Fatalf("first note payload = %q, want untouched %q", firstNote, "payload-v1")
+	}
+	secondNote, exists := git.notes[[2]string{testReceiptRef, newChainTip}]
+	if !exists {
+		t.Fatal("second note (the restart's own publish) is missing")
+	}
+	if string(secondNote) != "payload-v2" {
+		t.Fatalf("second note payload = %q, want %q", secondNote, "payload-v2")
 	}
 }
