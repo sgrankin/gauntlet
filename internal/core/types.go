@@ -54,6 +54,26 @@ type CheckJob struct {
 	// executor-agnostic).
 	Executor string
 
+	// OperatorOwned is true iff this job's Command comes from the
+	// daemon's own operator-written config, never from a candidate's own
+	// repo spec — today that means exactly one thing: internal/hooks's
+	// Runner sets it on every post-land hook job it builds. Every other
+	// CheckJob constructor (internal/queue's checks, image builds, and
+	// receipt producers, all built from a candidate's OWN
+	// `.gauntlet.kdl`) leaves it false — CANDIDATE CODE, by construction.
+	//
+	// The distinction exists for exactly one consumer:
+	// executor.LocalExecutor.RunCheck's config-named-secret env filter
+	// (issue #13 Gap 1, docs/checks.md). A hook is operator-owned daemon
+	// config and legitimately uses the same credentials the daemon itself
+	// holds (a deploy hook driving `gh`); a candidate's check/build/receipt
+	// command is attacker-controlled the moment someone can push a `for/`
+	// ref, so it must never observe them. Nothing else about a CheckJob —
+	// hooks and checks share every other field — distinguishes the two,
+	// which is why this is an explicit bool rather than something inferred
+	// from Name or another field already in play.
+	OperatorOwned bool
+
 	// ImageBuild marks this job as a candidate-image BUILD
 	// (config.Image): the executor exports EnvImageResultFile instead of
 	// EnvResultFile and returns the file's content verbatim in
@@ -444,15 +464,24 @@ type RunRecord struct {
 	Recovered bool
 
 	// ReceiptRef, ReceiptBlob, and ReceiptPublished carry the receipt-notes
-	// provenance of a LANDED run (issue #13): ReceiptRef is the configured
-	// notes ref the receipt was published under, ReceiptBlob is the
-	// published note's blob SHA (core.NotePublishResult.NoteBlobSHA), and
-	// ReceiptPublished is a small vocabulary — "published" (a fresh note
-	// commit) or "already-present" (PublishNote's idempotent AlreadyPublished
-	// outcome; still a landing success) — describing which. All three are ""
-	// when receipt-notes policy is disabled, the spec declares no receipt,
-	// or the run did not land (publication happens immediately before the
-	// target CAS, gated on it — see queue's landRun). Purely provenance,
+	// provenance of a run whose note was CONFIRMED PUBLISHED (issue #13):
+	// ReceiptRef is the configured notes ref the receipt was published
+	// under, ReceiptBlob is the published note's blob SHA
+	// (core.NotePublishResult.NoteBlobSHA), and ReceiptPublished is a small
+	// vocabulary — "published" (a fresh note commit) or "already-present"
+	// (PublishNote's idempotent AlreadyPublished outcome; still a landing
+	// success) — describing which. All three are "" when receipt-notes
+	// policy is disabled or the spec declares no receipt.
+	//
+	// NOT gated on the run actually landing: publication happens
+	// immediately before the target CAS (queue's landRun), and the queue
+	// stamps these three fields onto every member's record right then —
+	// before that CAS is even attempted — specifically so a run whose
+	// publish succeeded but then lost the target race (stale CAS, crash,
+	// a disjoint concurrent writer) still carries them despite ending
+	// Skipped or Error, not Landed. That orphan is deliberate: it is
+	// exactly the record that most needs this data, since a confirmed
+	// note now exists for a merge that never landed. Purely provenance,
 	// like Speculated/Recovered above: never read back by queue logic.
 	ReceiptRef       string
 	ReceiptBlob      string

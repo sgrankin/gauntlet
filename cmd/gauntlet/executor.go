@@ -28,8 +28,20 @@ import (
 // runs on exactly one profile, so names can't collide across profiles.
 // gitDir is the daemon's bare repo path, exported to every check as
 // GAUNTLET_GIT_DIR by every profile alike (core.EnvGitDir).
-func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string) (core.Executor, error) {
-	def, err := buildOneExecutor(cfg.Executor, scratchDir, token, gitDir)
+//
+// secretEnv is cfg.SecretEnvNames() (issue #13 Gap 1) — the config-named
+// operator secret env-var names every LOCAL profile's LocalExecutor strips
+// from a candidate-code job's environment (checks, image builds, receipt
+// producers; post-land hooks are exempt, core.CheckJob.OperatorOwned).
+// Threaded straight through from LoadDaemon's result rather than
+// recomputed per profile, so every local profile — default and named
+// alike — shares exactly one collection. The container executor never
+// passes host env through at all (runArgs builds every -e as a fully
+// specified NAME=VALUE, never a bare NAME that would forward from this
+// process's own environment — see executor/container.go), so it has no
+// analogous field and needs no filtering here.
+func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string, secretEnv []string) (core.Executor, error) {
+	def, err := buildOneExecutor(cfg.Executor, scratchDir, token, gitDir, secretEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +50,7 @@ func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string) (core.E
 	}
 	named := make(map[string]core.Executor, len(cfg.Profiles))
 	for _, p := range cfg.Profiles {
-		ex, err := buildOneExecutor(p, scratchDir, token, gitDir)
+		ex, err := buildOneExecutor(p, scratchDir, token, gitDir, secretEnv)
 		if err != nil {
 			return nil, err
 		}
@@ -80,14 +92,14 @@ func executorPredicates(cfg *config.Daemon) (known, imageCapable func(name strin
 // already rejected any Kind outside the switch, so the default case is
 // unreachable in practice — it still errors rather than panicking, since
 // this constructs from a caller-supplied struct, not only from LoadDaemon.
-func buildOneExecutor(e config.Executor, scratchDir, token, gitDir string) (core.Executor, error) {
+func buildOneExecutor(e config.Executor, scratchDir, token, gitDir string, secretEnv []string) (core.Executor, error) {
 	label := "executor"
 	if e.Name != "" {
 		label = fmt.Sprintf("executor %q", e.Name)
 	}
 	switch e.Kind {
 	case "", "local":
-		return executor.LocalExecutor{BaseDir: scratchDir, GitDir: gitDir, Env: envPairs(e.Env)}, nil
+		return executor.LocalExecutor{BaseDir: scratchDir, GitDir: gitDir, Env: envPairs(e.Env), SecretEnv: secretEnv}, nil
 	case "container":
 		caches := make([]executor.Cache, len(e.Caches))
 		for i, c := range e.Caches {

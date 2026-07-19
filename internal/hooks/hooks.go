@@ -797,6 +797,13 @@ func (r *Runner) runLanding(ctx context.Context, ev core.Event, supersede <-chan
 			MergeSHA:  rec.MergeSHA,
 			Candidate: rec.Candidate,
 			LogPath:   r.hookLogPath(rec.RunID, i+1, h.Name),
+			// A hook's Command comes from the daemon's own operator-written
+			// config (config.Hook), never a candidate's repo spec — see
+			// core.CheckJob.OperatorOwned's doc. This is what exempts hooks
+			// from the local executor's config-named-secret env filter
+			// (issue #13 Gap 1): a deploy hook driving `gh` legitimately
+			// needs the same credentials the daemon itself holds.
+			OperatorOwned: true,
 		}
 
 		// EventHookStarted fires before this hook's RunCheck, on this

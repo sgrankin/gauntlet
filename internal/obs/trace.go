@@ -30,11 +30,13 @@ const (
 	AttrCheckStatus   = "gauntlet.check.status"
 	AttrCheckDuration = "gauntlet.check.duration_ms"
 
-	// AttrReceiptRef, AttrReceiptBlob, and AttrReceiptOutcome carry a landed
-	// run's receipt-notes provenance (issue #13, core.RunRecord.ReceiptRef/
-	// ReceiptBlob/ReceiptPublished) alongside the existing landing
-	// attributes — "" on every run that never published one (policy
-	// disabled, no declared receipt, or a non-landing outcome), same as
+	// AttrReceiptRef, AttrReceiptBlob, and AttrReceiptOutcome carry the
+	// receipt-notes provenance of a run whose note was CONFIRMED PUBLISHED
+	// (issue #13, core.RunRecord.ReceiptRef/ReceiptBlob/ReceiptPublished)
+	// alongside the existing landing attributes — "" only when the policy
+	// is disabled or the spec declared no receipt. NOT landed-only: a run
+	// that publishes and then loses the target race (stale CAS, crash)
+	// carries these too, by design (RunRecord's own field doc), same as
 	// every other RunRecord-derived attribute here.
 	AttrReceiptRef     = "gauntlet.receipt.ref"
 	AttrReceiptBlob    = "gauntlet.receipt.blob"

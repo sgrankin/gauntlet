@@ -91,10 +91,14 @@ type RunRow struct {
 
 	// ReceiptRef, ReceiptBlob, and ReceiptPublished are core.RunRecord's
 	// own fields of the same names verbatim (v12+): the receipt-notes
-	// publication provenance of a landed run (issue #13) — the notes ref,
-	// the published note's blob SHA, and "published"/"already-present".
-	// All three are "" when receipt-notes policy is disabled, the spec
-	// declared no receipt, the run didn't land, or the row predates v12.
+	// publication provenance of a run whose note was confirmed published
+	// (issue #13) — the notes ref, the published note's blob SHA, and
+	// "published"/"already-present". All three are "" when receipt-notes
+	// policy is disabled, the spec declared no receipt, or the row
+	// predates v12 — NOT necessarily "" for a non-landed run: a run that
+	// publishes and then loses the target race (stale CAS, crash) still
+	// carries these three, by design (see schema.sql's column comment
+	// and reconcile.go's stampReceiptRecords).
 	ReceiptRef       string
 	ReceiptBlob      string
 	ReceiptPublished string

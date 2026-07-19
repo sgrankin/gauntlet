@@ -691,8 +691,9 @@ type runOut struct {
 
 	// ReceiptRef/ReceiptBlob/ReceiptPublished mirror dashboard/api.go's
 	// runDetailResponse additions field-for-field (v12+, issue #13): the
-	// receipt-notes publication provenance of a landed run, omitted when
-	// the run never published one.
+	// receipt-notes publication provenance of a run whose note was
+	// confirmed published (not landed-only — see that field's doc),
+	// omitted when the run never published one.
 	ReceiptRef       string `json:"receiptRef,omitempty"`
 	ReceiptBlob      string `json:"receiptBlob,omitempty"`
 	ReceiptPublished string `json:"receiptPublished,omitempty"`

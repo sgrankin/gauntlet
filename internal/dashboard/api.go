@@ -698,7 +698,9 @@ type runDetailResponse struct {
 
 	// ReceiptRef/ReceiptBlob/ReceiptPublished mirror history.RunRow's own
 	// fields of the same names (v12+, issue #13): the receipt-notes
-	// publication provenance of a landed run. Omitted (rather than
+	// publication provenance of a run whose note was confirmed published —
+	// NOT landed-only, an orphaned publish (target CAS lost the race after
+	// a successful publish) carries these too. Omitted (rather than
 	// present-and-empty) when the run never published one — same
 	// omitempty convention as BatchID/Speculated above.
 	ReceiptRef       string `json:"receiptRef,omitempty"`

@@ -348,7 +348,14 @@ func run() error {
 		}
 	}
 
-	ex, err := buildExecutor(cfg, scratchDir, token, repoDir)
+	// Config-named operator secret env-var names (issue #13 Gap 1): every
+	// local executor profile strips these from a candidate-code job's
+	// environment (checks, image builds, receipt producers) so a check
+	// command can never observe the daemon's own GitHub/Slack/summarize
+	// credentials — see config.Daemon.SecretEnvNames's doc for exactly
+	// which names qualify and why, and docs/checks.md for the operator-
+	// facing contract.
+	ex, err := buildExecutor(cfg, scratchDir, token, repoDir, cfg.SecretEnvNames())
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
 	}

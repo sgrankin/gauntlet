@@ -1175,6 +1175,48 @@ func pathAtOrUnder(path, reserved string) bool {
 	return path == reserved || strings.HasPrefix(path, reserved+string(filepath.Separator))
 }
 
+// SecretEnvNames returns the environment variable NAMES (never values)
+// that d's configured integrations declare as operator-secret credential
+// sources: github's token-env in static-token mode, slack's
+// app-token-env/bot-token-env, and summarize's api-key-env — exactly the
+// vocabulary issue #13's Gap 1 requires the local executor to strip from
+// every CANDIDATE-CODE command environment (checks, image builds, receipt
+// producers; post-land hooks are exempt — see core.CheckJob.OperatorOwned —
+// being operator-owned daemon config themselves, e.g. a deploy hook driving
+// `gh`). cmd/gauntlet threads this straight into executor.LocalExecutor's
+// SecretEnv field at construction; callers that build a Daemon by hand
+// (tests) get the same collection logic by calling this method rather than
+// re-deriving it, so the two can never drift.
+//
+// Call after applyDefaults has run (LoadDaemon always does) so each env-var
+// field already carries its resolved default rather than an unresolved "".
+//
+// Only a name the config ACTUALLY declares as a secret source is
+// collected, never the whole vocabulary regardless of mode: github's
+// TokenEnv is a credential source only in static-token mode (Auth == nil)
+// — an app-mode github block puts no static token in the daemon's own
+// environment at all (ghauth mints installation tokens in-process), so
+// there is nothing to strip. Likewise a disabled section (Repo/Channel
+// empty, Summarize nil) contributes nothing.
+func (d *Daemon) SecretEnvNames() []string {
+	var names []string
+	if d.GitHub.Repo != "" && d.GitHub.Auth == nil && d.GitHub.TokenEnv != "" {
+		names = append(names, d.GitHub.TokenEnv)
+	}
+	if d.Slack.Channel != "" {
+		if d.Slack.AppTokenEnv != "" {
+			names = append(names, d.Slack.AppTokenEnv)
+		}
+		if d.Slack.BotTokenEnv != "" {
+			names = append(names, d.Slack.BotTokenEnv)
+		}
+	}
+	if d.Summarize != nil && d.Summarize.APIKeyEnv != "" {
+		names = append(names, d.Summarize.APIKeyEnv)
+	}
+	return names
+}
+
 func (d *Daemon) validate() error {
 	if d.Remote == "" {
 		return fmt.Errorf("remote: must not be empty")

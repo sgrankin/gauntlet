@@ -42,18 +42,25 @@ CREATE TABLE runs (
   speculated   INTEGER NOT NULL DEFAULT 0,
   recovered    INTEGER NOT NULL DEFAULT 0,
   -- receipt_ref/receipt_blob/receipt_published (v12+): the receipt-notes
-  -- publication provenance of a LANDED run (issue #13; core.RunRecord.
-  -- ReceiptRef/ReceiptBlob/ReceiptPublished verbatim). receipt_ref is the
-  -- configured notes ref the receipt was published under; receipt_blob is
-  -- the published note's blob SHA; receipt_published is a small vocabulary
-  -- ("published" for a fresh note commit, "already-present" for
-  -- PublishNote's idempotent AlreadyPublished outcome — still a landing
-  -- success). All three are '' when receipt-notes policy is disabled, the
-  -- spec declares no receipt, or the run did not land. The receipt node's
-  -- own execution (its command's pass/fail) already lands as an ordinary
-  -- row in the checks table below, under "receipt:<name>" — these three
-  -- columns are ONLY the post-land publication fact, not a duplicate of
-  -- that row.
+  -- publication provenance of a run whose note was actually confirmed
+  -- published (issue #13; core.RunRecord.ReceiptRef/ReceiptBlob/
+  -- ReceiptPublished verbatim). receipt_ref is the configured notes ref the
+  -- receipt was published under; receipt_blob is the published note's blob
+  -- SHA; receipt_published is a small vocabulary ("published" for a fresh
+  -- note commit, "already-present" for PublishNote's idempotent
+  -- AlreadyPublished outcome — still a landing success). All three are '' when
+  -- receipt-notes policy is disabled or the spec declares no receipt.
+  -- NOT necessarily '' for a non-landed run: landRun stamps these three
+  -- fields onto every member's record immediately after a successful
+  -- PublishNote, before the target CAS is even attempted — so a run whose
+  -- publish succeeded but then lost the target race (stale CAS, crash) still
+  -- carries them despite ending Skipped/Error, not Landed. That orphan case
+  -- is deliberate: it is exactly the row that most needs this data for
+  -- diagnosis (a confirmed-published note with no landing to show for it).
+  -- The receipt node's own execution (its command's pass/fail) already
+  -- lands as an ordinary row in the checks table below, under
+  -- "receipt:<name>" — these three columns are ONLY the publication fact,
+  -- not a duplicate of that row.
   receipt_ref       TEXT NOT NULL DEFAULT '',
   receipt_blob      TEXT NOT NULL DEFAULT '',
   receipt_published TEXT NOT NULL DEFAULT ''

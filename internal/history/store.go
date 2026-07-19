@@ -121,8 +121,10 @@ func Open(path string) (*Store, error) {
 //     loop.
 //   - 11 (schema v11: runs has no receipt_* columns): ALTER TABLE runs ADD
 //     COLUMN receipt_ref/receipt_blob/receipt_published (the receipt-notes
-//     publication provenance of a landed run — core.RunRecord.ReceiptRef/
-//     ReceiptBlob/ReceiptPublished, issue #13), stamp user_version=12, loop.
+//     publication provenance of a run whose note was confirmed published —
+//     core.RunRecord.ReceiptRef/ReceiptBlob/ReceiptPublished, issue #13; not
+//     landed-only, see schema.sql's column comment), stamp user_version=12,
+//     loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql

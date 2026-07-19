@@ -25,6 +25,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/executor"
 	"github.com/sgrankin/gauntlet/internal/gitx"
+	"github.com/sgrankin/gauntlet/internal/history"
 )
 
 // testReceiptRef is the receipt-notes ref every test in this file uses.
@@ -476,6 +477,19 @@ func TestReceipt_StaleTargetCASAfterPublish(t *testing.T) {
 	if h.git.publishNoteCalls[0].sha != firstChainTip {
 		t.Fatalf("first publish sha = %q, want the first trial's chainTip %q", h.git.publishNoteCalls[0].sha, firstChainTip)
 	}
+	// The orphan case this test is named for: the note published
+	// successfully before the target CAS lost the race, so the record must
+	// still carry its provenance — never empty just because the run ended
+	// Skipped rather than Landed (the gap this test now closes).
+	if last.ReceiptRef != testReceiptRef {
+		t.Errorf("orphaned run's record ReceiptRef = %q, want %q", last.ReceiptRef, testReceiptRef)
+	}
+	if last.ReceiptBlob == "" {
+		t.Error("orphaned run's record ReceiptBlob is empty, want the published note's blob SHA")
+	}
+	if last.ReceiptPublished != receiptPublishedFresh {
+		t.Errorf("orphaned run's record ReceiptPublished = %q, want %q", last.ReceiptPublished, receiptPublishedFresh)
+	}
 
 	// Re-trial against the new (human-pushed) tip; the slot survived
 	// untouched, so it re-forms on the next tick.
@@ -892,5 +906,87 @@ func TestReceipt_RestartAfterPublishBeforeLand_Converges(t *testing.T) {
 	}
 	if string(secondNote) != "payload-v2" {
 		t.Fatalf("second note payload = %q, want %q", secondNote, "payload-v2")
+	}
+}
+
+// TestReceipt_StaleTargetCASAfterPublish_HistoryRow proves the orphan case's
+// provenance actually reaches durable history — not just the in-memory
+// RunRecord TestReceipt_StaleTargetCASAfterPublish checks — through the
+// exact same real *history.Store path buildDaemonWithStore uses elsewhere
+// (retryintent_test.go): the store is wired as an ordinary core.Channel, so
+// EventLanded/EventSkipped's carried Record is what writeRecord persists.
+// The scenario is the identical race — a successful PublishNote immediately
+// followed by a target CAS that loses to a human push — but this time
+// queried back out of runs.receipt_ref/receipt_blob/receipt_published via
+// Store.Run, proving the schema.sql column comment's claim (these three
+// columns are NOT gated on outcome=landed) end to end.
+func TestReceipt_StaleTargetCASAfterPublish_HistoryRow(t *testing.T) {
+	dbPath := t.TempDir() + "/history.db"
+	store, err := history.Open(dbPath)
+	if err != nil {
+		t.Fatalf("history.Open: %v", err)
+	}
+	defer store.Close()
+
+	git := newFakeGitRepo()
+	git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	git.pushCandidate(ref, "", receiptSpecFile("deploy"))
+
+	exec := executor.NewGatedExecutor()
+	ch := channel.NewRecordingChannel()
+	clock := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	}
+	d, err := New(git, exec, []core.Channel{ch, store}, Config{
+		Targets:      []config.Target{{Name: "main", Branch: "main"}},
+		CheckSpec:    testCheckSpecPath,
+		Committer:    testCommitter,
+		ReceiptNotes: &config.ReceiptNotes{Ref: testReceiptRef, MaxBytes: 65536},
+	}, now)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	mustReconcile(t, d)
+	runID := currentRunIDFrom(t, ch)
+
+	triggered := false
+	git.beforeCAS = func(remoteRef string) {
+		if remoteRef == "refs/heads/main" && !triggered {
+			triggered = true
+			git.directPush("main", map[string]string{"human.txt": "raced in at land time"})
+		}
+	}
+
+	releaseCheck(t, d, ch, runID, "unit", core.CheckResult{Name: "unit", Status: core.CheckPassed})
+	releaseCheck(t, d, ch, runID, receiptNode, core.CheckResult{Name: receiptNode, Status: core.CheckPassed, Receipt: []byte("payload-v1")})
+
+	if !triggered {
+		t.Fatal("beforeCAS hook never fired; test didn't exercise the race it's meant to")
+	}
+	recs := ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeSkipped {
+		t.Fatalf("Outcome = %v, want Skipped", last.Outcome)
+	}
+
+	row, _, err := store.Run(runID)
+	if err != nil {
+		t.Fatalf("store.Run(%q): %v", runID, err)
+	}
+	if row.Outcome != "skipped" {
+		t.Fatalf("history row outcome = %q, want %q (un-landed, per the raced-away target CAS)", row.Outcome, "skipped")
+	}
+	if row.ReceiptRef != testReceiptRef {
+		t.Errorf("history row ReceiptRef = %q, want %q — an un-landed orphan run must still carry it", row.ReceiptRef, testReceiptRef)
+	}
+	if row.ReceiptBlob == "" {
+		t.Error("history row ReceiptBlob is empty, want the published note's blob SHA")
+	}
+	if row.ReceiptPublished != receiptPublishedFresh {
+		t.Errorf("history row ReceiptPublished = %q, want %q", row.ReceiptPublished, receiptPublishedFresh)
 	}
 }

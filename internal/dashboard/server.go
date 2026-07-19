@@ -1573,8 +1573,9 @@ type runSummaryFull struct {
 
 	// Receipt mirrors history.RunRow's own ReceiptRef/ReceiptBlob/
 	// ReceiptPublished fields (v12+, issue #13): "" on ReceiptRef when the
-	// run never published one (policy disabled, no declared receipt, or a
-	// non-landing outcome) — run.html only renders the receipt row when
+	// run never published one (policy disabled or no declared receipt) —
+	// NOT landed-only, an orphaned publish (successful note, lost target
+	// race) carries these too — run.html only renders the receipt row when
 	// ReceiptRef is non-empty.
 	ReceiptRef       string
 	ReceiptBlob      string

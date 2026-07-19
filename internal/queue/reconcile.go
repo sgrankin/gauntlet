@@ -2158,6 +2158,24 @@ func effectiveMaxParallel(spec *config.CheckSpec) int {
 	return spec.MaxParallel
 }
 
+// stampReceiptRecords mirrors r.receiptBlobSHA/r.receiptPublished (and
+// d.cfg.ReceiptNotes.Ref) onto every member's RunRecord — the common record
+// path every terminal event and history write reads from. Called exactly
+// once, from landRun, right after a successful PublishNote and before the
+// target CAS is even attempted: that ordering is what makes an orphaned
+// publication (the target CAS then fails or the process crashes) keep its
+// provenance instead of recording as if nothing was ever published — the
+// orphan is precisely the case that most needs this data for diagnosis.
+// Never called when d.cfg.ReceiptNotes is nil (landRun's own gate), so an
+// unconfigured policy's records stay all-empty, unchanged.
+func (d *Daemon) stampReceiptRecords(r *run) {
+	for i := range r.members {
+		r.members[i].rec.ReceiptRef = d.cfg.ReceiptNotes.Ref
+		r.members[i].rec.ReceiptBlob = r.receiptBlobSHA
+		r.members[i].rec.ReceiptPublished = r.receiptPublished
+	}
+}
+
 // landRun is the generalized land: one CAS push lands the whole chain, then
 // a per-member slot delete + terminal event, FIFO. len(r.members)==1 for
 // serial/speculate: one push, one delete, one event. A batch run has N
@@ -2214,6 +2232,20 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		if !res.Published {
 			r.receiptPublished = receiptPublishedAlready
 		}
+		// Stamp provenance onto every member's record IMMEDIATELY — before
+		// the target CAS below is even attempted, not only after it
+		// succeeds. A publish that then loses the target race (stale CAS,
+		// crash, a disjoint concurrent writer — the orphan case documented
+		// in DESIGN.md's decision ledger) still confirms a real note exists
+		// for r.chainTip; recording that here means the orphan's own
+		// history/API/span rows carry ref+blob+published for diagnosis,
+		// same as a landed run's, rather than reading as if nothing was
+		// ever published. finishRun's own per-member loop (the stale-CAS
+		// and error paths both route through it) only ever touches
+		// Outcome/Detail/EndedAt, never these fields, so a value stamped
+		// here survives untouched to every terminal path. Never the
+		// payload itself — r.receiptPayload stays in-memory only.
+		d.stampReceiptRecords(r)
 	}
 
 	err := d.git.CASUpdate(ctx, targetRefName(t), r.baseOID, r.chainTip)
@@ -2276,15 +2308,12 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		m.rec.Outcome = core.OutcomeLanded
 		m.rec.Detail = detail
 		m.rec.EndedAt = d.now()
-		// Receipt provenance (issue #13): "" on every field when the policy
-		// is off (r.receiptPublished is "" unless landRun's publish gate
-		// above ran), so a disabled-policy landing's record is
-		// byte-identical to today's.
-		if d.cfg.ReceiptNotes != nil {
-			m.rec.ReceiptRef = d.cfg.ReceiptNotes.Ref
-			m.rec.ReceiptBlob = r.receiptBlobSHA
-			m.rec.ReceiptPublished = r.receiptPublished
-		}
+		// Receipt provenance (issue #13) is already on m.rec by now —
+		// stampReceiptRecords ran right after the publish, above, before
+		// this CAS was even attempted, specifically so it isn't lost on
+		// the paths that never reach this loop (a stale/failed target CAS
+		// routes through finishRun instead). "" on every field when the
+		// policy is off, unchanged.
 		d.emit(ctx, core.Event{
 			Kind:      core.EventLanded,
 			At:        d.now(),

@@ -52,6 +52,62 @@ type LocalExecutor struct {
 	// names outright. Nil for the profile-less default, byte-identical to
 	// the pre-profiles environment.
 	Env []string
+
+	// SecretEnv names the config-named operator secret environment
+	// variables (config.Daemon.SecretEnvNames — github's token-env in
+	// static mode, slack's app-token-env/bot-token-env, summarize's
+	// api-key-env) that must never enter a CANDIDATE-CODE command's
+	// environment (issue #13 Gap 1, docs/checks.md's environment
+	// reference): a check, image build, or receipt producer is a
+	// candidate's own repo code, and the daemon's operator secrets are not
+	// its business — the daemon reads the GitHub token itself, in-process,
+	// and never hands it to a child. Only NAMES, never values; matched by
+	// exact env-var name, not prefix or pattern.
+	//
+	// Applied in RunCheck to the BASE os.Environ() only, before Env/the
+	// GAUNTLET_* contract/ServiceEnv are appended — those layers are
+	// gauntlet's own or the operator's own, never a candidate's, so
+	// nothing in them is ever a filter target. Skipped entirely when
+	// job.OperatorOwned is true (internal/hooks sets this on every
+	// post-land hook job): a hook is itself operator-owned daemon config,
+	// not candidate code, and legitimately uses these same credentials
+	// (e.g. a deploy hook driving `gh`) — see core.CheckJob.OperatorOwned's
+	// doc for the full boundary. Nil (the default, and every hand-built
+	// executor in tests that doesn't set it) filters nothing, byte-identical
+	// to the pre-Gap-1 environment.
+	//
+	// This is NOT a sandbox: DESIGN.md's issue #6 same-UID /proc caveat
+	// still stands unchanged — a same-UID process can still read another
+	// process's environment off /proc on platforms that allow it,
+	// regardless of what this executor puts in argv/envp. What this DOES
+	// close is the ordinary, by-design channel: a candidate command no
+	// longer receives the credential in its own env at all.
+	SecretEnv []string
+}
+
+// filterSecretEnv returns env with every entry whose NAME (the part before
+// "=") appears in secret dropped, preserving relative order of what
+// remains. Matches by exact name only. A nil/empty secret returns env
+// unchanged (same backing array, no allocation) — the common case for
+// every daemon with no configured integrations and for every hand-built
+// executor in tests.
+func filterSecretEnv(env []string, secret []string) []string {
+	if len(secret) == 0 {
+		return env
+	}
+	drop := make(map[string]bool, len(secret))
+	for _, name := range secret {
+		drop[name] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if drop[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // RunCheck implements core.Executor.
@@ -79,10 +135,21 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
 	cmd.Dir = job.Dir
+	// Base environment: the daemon's own os.Environ(), with every
+	// config-named operator secret stripped by exact name — UNLESS this
+	// job is operator-owned (a post-land hook), which is exempt (see
+	// SecretEnv's and core.CheckJob.OperatorOwned's docs). Filtering here,
+	// before Env/the GAUNTLET_* contract/ServiceEnv are appended below,
+	// means none of gauntlet's own or the operator's own values can ever
+	// be a filter target — only the inherited ambient environment is.
+	base := os.Environ()
+	if !job.OperatorOwned {
+		base = filterSecretEnv(base, e.SecretEnv)
+	}
 	// Fixed profile env sits between the inherited environment and the
 	// GAUNTLET_* contract, so gauntlet's own values win any collision
 	// (last entry wins for exec.Cmd.Env).
-	cmd.Env = append(os.Environ(), e.Env...)
+	cmd.Env = append(base, e.Env...)
 	cmd.Env = append(cmd.Env,
 		core.EnvBaseSHA+"="+job.BaseSHA,
 		core.EnvMergeSHA+"="+job.MergeSHA,
