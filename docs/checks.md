@@ -288,6 +288,13 @@ merge strategy, no artifact graph. Your command owns constructing and
 validating its own payload; gauntlet's whole job is capturing it exactly
 and publishing it exactly, unmodified, as the note's content.
 
+**The producer never sees the daemon's own credentials.** A `receipt`
+node is candidate code like any check, so it runs under the same
+config-named operator-secret stripping described in ["Check environment
+reference"](#check-environment-reference) below — publication itself is
+the *daemon's* job, using its own in-process authenticated transport, not
+something the producer command does or needs credentials for.
+
 **Policy handshake.** A `receipt` node only ever runs under a daemon
 configured with a `receipt-notes` policy (`github { receipt-notes { ... }
 }` — [config.md](config.md)) for the target it lands against. Both
@@ -347,6 +354,33 @@ running a check's command, and provides a result file for reporting
   credential helper or SSH agent, both of which keep secrets out of the
   URL), every check can read it. Local checks could already read it off
   disk; this extends that visibility to container checks too.
+
+**Operator secrets are stripped from candidate-code environments.** The
+daemon's own credential env vars — `github`'s `token-env` in static-token
+mode, `slack`'s `app-token-env`/`bot-token-env`, `summarize`'s
+`api-key-env` (config-named, never a hardcoded list — see
+[config.md](config.md)) — are removed by exact name from a candidate
+command's environment on the local executor, before this contract's own
+`GAUNTLET_*` variables are added. This covers every candidate-code job: an
+ordinary check, an `image` build, and a `receipt` producer (see
+["Receipts"](#receipts) above) alike — none of them ever needs the
+daemon's own GitHub/Slack/Anthropic credentials to do its job, and a
+repository's own commands are effectively attacker-controlled the moment
+anyone can push a `for/` ref. **Post-land hooks are exempt**: a hook's
+command comes from the daemon's own operator-written config
+([config.md's "Hooks"](config.md#hooks)), never a candidate's repo spec,
+and legitimately uses these same credentials — a deploy hook driving `gh`,
+say. **Container profiles never had host env in the first place** and so
+need no such filter: the container executor only ever passes explicit
+`NAME=VALUE` pairs into the container (its fixed profile `env`, this
+contract's own `GAUNTLET_*` set, and resolved `needs` env), never the
+daemon's own ambient environment. This is a by-exact-name filter over the
+*command's own environment*, not a sandbox: it closes the ordinary,
+by-design channel (a candidate command's own `os.Environ()`), but it does
+not change what a same-UID process can see through other means (e.g.
+reading another process's environment off `/proc` on a platform that
+allows it) — the same own-code threat model the rest of the local
+executor already runs under (see `DESIGN.md`'s decision ledger).
 
 A check that declares `needs` (see ["Shared services"](#shared-services)
 below) additionally gets one pair per resolved service:

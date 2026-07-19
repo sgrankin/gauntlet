@@ -682,15 +682,23 @@ printf '%%s' %q > "$%s"
 	// itself must never have ADDED anything beyond the documented GAUNTLET_*
 	// vocabulary (core.Env*/job.ServiceEnv) to what the subprocess got.
 	//
-	// This harness (newIntegrationHarness -> gitx.New with no
-	// WithTokenSource) never configures a credential at all, so there is no
-	// real secret value here to search for byte-exact — asserting that
-	// would be dishonest (nothing could ever make it fail). What's asserted
-	// below instead is diffed against THIS test process's own os.Environ():
-	// LocalExecutor.RunCheck deliberately passes the daemon's whole ambient
-	// environment through to every check/receipt job (cmd.Env =
-	// append(os.Environ(), ...) — by design, not a gap this test exists to
-	// close, and this sandbox's own ambient env happens to carry real
+	// This harness builds a bare executor.LocalExecutor{} with no SecretEnv
+	// configured (newIntegrationHarness -> gitx.New with no
+	// WithTokenSource either), so there is no real secret value here to
+	// search for byte-exact — asserting that would be dishonest (nothing
+	// could ever make it fail), and this test exercises no filtering at
+	// all: LocalExecutor.RunCheck only strips a name that's actually
+	// listed in its SecretEnv field (issue #13 Gap 1), which is nil here.
+	// TestIntegration_ReceiptPublishEndToEnd_SecretEnvStripped below is the
+	// sibling that actually configures a config-named secret (a static
+	// github.token-env) and proves it gets stripped from exactly this same
+	// receipt-producer path. What's asserted below instead is diffed
+	// against THIS test process's own os.Environ(): LocalExecutor.RunCheck
+	// passes the daemon's ambient environment through to every
+	// check/receipt job MINUS whatever SecretEnv names (cmd.Env =
+	// append(filterSecretEnv(os.Environ(), e.SecretEnv), ...)) — with
+	// SecretEnv nil here, that's everything, unfiltered, and this
+	// sandbox's own ambient env happens to carry real
 	// GH_TOKEN/GITHUB_TOKEN/etc. vars unrelated to gauntlet, which a naive
 	// "no GITHUB_/TOKEN-suffixed name anywhere" check would misfire on. So
 	// this only flags a name that is BOTH new (not already in the parent's
@@ -700,10 +708,10 @@ printf '%%s' %q > "$%s"
 	// deeper guarantee — a real token never reaching a check/receipt
 	// subprocess at all — is enforced by that same shared env-assembly path
 	// (RunCheck only ever appends core.Env*/job.ServiceEnv, never a
-	// credential) plus gitx's own askpass tests (auth_test.go), which prove
-	// a git credential rides ONLY the git subprocess's ephemeral
-	// GIT_ASKPASS environment, never anywhere a check or receipt command
-	// could read it from.
+	// credential, and strips SecretEnv names before even that) plus gitx's
+	// own askpass tests (auth_test.go), which prove a git credential rides
+	// ONLY the git subprocess's ephemeral GIT_ASKPASS environment, never
+	// anywhere a check or receipt command could read it from.
 	envDump, err := os.ReadFile(envDumpPath)
 	if err != nil {
 		t.Fatalf("read receipt env dump: %v", err)
@@ -742,6 +750,111 @@ printf '%%s' %q > "$%s"
 
 	// The read-path incantation: an explicit fetch of the notes ref into its
 	// local work ref, then a read keyed on the landed merge SHA.
+	ctx := context.Background()
+	if _, err := h.git.FetchNotesRef(ctx, testReceiptRef); err != nil {
+		t.Fatalf("FetchNotesRef: %v", err)
+	}
+	got, exists, err := h.git.ReadNote(ctx, gitx.NotesWorkRef(testReceiptRef), rec.MergeSHA)
+	if err != nil {
+		t.Fatalf("ReadNote: %v", err)
+	}
+	if !exists {
+		t.Fatalf("no note found for the landed merge SHA %s", rec.MergeSHA)
+	}
+	if string(got) != payload {
+		t.Fatalf("note payload = %q, want byte-identical %q", got, payload)
+	}
+}
+
+// TestIntegration_ReceiptPublishEndToEnd_SecretEnvStripped is the sentinel
+// acceptance test for issue #13 Gap 1 (the contract-review finding: a
+// local-profile receipt/check/image-build command could read the daemon's
+// own operator secrets out of its inherited environment). A daemon whose
+// github block uses a STATIC token-env, with a SENTINEL value set via
+// t.Setenv, must never let a receipt producer — candidate code — observe
+// that value, or even its var NAME, while note publication still succeeds:
+// the daemon never needed the token in a child's env to do its own work: it
+// reads cfg.GitHub.TokenEnv itself, in-process (ghstatus), and here
+// publication is git-notes over the harness's own local bare remote, wholly
+// unrelated to GitHub auth, so nothing about filtering the candidate's own
+// env can affect it — that's exactly the point.
+//
+// Wires LocalExecutor.SecretEnv through the exact SAME
+// config.Daemon.SecretEnvNames() path cmd/gauntlet's buildExecutor uses
+// (cmd/gauntlet/executor.go's buildOneExecutor, called from
+// cmd/gauntlet/main.go with cfg.SecretEnvNames()) rather than a bespoke
+// substitute, so a drift between the two would show up here.
+func TestIntegration_ReceiptPublishEndToEnd_SecretEnvStripped(t *testing.T) {
+	const sentinelVar = "GAUNTLET_TEST_GH_TOKEN_SENTINEL"
+	const sentinelValue = "sentinel-token-must-never-leak-4f9c2b8e"
+	t.Setenv(sentinelVar, sentinelValue)
+
+	// A static-token github block naming sentinelVar as its credential
+	// source: Repo non-empty, Auth nil (static mode) — exactly the gate
+	// SecretEnvNames() itself checks.
+	cfg := &config.Daemon{GitHub: config.GitHub{Repo: "acme/widgets", TokenEnv: sentinelVar}}
+	secretEnv := cfg.SecretEnvNames()
+	if len(secretEnv) != 1 || secretEnv[0] != sentinelVar {
+		t.Fatalf("SecretEnvNames() = %v, want exactly [%s]", secretEnv, sentinelVar)
+	}
+
+	h := newIntegrationHarness(t, nil, executor.LocalExecutor{SecretEnv: secretEnv})
+	h.d.cfg.ReceiptNotes = &config.ReceiptNotes{Ref: testReceiptRef, MaxBytes: 65536}
+	remote := h.remote
+	remote.Seed("main", map[string]string{"README.md": "seed\n"})
+
+	envDumpPath := filepath.Join(t.TempDir(), "receipt-env-sentinel.dump")
+	const payload = "deployment-receipt-sentinel-test"
+	files := map[string]string{
+		testCheckSpecPath: "check \"unit\" {\n    command \"/bin/sh\" \"unit.sh\"\n}\n" +
+			"receipt \"deploy\" {\n    command \"/bin/sh\" \"receipt.sh\"\n}\n",
+		"unit.sh": "#!/bin/sh\nexit 0\n",
+		// set -u makes a still-present sentinel an observable, distinct
+		// script failure (unbound-var error) rather than a silent no-op —
+		// belt-and-suspenders alongside the Go-side dump assertions below.
+		"receipt.sh": fmt.Sprintf(`#!/bin/sh
+set -eu
+env > %q
+if [ -n "${%s:-}" ]; then echo "sentinel var visible to receipt producer"; exit 1; fi
+printf '%%s' %q > "$%s"
+`, envDumpPath, sentinelVar, payload, core.EnvReceiptResultFile),
+	}
+	remote.PushCandidate("main", "alice", "widget", files)
+
+	before := len(h.ch.Records())
+	h.reconcile()
+	rec := h.pumpUntilRecord(before)
+
+	if rec.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v, want Landed; Detail=%q Checks=%+v", rec.Outcome, rec.Detail, rec.Checks)
+	}
+	if rec.ReceiptPublished != receiptPublishedFresh {
+		t.Errorf("record ReceiptPublished = %q, want %q — publication must succeed despite the candidate-env filter", rec.ReceiptPublished, receiptPublishedFresh)
+	}
+
+	envDump, err := os.ReadFile(envDumpPath)
+	if err != nil {
+		t.Fatalf("read receipt env dump: %v", err)
+	}
+	dump := string(envDump)
+
+	envNames := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimRight(dump, "\n"), "\n") {
+		name, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		envNames[name] = true
+	}
+	if envNames[sentinelVar] {
+		t.Errorf("receipt env carries the sentinel var name %q, want it stripped", sentinelVar)
+	}
+	if strings.Contains(dump, sentinelValue) {
+		t.Errorf("receipt env dump contains the sentinel VALUE %q somewhere, want it fully absent", sentinelValue)
+	}
+
+	// The note landed for real, over the harness's own local remote,
+	// proving the filter didn't quietly break publication.
 	ctx := context.Background()
 	if _, err := h.git.FetchNotesRef(ctx, testReceiptRef); err != nil {
 		t.Fatalf("FetchNotesRef: %v", err)

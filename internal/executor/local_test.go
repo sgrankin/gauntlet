@@ -257,6 +257,67 @@ exit 0
 	}
 }
 
+// TestLocalExecutor_SecretEnvStrippedFromCandidateJob covers issue #13 Gap
+// 1's core mechanism directly: a job with OperatorOwned left at its zero
+// value (false — candidate code: an ordinary check, image build, or
+// receipt producer) must not see a variable named in SecretEnv, even
+// though it's present in this test process's own environment (t.Setenv)
+// and would otherwise pass straight through via os.Environ().
+func TestLocalExecutor_SecretEnvStrippedFromCandidateJob(t *testing.T) {
+	const secretVar = "GAUNTLET_TEST_SECRET_VAR"
+	const secretValue = "must-not-leak-to-candidate-code"
+	t.Setenv(secretVar, secretValue)
+
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test -z "${%s+x}" || { echo "secret var visible to candidate job: $%s"; exit 1; }
+exit 0
+`, secretVar, secretVar)
+	cmd := script(t, dir, "check.sh", body)
+	job := baseJob(t, cmd) // OperatorOwned: false (zero value) — candidate code
+
+	res := LocalExecutor{SecretEnv: []string{secretVar}}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed (SecretEnv var must be stripped from a candidate job); output=%q", res.Status, res.Output)
+	}
+}
+
+// TestLocalExecutor_SecretEnvVisibleToOperatorOwnedJob covers the
+// deliberate exemption's other half: a job with OperatorOwned true (what
+// internal/hooks's Runner sets on every post-land hook job) MUST still see
+// a SecretEnv-named variable — hooks are operator-owned daemon config, not
+// candidate code, and legitimately use the same credentials the daemon
+// itself holds (e.g. a deploy hook driving `gh`). Same SecretEnv, same
+// variable, opposite job flag, opposite outcome — proving the exemption is
+// live, not merely that filtering is off by default.
+func TestLocalExecutor_SecretEnvVisibleToOperatorOwnedJob(t *testing.T) {
+	const secretVar = "GAUNTLET_TEST_SECRET_VAR"
+	const secretValue = "hook-may-legitimately-see-this"
+	t.Setenv(secretVar, secretValue)
+
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test "$%s" = %q || { echo "secret var missing or wrong for operator-owned job: $%s"; exit 1; }
+exit 0
+`, secretVar, secretValue, secretVar)
+	cmd := script(t, dir, "hook.sh", body)
+	job := baseJob(t, cmd)
+	job.OperatorOwned = true // the hooks exemption (core.CheckJob.OperatorOwned's doc)
+
+	res := LocalExecutor{SecretEnv: []string{secretVar}}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed (an operator-owned job must still see its configured secret); output=%q", res.Status, res.Output)
+	}
+}
+
 func TestLocalExecutor_OutputCap(t *testing.T) {
 	dir := t.TempDir()
 	// Write well more than outputCap bytes of distinguishable output, then

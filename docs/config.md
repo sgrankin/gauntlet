@@ -119,7 +119,11 @@ summarize {
     authentication the host already has (SSH, a credential helper).
     Once `repo` is set, an empty/unset `token-env` is a startup error,
     not a silent no-op — the daemon refuses to start rather than run a
-    channel it can't authenticate.
+    channel it can't authenticate. This name is also one of the
+    config-named operator secrets the local executor strips from every
+    candidate-code command's environment (checks, image builds, receipt
+    producers) — see [checks.md's environment
+    reference](checks.md#check-environment-reference).
   - **GitHub App** (`internal/ghauth`, issue #6):
 
     ```kdl
@@ -319,7 +323,10 @@ summarize {
   the app-level (socket mode) and bot tokens (defaults `SLACK_APP_TOKEN` /
   `SLACK_BOT_TOKEN`). **Channel absent ⇒ disabled.** Once `channel` is
   set, either token being empty/unset is a startup error, same rationale
-  as `github` above. `allowed-users`, when present, restricts reaction
+  as `github` above. Both names are also config-named operator secrets the
+  local executor strips from every candidate-code command's environment —
+  see [checks.md's environment
+  reference](checks.md#check-environment-reference). `allowed-users`, when present, restricts reaction
   commands to the listed Slack member IDs ("U…"/"W…" — profile → "Copy
   member ID"): reactions from anyone else are ignored silently (logged
   daemon-side only, so the channel doesn't reveal who is authorized).
@@ -538,7 +545,10 @@ Configuration (all fields optional; defaults shown in the example above):
   but it does mean every summarize call 400s until `effort "none"` is set.
 - **`api-key-env`** — the environment variable holding the Anthropic API
   key. Defaults to `ANTHROPIC_API_KEY`. The daemon reads this at startup,
-  once; it is never read from the config file itself.
+  once; it is never read from the config file itself. Also a config-named
+  operator secret the local executor strips from every candidate-code
+  command's environment — see [checks.md's environment
+  reference](checks.md#check-environment-reference).
 - **`timeout`** — the per-call budget for the Messages API request, and
   therefore the worst-case stall of the whole reconcile loop described
   above. Defaults to `5s`.
