@@ -94,10 +94,12 @@ func runValidateTo(w io.Writer, args []string) error {
 //
 // The hasServices condition len(cfg.Services.Allow) > 0 is equivalent to
 // the queue's Services != nil: run() populates queue.Config.Services
-// exactly when Allow is non-empty.
+// exactly when Allow is non-empty. Likewise cfg.GitHub.ReceiptNotes != nil
+// (issue #13) is equivalent to the queue's Config.ReceiptNotes: both mean
+// "this daemon has a receipt-notes policy configured".
 func crossCheck(cfg *config.Daemon, spec *config.CheckSpec) error {
 	known, imageCapable := executorPredicates(cfg)
-	if reason := queue.SpecRejectReason(spec, len(cfg.Services.Allow) > 0, known, imageCapable); reason != "" {
+	if reason := queue.SpecRejectReason(spec, len(cfg.Services.Allow) > 0, known, imageCapable, cfg.GitHub.ReceiptNotes != nil); reason != "" {
 		return errors.New(reason)
 	}
 	return nil

@@ -235,9 +235,35 @@ check "test" {
     needs "db"
 }
 `
+	const checksNoReceipt = `
+check "test" {
+    command "true"
+}
+`
+	const checksWithReceipt = `
+check "test" {
+    command "true"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+}
+`
+	const daemonWithReceiptNotes = `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "local"
+github "acme/widgets" {
+    receipt-notes {}
+}
+`
 
 	cases := []struct {
 		name       string
+		daemonKDL  string // defaults to daemonNoProfilesNoServices when empty
 		checksKDL  string
 		wantErrSub string
 	}{
@@ -256,16 +282,37 @@ check "test" {
 			checksKDL:  checksNeedsService,
 			wantErrSub: "check spec declares services but this daemon has no services block",
 		},
+		{
+			// issue #13: receipt-notes configured, spec declares no receipt.
+			name:       "receipt-notes policy requires a receipt but spec declares none",
+			daemonKDL:  daemonWithReceiptNotes,
+			checksKDL:  checksNoReceipt,
+			wantErrSub: "this daemon requires a receipt (receipt-notes is configured) but the check spec declares none",
+		},
+		{
+			// issue #13: no receipt-notes policy, spec declares one anyway.
+			name:       "spec declares a receipt but daemon has no receipt-notes policy",
+			checksKDL:  checksWithReceipt,
+			wantErrSub: `check spec declares receipt "deployment" but this daemon has no receipt-notes policy`,
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			daemonKDL := c.daemonKDL
+			if daemonKDL == "" {
+				daemonKDL = daemonNoProfilesNoServices
+			}
 			dir := t.TempDir()
-			cfgPath := writeFile(t, dir, "gauntlet.kdl", daemonNoProfilesNoServices)
+			cfgPath := writeFile(t, dir, "gauntlet.kdl", daemonKDL)
 			checksPath := writeFile(t, dir, ".gauntlet.kdl", c.checksKDL)
 
 			// The same spec, alone, only checks intrinsic validity — the
-			// cross-file property is invisible without -config.
+			// cross-file property is invisible without -config. This also
+			// proves repo-mode-alone accepts a spec that declares (or
+			// omits) a receipt regardless of any daemon's policy: receipt
+			// SYNTAX is self-checkable, receipt POLICY is not (docs/checks.md's
+			// "Self-checking your spec" cross-file list).
 			var aloneOut bytes.Buffer
 			if err := runValidateTo(&aloneOut, []string{"-checks", checksPath}); err != nil {
 				t.Fatalf("runValidateTo(-checks alone) = %v, want success (cross-file issues aren't checked without -config)", err)
@@ -278,6 +325,68 @@ check "test" {
 			}
 			if !strings.Contains(err.Error(), c.wantErrSub) {
 				t.Errorf("error = %q, want it to contain %q", err.Error(), c.wantErrSub)
+			}
+		})
+	}
+}
+
+// TestRunValidate_CrossCheck_ReceiptPolicyAccepted is the positive
+// counterpart to TestRunValidate_CrossCheck's two new receipt-policy
+// cases: a spec WITH a receipt against a daemon WITH receipt-notes, and a
+// spec with none against a daemon with none, both cross-check clean.
+func TestRunValidate_CrossCheck_ReceiptPolicyAccepted(t *testing.T) {
+	const daemonNoProfilesNoServices = `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "local"
+`
+	const daemonWithReceiptNotes = `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+executor "local"
+github "acme/widgets" {
+    receipt-notes {}
+}
+`
+	const checksNoReceipt = `
+check "test" {
+    command "true"
+}
+`
+	const checksWithReceipt = `
+check "test" {
+    command "true"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+}
+`
+
+	cases := []struct {
+		name      string
+		daemonKDL string
+		checksKDL string
+	}{
+		{"policy enabled, spec declares one", daemonWithReceiptNotes, checksWithReceipt},
+		{"policy disabled, spec declares none", daemonNoProfilesNoServices, checksNoReceipt},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := writeFile(t, dir, "gauntlet.kdl", c.daemonKDL)
+			checksPath := writeFile(t, dir, ".gauntlet.kdl", c.checksKDL)
+
+			var out bytes.Buffer
+			if err := runValidateTo(&out, []string{"-config", cfgPath, "-checks", checksPath}); err != nil {
+				t.Fatalf("runValidateTo(-config, -checks) = %v, want acceptance", err)
 			}
 		})
 	}

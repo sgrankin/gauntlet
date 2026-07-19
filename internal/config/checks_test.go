@@ -167,6 +167,87 @@ func TestParseChecks_Workspace(t *testing.T) {
 	}
 }
 
+// TestParseChecks_ReceiptMinimal covers the smallest legal receipt node:
+// just a name and a command. Executor/Image/After all stay at their zero
+// values, and CheckSpec.Receipt() returns it.
+func TestParseChecks_ReceiptMinimal(t *testing.T) {
+	data := []byte(`
+check "unit" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+}
+`)
+	cs, err := ParseChecks(data)
+	if err != nil {
+		t.Fatalf("ParseChecks: %v", err)
+	}
+	r := cs.Receipt()
+	if r == nil {
+		t.Fatal("Receipt() = nil, want the declared receipt")
+	}
+	want := Receipt{Name: "deployment", Command: []string{"./ci/write-candidate-receipt"}}
+	if !reflect.DeepEqual(*r, want) {
+		t.Errorf("Receipt() = %+v, want %+v", *r, want)
+	}
+}
+
+// TestParseChecks_ReceiptFullFeatured covers every receipt field at once:
+// executor profile selection, a candidate-built image, and `after` edges
+// naming checks — the same fields and semantics Check itself has, per the
+// issue #13 design (Receipt's doc comment).
+func TestParseChecks_ReceiptFullFeatured(t *testing.T) {
+	data := []byte(`
+image "go-ci" {
+    command "./ci/build-image"
+}
+check "unit" {
+    command "./ci/unit"
+}
+check "lint" {
+    command "./ci/lint"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+    executor "host"
+    image "go-ci"
+    after "unit" "lint"
+}
+`)
+	cs, err := ParseChecks(data)
+	if err != nil {
+		t.Fatalf("ParseChecks: %v", err)
+	}
+	r := cs.Receipt()
+	if r == nil {
+		t.Fatal("Receipt() = nil, want the declared receipt")
+	}
+	want := Receipt{
+		Name:     "deployment",
+		Command:  []string{"./ci/write-candidate-receipt"},
+		Executor: "host",
+		Image:    "go-ci",
+		After:    []string{"unit", "lint"},
+	}
+	if !reflect.DeepEqual(*r, want) {
+		t.Errorf("Receipt() = %+v, want %+v", *r, want)
+	}
+}
+
+// TestParseChecks_ReceiptAbsent confirms Receipt() is nil when no receipt
+// node is declared — the common case, and the signal
+// queue.SpecRejectReason's new receipt-notes gates consume.
+func TestParseChecks_ReceiptAbsent(t *testing.T) {
+	cs, err := ParseChecks([]byte("check \"t\" {\n    command \"true\"\n}\n"))
+	if err != nil {
+		t.Fatalf("ParseChecks: %v", err)
+	}
+	if r := cs.Receipt(); r != nil {
+		t.Errorf("Receipt() = %+v, want nil", r)
+	}
+}
+
 func TestCheckSpec_RequiresServices(t *testing.T) {
 	cases := []struct {
 		name string

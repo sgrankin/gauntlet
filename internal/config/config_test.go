@@ -1906,6 +1906,129 @@ github "acme/widgets" {
 			wantErr: "retention must not be negative",
 		},
 		{
+			name: "receipt-notes without a github repo",
+			kdl: `
+remote "https://example.com/repo.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github {
+    receipt-notes {}
+}
+`,
+			wantErr: "receipt-notes requires the github block to name a repo",
+		},
+		{
+			name: "receipt-notes ref not under refs/",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    receipt-notes {
+        ref "gauntlet/receipts"
+    }
+}
+`,
+			wantErr: `receipt-notes ref must start with "refs/"`,
+		},
+		{
+			name: "receipt-notes ref under refs/heads/",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    receipt-notes {
+        ref "refs/heads/gauntlet-receipts"
+    }
+}
+`,
+			wantErr: "must not be under \"refs/heads/\"",
+		},
+		{
+			name: "receipt-notes ref with a trailing slash",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    receipt-notes {
+        ref "refs/notes/gauntlet/receipts/"
+    }
+}
+`,
+			wantErr: "no trailing slash",
+		},
+		{
+			name: "receipt-notes ref with a glob metacharacter",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    receipt-notes {
+        ref "refs/notes/gauntlet/receipts/*"
+    }
+}
+`,
+			wantErr: "not a valid ref name",
+		},
+		{
+			// max-bytes 0 is indistinguishable from "left unset" (kdl-go
+			// unmarshals a missing node into the field's zero value,
+			// exactly like Daemon.Poll/CheckSpec.MaxParallel elsewhere in
+			// this package) and gets defaulted to 65536 before validate()
+			// ever runs — so only a negative value is unambiguously an
+			// explicit invalid one; see applyDefaults above.
+			name: "receipt-notes max-bytes negative",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    receipt-notes {
+        max-bytes -1
+    }
+}
+`,
+			wantErr: "max-bytes must be positive",
+		},
+		{
+			name: "receipt-notes max-bytes over the hard ceiling",
+			kdl: `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+github "acme/widgets" {
+    receipt-notes {
+        max-bytes 1048577
+    }
+}
+`,
+			wantErr: "max-bytes 1048577 exceeds the maximum of 1048576",
+		},
+		{
 			name: "export mtimes with an unknown mode",
 			kdl: `
 remote "https://example.com/repo.git"
@@ -2065,6 +2188,59 @@ target "main" branch="main"
 	}
 	if d.GitHub.TrialRefRetention != time.Hour {
 		t.Errorf("retention = %s, want 1h", d.GitHub.TrialRefRetention)
+	}
+}
+
+// TestLoadDaemon_GitHubReceiptNotes covers the `receipt-notes { ref ...;
+// max-bytes ... }` block (issue #13): absent means disabled with a nil
+// GitHub.ReceiptNotes (zero behavior change), a bare node takes both
+// defaults, and explicit values are respected.
+func TestLoadDaemon_GitHubReceiptNotes(t *testing.T) {
+	load := func(t *testing.T, gh string) *Daemon {
+		t.Helper()
+		kdl := `
+remote "https://github.com/acme/widgets.git"
+committer {
+    name "Gauntlet"
+    email "gauntlet@example.com"
+}
+target "main" branch="main"
+` + gh
+		path := t.TempDir() + "/gauntlet.kdl"
+		if err := os.WriteFile(path, []byte(kdl), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := LoadDaemon(path)
+		if err != nil {
+			t.Fatalf("LoadDaemon: %v", err)
+		}
+		return d
+	}
+
+	// Absent: disabled.
+	if d := load(t, `github "acme/widgets"`); d.GitHub.ReceiptNotes != nil {
+		t.Errorf("ReceiptNotes = %+v with no receipt-notes node, want nil", d.GitHub.ReceiptNotes)
+	}
+
+	// Bare node: both defaults.
+	d := load(t, "github \"acme/widgets\" {\n    receipt-notes {}\n}\n")
+	if d.GitHub.ReceiptNotes == nil {
+		t.Fatal("ReceiptNotes = nil for a bare receipt-notes node, want a defaulted block")
+	}
+	if d.GitHub.ReceiptNotes.Ref != "refs/notes/gauntlet/receipts" {
+		t.Errorf("default ref = %q", d.GitHub.ReceiptNotes.Ref)
+	}
+	if d.GitHub.ReceiptNotes.MaxBytes != 65536 {
+		t.Errorf("default max-bytes = %d, want 65536", d.GitHub.ReceiptNotes.MaxBytes)
+	}
+
+	// Explicit values.
+	d = load(t, "github \"acme/widgets\" {\n    receipt-notes {\n        ref \"refs/notes/gauntlet/custom\"\n        max-bytes 1024\n    }\n}\n")
+	if d.GitHub.ReceiptNotes.Ref != "refs/notes/gauntlet/custom" {
+		t.Errorf("ref = %q", d.GitHub.ReceiptNotes.Ref)
+	}
+	if d.GitHub.ReceiptNotes.MaxBytes != 1024 {
+		t.Errorf("max-bytes = %d, want 1024", d.GitHub.ReceiptNotes.MaxBytes)
 	}
 }
 
@@ -2592,6 +2768,124 @@ check "image:go-ci" {
 }
 `,
 			wantErr: `the "image:" name prefix is reserved`,
+		},
+		{
+			name: "two receipt nodes rejected",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+receipt "a" {
+    command "./ci/write-candidate-receipt"
+}
+receipt "b" {
+    command "./ci/write-candidate-receipt"
+}
+`,
+			wantErr: `receipt: declared more than once (at most one is allowed)`,
+		},
+		{
+			name: "receipt with empty command",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+}
+`,
+			wantErr: `receipt "deployment": command must not be empty`,
+		},
+		{
+			name: "receipt name collides with check name",
+			kdl: `
+check "deployment" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+}
+`,
+			wantErr: `receipt "deployment": collides with check "deployment"`,
+		},
+		{
+			name: "receipt name collides with image name",
+			kdl: `
+image "deployment" {
+    command "./ci/build"
+}
+check "unit" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+}
+`,
+			wantErr: `receipt "deployment": collides with image "deployment"`,
+		},
+		{
+			name: "check after names the receipt: unknown-name error",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+check "publish" {
+    command "./ci/publish"
+    after "deployment"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+    after "unit"
+}
+`,
+			wantErr: `check "publish": after "deployment": no such check declared`,
+		},
+		{
+			name: "receipt with unknown after name",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+    after "ghost"
+}
+`,
+			wantErr: `receipt "deployment": after "ghost": no such check declared`,
+		},
+		{
+			name: "receipt with duplicate after edges",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+    after "unit" "unit"
+}
+`,
+			wantErr: `receipt "deployment": after "unit": duplicate`,
+		},
+		{
+			name: "check squats on the receipt node prefix",
+			kdl: `
+check "receipt:deployment" {
+    command "./ci/unit"
+}
+`,
+			wantErr: `the "receipt:" name prefix is reserved`,
+		},
+		{
+			name: "receipt consumes undeclared image",
+			kdl: `
+check "unit" {
+    command "./ci/unit"
+}
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+    image "go-ci"
+}
+`,
+			wantErr: `receipt "deployment": image "go-ci": no such image declared`,
 		},
 	}
 	for _, tc := range cases {

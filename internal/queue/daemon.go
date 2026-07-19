@@ -205,6 +205,23 @@ type Config struct {
 	// delete on terminal, no retention. Meaningful only when TrialRefs is
 	// set.
 	TrialRefRetention time.Duration
+
+	// ReceiptNotes mirrors config.GitHub.ReceiptNotes's presence (issue
+	// #13, config's `github { receipt-notes { ... } }`): whether this
+	// daemon has a receipt-notes policy configured. Consulted only by
+	// SpecRejectReason's load-time gate, both directions — a spec
+	// declaring no receipt is rejected when this is true, and a spec
+	// declaring one is rejected when this is false — via startRun and
+	// finishBatchStart. False is this package's own zero-value default
+	// (queue's policy-free stance, matching AutoRetryErrors's doc above).
+	//
+	// This slice does not wire actual note publication or receipt-node
+	// scheduling: cmd/gauntlet does not yet populate this field from a
+	// loaded config (that wiring, and the scheduling it gates, is a later
+	// slice) — a hand-built queue.Config (tests, or a daemon run before
+	// that wiring lands) simply leaves it false, matching every other
+	// unwired bool default in this struct.
+	ReceiptNotes bool
 }
 
 // ServicePool is the subset of *services.Pool the queue consumes. Its

@@ -388,10 +388,12 @@ check "validate-spec" {
 Without `-config`, only the spec's own internal validity is checked.
 Cross-file properties — whether an `executor` name it references actually
 exists, whether an `image` runs on a container-kind profile, whether
-`service`/`needs` are usable at all — depend on the daemon's config and
-can't be checked from the spec alone; run `gauntlet validate -config
-gauntlet.kdl -checks .gauntlet.kdl` (with the operator's real config) to
-catch those too. See `gauntlet validate -h` for the full set of modes.
+`service`/`needs` are usable at all, whether a `receipt` node is required
+(or forbidden) by the daemon's `receipt-notes` policy — depend on the
+daemon's config and can't be checked from the spec alone; run `gauntlet
+validate -config gauntlet.kdl -checks .gauntlet.kdl` (with the operator's
+real config) to catch those too. See `gauntlet validate -h` for the full
+set of modes.
 
 ## Shared services
 

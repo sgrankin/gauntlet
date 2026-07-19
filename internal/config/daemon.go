@@ -38,12 +38,22 @@ const (
 	defaultGitHubAPIURL      = "https://api.github.com"
 	defaultTrialRefPrefix    = "refs/gauntlet/trials"
 	defaultTrialRefRetention = 24 * time.Hour
-	defaultShutdown          = "drain"
-	defaultSlackAppEnv       = "SLACK_APP_TOKEN"
-	defaultSlackBotEnv       = "SLACK_BOT_TOKEN"
-	defaultExecutorKind      = "local"
-	defaultRuntime           = "container"
-	defaultWorkdir           = "/workspace"
+
+	// defaultReceiptNotesRef and defaultReceiptNotesMaxBytes are
+	// GitHub.ReceiptNotes's per-field defaults, applied only when the
+	// `receipt-notes` block is present (see that field's doc) and the
+	// field is left unset. maxAllowedReceiptBytes is the hard ceiling
+	// max-bytes may not exceed even when explicitly set — see
+	// ReceiptNotes's doc for why this one caps rather than just defaults.
+	defaultReceiptNotesRef      = "refs/notes/gauntlet/receipts"
+	defaultReceiptNotesMaxBytes = 65536
+	maxAllowedReceiptBytes      = 1 << 20 // 1 MiB
+	defaultShutdown             = "drain"
+	defaultSlackAppEnv          = "SLACK_APP_TOKEN"
+	defaultSlackBotEnv          = "SLACK_BOT_TOKEN"
+	defaultExecutorKind         = "local"
+	defaultRuntime              = "container"
+	defaultWorkdir              = "/workspace"
 
 	// defaultHooksPolicy is applied to a target's hooks-policy whenever
 	// the target has at least one hook and left hooks-policy unset (see
@@ -312,12 +322,57 @@ type GitHub struct {
 	// `trial-refs` node with defaults still enables the feature), like
 	// Daemon.Summarize.
 	TrialRefs *GitHubTrialRefs `kdl:"trial-refs"`
+
+	// ReceiptNotes is the `receipt-notes { ref ...; max-bytes ... }`
+	// block (issue #13): its presence — not any one field's non-emptiness
+	// — enables the daemon's commitment to publish every landing's
+	// receipt (CheckSpec.Receipt's captured command result) as a git note
+	// on the tested merge SHA before landing, for every target this
+	// GitHub block covers. A pointer for the same presence-signalling
+	// reason as TrialRefs/Summarize: a bare `receipt-notes {}` with
+	// nothing set must still count as enabled. Absent ⇒ disabled, zero
+	// behavior change.
+	//
+	// This config slice (issue #13's config-surface half) only exposes
+	// and validates this field; a later slice wires actual note
+	// publication. The load-time consequence THIS slice does implement is
+	// queue.SpecRejectReason's receipt-policy gate, both directions: a
+	// spec with no receipt is rejected when this is set, and a spec
+	// declaring one is rejected when this is nil (see that function's
+	// doc).
+	ReceiptNotes *ReceiptNotes `kdl:"receipt-notes"`
 }
 
 // GitHubTrialRefs is the `trial-refs { prefix ...; retention ... }` block.
 type GitHubTrialRefs struct {
 	Prefix    string        `kdl:"prefix"`    // default "refs/gauntlet/trials"
 	Retention time.Duration `kdl:"retention"` // default 24h (unset/zero both take the default)
+}
+
+// ReceiptNotes is the `receipt-notes { ref ...; max-bytes ... }` block —
+// see GitHub.ReceiptNotes's doc for what its presence enables. Ref is the
+// git-notes ref every receipt is published under; validate() holds it to
+// the same ref-name grammar as GitHub.TrialRefPrefix (issue #7's
+// trial-refs validation), plus an additional requirement specific to
+// notes: it must not live under "refs/heads/" (a notes payload there
+// would trigger branch machinery), though any other custom namespace —
+// "refs/notes/..." is conventional, not required — is allowed, matching
+// trial-refs' own stance on refs/heads/**. MaxBytes bounds one receipt's
+// published size; receipts are receipts, not artifacts, so this is capped
+// hard at maxAllowedReceiptBytes (1 MiB), not just operator-adjustable.
+type ReceiptNotes struct {
+	Ref string `kdl:"ref"` // default defaultReceiptNotesRef
+
+	// MaxBytes bounds one receipt's published size (default
+	// defaultReceiptNotesMaxBytes; hard ceiling maxAllowedReceiptBytes).
+	// Zero is indistinguishable from "left unset" (kdl-go unmarshals a
+	// missing node into the field's zero value, like Daemon.Poll
+	// elsewhere in this package) and applyDefaults fills it in before
+	// validate() ever runs — so only an explicit NEGATIVE value is
+	// unambiguously invalid; validate()'s "must be positive" check is
+	// consequently unreachable for exactly zero, by the same design as
+	// CheckSpec.MaxParallel's zero-vs-absent handling.
+	MaxBytes int `kdl:"max-bytes"`
 }
 
 // GitHubAuth is the `auth "app" { ... }` block: GitHub App installation
@@ -825,6 +880,18 @@ func (d *Daemon) applyDefaults() {
 				d.GitHub.TrialRefRetention = defaultTrialRefRetention
 			}
 		}
+		// Receipt-notes policy (issue #13): the block's presence enables
+		// it; a bare `receipt-notes {}` node takes both defaults — same
+		// "only default within the section, only when enabled" pattern as
+		// trial-refs above.
+		if rn := d.GitHub.ReceiptNotes; rn != nil {
+			if rn.Ref == "" {
+				rn.Ref = defaultReceiptNotesRef
+			}
+			if rn.MaxBytes == 0 {
+				rn.MaxBytes = defaultReceiptNotesMaxBytes
+			}
+		}
 	}
 
 	if d.Slack.Channel != "" {
@@ -1276,6 +1343,38 @@ func (d *Daemon) validate() error {
 		}
 		if tr.Retention < 0 {
 			return fmt.Errorf("github: trial-refs retention must not be negative, got %s", tr.Retention)
+		}
+	}
+	if rn := d.GitHub.ReceiptNotes; rn != nil {
+		if d.GitHub.Repo == "" {
+			return fmt.Errorf("github: receipt-notes requires the github block to name a repo")
+		}
+		// Same ref-name grammar as trial-refs above (issue #7), reused
+		// rather than re-derived, plus the notes-specific refs/heads/
+		// exclusion below.
+		ref := rn.Ref
+		if !strings.HasPrefix(ref, "refs/") {
+			return fmt.Errorf("github: receipt-notes ref must start with \"refs/\", got %q", ref)
+		}
+		if strings.HasSuffix(ref, "/") || strings.ContainsAny(ref, " \t\n") {
+			return fmt.Errorf("github: receipt-notes ref must have no trailing slash or whitespace, got %q", ref)
+		}
+		if strings.ContainsAny(ref, "*?[\\~^:") || strings.Contains(ref, "..") || strings.Contains(ref, "@{") {
+			return fmt.Errorf("github: receipt-notes ref is not a valid ref name (no * ? [ \\ ~ ^ : .. @{ ), got %q", ref)
+		}
+		// A notes payload under refs/heads/ would trigger branch
+		// machinery (GitHub's branch UI, push-triggered workflows) —
+		// refs/notes/ is the conventional namespace, but any other
+		// custom, non-heads namespace is allowed, matching trial-refs'
+		// own refs/heads/** stance.
+		if strings.HasPrefix(ref, "refs/heads/") {
+			return fmt.Errorf("github: receipt-notes ref must not be under \"refs/heads/\" — a receipts payload there would trigger branch machinery; use a custom namespace like %q, got %q", defaultReceiptNotesRef, ref)
+		}
+		if rn.MaxBytes <= 0 {
+			return fmt.Errorf("github: receipt-notes max-bytes must be positive, got %d", rn.MaxBytes)
+		}
+		if rn.MaxBytes > maxAllowedReceiptBytes {
+			return fmt.Errorf("github: receipt-notes max-bytes %d exceeds the maximum of %d", rn.MaxBytes, maxAllowedReceiptBytes)
 		}
 	}
 	if a := d.GitHub.Auth; a != nil {

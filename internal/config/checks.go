@@ -32,6 +32,18 @@ type CheckSpec struct {
 	// run, an implicit prerequisite of every consumer.
 	Images []Image `kdl:"image,multiple"`
 
+	// Receipts is the raw parse target for the optional `receipt` node
+	// (issue #13): a repo's declared receipt gate — an opaque deployment
+	// handoff command whose captured result the daemon publishes as a git
+	// note on the tested merge SHA before landing. Bound with
+	// `kdl:"...,multiple"`, Images's own pattern, specifically so two
+	// `receipt` declarations collect into a 2-element slice instead of
+	// kdl-go's last-wins scalar binding silently swallowing the first —
+	// validate() rejects len(Receipts) > 1 outright, with a clear message,
+	// rather than accepting whichever one happened to parse last.
+	// CheckSpec.Receipt() is the only way callers should read it.
+	Receipts []Receipt `kdl:"receipt,multiple"`
+
 	// MaxParallel is how many of this candidate's ready checks may run
 	// concurrently. Unset (zero) means 1 — the pre-parallelism contract,
 	// preserved exactly: checks run one at a time in declaration order, so
@@ -124,6 +136,52 @@ type Image struct {
 	// candidate-built image (Image has no image field): no recursive
 	// bootstrapping, per the issue-#2 boundary.
 	Executor string `kdl:"executor"`
+}
+
+// Receipt is one declared receipt gate (issue #13): an opaque deployment
+// handoff a repo's own verification produces — a command's captured
+// result — which the daemon publishes as a git note on the tested merge
+// SHA before landing. At most one may be declared per spec (validate()
+// rejects a second, loudly, rather than last-wins); read it via
+// CheckSpec.Receipt(), never CheckSpec.Receipts directly.
+//
+// TERMINAL BY CONSTRUCTION: the receipt's name lives outside the check
+// name namespace — Check.After only ever resolves against check names
+// (the `seen` set in validate()) — so no check's `after` may name it; a
+// check that tries gets the ordinary unknown-name error, exactly as if it
+// had named a typo'd check. Nothing can depend on a receipt in turn.
+//
+// Scheduled, by a later slice, as node "receipt:<name>" in the run's
+// dependency graph — the "receipt:" prefix is reserved for it, mirroring
+// Image's own "image:" reservation, so no check may be named
+// "receipt:...". This slice (issue #13's config-surface half) only
+// parses and validates this node: nothing yet runs its Command or
+// schedules it — see internal/queue's SpecRejectReason for the load-time
+// policy gates a later slice's scheduling change will consume.
+type Receipt struct {
+	Name    string   `kdl:",arg"`
+	Command []string `kdl:"command,child"`
+
+	// Executor names the operator-defined execution profile this receipt
+	// command runs on — the same profile-selection contract as
+	// Check.Executor ("" is the daemon's default profile; an unknown name
+	// rejects the spec at run start, never mid-run).
+	Executor string `kdl:"executor"`
+
+	// Image names a candidate-built image (CheckSpec.Images) this receipt
+	// command runs in — the same contract as Check.Image, including the
+	// implicit `after` prerequisite on the image build and the
+	// container-profile requirement a later slice's scheduling enforces
+	// (queue.SpecRejectReason gates it exactly like a check's Image today).
+	Image string `kdl:"image"`
+
+	// After names the checks (by Check.Name) that must pass before this
+	// receipt command runs — the same edge semantics as Check.After
+	// (unknown names and duplicate edges are spec errors). A receipt can
+	// never self-reference: its own name is outside the check namespace
+	// by construction, so it can never appear as one of its own After
+	// entries via a legitimate reference.
+	After []string `kdl:"after"`
 }
 
 // EnvVar is one `env "NAME" "VALUE"` pair set inside a service's container.
@@ -383,6 +441,11 @@ func (cs *CheckSpec) validate() error {
 		if strings.HasPrefix(c.Name, "image:") {
 			return fmt.Errorf("check %q: the \"image:\" name prefix is reserved for image-build nodes", c.Name)
 		}
+		// "receipt:" is the reserved node-name prefix the (later-slice)
+		// receipt-scheduling node occupies, mirroring "image:" above.
+		if strings.HasPrefix(c.Name, "receipt:") {
+			return fmt.Errorf("check %q: the \"receipt:\" name prefix is reserved for the receipt node", c.Name)
+		}
 		if seen[c.Name] {
 			return fmt.Errorf("check %q: duplicate", c.Name)
 		}
@@ -424,6 +487,50 @@ func (cs *CheckSpec) validate() error {
 		}
 	}
 
+	// At most one receipt (see Receipts's doc): bound with ",multiple" so
+	// this collects every declaration instead of losing one to kdl-go's
+	// last-wins scalar binding, then rejected here outright rather than
+	// silently picking one.
+	if len(cs.Receipts) > 1 {
+		return fmt.Errorf("receipt: declared more than once (at most one is allowed)")
+	}
+	if len(cs.Receipts) == 1 {
+		r := &cs.Receipts[0]
+		if r.Name == "" {
+			return fmt.Errorf("receipt: name must not be empty")
+		}
+		// Name constraints mirror a check's: must not collide with a
+		// check or image name (the receipt is scheduled into the same
+		// run-graph node-name space, by a later slice).
+		if seen[r.Name] {
+			return fmt.Errorf("receipt %q: collides with check %q", r.Name, r.Name)
+		}
+		if imageNames[r.Name] {
+			return fmt.Errorf("receipt %q: collides with image %q", r.Name, r.Name)
+		}
+		if len(r.Command) == 0 {
+			return fmt.Errorf("receipt %q: command must not be empty", r.Name)
+		}
+		if r.Image != "" && !imageNames[r.Image] {
+			return fmt.Errorf("receipt %q: image %q: no such image declared", r.Name, r.Image)
+		}
+		// After resolves against the check namespace ONLY (seen) — the
+		// receipt's own name was never added to it, so a check naming
+		// the receipt in ITS OWN after gets the ordinary unknown-name
+		// error from the checks loop above, exactly as intended (the
+		// receipt is terminal by construction).
+		seenAfter := make(map[string]bool, len(r.After))
+		for _, a := range r.After {
+			if !seen[a] {
+				return fmt.Errorf("receipt %q: after %q: no such check declared", r.Name, a)
+			}
+			if seenAfter[a] {
+				return fmt.Errorf("receipt %q: after %q: duplicate", r.Name, a)
+			}
+			seenAfter[a] = true
+		}
+	}
+
 	if err := cs.validateAcyclic(); err != nil {
 		return err
 	}
@@ -449,6 +556,17 @@ func (cs *CheckSpec) validate() error {
 // workspaces (issue #9). A convenience for the queue so it never string-
 // compares the policy value itself.
 func (cs *CheckSpec) Isolated() bool { return cs.Workspace == "isolated" }
+
+// Receipt returns the spec's declared receipt gate, or nil when none was
+// declared. validate() has already rejected a spec declaring more than
+// one, so this never has to choose among candidates — the queue's
+// SpecRejectReason and (later) its scheduling are the only consumers.
+func (cs *CheckSpec) Receipt() *Receipt {
+	if len(cs.Receipts) == 0 {
+		return nil
+	}
+	return &cs.Receipts[0]
+}
 
 // maxAllowedMaxParallel is a sane safety valve on CheckSpec.MaxParallel,
 // not a hard architectural requirement — the same stance as daemon.go's

@@ -1307,7 +1307,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 	// Spec-load gates, same as startRun's (see SpecRejectReason).
-	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile); reason != "" {
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes); reason != "" {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, reason, rootSpan)
 		return
 	}
@@ -1752,7 +1752,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// (Config.KnownExecutorProfile's / ImageCapableProfile's docs;
 	// docs/design/services.md, "The model: a cache entry, not a
 	// supervised unit").
-	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile); reason != "" {
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes); reason != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, reason, rootSpan)
 		return nil, false
 	}
@@ -1856,14 +1856,26 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 // SpecRejectReason is the daemon's whole spec-load gate: the reason a
 // parsed check spec is rejected against this daemon's capabilities ("" =
 // accepted) — services declared with no services block, an unknown
-// executor profile selection, or a candidate-built image on a profile
-// with no rootfs to swap. Both run-start paths (startRun,
-// finishBatchStart) and `gauntlet validate`'s cross-check mode call THIS
-// function, so the gates and their wording cannot drift between the
-// daemon and the CLI. hasServices is whether the daemon has a services
-// pool (queue.Config.Services != nil; for validate, whether the config's
-// services block allows anything).
-func SpecRejectReason(spec *config.CheckSpec, hasServices bool, known, imageCapable func(string) bool) string {
+// executor profile selection, a candidate-built image on a profile with
+// no rootfs to swap, or (issue #13) a receipt-notes policy mismatch in
+// either direction: this daemon requires a receipt but the spec declares
+// none, or this daemon has no receipt-notes policy but the spec declares
+// one anyway (a receipt declaration is a correctness claim — running it
+// and discarding the handoff would be worse than failing loudly). Both
+// run-start paths (startRun, finishBatchStart) and `gauntlet validate`'s
+// cross-check mode call THIS function, so the gates and their wording
+// cannot drift between the daemon and the CLI. hasServices is whether the
+// daemon has a services pool (queue.Config.Services != nil; for validate,
+// whether the config's services block allows anything). receiptPolicy is
+// whether this daemon has a receipt-notes policy configured (for the
+// daemon, Config.ReceiptNotes; for validate, cfg.GitHub.ReceiptNotes !=
+// nil).
+//
+// This slice does NOT schedule or run a spec's receipt node — only gates
+// its declaration against policy at load time, same boundary as every
+// other check here (a config mismatch is caught before any command
+// starts, never discovered mid-run).
+func SpecRejectReason(spec *config.CheckSpec, hasServices bool, known, imageCapable func(string) bool, receiptPolicy bool) string {
 	if spec.RequiresServices() && !hasServices {
 		return "check spec declares services but this daemon has no services block"
 	}
@@ -1872,6 +1884,12 @@ func SpecRejectReason(spec *config.CheckSpec, hasServices bool, known, imageCapa
 	}
 	if chk, img := imageOnIncapableProfile(spec, imageCapable); img != "" {
 		return fmt.Sprintf("check spec: check %q runs candidate-built image %q but its executor profile is not a container profile", chk, img)
+	}
+	switch rcp := spec.Receipt(); {
+	case receiptPolicy && rcp == nil:
+		return "this daemon requires a receipt (receipt-notes is configured) but the check spec declares none"
+	case !receiptPolicy && rcp != nil:
+		return fmt.Sprintf("check spec declares receipt %q but this daemon has no receipt-notes policy", rcp.Name)
 	}
 	return ""
 }
@@ -1901,6 +1919,14 @@ func unknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (ch
 			return imageNodePrefix + img.Name, img.Executor
 		}
 	}
+	// The receipt node (issue #13) selects a profile too, same vocabulary
+	// and gate — reported under its own reserved node-name prefix,
+	// mirroring the image-build case just above.
+	if rcp := spec.Receipt(); rcp != nil && rcp.Executor != "" {
+		if known == nil || !known(rcp.Executor) {
+			return receiptNodePrefix + rcp.Name, rcp.Executor
+		}
+	}
 	return "", ""
 }
 
@@ -1908,6 +1934,13 @@ func unknownExecutorProfile(spec *config.CheckSpec, known func(string) bool) (ch
 // a run's dependency graph (config.ParseChecks rejects check names under
 // it, so the two row kinds can never alias).
 const imageNodePrefix = "image:"
+
+// receiptNodePrefix is the reserved node-name prefix the receipt node
+// occupies in a run's dependency graph (config.ParseChecks rejects check
+// names under it, mirroring imageNodePrefix above) — a later slice
+// schedules the receipt as "receipt:<name>"; this slice only uses the
+// prefix to label the offending node in SpecRejectReason's gate messages.
+const receiptNodePrefix = "receipt:"
 
 // imageNodeName reports whether node is an image-build node, and for
 // which declared image.
@@ -1926,6 +1959,15 @@ func imageOnIncapableProfile(spec *config.CheckSpec, capable func(string) bool) 
 		}
 		if capable == nil || !capable(c.Executor) {
 			return c.Name, c.Image
+		}
+	}
+	// The receipt node (issue #13) can consume a candidate-built image
+	// too, same contract and gate as a check's Image — reported under its
+	// own reserved node-name prefix, mirroring unknownExecutorProfile
+	// above.
+	if rcp := spec.Receipt(); rcp != nil && rcp.Image != "" {
+		if capable == nil || !capable(rcp.Executor) {
+			return receiptNodePrefix + rcp.Name, rcp.Image
 		}
 	}
 	return "", ""
