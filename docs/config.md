@@ -214,6 +214,98 @@ summarize {
   refs add to the repository's ref count and assume a single daemon owns
   the remote (Gauntlet's model). With App auth configured, publication
   uses the same refreshable credential provider.
+
+  A `receipt-notes` child block enables pre-land receipt publication
+  (issue #13 — the repo-side half is `receipt` in
+  [checks.md](checks.md#receipts)):
+
+    ```kdl
+    github "acme/widgets" {
+        receipt-notes {
+            ref "refs/notes/gauntlet/receipts"
+            max-bytes 65536
+        }
+    }
+    ```
+
+  Its mere *presence* — not any one field being non-default — is the
+  daemon's commitment: every landing on a target this `github` block
+  covers must publish exactly one successful receipt before it lands, and
+  every check spec for that target must therefore declare a `receipt`
+  node (see checks.md's policy-handshake wording; a bare `receipt-notes
+  {}` still counts as enabled with both fields defaulted). **Absent ⇒
+  disabled**, byte-identical to today: no new required result, no new git
+  objects, no remote ref updates, no landing latency.
+
+  `ref` (default `refs/notes/gauntlet/receipts`) follows the same
+  ref-name grammar as `trial-refs`' `prefix` (must start with `refs/`, no
+  trailing slash/whitespace, no glob metacharacters) plus one further
+  constraint specific to notes: it **must not** live under `refs/heads/`
+  — a receipts payload there would be a branch, triggering the exact
+  branch-UI clutter and workflow-trigger risk `trial-refs` avoids by the
+  same custom-namespace choice; any other custom namespace is fine,
+  `refs/notes/` is conventional, not required. `max-bytes` (default
+  65536) bounds one receipt's published size; unlike most numeric knobs
+  here it is capped, not just defaulted — an operator may lower it but
+  never raise it past 1 MiB (1048576 bytes), because a receipt is a
+  receipt, not an artifact store.
+
+  **Landing order.** Publication is a hard gate immediately before the
+  target CAS, not a parallel step: a run must go green, become the
+  landable head, and have its receipt note *remotely confirmed on the
+  exact tested `MergeSHA`* before the target ever moves — a publication
+  failure (transport, contention, or a fail-closed conflict) parks the
+  run as an infrastructure error, subject to the existing auto-retry, and
+  the target is never touched without a confirmed receipt.
+
+  **Idempotency and conflicts.** Publication is compare-and-swap: no
+  existing note ⇒ add the payload; an existing note with byte-identical
+  content ⇒ success with no new commit (`AlreadyPublished` — a legitimate
+  outcome of crash-retried or duplicate publication, not an error, and
+  recorded distinctly in history from a fresh publish); an existing note
+  with *different* bytes on the same `MergeSHA` ⇒ **fail closed** as an
+  invariant violation — two disjoint receipts computed for one tested
+  tree is treated as a correctness anomaly, never resolved by force-push
+  or a textual merge. A concurrent writer advancing the ref with a
+  disjoint receipt (a different `MergeSHA`) is retried against the
+  refetched tip, bounded, so neither receipt is lost.
+
+  **Orphans accumulate — no reaper in v1, deliberately.** A confirmed
+  note whose landing CAS then fails or goes stale leaves an orphan note
+  (a true statement about a merge that never landed); receipts are small,
+  and append-only auditability is worth more than compaction until
+  measurement says otherwise. See DESIGN.md's decision ledger.
+
+  **Activation checklist.** Verify this against your real provider with
+  the daemon's *actual* production credentials before turning
+  `receipt-notes` on for a live target — trial refs proved the custom-
+  namespace transport path (`refs/gauntlet/*`), but `refs/notes/*` is a
+  distinct enough ref shape to test rather than infer. GitHub App mode
+  needs no permission beyond the existing **Contents: Read and write**
+  (see [deploy.md](deploy.md#github-fine-grained-pat-minimal-permissions)
+  for the PAT equivalent) — `refs/notes/*` is an ordinary ref under
+  Contents, same as any other. From a clone authenticated the same way
+  the daemon is:
+
+    ```sh
+    TESTSHA=$(git rev-parse HEAD)
+
+    # create a disposable note
+    git notes --ref=refs/notes/gauntlet/receipts add -m "activation check, safe to delete" "$TESTSHA"
+    git push origin refs/notes/gauntlet/receipts
+
+    # fetch it back explicitly, the same step a deployment consumer runs
+    git fetch origin refs/notes/gauntlet/receipts:refs/notes/gauntlet/receipts
+    git notes --ref=refs/notes/gauntlet/receipts show "$TESTSHA"
+
+    # cleanup: remove the disposable note and push the removal
+    git notes --ref=refs/notes/gauntlet/receipts remove "$TESTSHA"
+    git push origin refs/notes/gauntlet/receipts
+    ```
+
+  A live github.com App-token spike isn't reachable from every build
+  environment; treat this as a first-use production check, not a
+  prerequisite for shipping the feature.
 - **`slack <channel-id>`** — enables the Slack channel (`internal/slack`):
   threaded run messages in the given channel ID, root edited to a
   pass/fail mark on landing, `:recycle:` on the root re-queues via retry,

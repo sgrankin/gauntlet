@@ -237,6 +237,84 @@ runtime can receive endpoints it cannot reach. Keep service-dependent
 checks on the default executor unless your operator confirms the profile
 matches it.
 
+## Receipts
+
+The `check "publish-receipt" { executor "host" }` pattern above is one
+repository giving a host profile its own publishing identity — still
+appropriate when you're willing to expose that credential to a candidate
+command. A `receipt` node (issue #13) is the alternative for operators who
+don't want to: it produces bytes, and the *daemon* — never the command —
+publishes them as a git note on the tested merge SHA, using the daemon's
+own authenticated transport.
+
+```kdl
+receipt "deployment" {
+    command "./ci/write-candidate-receipt"
+    executor "host"
+    after "unit" "lint" "artifacts"
+}
+```
+
+`command`, `executor`, `image`, and `after` mean exactly what they mean on
+a check: the same executor-profile selection, the same candidate-built
+`image` (with its implicit `after` on the image build), and `after` edges
+against check names, validated the same way (unknown names, duplicates —
+spec errors). **At most one** `receipt` node per spec — a second is a
+parse error, not last-wins; the name is provenance (history, logs, graph
+diagnostics), never a selector.
+
+**Terminal by construction.** A receipt's name lives outside the check
+namespace: `after` only ever resolves against declared *checks*, so no
+check can name a receipt in its own `after` — it gets the ordinary
+unknown-name error, exactly as if it had typo'd a check name. Nothing can
+depend on a receipt in turn; it is scheduled as a `receipt:<name>` node
+(prefix reserved, mirroring `image:`) after every check, and only ever
+sits at the end of the graph.
+
+**A different result-file protocol, not the check protocol.** The command
+gets `GAUNTLET_RECEIPT_RESULT_FILE` *instead of* `GAUNTLET_RESULT_FILE` —
+the same "distinct protocol, never conflated" contract as
+`GAUNTLET_IMAGE_RESULT_FILE`. A receipt has no `skipped` verdict: non-zero
+exit is red regardless of the file's contents, and exit 0 requires the
+file to contain non-empty bytes within the operator's configured cap
+(`receipt-notes { max-bytes ... }` in daemon config — see
+[config.md](config.md)). An empty, unreadable, or oversized result on a
+zero exit is the receipt node's own red row — one root cause, not a
+publication failure discovered later.
+
+**The payload is opaque.** Gauntlet never parses, schemas, or interprets
+the bytes your command writes — no deployment-manifest format, no JSON
+merge strategy, no artifact graph. Your command owns constructing and
+validating its own payload; gauntlet's whole job is capturing it exactly
+and publishing it exactly, unmodified, as the note's content.
+
+**Policy handshake.** A `receipt` node only ever runs under a daemon
+configured with a `receipt-notes` policy (`github { receipt-notes { ... }
+}` — [config.md](config.md)) for the target it lands against. Both
+mismatch directions are rejected at spec load, loudly, before any command
+starts:
+
+- the daemon requires a receipt but the spec declares none:
+  `this daemon requires a receipt (receipt-notes is configured) but the check spec declares none`
+- the spec declares a receipt but the daemon has no policy for it:
+  `check spec declares receipt "<name>" but this daemon has no receipt-notes policy`
+
+Both directions reject rather than silently diverging on purpose: a
+`receipt` declaration is a correctness claim ("this run has a durable
+handoff before landing"), and running the producer while quietly
+discarding the handoff would make one repository spec mean different
+things on different daemons — worse than the rollout inconvenience of
+failing closed. This also shapes rollout order: upgrade the daemon, turn
+on `receipt-notes`, *then* land the candidate that adds the `receipt`
+node — a candidate lacking it fails closed during that window, same as an
+undeclared `needs` service.
+
+Publication itself — when it runs, what it publishes onto, how a
+deployment consumer reads it back — is a daemon-config and operations
+concern; see [config.md](config.md)'s `receipt-notes` reference and
+deploy.md's ["Receipt read
+path"](deploy.md#receipt-read-path-consuming-pre-land-receipts).
+
 ## Check environment reference
 
 Every executor (local or container) sets these environment variables before
