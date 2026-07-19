@@ -102,7 +102,9 @@ The review checklist. Every plan and every implementation gets graded against th
 5. **Ref moves mid-test are detected**, the running suite is aborted (or its
    verdict discarded), and the slot re-queues at the new SHA.
 6. **Never rewrite candidate commits.** No rebase, no squash, no message
-   mutation. The only new object gauntlet creates is the merge commit.
+   mutation. Gauntlet creates exactly two kinds of object: the trial merge
+   commit (`CommitTree`) and, per issue #13, a receipt note's blob/tree/commit
+   (the notes publisher in `internal/gitx`) — nothing else.
 7. **Cache escape hatch exists.** A clean-build command (config + channel
    command) for suspected cache poisoning on the warm builder.
 8. **The queue core is executor- and channel-agnostic.** It sees interfaces;
