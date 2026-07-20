@@ -263,13 +263,20 @@ spec errors). **At most one** `receipt` node per spec — a second is a
 parse error, not last-wins; the name is provenance (history, logs, graph
 diagnostics), never a selector.
 
-**Terminal by construction.** A receipt's name lives outside the check
+**A sink, not a barrier.** A receipt's name lives outside the check
 namespace: `after` only ever resolves against declared *checks*, so no
 check can name a receipt in its own `after` — it gets the ordinary
 unknown-name error, exactly as if it had typo'd a check name. Nothing can
 depend on a receipt in turn; it is scheduled as a `receipt:<name>` node
-(prefix reserved, mirroring `image:`) after every check, and only ever
-sits at the end of the graph.
+(prefix reserved, mirroring `image:`). But sink does not mean "runs
+last": only its **declared** `after` edges (plus the implicit edge on its
+`image`, if any) gate its readiness, so under `max-parallel > 1` it may
+run concurrently with checks it doesn't name. Declare an edge on every
+check whose outcome the receipt's contents depend on — the example above
+names all three artifact producers. What "runs last" actually protects is
+protected elsewhere: publication happens only once the *entire* graph is
+green, so an unnamed check failing still prevents the note and the
+landing.
 
 **A different result-file protocol, not the check protocol.** The command
 gets `GAUNTLET_RECEIPT_RESULT_FILE` *instead of* `GAUNTLET_RESULT_FILE` —
