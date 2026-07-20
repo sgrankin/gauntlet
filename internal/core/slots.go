@@ -72,3 +72,19 @@ func (s *Slots) Release() {
 		panic("core.Slots.Release: release without matching acquire")
 	}
 }
+
+// InUse reports how many slots are currently held. A cheap, racy-by-design
+// read (len on a channel) meant for observability sampling (issue #14's
+// gauntlet.slots.in_use gauge), never for a correctness decision — nothing
+// here synchronizes with a concurrent Acquire/Release, so a caller wanting
+// an authoritative admission decision must keep using TryAcquire/Acquire.
+// Always 0 on a nil *Slots; that's indistinguishable from "cap configured
+// but idle", so an observability caller that needs to tell "no cap" apart
+// from "zero held" must check for nil itself rather than trust this return
+// alone.
+func (s *Slots) InUse() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.ch)
+}

@@ -202,6 +202,20 @@ func run() error {
 		_ = shutdownOTLP(sctx)
 	}()
 
+	// obs.InstallMeterProvider (issue #14) is the metrics analogue of
+	// InstallProvider just above: same otlp config block, same ordering
+	// caution — installed before queue.New so nothing that captures an
+	// instrument early is left bound to a stale no-op default.
+	shutdownOTLPMetrics, err := obs.InstallMeterProvider(ctx, cfg.OTLP.Endpoint, cfg.OTLP.Insecure)
+	if err != nil {
+		return fmt.Errorf("otlp: install meter provider: %w", err)
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownOTLPMetrics(sctx)
+	}()
+
 	// Key the bare repo's directory off the remote URL so a future
 	// multi-remote daemon (or a config that just changes remotes) never
 	// collides with a stale clone left under the same state dir.
@@ -636,6 +650,46 @@ func run() error {
 	d, err := queue.New(repo, ex, chans, qcfg, nil)
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
+	}
+
+	// Daemon gauges (issue #14): queue depth per target, execution-slot
+	// occupancy, and runs in flight, registered once against the meter
+	// obs.InstallMeterProvider above installed — no polling goroutine of
+	// our own, the SDK (or the no-op meter, when otlp is disabled) samples
+	// these closures at its own collection cadence. depth and runsInFlight
+	// both read d.Snapshot(), the same published, point-in-time view the
+	// history depth sampler (startDepthSampler, below) already reads —
+	// this adds no new sampling path, just a second reader of the existing
+	// one. slots is the same *core.Slots the queue's checks and the hooks
+	// runner already share; nil (unlimited) reports ok=false, so the gauge
+	// simply observes nothing rather than a misleading zero.
+	if _, err := obs.RegisterGauges(
+		func() []obs.QueueDepth {
+			snap := d.Snapshot()
+			if snap == nil {
+				return nil
+			}
+			depths := make([]obs.QueueDepth, len(snap.Targets))
+			for i, ts := range snap.Targets {
+				depths[i] = obs.QueueDepth{Target: ts.Name, Waiting: len(ts.Waiting), InFlight: len(ts.Pipeline), Parked: len(ts.Parked)}
+			}
+			return depths
+		},
+		func() (n int, ok bool) {
+			if slots == nil {
+				return 0, false
+			}
+			return slots.InUse(), true
+		},
+		func() int {
+			snap := d.Snapshot()
+			if snap == nil {
+				return 0
+			}
+			return snap.ActiveRuns
+		},
+	); err != nil {
+		return fmt.Errorf("otlp: register gauges: %w", err)
 	}
 
 	// wg additionally covers the dashboard's goroutines (Shutdown watcher +

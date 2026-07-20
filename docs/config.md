@@ -333,12 +333,43 @@ summarize {
   Absent ⇒ anyone who can react in the channel can command the queue —
   fine for a private team channel, set the list for anything broader. Only
   inbound commands are gated; posting is unaffected.
-- **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter
-  (`internal/obs`) pointed at `<endpoint>`; `insecure` skips TLS (typical for
-  a local collector). The daemon always emits spans via the OTel API —
-  this just gives them somewhere to go.
-  **Endpoint absent ⇒ no-op**: spans are emitted and
+- **`otlp <endpoint>`** — installs a real OTLP/HTTP span exporter AND (issue
+  #14) a real OTLP/HTTP metrics exporter, both `internal/obs`, both pointed
+  at the same `<endpoint>` over the same HTTP transport; `insecure` skips
+  TLS (typical for a local collector). The daemon always emits spans and
+  metric instruments via the OTel API — this just gives them somewhere to
+  go. **Endpoint absent ⇒ no-op**: spans and metrics are emitted and
   immediately discarded.
+
+  The metrics signal (`internal/obs/metrics.go`) adds:
+
+  - **Node-completion histograms** — `gauntlet.node.duration` (ms),
+    `gauntlet.node.peak_rss` (bytes), `gauntlet.node.user_cpu` (ms), and
+    `gauntlet.node.sys_cpu` (ms), recorded once per finished node (a check,
+    an `image` build, or a `receipt` producer). Attribute set is
+    **strictly** `gauntlet.target`, `gauntlet.node.name` (the check name,
+    or `image:<name>`/`receipt:<name>`), `gauntlet.node.kind`
+    (`check`/`image`/`receipt`), and `gauntlet.node.outcome`
+    (`passed`/`failed`/`skipped`/`blocked`/`error`). `peak_rss`/`user_cpu`/
+    `sys_cpu` are only recorded when actually measured — `core.CheckResult`'s
+    own zero-means-unmeasured contract (e.g. the container executor never
+    measures them; see DESIGN.md) — `duration` always is.
+  - **Daemon gauges** (observed asynchronously, no extra polling) —
+    `gauntlet.queue.depth` (per target, split by `gauntlet.queue.state` ∈
+    `waiting`/`in_flight`/`parked`), `gauntlet.slots.in_use` (the
+    `max-executions` cap's current occupancy; unobserved when no cap is
+    configured), and `gauntlet.runs.in_flight` (runs currently occupying a
+    lane, daemon-wide).
+
+  **Cardinality stance, stated once for the whole signal**: every attribute
+  above is either config-bounded (a handful of targets/check names) or a
+  small fixed enum (kind/outcome/state). **`gauntlet.run.id`, a candidate
+  SHA, or a ref is never a metric attribute** — those are per-run
+  identifiers with effectively unbounded cardinality, and that's exactly
+  the shape that makes a metrics backend fall over. The identical per-run
+  fact already lives on the run's OTel span (`gauntlet.run.id` etc., same
+  package) and in the history database (`internal/history`) — this signal
+  is the aggregate-over-time view, not a replacement for either.
 - **`executor <kind>`** — selects the check executor. `"local"` (the
   default when the node is absent, or when written with no further
   configuration) runs checks as local subprocesses.

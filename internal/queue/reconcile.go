@@ -540,6 +540,12 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		select {
 		case res := <-inf.result:
 			obs.EndCheck(inf.span, res)
+			// OTLP node-completion histograms (issue #14): same site and
+			// same pre-validation res as EndCheck's span above, on purpose
+			// — see obs.RecordNode's doc. nodeKind (below) is the one bit
+			// of node-name-prefix knowledge obs needs but must not own
+			// itself (that convention is queue's).
+			obs.RecordNode(ctx, t.Name, nodeKind(name), res)
 			res.Waited = inf.waited
 			// An image-build node's green is conditional on its captured
 			// result validating as one IMMUTABLE reference — validated
@@ -2000,6 +2006,21 @@ func imageNodeName(node string) (image string, ok bool) {
 // declared name — mirroring imageNodeName above.
 func receiptNodeName(node string) (name string, ok bool) {
 	return strings.CutPrefix(node, receiptNodePrefix)
+}
+
+// nodeKind classifies node (a check name, possibly "image:<name>" or
+// "receipt:<name>") into the coarse kind obs.RecordNode (issue #14) uses
+// as a low-cardinality metric attribute — mirrors imageNodeName/
+// receiptNodeName's own prefix stripping so the two classifications can
+// never drift apart.
+func nodeKind(node string) string {
+	if _, ok := imageNodeName(node); ok {
+		return obs.NodeKindImage
+	}
+	if _, ok := receiptNodeName(node); ok {
+		return obs.NodeKindReceipt
+	}
+	return obs.NodeKindCheck
 }
 
 // imageOnIncapableProfile returns the first check (spec order) that names
