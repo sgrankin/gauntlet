@@ -205,6 +205,15 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		logPath = job.LogPath
 	}
 
+	// Resource usage is captured identically regardless of outcome — see
+	// captureRusage's doc. ProcessState is populated by Wait even on a
+	// cancellation kill (confirmed: cmd.Cancel's SIGKILL still lets Wait
+	// finish and record rusage before Run returns), so this line covers
+	// every branch below, including the ctx-cancelled one. Only the
+	// exec-start-failure branch actually sees zeros (ProcessState is nil
+	// there — exec never got far enough to have a process to wait on).
+	peakRSS, userCPU, sysCPU := captureRusage(cmd.ProcessState)
+
 	// ctx cancellation takes precedence over any run error: the process
 	// may exit with a signalled/non-zero status as a side effect of the
 	// group kill, but that is not a verdict.
@@ -215,6 +224,9 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 			Output:   out.String(),
 			LogPath:  logPath,
 			Duration: duration,
+			PeakRSS:  peakRSS,
+			UserCPU:  userCPU,
+			SysCPU:   sysCPU,
 		}
 	}
 
@@ -230,10 +242,15 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 				Output:   out.String(),
 				LogPath:  logPath,
 				Duration: duration,
+				PeakRSS:  peakRSS,
+				UserCPU:  userCPU,
+				SysCPU:   sysCPU,
 			}
 		}
 		// Exec-start failure (command missing/not executable/etc.): a
 		// verdict, not Err — it's the check spec's problem to fix.
+		// peakRSS/userCPU/sysCPU are zero here (no process was ever
+		// started to wait on).
 		output := out.String()
 		if output != "" {
 			output += "\n"
@@ -245,6 +262,9 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 			Output:   output,
 			LogPath:  logPath,
 			Duration: duration,
+			PeakRSS:  peakRSS,
+			UserCPU:  userCPU,
+			SysCPU:   sysCPU,
 		}
 	}
 
@@ -261,6 +281,9 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 			Output:   out.String(),
 			LogPath:  logPath,
 			Duration: duration,
+			PeakRSS:  peakRSS,
+			UserCPU:  userCPU,
+			SysCPU:   sysCPU,
 		}
 	}
 	if job.ReceiptCapture {
@@ -278,6 +301,9 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 			Output:   out.String(),
 			LogPath:  logPath,
 			Duration: duration,
+			PeakRSS:  peakRSS,
+			UserCPU:  userCPU,
+			SysCPU:   sysCPU,
 		}
 	}
 	status := core.CheckPassed
@@ -290,6 +316,9 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		Output:   out.String(),
 		LogPath:  logPath,
 		Duration: duration,
+		PeakRSS:  peakRSS,
+		UserCPU:  userCPU,
+		SysCPU:   sysCPU,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -473,5 +474,179 @@ func TestLocalExecutor_EmptyBaseDirPreservesOSDefaultTempDir(t *testing.T) {
 
 	if filepath.Dir(scratchDir) != filepath.Dir(refDir) {
 		t.Fatalf("scratch dir = %q (parent %q), want parent %q (empty BaseDir must preserve os.MkdirTemp(\"\", ...) prior behavior)", scratchDir, filepath.Dir(scratchDir), filepath.Dir(refDir))
+	}
+}
+
+// --- resource usage capture (issue #14) ---
+
+// requireTac skips the test when GNU coreutils' tac isn't on PATH — house
+// CI (ubuntu-latest, see .github/workflows) always has it, but a developer
+// running tests on a machine without GNU coreutils (e.g. a bare macOS
+// install, which ships BSD tools and no tac at all) shouldn't see a
+// spurious failure from a test whose only job is to allocate a known-size
+// buffer.
+func requireTac(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("tac"); err != nil {
+		t.Skip("tac not on PATH, skipping (see requireTac's doc)")
+	}
+}
+
+// TestLocalExecutor_PeakRSS_BoundedRange allocates a known-order-of-magnitude
+// buffer and asserts PeakRSS lands in a bounded range around it, not an
+// exact value (peak RSS is inherently a little fuzzy: allocator overhead,
+// page rounding, the shell and dd's own small footprint all add a bit on
+// top of the pure buffer).
+//
+// The shape: `dd if=/dev/zero bs=1M count=32 | tac > /dev/null`, piped
+// (not through a regular file) so tac cannot mmap its input — a pipe isn't
+// seekable, so tac is forced to read the whole 32MB into a malloc'd
+// buffer before it can emit anything in reverse, which is exactly the
+// large, deterministic, portable allocation this test wants. (Tried
+// piping through a real file first: tac mmaps a seekable regular file
+// instead of copying it, so touched-but-mapped pages don't reliably show
+// up in ru_maxrss — that variant measured ~2.7MB, not ~32MB, on this
+// host. The piped form measured a stable ~34MB across five repeated
+// runs — see the investigation notes accompanying this change.)
+//
+// Bounds: > 24MB rules out "nothing was captured" (a bug regressing to
+// near-zero); < 400MB gives generous headroom above the ~34MB observed
+// value for allocator/page-rounding variance across kernels and libc
+// versions without risking a flake — see CLAUDE.md: bounded-range
+// assertions must not be flaky, widen before shipping a flake.
+func TestLocalExecutor_PeakRSS_BoundedRange(t *testing.T) {
+	requireTac(t)
+	dir := t.TempDir()
+	cmd := script(t, dir, "check.sh", "#!/bin/sh\ndd if=/dev/zero bs=1M count=32 2>/dev/null | tac > /dev/null\n")
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+	const minBytes = 24 * 1024 * 1024
+	const maxBytes = 400 * 1024 * 1024
+	if res.PeakRSS < minBytes || res.PeakRSS > maxBytes {
+		t.Errorf("PeakRSS = %d bytes (%.1fMB), want in [%d, %d] (~24-400MB)", res.PeakRSS, float64(res.PeakRSS)/(1024*1024), minBytes, maxBytes)
+	}
+}
+
+// TestLocalExecutor_CPUSpin_UserCPUDominatesAndClearsFloor runs a pure
+// busy-loop (no syscalls in the hot path beyond arithmetic and the
+// condition test) and asserts UserCPU is both well above SysCPU (the
+// command does no I/O) and comfortably above a floor that rules out "CPU
+// time wasn't actually captured".
+func TestLocalExecutor_CPUSpin_UserCPUDominatesAndClearsFloor(t *testing.T) {
+	dir := t.TempDir()
+	cmd := script(t, dir, "check.sh", "#!/bin/sh\ni=0\nwhile [ $i -lt 2000000 ]; do i=$((i+1)); done\n")
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+	const floor = 100 * time.Millisecond
+	if res.UserCPU < floor {
+		t.Errorf("UserCPU = %v, want >= %v (a 2M-iteration busy loop)", res.UserCPU, floor)
+	}
+	if res.UserCPU <= res.SysCPU {
+		t.Errorf("UserCPU = %v, SysCPU = %v, want UserCPU well above SysCPU (a pure busy loop does no I/O)", res.UserCPU, res.SysCPU)
+	}
+}
+
+// TestLocalExecutor_TrivialCommand_ResourceFieldsPresentButSmall asserts
+// the opposite corner from the two tests above: a command that does
+// essentially nothing still gets a real (nonzero) PeakRSS — every process
+// has SOME resident footprint just from being loaded and started — but
+// every field stays small, nowhere near the buffer/spin tests' values.
+func TestLocalExecutor_TrivialCommand_ResourceFieldsPresentButSmall(t *testing.T) {
+	dir := t.TempDir()
+	cmd := script(t, dir, "check.sh", "#!/bin/sh\nexit 0\n")
+	job := baseJob(t, cmd)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.PeakRSS <= 0 {
+		t.Errorf("PeakRSS = %d, want > 0 (every started process has some resident footprint)", res.PeakRSS)
+	}
+	const smallCeiling = 50 * 1024 * 1024 // 50MB: generous ceiling for a bare `sh -c exit 0`
+	if res.PeakRSS > smallCeiling {
+		t.Errorf("PeakRSS = %d bytes, want < %d (a trivial command should have a small footprint)", res.PeakRSS, smallCeiling)
+	}
+	if res.UserCPU < 0 || res.UserCPU > time.Second {
+		t.Errorf("UserCPU = %v, want in [0, 1s] for a trivial command", res.UserCPU)
+	}
+	if res.SysCPU < 0 || res.SysCPU > time.Second {
+		t.Errorf("SysCPU = %v, want in [0, 1s] for a trivial command", res.SysCPU)
+	}
+}
+
+// TestLocalExecutor_CtxCancel_StillCapturesPartialUsage confirms the
+// investigation finding behind captureRusage's doc: cmd.Cancel's SIGKILL
+// still lets exec.Cmd.Wait populate ProcessState (and its rusage) before
+// Run returns, so a cancelled check reports whatever CPU/RSS it burned
+// before being killed rather than all zeros. Uses a CPU-spinning script
+// (not a mere `sleep`, which does no CPU work and so would round to zero
+// either way) so a nonzero UserCPU is a meaningful assertion.
+func TestLocalExecutor_CtxCancel_StillCapturesPartialUsage(t *testing.T) {
+	dir := t.TempDir()
+	// A very long spin loop, killed well before it could finish on its own.
+	cmd := script(t, dir, "check.sh", "#!/bin/sh\ni=0\nwhile [ $i -lt 100000000 ]; do i=$((i+1)); done\n")
+	job := baseJob(t, cmd)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan core.CheckResult, 1)
+	go func() {
+		done <- LocalExecutor{}.RunCheck(ctx, job)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case res := <-done:
+		if res.Err == nil {
+			t.Fatalf("Err = nil, want ctx cancellation error; status=%v", res.Status)
+		}
+		if res.UserCPU <= 0 {
+			t.Errorf("UserCPU = %v, want > 0 (the loop ran for ~200ms before being killed, and ProcessState is populated even after cmd.Cancel's SIGKILL)", res.UserCPU)
+		}
+		if res.PeakRSS <= 0 {
+			t.Errorf("PeakRSS = %d, want > 0 (same reasoning as UserCPU)", res.PeakRSS)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunCheck did not return after ctx cancel")
+	}
+}
+
+// TestLocalExecutor_CommandNotFound_ResourceFieldsZero confirms the other
+// half of captureRusage's nil-ProcessState branch: when exec itself never
+// gets a process started (command missing), there is nothing to have
+// measured, so all three resource fields stay at their zero
+// "not measured" value rather than some stale or fabricated number.
+func TestLocalExecutor_CommandNotFound_ResourceFieldsZero(t *testing.T) {
+	job := baseJob(t, []string{filepath.Join(t.TempDir(), "does-not-exist")})
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.PeakRSS != 0 {
+		t.Errorf("PeakRSS = %d, want 0 (exec-start failure never started a process)", res.PeakRSS)
+	}
+	if res.UserCPU != 0 {
+		t.Errorf("UserCPU = %v, want 0", res.UserCPU)
+	}
+	if res.SysCPU != 0 {
+		t.Errorf("SysCPU = %v, want 0", res.SysCPU)
 	}
 }

@@ -274,6 +274,28 @@ type CheckResult struct {
 	// whether per-node materialization is a material cost of isolation.
 	Materialized time.Duration
 
+	// PeakRSS is the peak resident-set size the check's process (and any
+	// descendants its own children reaped via wait(2), transitively)
+	// touched over its lifetime, in BYTES. Zero means "not measured" —
+	// either the executor has no reliable source for it (issue #14's
+	// container-executor investigation: --rm removes the container
+	// before any terminal stat is retrievable, so the container executor
+	// always leaves this zero rather than approximate) or the command
+	// never actually ran (a daemon-side failure before exec). Best-effort
+	// observability only, captured for history/telemetry — see
+	// docs/design's issue #14 slice notes; NEVER an input to Status or
+	// any other verdict.
+	PeakRSS int64
+
+	// UserCPU and SysCPU are the check's process (and reaped-descendant)
+	// time spent in user space and in the kernel on its behalf,
+	// respectively — the same rusage the OS accumulates through wait(2)
+	// that PeakRSS comes from, and the same zero-means-unmeasured and
+	// never-a-verdict-input rules apply. A CPU-bound command shows UserCPU
+	// well above SysCPU; an I/O-bound one shows the reverse.
+	UserCPU time.Duration
+	SysCPU  time.Duration
+
 	// BlockedBy, set only when Status is CheckBlocked, names the
 	// prerequisite check(s) whose non-green end blocked this one — the
 	// direct `after` edges that failed, or, for a check with no failed

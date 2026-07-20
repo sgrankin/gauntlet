@@ -591,6 +591,51 @@ func TestContainerExecutor_ScratchDirRootsResultDirMount(t *testing.T) {
 	}
 }
 
+// --- RunCheck: resource usage is always recorded absent (issue #14). ---
+// Hermetic — a fake "container" CLI on PATH, same pattern as
+// TestContainerExecutor_ScratchDirRootsResultDirMount above, so this
+// exercises the real RunCheck success path without needing a live runtime.
+// See container.go's "Resource usage (issue #14)" comment for why: the
+// investigation found no reliable terminal-stats source for any supported
+// runtime once --rm has removed the container, so v1 never populates
+// these fields — this pins that "always absent, never approximated"
+// contract at the API layer, independent of what a real runtime would
+// have reported.
+
+func TestContainerExecutor_ResourceFieldsAlwaysAbsent(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "container"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake runtime: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	c, err := New(Params{Runtime: "container", Image: "img"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	job := containerJob([]string{"true"})
+	job.Dir = t.TempDir()
+
+	res := c.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed", res.Status)
+	}
+	if res.PeakRSS != 0 {
+		t.Errorf("PeakRSS = %d, want 0 (container executor never measures this in v1)", res.PeakRSS)
+	}
+	if res.UserCPU != 0 {
+		t.Errorf("UserCPU = %v, want 0", res.UserCPU)
+	}
+	if res.SysCPU != 0 {
+		t.Errorf("SysCPU = %v, want 0", res.SysCPU)
+	}
+}
+
 // --- diagnoseMount: pure decision function. ---
 
 func TestDiagnoseMount(t *testing.T) {
@@ -904,6 +949,16 @@ func TestContainerExecutor_Functional(t *testing.T) {
 		}
 		if res.Status != core.CheckPassed {
 			t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+		}
+		// Issue #14: the container executor deliberately records resource
+		// usage as absent (see container.go's "Resource usage (issue #14)"
+		// note) rather than approximating from unreliable sources — proven
+		// here against a REAL runtime run, not just the hermetic
+		// fake-binary test below, so a future accidental wiring-up of a
+		// misleading number (e.g. the `container` CLI's own rusage) would
+		// be caught even though it would "work" superficially.
+		if res.PeakRSS != 0 || res.UserCPU != 0 || res.SysCPU != 0 {
+			t.Errorf("PeakRSS=%d UserCPU=%v SysCPU=%v, want all zero (container executor records resource usage as absent in v1)", res.PeakRSS, res.UserCPU, res.SysCPU)
 		}
 	})
 

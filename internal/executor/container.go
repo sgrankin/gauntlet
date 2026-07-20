@@ -185,6 +185,59 @@ type ContainerExecutor struct {
 	params Params
 }
 
+// Resource usage (issue #14): unlike LocalExecutor, ContainerExecutor never
+// populates CheckResult.PeakRSS/UserCPU/SysCPU — they are always left at
+// their zero "not measured" value. This is a deliberate v1 decision, not an
+// oversight; the investigation behind it:
+//
+//   - The workload's actual peak-RSS/CPU-time accounting lives in the
+//     container runtime's terminal cgroup stats, and `--rm` (runArgs above)
+//     removes the container synchronously when it exits — there is no
+//     window after exit in which `docker inspect`/`stats`-equivalent data
+//     or the cgroup files are still readable. This isn't a race to lose;
+//     the data is simply gone by the time RunCheck would go looking for it.
+//   - The obvious workaround — read the `<runtime> run` CLI subprocess's own
+//     rusage, the same way LocalExecutor reads its child's — does not work
+//     for any of the three runtimes this package supports, for two
+//     different reasons:
+//   - docker: the `docker` binary is a thin client to the dockerd
+//     daemon over a socket; the workload runs as a child of
+//     containerd-shim, not of the CLI process. The CLI's own rusage
+//     reflects socket I/O and JSON handling, never the container.
+//   - podman (including rootless): `podman run` (non-remote) forks
+//     `conmon` as the container's supervisor, and conmon deliberately
+//     double-forks/detaches so the container survives the `podman`
+//     client exiting — the exact "double-forking daemonizer" escape
+//     documented on captureRusage (rusage.go) for LocalExecutor. The
+//     `podman` client's rusage does not include it either. Rootless
+//     mode's `--cgroup-manager=cgroupfs` vs the default `systemd` only
+//     changes where the accounting cgroup lives while the container is
+//     RUNNING (relevant to a live `podman stats` poll); it doesn't
+//     change what's readable after `--rm` has already removed the
+//     container, so it offers nothing cheap for this v1's terminal-only
+//     capture.
+//   - Apple's `container` CLI: same client/supervisor split as docker
+//     (a background `container-runtime-linux` VM process does the
+//     work), so the same reasoning applies; not independently verified
+//     against a live install (unavailable in this environment), but
+//     consistent with its documented client/server architecture.
+//   - The one way to get real numbers would be to stop removing the
+//     container automatically — run without `--rm`, then
+//     `docker inspect`/equivalent for stats, then `docker rm` — but that
+//     changes this executor's cleanup semantics (a crash between exit and
+//     the manual `rm` now leaves a stopped-but-present container instead
+//     of a `--rm`'d one) and needs its interplay with
+//     cmd/gauntlet/sweep.go's orphan sweep re-examined even though the
+//     sweep's `ps -a`/`ls -a` listing already tolerates stopped
+//     containers today. That's a deliberate hygiene trade-off, not a
+//     capture-mechanics detail, so it's left for the session owner to
+//     decide rather than made here.
+//
+// Per the issue's own stance ("where the answer is 'nothing reliable',
+// record the fields as absent rather than approximating"), v1 does exactly
+// that: every ContainerExecutor.RunCheck result carries PeakRSS == 0,
+// UserCPU == 0, SysCPU == 0, same as any other "not measured" result.
+
 // New validates params and returns a ready ContainerExecutor. It does not
 // touch the runtime itself — reachability is checked per-RunCheck, since
 // the service can come and go across the life of a long-running daemon.
