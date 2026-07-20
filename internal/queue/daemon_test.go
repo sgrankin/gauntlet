@@ -13,6 +13,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/executor"
+	"github.com/sgrankin/gauntlet/internal/obs"
 )
 
 const testCheckSpecPath = ".gauntlet.kdl"
@@ -517,6 +518,25 @@ func TestReconcile_EventsPerTransition(t *testing.T) {
 		}
 		if e.RunID != runID {
 			t.Errorf("events[%d] (kind=%v) RunID = %q, want %q (same run throughout)", i, e.Kind, e.RunID, runID)
+		}
+	}
+}
+
+// TestNodeKind pins the node-name classification RecordNode's kind
+// attribute depends on: the image:/receipt: prefixes are queue-owned
+// conventions, and a misclassification would silently partition metric
+// aggregates under the wrong kind.
+func TestNodeKind(t *testing.T) {
+	cases := []struct{ node, want string }{
+		{"test", obs.NodeKindCheck},
+		{"image:go-ci", obs.NodeKindImage},
+		{"receipt:deployment", obs.NodeKindReceipt},
+		{"imagey", obs.NodeKindCheck},
+		{"receipts", obs.NodeKindCheck},
+	}
+	for _, tc := range cases {
+		if got := nodeKind(tc.node); got != tc.want {
+			t.Errorf("nodeKind(%q) = %q, want %q", tc.node, got, tc.want)
 		}
 	}
 }

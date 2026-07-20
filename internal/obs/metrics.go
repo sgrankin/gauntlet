@@ -232,10 +232,15 @@ func recordNode(ctx context.Context, nh *nodeHistograms, target, kind string, re
 	if result.PeakRSS > 0 {
 		nh.peakRSS.Record(ctx, result.PeakRSS, attrs)
 	}
-	if result.UserCPU > 0 {
+	// Gate on the emitted MILLISECOND value, matching trace.go's span
+	// attributes and history's stored unit: a sub-ms measurement truncates
+	// to 0, which every other surface treats as "not measured" — recording
+	// it here would put literal-0 samples into a distribution documented
+	// as never diluted by absent readings.
+	if result.UserCPU.Milliseconds() > 0 {
 		nh.userCPU.Record(ctx, result.UserCPU.Milliseconds(), attrs)
 	}
-	if result.SysCPU > 0 {
+	if result.SysCPU.Milliseconds() > 0 {
 		nh.sysCPU.Record(ctx, result.SysCPU.Milliseconds(), attrs)
 	}
 }

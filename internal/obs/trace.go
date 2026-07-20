@@ -154,10 +154,15 @@ func checkAttributes(r core.CheckResult) []attribute.KeyValue {
 	if r.PeakRSS > 0 {
 		kvs = append(kvs, attribute.Int64(AttrCheckPeakRSS, r.PeakRSS))
 	}
-	if r.UserCPU > 0 {
+	// Gate on the MILLISECOND value that is actually emitted, not the raw
+	// nanosecond duration: a sub-ms measurement truncates to 0, and history
+	// stores/reads the same ms value with 0 meaning "not measured" — every
+	// surface must agree that sub-ms is absent, or a false 0 leaks here
+	// while history calls the same run unmeasured.
+	if r.UserCPU.Milliseconds() > 0 {
 		kvs = append(kvs, attribute.Int64(AttrCheckUserCPU, r.UserCPU.Milliseconds()))
 	}
-	if r.SysCPU > 0 {
+	if r.SysCPU.Milliseconds() > 0 {
 		kvs = append(kvs, attribute.Int64(AttrCheckSysCPU, r.SysCPU.Milliseconds()))
 	}
 	return kvs

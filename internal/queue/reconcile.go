@@ -540,12 +540,6 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		select {
 		case res := <-inf.result:
 			obs.EndCheck(inf.span, res)
-			// OTLP node-completion histograms (issue #14): same site and
-			// same pre-validation res as EndCheck's span above, on purpose
-			// — see obs.RecordNode's doc. nodeKind (below) is the one bit
-			// of node-name-prefix knowledge obs needs but must not own
-			// itself (that convention is queue's).
-			obs.RecordNode(ctx, t.Name, nodeKind(name), res)
 			res.Waited = inf.waited
 			// An image-build node's green is conditional on its captured
 			// result validating as one IMMUTABLE reference — validated
@@ -619,6 +613,15 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 				}
 				res.Receipt = nil // never carried past this validation step
 			}
+			// OTLP node-completion histograms (issue #14), recorded AFTER
+			// the image/receipt validation above so the metric's outcome
+			// attribute matches the verdict history stores — a
+			// validation-flipped node must not count as "passed" in
+			// outcome-partitioned aggregates. (EndCheck's span status
+			// above keeps its pre-existing pre-validation semantics.)
+			// nodeKind is the one bit of node-name-prefix knowledge obs
+			// needs but must not own itself (that convention is queue's).
+			obs.RecordNode(ctx, t.Name, nodeKind(name), res)
 			delete(r.inflight, name)
 			r.results[name] = res
 			// Check is the just-finished result itself, so channels can

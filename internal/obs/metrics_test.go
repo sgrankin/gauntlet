@@ -364,3 +364,40 @@ func TestDisabledOTLPMetricsAreNoop(t *testing.T) {
 		_ = reg.Unregister()
 	}
 }
+
+// TestRecordNodeSkipsSubMillisecondCPU pins the gate's unit: a genuinely
+// measured but sub-millisecond CPU time truncates to 0 in the emitted
+// millisecond value, and history stores/reads the same ms with 0 meaning
+// "not measured" — so it must be skipped here too, or the histogram gets
+// literal-0 samples every other surface calls absent.
+func TestRecordNodeSkipsSubMillisecondCPU(t *testing.T) {
+	rdr, meter := newTestMeter(t)
+	nh, err := newNodeHistograms(meter)
+	if err != nil {
+		t.Fatalf("newNodeHistograms: %v", err)
+	}
+
+	result := core.CheckResult{
+		Name:     "fast",
+		Status:   core.CheckPassed,
+		Duration: 10 * time.Millisecond,
+		PeakRSS:  4096, // measured; must still record
+		UserCPU:  500 * time.Microsecond,
+		SysCPU:   900 * time.Microsecond,
+	}
+	recordNode(context.Background(), nh, "main", NodeKindCheck, result)
+
+	rm := collect(t, rdr)
+	if _, ok := findMetric(rm, "gauntlet.node.peak_rss"); !ok {
+		t.Error("gauntlet.node.peak_rss: not recorded, want the measured RSS point")
+	}
+	for _, name := range []string{"gauntlet.node.user_cpu", "gauntlet.node.sys_cpu"} {
+		m, ok := findMetric(rm, name)
+		if !ok {
+			continue
+		}
+		if hist, ok := m.Data.(metricdata.Histogram[int64]); ok && len(hist.DataPoints) != 0 {
+			t.Errorf("%s: got %d data points for a sub-ms value, want 0", name, len(hist.DataPoints))
+		}
+	}
+}

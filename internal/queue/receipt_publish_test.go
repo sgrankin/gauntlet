@@ -1103,3 +1103,50 @@ func TestReceipt_StaleTargetCASAfterPublish_HistoryRow(t *testing.T) {
 		t.Errorf("history row ReceiptPublished = %q, want %q", row.ReceiptPublished, receiptPublishedFresh)
 	}
 }
+
+// TestReconcile_ImageAndReceiptNodesCarryResourceUsage pins the issue #14
+// acceptance item that image builds and receipt producers record the same
+// resource-usage fields as checks: the capture is executor-level and the
+// rows ride the shared record plumbing, but that uniformity is asserted
+// here per node kind rather than assumed.
+func TestReconcile_ImageAndReceiptNodesCarryResourceUsage(t *testing.T) {
+	h := newReceiptHarness(t, 65536)
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", map[string]string{testCheckSpecPath: "" +
+		"image \"ci\" {\n    command \"true\"\n}\n" +
+		"check \"unit\" {\n    command \"true\"\n}\n" +
+		"receipt \"deploy\" {\n    command \"true\"\n}\n"})
+
+	h.reconcile()
+	runID := h.currentRunID()
+
+	imageRef := "sha256:" + strings.Repeat("a", 64)
+	h.release(runID, "image:ci", core.CheckResult{
+		Name: "image:ci", Status: core.CheckPassed, Image: imageRef,
+		PeakRSS: 111_000_000, UserCPU: 400 * time.Millisecond, SysCPU: 40 * time.Millisecond,
+	})
+	h.release(runID, "unit", core.CheckResult{Name: "unit", Status: core.CheckPassed})
+	h.release(runID, receiptNode, core.CheckResult{
+		Name: receiptNode, Status: core.CheckPassed, Receipt: []byte("payload"),
+		PeakRSS: 22_000_000, UserCPU: 80 * time.Millisecond, SysCPU: 8 * time.Millisecond,
+	})
+
+	recs := h.ch.Records()
+	last := recs[len(recs)-1]
+	if last.Outcome != core.OutcomeLanded {
+		t.Fatalf("Outcome = %v (detail %q), want Landed", last.Outcome, last.Detail)
+	}
+	byName := map[string]core.CheckResult{}
+	for _, c := range last.Checks {
+		byName[c.Name] = c
+	}
+	img := byName["image:ci"]
+	if img.PeakRSS != 111_000_000 || img.UserCPU != 400*time.Millisecond || img.SysCPU != 40*time.Millisecond {
+		t.Errorf("image row usage = rss %d user %v sys %v, want 111000000/400ms/40ms", img.PeakRSS, img.UserCPU, img.SysCPU)
+	}
+	rcpt := byName[receiptNode]
+	if rcpt.PeakRSS != 22_000_000 || rcpt.UserCPU != 80*time.Millisecond || rcpt.SysCPU != 8*time.Millisecond {
+		t.Errorf("receipt row usage = rss %d user %v sys %v, want 22000000/80ms/8ms", rcpt.PeakRSS, rcpt.UserCPU, rcpt.SysCPU)
+	}
+}

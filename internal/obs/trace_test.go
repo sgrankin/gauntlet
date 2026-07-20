@@ -255,3 +255,30 @@ func TestOutcomeStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckAttributes_SubMillisecondCPUOmitted mirrors the metrics-side
+// sub-ms gate: a measured-but-sub-ms CPU value would render as a literal
+// 0 attribute while history calls the same run unmeasured, so it is
+// omitted like any other absent reading.
+func TestCheckAttributes_SubMillisecondCPUOmitted(t *testing.T) {
+	kvs := checkAttributes(core.CheckResult{
+		Name:     "fast",
+		Status:   core.CheckPassed,
+		Duration: 5 * time.Millisecond,
+		PeakRSS:  4096,
+		UserCPU:  500 * time.Microsecond,
+		SysCPU:   900 * time.Microsecond,
+	})
+	var sawRSS bool
+	for _, kv := range kvs {
+		switch string(kv.Key) {
+		case AttrCheckUserCPU, AttrCheckSysCPU:
+			t.Errorf("attribute %s present with value %v, want omitted for sub-ms CPU", kv.Key, kv.Value)
+		case AttrCheckPeakRSS:
+			sawRSS = true
+		}
+	}
+	if !sawRSS {
+		t.Error("AttrCheckPeakRSS absent, want present for a measured RSS")
+	}
+}
