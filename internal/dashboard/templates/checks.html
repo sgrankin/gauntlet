@@ -12,9 +12,9 @@
 {{if .Stats}}
 <div class="table-scroll">
 <table>
-<tr><th>check</th><th>total</th><th>failed</th><th>red rate</th><th>avg</th><th>max</th></tr>
+<tr><th>check</th><th>total</th><th>failed</th><th>red rate</th><th>avg</th><th>max</th><th title="peak resident-set size: max / median across measured rows">peak rss</th><th title="user-space CPU time: max / median across measured rows">cpu user</th><th title="kernel CPU time: max / median across measured rows">cpu sys</th></tr>
 {{range .Stats}}
-<tr><td>{{.Name}}</td><td>{{.Total}}</td><td>{{.Failed}}</td><td>{{.RedRate}}</td><td>{{.Avg}}</td><td>{{.Max}}</td></tr>
+<tr><td>{{.Name}}</td><td>{{.Total}}</td><td>{{.Failed}}</td><td>{{.RedRate}}</td><td>{{.Avg}}</td><td>{{.Max}}</td><td>{{.PeakRSS}}</td><td>{{.UserCPU}}</td><td>{{.SysCPU}}</td></tr>
 {{end}}
 </table>
 </div>

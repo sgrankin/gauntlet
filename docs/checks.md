@@ -71,6 +71,24 @@ sat ready waiting for host capacity records that wait separately from its
 own duration, so a slow host and a slow command are distinguishable in
 history.
 
+**Resource usage.** A check run by the local executor also records its peak
+memory (resident-set size) and CPU time (user and kernel, separately) beside
+its duration, read back from the child process's rusage after it exits —
+best-effort observability, never an input to the check's own pass/fail
+verdict. These show up as a "peak … / cpu … user / … sys" annotation on the
+run page, as max/median columns on the per-check stats view
+(`/checks`), and on the `run`/`checks` MCP tools and JSON API alongside
+duration. A check run by a **container** executor (docker, podman, or
+Apple's `container` CLI) never records any of this in v1: `--rm` removes the
+container synchronously at exit, before there's a window to read its
+terminal cgroup stats, and the client process's own rusage measures the
+client, not the containerized workload — see `ContainerExecutor`'s doc
+comment (`internal/executor/container.go`) for the full investigation and
+the one cheap-but-not-free option (trading `--rm` for inspect-then-`rm`) left
+for a future version. Zero always means "not measured", never "measured
+zero" — nothing in history, the dashboard, or the API reports a bare zero
+for these fields; they're simply absent.
+
 ## Workspace isolation
 
 By default every node in a run — each check and each `image:` build —

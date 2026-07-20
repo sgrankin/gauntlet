@@ -524,6 +524,54 @@ func TestAPIRun_ReceiptProvenancePresentNoPayloadLeak(t *testing.T) {
 	}
 }
 
+// TestAPIRun_ChecksIncludeResourceUsageWhenMeasuredOmitWhenNot mirrors
+// TestAPIRun_ReceiptProvenancePresentNoPayloadLeak's pattern for issue #14's
+// per-check resource-usage fields: GET /api/v1/run/{id} surfaces
+// peakRSSBytes/userCPUMs/sysCPUMs on a check that measured them, and omits
+// all three (not present-and-zero) on a check that didn't — the
+// zero-means-unmeasured contract has to survive the JSON boundary or a
+// client can't tell "measured zero" from "never measured".
+func TestAPIRun_ChecksIncludeResourceUsageWhenMeasuredOmitWhenNot(t *testing.T) {
+	store := openTestStore(t)
+
+	rec := sampleRecord("run-usage-api", "main")
+	rec.Checks = []core.CheckResult{
+		{Name: "measured", Status: core.CheckPassed, Duration: time.Second,
+			PeakRSS: 34_100_000, UserCPU: 750 * time.Millisecond, SysCPU: 50 * time.Millisecond},
+		{Name: "unmeasured", Status: core.CheckPassed, Duration: time.Second},
+	}
+	emitRun(t, store, rec)
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/run/run-usage-api")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	checks, ok := m["checks"].([]any)
+	if !ok || len(checks) != 2 {
+		t.Fatalf("checks = %v, want a 2-element array", m["checks"])
+	}
+	measured := checks[0].(map[string]any)
+	if measured["peakRSSBytes"] != float64(34_100_000) {
+		t.Errorf("measured.peakRSSBytes = %v, want 34100000", measured["peakRSSBytes"])
+	}
+	if measured["userCPUMs"] != float64(750) {
+		t.Errorf("measured.userCPUMs = %v, want 750", measured["userCPUMs"])
+	}
+	if measured["sysCPUMs"] != float64(50) {
+		t.Errorf("measured.sysCPUMs = %v, want 50", measured["sysCPUMs"])
+	}
+
+	unmeasured := checks[1].(map[string]any)
+	for _, key := range []string{"peakRSSBytes", "userCPUMs", "sysCPUMs"} {
+		if _, present := unmeasured[key]; present {
+			t.Errorf("unmeasured check has key %q = %v, want omitted entirely", key, unmeasured[key])
+		}
+	}
+}
+
 // TestAPIRun_ChecksIncludeLogPathAndLogURLWhenConfigured confirms
 // GET /api/v1/run/{id} exposes logPath (always, when non-empty) and logUrl
 // (only when the dashboard is configured to actually serve it, WithLogRoot)
@@ -1293,6 +1341,71 @@ func TestAPIChecks_Shape(t *testing.T) {
 	}
 	if dp["waiting"] != float64(2) {
 		t.Errorf("depth[0].waiting = %v, want 2", dp["waiting"])
+	}
+}
+
+// TestAPIChecks_ResourceUsageAggregatesPresentWhenMeasuredOmittedWhenNot
+// confirms GET /api/v1/checks surfaces issue #14's peakRSSMax/MedianBytes
+// and userCPU/sysCPUMax/MedianMs on a check name with measured rows, and
+// omits all six for a check name with none — same
+// present-only-when-measured contract as the per-run checks fields
+// (TestAPIRun_ChecksIncludeResourceUsageWhenMeasuredOmitWhenNot).
+func TestAPIChecks_ResourceUsageAggregatesPresentWhenMeasuredOmittedWhenNot(t *testing.T) {
+	store := openTestStore(t)
+	base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+
+	rec := &core.RunRecord{
+		RunID: "run-usage-checks", Target: "main",
+		Checks: []core.CheckResult{
+			{Name: "measured", Status: core.CheckPassed, Duration: time.Second,
+				PeakRSS: 34_100_000, UserCPU: 750 * time.Millisecond, SysCPU: 50 * time.Millisecond},
+			{Name: "unmeasured", Status: core.CheckPassed, Duration: time.Second},
+		},
+		Outcome: core.OutcomeLanded, StartedAt: base, EndedAt: base.Add(time.Second),
+	}
+	if err := store.Emit(context.Background(), core.Event{Kind: core.EventLanded, Target: "main", RunID: rec.RunID, Record: rec}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	h := dashboard.New(func() *queue.Snapshot { return nil }, store)
+	resp, body := get(t, h, "/api/v1/checks?target=main&since=720h")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	}
+
+	m := decodeJSON(t, body)
+	stats, ok := m["stats"].([]any)
+	if !ok || len(stats) != 2 {
+		t.Fatalf("stats = %v, want a 2-element array", m["stats"])
+	}
+	var measured, unmeasured map[string]any
+	for _, s := range stats {
+		st := s.(map[string]any)
+		switch st["name"] {
+		case "measured":
+			measured = st
+		case "unmeasured":
+			unmeasured = st
+		}
+	}
+	if measured == nil || unmeasured == nil {
+		t.Fatalf("stats missing an expected name: %v", stats)
+	}
+
+	if measured["peakRSSMaxBytes"] != float64(34_100_000) || measured["peakRSSMedianBytes"] != float64(34_100_000) {
+		t.Errorf("measured peakRSS max/median = %v/%v, want 34100000/34100000", measured["peakRSSMaxBytes"], measured["peakRSSMedianBytes"])
+	}
+	if measured["userCPUMaxMs"] != float64(750) || measured["userCPUMedianMs"] != float64(750) {
+		t.Errorf("measured userCPU max/median = %v/%v, want 750/750", measured["userCPUMaxMs"], measured["userCPUMedianMs"])
+	}
+	if measured["sysCPUMaxMs"] != float64(50) || measured["sysCPUMedianMs"] != float64(50) {
+		t.Errorf("measured sysCPU max/median = %v/%v, want 50/50", measured["sysCPUMaxMs"], measured["sysCPUMedianMs"])
+	}
+
+	for _, key := range []string{"peakRSSMaxBytes", "peakRSSMedianBytes", "userCPUMaxMs", "userCPUMedianMs", "sysCPUMaxMs", "sysCPUMedianMs"} {
+		if _, present := unmeasured[key]; present {
+			t.Errorf("unmeasured stat has key %q = %v, want omitted entirely", key, unmeasured[key])
+		}
 	}
 }
 

@@ -344,6 +344,52 @@ func TestReconcile_GreenMultiCheckLand(t *testing.T) {
 	}
 }
 
+// TestReconcile_ResourceUsageFlowsToRecord proves the plumbing issue #14's
+// surfaces slice depends on: a CheckResult the executor hands back with
+// PeakRSS/UserCPU/SysCPU set survives verbatim into the terminal
+// RunRecord.Checks entry, exactly like Duration/Image/Materialized already
+// do (see TestReconcile_GreenMultiCheckLand and image_test.go's build-row
+// assertions for the established pattern this mirrors). The queue never
+// reconstructs a CheckResult by field list on the success path — startCheck
+// mutates the executor's own result in place (reconcile.go) — so this is a
+// regression guard against a future refactor that starts doing so and drops
+// fields it doesn't know about, not a test of new queue logic (there is
+// none: the local executor capture and the eventual history/dashboard/obs
+// consumers are the only issue #14 code that actually branches on these
+// fields).
+func TestReconcile_ResourceUsageFlowsToRecord(t *testing.T) {
+	h := newHarness(t)
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "widget")
+	h.git.pushCandidate(ref, "", checkSpecFile("test"))
+
+	h.reconcile() // trial clean; test started
+	runID := h.currentRunID()
+
+	h.release(runID, "test", core.CheckResult{
+		Name: "test", Status: core.CheckPassed, Duration: time.Second,
+		PeakRSS: 987_654_321,
+		UserCPU: 750 * time.Millisecond,
+		SysCPU:  50 * time.Millisecond,
+	})
+
+	recs := h.ch.Records()
+	last := recs[len(recs)-1]
+	if len(last.Checks) != 1 {
+		t.Fatalf("Checks = %+v, want 1 entry", last.Checks)
+	}
+	c := last.Checks[0]
+	if c.PeakRSS != 987_654_321 {
+		t.Errorf("Checks[0].PeakRSS = %d, want 987654321", c.PeakRSS)
+	}
+	if c.UserCPU != 750*time.Millisecond {
+		t.Errorf("Checks[0].UserCPU = %v, want 750ms", c.UserCPU)
+	}
+	if c.SysCPU != 50*time.Millisecond {
+		t.Errorf("Checks[0].SysCPU = %v, want 50ms", c.SysCPU)
+	}
+}
+
 func TestNew_Validation(t *testing.T) {
 	git := newFakeGitRepo()
 	exec := executor.NewGatedExecutor()

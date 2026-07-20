@@ -2,6 +2,7 @@ package history
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -18,8 +19,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -154,6 +155,16 @@ type CheckRow struct {
 	// to materialize before its command ran (core.CheckResult.Materialized,
 	// issue #9); zero in shared mode and for pre-v11 rows.
 	Materialized time.Duration
+	// PeakRSS is the peak resident-set size the check's process (and reaped
+	// descendants) touched, in bytes (core.CheckResult.PeakRSS, v13+, issue
+	// #14). Zero means "not measured" — the container executor (v1) never
+	// measures it, and neither does a pre-v13 row — never "measured zero".
+	PeakRSS int64
+	// UserCPU and SysCPU are the check's process (and reaped-descendant)
+	// user-space/kernel CPU time (core.CheckResult.UserCPU/SysCPU, v13+,
+	// issue #14). Same zero-means-unmeasured contract as PeakRSS.
+	UserCPU time.Duration
+	SysCPU  time.Duration
 }
 
 // HookRow is one row of the hooks table, as read back for the dashboard:
@@ -178,7 +189,8 @@ type HookRow struct {
 }
 
 // CheckStat summarizes one check's outcomes across a window of runs: how
-// often it failed (red rate) and how long it took.
+// often it failed (red rate), how long it took, and (issue #14) its
+// resource-usage envelope.
 type CheckStat struct {
 	Name        string
 	Total       int
@@ -186,6 +198,33 @@ type CheckStat struct {
 	RedRate     float64 // Failed / Total; 0 when Total == 0
 	AvgDuration time.Duration
 	MaxDuration time.Duration
+
+	// PeakRSSMax/PeakRSSMedian summarize checks.peak_rss_bytes across this
+	// window's rows — but ONLY rows where it was actually measured (> 0;
+	// core.CheckResult's zero-means-unmeasured contract). PeakRSSMeasured is
+	// false, and both values are zero, when not a single row in the window
+	// measured it (e.g. every run used the container executor, which never
+	// does, or the window predates v13) — callers must gate on
+	// PeakRSSMeasured rather than treat zero as "measured zero", exactly
+	// like AvgDuration would if duration itself could go unmeasured (it
+	// can't, which is why no such gate exists on it).
+	PeakRSSMax      int64
+	PeakRSSMedian   int64
+	PeakRSSMeasured bool
+
+	// UserCPUMax/UserCPUMedian/SysCPUMax/SysCPUMedian mirror PeakRSSMax/
+	// PeakRSSMedian for checks.user_cpu_ms/sys_cpu_ms, independently gated
+	// by their own Measured flags: a check's PeakRSS and CPU times are
+	// captured together in practice (same executor rusage read), but a
+	// measurement failure or a mixed-version window could in principle
+	// measure one without the other, so each metric carries its own
+	// presence flag rather than sharing PeakRSSMeasured.
+	UserCPUMax      time.Duration
+	UserCPUMedian   time.Duration
+	UserCPUMeasured bool
+	SysCPUMax       time.Duration
+	SysCPUMedian    time.Duration
+	SysCPUMeasured  bool
 }
 
 // DepthPoint is one sample of the queue_depth series.
@@ -297,7 +336,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -308,13 +347,15 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	var checks []CheckRow
 	for rows.Next() {
 		var c CheckRow
-		var durationMS, waitedMS, materializeMS int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS); err != nil {
+		var durationMS, waitedMS, materializeMS, userCPUms, sysCPUms int64
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond
 		c.Waited = time.Duration(waitedMS) * time.Millisecond
 		c.Materialized = time.Duration(materializeMS) * time.Millisecond
+		c.UserCPU = time.Duration(userCPUms) * time.Millisecond
+		c.SysCPU = time.Duration(sysCPUms) * time.Millisecond
 		checks = append(checks, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -356,6 +397,15 @@ func (s *Store) Hooks(runID string) ([]HookRow, error) {
 
 // CheckStats summarizes per-check red-rate and duration across target's
 // runs started at or after since.
+//
+// Total/Failed/AvgDuration/MaxDuration are computed in SQL (GROUP BY
+// c.name), unchanged since before v13. The resource-usage aggregates
+// (PeakRSS*/UserCPU*/SysCPU*, issue #14) need a per-check-name MEDIAN, which
+// SQLite has no builtin aggregate for; rather than hand-roll a
+// ROW_NUMBER/PARTITION window query three times over (once per metric) this
+// runs one extra query fetching every representative row's raw values (name
+// + the three usage columns) and reduces each check name's slice to
+// max/median in Go — see medianAndMax, below.
 //
 // Batch-aware: a batch run's check results are duplicated verbatim onto
 // every member's RunRecord, so naively joining checks to runs would count a
@@ -421,7 +471,107 @@ ORDER BY c.name`,
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("history: check stats: %w", err)
 	}
+	if len(out) == 0 {
+		return out, nil
+	}
+
+	// indexByName is built only now that out is done growing: CheckStats
+	// below mutates out[idx] in place via this map, and a pointer/index
+	// taken mid-append would go stale the moment a later append reallocates
+	// out's backing array — this two-pass shape (finish growing, then index)
+	// sidesteps that rather than pre-sizing out to a row count learned
+	// separately.
+	indexByName := make(map[string]int, len(out))
+	for i, st := range out {
+		indexByName[st.Name] = i
+	}
+
+	usageRows, err := s.db.Query(`
+WITH suite_runs AS (
+	SELECT run_id, COALESCE(NULLIF(batch_id, ''), run_id) AS suite_key
+	FROM runs
+	WHERE target = ? AND started_at >= ?
+),
+representative AS (
+	SELECT MIN(run_id) AS run_id
+	FROM suite_runs
+	GROUP BY suite_key
+)
+SELECT c.name, c.peak_rss_bytes, c.user_cpu_ms, c.sys_cpu_ms
+FROM checks c
+JOIN representative rep ON rep.run_id = c.run_id
+WHERE c.status != 'blocked'`,
+		target, since.UnixMilli(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("history: check stats usage: %w", err)
+	}
+	defer usageRows.Close()
+
+	peakRSS := make(map[string][]int64)
+	userCPU := make(map[string][]int64)
+	sysCPU := make(map[string][]int64)
+	for usageRows.Next() {
+		var name string
+		var peak, user, sys int64
+		if err := usageRows.Scan(&name, &peak, &user, &sys); err != nil {
+			return nil, fmt.Errorf("history: check stats usage: %w", err)
+		}
+		// > 0 only: the capture-slice zero-means-unmeasured contract
+		// (core.CheckResult's own field docs) applies per field
+		// independently, so a row can contribute to one metric's slice and
+		// not another's.
+		if peak > 0 {
+			peakRSS[name] = append(peakRSS[name], peak)
+		}
+		if user > 0 {
+			userCPU[name] = append(userCPU[name], user)
+		}
+		if sys > 0 {
+			sysCPU[name] = append(sysCPU[name], sys)
+		}
+	}
+	if err := usageRows.Err(); err != nil {
+		return nil, fmt.Errorf("history: check stats usage: %w", err)
+	}
+
+	for name, idx := range indexByName {
+		st := &out[idx]
+		if median, max, ok := medianAndMax(peakRSS[name]); ok {
+			st.PeakRSSMedian, st.PeakRSSMax, st.PeakRSSMeasured = median, max, true
+		}
+		if median, max, ok := medianAndMax(userCPU[name]); ok {
+			st.UserCPUMedian = time.Duration(median) * time.Millisecond
+			st.UserCPUMax = time.Duration(max) * time.Millisecond
+			st.UserCPUMeasured = true
+		}
+		if median, max, ok := medianAndMax(sysCPU[name]); ok {
+			st.SysCPUMedian = time.Duration(median) * time.Millisecond
+			st.SysCPUMax = time.Duration(max) * time.Millisecond
+			st.SysCPUMeasured = true
+		}
+	}
 	return out, nil
+}
+
+// medianAndMax returns vals' median and max. ok is false (median and max
+// both 0) for an empty vals — the "nothing measured" case CheckStats uses to
+// leave a CheckStat's *Measured flag false rather than report a misleading
+// zero. vals is sorted in place; callers here always pass a freshly built
+// per-name slice, never a slice another caller still holds a reference to.
+func medianAndMax(vals []int64) (median, max int64, ok bool) {
+	if len(vals) == 0 {
+		return 0, 0, false
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+	max = vals[len(vals)-1]
+	mid := len(vals) / 2
+	if len(vals)%2 == 1 {
+		median = vals[mid]
+	} else {
+		median = (vals[mid-1] + vals[mid]) / 2
+	}
+	return median, max, true
 }
 
 // DepthSeries returns target's queue-depth samples at or after since, in

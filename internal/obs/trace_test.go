@@ -128,6 +128,47 @@ func TestCheckAttributes(t *testing.T) {
 	}
 }
 
+// TestCheckAttributes_ResourceUsageOmittedWhenUnmeasured confirms a zero
+// PeakRSS/UserCPU/SysCPU (the container executor's v1 result, or any
+// daemon-side failure before exec) produces no span attribute at all for
+// that field — never a recorded zero, which would misread as "measured
+// zero" to anything reading the span later.
+func TestCheckAttributes_ResourceUsageOmittedWhenUnmeasured(t *testing.T) {
+	r := core.CheckResult{Name: "test", Status: core.CheckPassed, Duration: time.Second}
+	kvs := checkAttributes(r)
+	for _, key := range []string{AttrCheckPeakRSS, AttrCheckUserCPU, AttrCheckSysCPU} {
+		for _, kv := range kvs {
+			if string(kv.Key) == key {
+				t.Errorf("attribute %q present for an unmeasured field, want omitted entirely: %v", key, kvs)
+			}
+		}
+	}
+}
+
+// TestCheckAttributes_ResourceUsagePresentWhenMeasured confirms all three
+// fields appear, correctly converted (bytes verbatim, durations to
+// milliseconds — matching AttrCheckDuration's own convention), when the
+// executor actually measured them.
+func TestCheckAttributes_ResourceUsagePresentWhenMeasured(t *testing.T) {
+	r := core.CheckResult{
+		Name: "test", Status: core.CheckPassed, Duration: time.Second,
+		PeakRSS: 123_456_789,
+		UserCPU: 1500 * time.Millisecond,
+		SysCPU:  250 * time.Millisecond,
+	}
+	kvs := checkAttributes(r)
+
+	if got := attr(t, kvs, AttrCheckPeakRSS).Value.AsInt64(); got != 123_456_789 {
+		t.Errorf("peak_rss_bytes = %d, want 123456789", got)
+	}
+	if got := attr(t, kvs, AttrCheckUserCPU).Value.AsInt64(); got != 1500 {
+		t.Errorf("user_cpu_ms = %d, want 1500", got)
+	}
+	if got := attr(t, kvs, AttrCheckSysCPU).Value.AsInt64(); got != 250 {
+		t.Errorf("sys_cpu_ms = %d, want 250", got)
+	}
+}
+
 func TestCheckStatusString(t *testing.T) {
 	cases := map[core.CheckStatus]string{
 		core.CheckPassed:  "passed",

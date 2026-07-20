@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 12
+const schemaVersion = 13
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -125,6 +125,11 @@ func Open(path string) (*Store, error) {
 //     core.RunRecord.ReceiptRef/ReceiptBlob/ReceiptPublished, issue #13; not
 //     landed-only, see schema.sql's column comment), stamp user_version=12,
 //     loop.
+//   - 12 (schema v12: checks has no peak_rss_bytes/user_cpu_ms/sys_cpu_ms
+//     columns): ALTER TABLE checks ADD COLUMN peak_rss_bytes/user_cpu_ms/
+//     sys_cpu_ms (best-effort per-check resource usage — core.CheckResult.
+//     PeakRSS/UserCPU/SysCPU, issue #14; zero means not measured, same as
+//     a pre-v13 row), stamp user_version=13, loop.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -285,6 +290,19 @@ CREATE TABLE hook_runs (
 			}
 			if _, err := db.Exec(`PRAGMA user_version = 12`); err != nil {
 				return fmt.Errorf("history: set user_version=12: %w", err)
+			}
+		case 12:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN peak_rss_bytes INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v12->v13 (checks.peak_rss_bytes): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN user_cpu_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v12->v13 (checks.user_cpu_ms): %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN sys_cpu_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("history: migrate v12->v13 (checks.sys_cpu_ms): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 13`); err != nil {
+				return fmt.Errorf("history: set user_version=13: %w", err)
 			}
 		case schemaVersion:
 			return nil
@@ -462,6 +480,13 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			cr.Waited.Milliseconds(),
 			cr.Image,
 			cr.Materialized.Milliseconds(),
+			// peak_rss_bytes/user_cpu_ms/sys_cpu_ms (v13+, issue #14):
+			// core.CheckResult.PeakRSS/UserCPU/SysCPU verbatim — zero for
+			// every field the running executor didn't measure, the same
+			// zero-means-unmeasured contract as materialize_ms above.
+			cr.PeakRSS,
+			cr.UserCPU.Milliseconds(),
+			cr.SysCPU.Milliseconds(),
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

@@ -717,6 +717,9 @@ func (d *dash) handleChecks(w http.ResponseWriter, r *http.Request) {
 			Name: st.Name, Total: st.Total, Failed: st.Failed,
 			RedRate: fmt.Sprintf("%.0f%%", st.RedRate*100),
 			Avg:     formatDuration(st.AvgDuration), Max: formatDuration(st.MaxDuration),
+			PeakRSS: statUsageCell(st.PeakRSSMeasured, st.PeakRSSMax, st.PeakRSSMedian, formatBytes),
+			UserCPU: statUsageCell(st.UserCPUMeasured, st.UserCPUMax, st.UserCPUMedian, formatDuration),
+			SysCPU:  statUsageCell(st.SysCPUMeasured, st.SysCPUMax, st.SysCPUMedian, formatDuration),
 		})
 	}
 
@@ -1044,6 +1047,31 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
+// formatBytes renders b (bytes) for display using decimal SI units (KB =
+// 1000 bytes, not KiB's 1024) — the "34.1 MB" style most operators already
+// read memory numbers in, not the kibibyte-precise value rusage returns.
+// One decimal place from KB up; whole bytes below that. b <= 0 renders "-":
+// this package's convention (checkRowDetail, statView) is to only ever call
+// formatBytes on a value already known to be measured (issue #14's
+// zero-means-unmeasured contract), so this is a defensive fallback, not the
+// primary way callers signal "absent".
+func formatBytes(b int64) string {
+	if b <= 0 {
+		return "-"
+	}
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	const units = "KMGTPE"
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), units[exp])
+}
+
 // formatTime renders t as a <time> element carrying both a machine-readable
 // RFC3339 UTC instant (its datetime attribute, for base.html's tooltip
 // script) and the same "2006-01-02 15:04:05 UTC" text this used to return
@@ -1328,8 +1356,13 @@ type memberView struct {
 // one short annotation for the run page: why a blocked check never ran
 // (v9 blocked_by), how long a slot-starved check waited for the daemon-wide
 // execution cap before its own duration began (v9 waited_ms), the built
-// image ref (v10 image), and per-node workspace materialization cost (v11
-// materialize_ms). Empty for the common case (ran immediately, shared tree).
+// image ref (v10 image), per-node workspace materialization cost (v11
+// materialize_ms), and (v13, issue #14) the check's peak memory and CPU
+// time. Empty for the common case (ran immediately, shared tree, no
+// resource-usage capture). PeakRSS/UserCPU/SysCPU are each gated on their
+// own > 0 \u2014 the zero-means-unmeasured contract \u2014 so a container-executor
+// check (v1: never measures) or a pre-v13 row renders no usage clause at
+// all, never a misleading "0 B" or "cpu 0s".
 func checkRowDetail(c history.CheckRow) string {
 	var parts []string
 	if c.BlockedBy != "" {
@@ -1343,6 +1376,12 @@ func checkRowDetail(c history.CheckRow) string {
 	}
 	if c.Image != "" {
 		parts = append(parts, "image "+shortImageRef(c.Image))
+	}
+	if c.PeakRSS > 0 {
+		parts = append(parts, "peak "+formatBytes(c.PeakRSS))
+	}
+	if c.UserCPU > 0 || c.SysCPU > 0 {
+		parts = append(parts, fmt.Sprintf("cpu %s user / %s sys", formatDuration(c.UserCPU), formatDuration(c.SysCPU)))
 	}
 	return strings.Join(parts, " \u00b7 ")
 }
@@ -1620,4 +1659,24 @@ type statView struct {
 	Total, Failed int
 	RedRate       string
 	Avg, Max      string
+
+	// PeakRSS/UserCPU/SysCPU (issue #14) are each "<max> / <median>" over
+	// this window's measured rows (history.CheckStat's own doc), or "-"
+	// when nothing in the window measured that field — e.g. the target's
+	// checks all ran under the container executor, or the window predates
+	// v13. Never a bare zero, which would misread as "measured zero".
+	PeakRSS string
+	UserCPU string
+	SysCPU  string
+}
+
+// statUsageCell renders one CheckStat resource-usage metric as "<max> /
+// <median>", or "-" when measured is false — the shared helper behind
+// statView's PeakRSS/UserCPU/SysCPU fields. format is formatBytes for
+// PeakRSS or formatDuration for the two CPU fields.
+func statUsageCell[T any](measured bool, max, median T, format func(T) string) string {
+	if !measured {
+		return "-"
+	}
+	return format(max) + " / " + format(median)
 }

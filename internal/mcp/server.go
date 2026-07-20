@@ -718,6 +718,14 @@ type checkDetail struct {
 	// (GET /run/{id}/log/{name}), present only when Params.LogRoot is set
 	// and LogPath is non-empty — see Params.LogRoot's doc.
 	LogURL string `json:"logUrl,omitempty"`
+
+	// PeakRSSBytes/UserCPUMs/SysCPUMs mirror dashboard/api.go's checkJSON
+	// field-for-field (v13+, issue #14): omitted (not present-and-zero) when
+	// the field wasn't measured — see checkJSON's own doc for why that
+	// distinction matters.
+	PeakRSSBytes int64 `json:"peakRSSBytes,omitempty"`
+	UserCPUMs    int64 `json:"userCPUMs,omitempty"`
+	SysCPUMs     int64 `json:"sysCPUMs,omitempty"`
 }
 
 func handleRun(p Params, in runIn) (runOut, error) {
@@ -761,6 +769,10 @@ func handleRun(p Params, in runIn) (runOut, error) {
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err, Output: c.Output,
 			LogPath: c.LogPath,
 			LogURL:  runLogURL(p.LogRoot, in.RunID, c.Name, c.LogPath),
+
+			PeakRSSBytes: c.PeakRSS,
+			UserCPUMs:    c.UserCPU.Milliseconds(),
+			SysCPUMs:     c.SysCPU.Milliseconds(),
 		})
 	}
 
@@ -959,6 +971,17 @@ type checkStat struct {
 	RedRate       float64 `json:"redRate"`
 	AvgDurationMs int64   `json:"avgDurationMs"`
 	MaxDurationMs int64   `json:"maxDurationMs"`
+
+	// PeakRSSMax/MedianBytes and UserCPU/SysCPUMax/MedianMs mirror
+	// dashboard/api.go's checkStatJSON resource-usage aggregates (v13+,
+	// issue #14): all six omitted together when that metric's history.
+	// CheckStat.*Measured flag is false — see checkStatJSON's own doc.
+	PeakRSSMaxBytes    int64 `json:"peakRSSMaxBytes,omitempty"`
+	PeakRSSMedianBytes int64 `json:"peakRSSMedianBytes,omitempty"`
+	UserCPUMaxMs       int64 `json:"userCPUMaxMs,omitempty"`
+	UserCPUMedianMs    int64 `json:"userCPUMedianMs,omitempty"`
+	SysCPUMaxMs        int64 `json:"sysCPUMaxMs,omitempty"`
+	SysCPUMedianMs     int64 `json:"sysCPUMedianMs,omitempty"`
 }
 
 // depthPoint mirrors dashboard/api.go's depthPointJSON field-for-field.
@@ -1002,10 +1025,20 @@ func handleChecks(p Params, in checksIn) (checksOut, error) {
 		Depth: make([]depthPoint, 0, len(depth)),
 	}
 	for _, st := range stats {
-		out.Stats = append(out.Stats, checkStat{
+		cs := checkStat{
 			Name: st.Name, Total: st.Total, Failed: st.Failed, RedRate: st.RedRate,
 			AvgDurationMs: st.AvgDuration.Milliseconds(), MaxDurationMs: st.MaxDuration.Milliseconds(),
-		})
+		}
+		if st.PeakRSSMeasured {
+			cs.PeakRSSMaxBytes, cs.PeakRSSMedianBytes = st.PeakRSSMax, st.PeakRSSMedian
+		}
+		if st.UserCPUMeasured {
+			cs.UserCPUMaxMs, cs.UserCPUMedianMs = st.UserCPUMax.Milliseconds(), st.UserCPUMedian.Milliseconds()
+		}
+		if st.SysCPUMeasured {
+			cs.SysCPUMaxMs, cs.SysCPUMedianMs = st.SysCPUMax.Milliseconds(), st.SysCPUMedian.Milliseconds()
+		}
+		out.Stats = append(out.Stats, cs)
 	}
 	for _, dp := range depth {
 		out.Depth = append(out.Depth, depthPoint{At: formatRFC3339(dp.At), Waiting: dp.Waiting, InFlight: dp.InFlight, Parked: dp.Parked})

@@ -41,6 +41,19 @@ const (
 	AttrReceiptRef     = "gauntlet.receipt.ref"
 	AttrReceiptBlob    = "gauntlet.receipt.blob"
 	AttrReceiptOutcome = "gauntlet.receipt.outcome"
+
+	// AttrCheckPeakRSS/AttrCheckUserCPU/AttrCheckSysCPU carry a check's
+	// best-effort resource usage (issue #14, core.CheckResult.PeakRSS/
+	// UserCPU/SysCPU) on the per-check span, for the same per-run drill-down
+	// AttrCheckDuration already serves — "what did THIS run's `test` use",
+	// the question metric series can't structurally answer (unbounded runID
+	// cardinality). checkAttributes omits all three entirely rather than
+	// emitting a recorded zero when a field is unmeasured (the local
+	// executor's own zero-means-unmeasured contract; the container executor
+	// never measures at all, v1) — see checkAttributes.
+	AttrCheckPeakRSS = "gauntlet.check.peak_rss_bytes"
+	AttrCheckUserCPU = "gauntlet.check.user_cpu_ms"
+	AttrCheckSysCPU  = "gauntlet.check.sys_cpu_ms"
 )
 
 // Tracer returns gauntlet's shared tracer. With no provider registered
@@ -126,13 +139,28 @@ func EndRun(span trace.Span, rec *core.RunRecord) {
 }
 
 // checkAttributes builds a CheckResult's span attributes: name, status
-// (stringified), and duration in milliseconds.
+// (stringified), and duration in milliseconds, always; PeakRSS/UserCPU/
+// SysCPU (issue #14) only when actually measured (> 0) — an unmeasured
+// field (container executor, v1; a daemon-side failure before exec) is
+// omitted from the span entirely rather than recorded as a misleading zero,
+// matching schema.sql's own peak_rss_bytes/user_cpu_ms/sys_cpu_ms column
+// contract.
 func checkAttributes(r core.CheckResult) []attribute.KeyValue {
-	return []attribute.KeyValue{
+	kvs := []attribute.KeyValue{
 		attribute.String(AttrCheckName, r.Name),
 		attribute.String(AttrCheckStatus, checkStatusString(r.Status)),
 		attribute.Int64(AttrCheckDuration, r.Duration.Milliseconds()),
 	}
+	if r.PeakRSS > 0 {
+		kvs = append(kvs, attribute.Int64(AttrCheckPeakRSS, r.PeakRSS))
+	}
+	if r.UserCPU > 0 {
+		kvs = append(kvs, attribute.Int64(AttrCheckUserCPU, r.UserCPU.Milliseconds()))
+	}
+	if r.SysCPU > 0 {
+		kvs = append(kvs, attribute.Int64(AttrCheckSysCPU, r.SysCPU.Milliseconds()))
+	}
+	return kvs
 }
 
 // runAttributes builds a RunRecord's summary span attributes.

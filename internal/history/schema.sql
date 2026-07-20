@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 12).
+-- schema.sql: gauntlet history store schema (user_version = 13).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -97,6 +97,19 @@ CREATE TABLE checks (
   -- took to materialize (git archive + history-mtime pass) before its
   -- command ran — isolated-workspace mode only, zero in shared mode.
   materialize_ms INTEGER NOT NULL DEFAULT 0,
+  -- peak_rss_bytes/user_cpu_ms/sys_cpu_ms (v13+): core.CheckResult.PeakRSS/
+  -- UserCPU/SysCPU verbatim (issue #14) — best-effort resource usage the
+  -- local executor reads back from the child's rusage after every outcome.
+  -- Zero means "not measured", the same contract CheckResult's own field
+  -- docs state, NOT "measured zero": the container executor always leaves
+  -- all three at zero (v1, deliberately — see executor/container.go's
+  -- ContainerExecutor doc for why --rm forecloses a reliable terminal
+  -- read), and a row written before v13 has no other source for them
+  -- either. Never an input to Status or any other verdict — capture-only,
+  -- same as materialize_ms.
+  peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
+  user_cpu_ms    INTEGER NOT NULL DEFAULT 0,
+  sys_cpu_ms     INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

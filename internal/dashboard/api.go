@@ -728,6 +728,20 @@ type checkJSON struct {
 	// actually configured to serve it (WithLogRoot) and LogPath is
 	// non-empty — omitted from the JSON entirely otherwise.
 	LogURL string `json:"logUrl,omitempty"`
+
+	// PeakRSSBytes/UserCPUMs/SysCPUMs mirror history.CheckRow.PeakRSS/
+	// UserCPU/SysCPU (v13+, issue #14): bounded numbers, same convention as
+	// DurationMs above. omitempty, not a bare 0: the zero-means-unmeasured
+	// contract (the container executor's v1 result, or a pre-v13 row) means
+	// a present-but-zero field would misread as "measured zero", so an
+	// unmeasured field is absent from the JSON entirely — a client checks
+	// for the field's presence, not its value, to know whether it was
+	// captured. Hooks never carry these (history.HookRow has no equivalent
+	// columns), so a checkJSON built from a hook's HookRow always omits all
+	// three, same as it always did before this field existed.
+	PeakRSSBytes int64 `json:"peakRSSBytes,omitempty"`
+	UserCPUMs    int64 `json:"userCPUMs,omitempty"`
+	SysCPUMs     int64 `json:"sysCPUMs,omitempty"`
 }
 
 func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
@@ -774,6 +788,10 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 			Output:  c.Output,
 			LogPath: c.LogPath,
 			LogURL:  d.runLogURL(row.RunID, c.Name, c.LogPath),
+
+			PeakRSSBytes: c.PeakRSS,
+			UserCPUMs:    c.UserCPU.Milliseconds(),
+			SysCPUMs:     c.SysCPU.Milliseconds(),
 		})
 	}
 
@@ -865,6 +883,19 @@ type checkStatJSON struct {
 	RedRate       float64 `json:"redRate"`
 	AvgDurationMs int64   `json:"avgDurationMs"`
 	MaxDurationMs int64   `json:"maxDurationMs"`
+
+	// PeakRSSMax/MedianBytes and UserCPU/SysCPUMax/MedianMs mirror
+	// history.CheckStat's resource-usage aggregates (v13+, issue #14): all
+	// six omitted together, per metric, when that metric's *Measured flag
+	// is false (nothing in the window measured it) — never a reported zero.
+	// A client should treat "peakRSSMaxBytes absent" as "no data", the same
+	// signal history.CheckStat.PeakRSSMeasured == false gives Go callers.
+	PeakRSSMaxBytes    int64 `json:"peakRSSMaxBytes,omitempty"`
+	PeakRSSMedianBytes int64 `json:"peakRSSMedianBytes,omitempty"`
+	UserCPUMaxMs       int64 `json:"userCPUMaxMs,omitempty"`
+	UserCPUMedianMs    int64 `json:"userCPUMedianMs,omitempty"`
+	SysCPUMaxMs        int64 `json:"sysCPUMaxMs,omitempty"`
+	SysCPUMedianMs     int64 `json:"sysCPUMedianMs,omitempty"`
 }
 
 // depthPointJSON is one sample of GET /api/v1/checks's depth series,
@@ -921,10 +952,20 @@ func (d *dash) handleAPIChecks(w http.ResponseWriter, r *http.Request) {
 		Depth: make([]depthPointJSON, 0, len(depth)),
 	}
 	for _, st := range stats {
-		resp.Stats = append(resp.Stats, checkStatJSON{
+		out := checkStatJSON{
 			Name: st.Name, Total: st.Total, Failed: st.Failed, RedRate: st.RedRate,
 			AvgDurationMs: st.AvgDuration.Milliseconds(), MaxDurationMs: st.MaxDuration.Milliseconds(),
-		})
+		}
+		if st.PeakRSSMeasured {
+			out.PeakRSSMaxBytes, out.PeakRSSMedianBytes = st.PeakRSSMax, st.PeakRSSMedian
+		}
+		if st.UserCPUMeasured {
+			out.UserCPUMaxMs, out.UserCPUMedianMs = st.UserCPUMax.Milliseconds(), st.UserCPUMedian.Milliseconds()
+		}
+		if st.SysCPUMeasured {
+			out.SysCPUMaxMs, out.SysCPUMedianMs = st.SysCPUMax.Milliseconds(), st.SysCPUMedian.Milliseconds()
+		}
+		resp.Stats = append(resp.Stats, out)
 	}
 	for _, p := range depth {
 		resp.Depth = append(resp.Depth, depthPointJSON{

@@ -1551,6 +1551,92 @@ func TestMigrate_V11ToV12(t *testing.T) {
 	}
 }
 
+// TestMigrate_V12ToV13 seeds a v12 database (receipt_* present, no
+// peak_rss_bytes/user_cpu_ms/sys_cpu_ms columns) and confirms Open migrates
+// it in place: user_version lands on schemaVersion, the pre-existing check
+// row survives with the three new columns defaulted to 0 (issue #14's
+// surfaces slice), and a fresh Emit populates and round-trips non-zero
+// values for all three.
+func TestMigrate_V12ToV13(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v12.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		schemaV7SQL,
+		`ALTER TABLE checks ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN waited_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE checks ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE checks ADD COLUMN materialize_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE runs ADD COLUMN receipt_ref TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN receipt_blob TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN receipt_published TEXT NOT NULL DEFAULT ''`,
+		`PRAGMA user_version = 12`,
+		`INSERT INTO runs (run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
+			base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
+			batch_id, position, batch_size, speculated, recovered, receipt_ref, receipt_blob, receipt_published)
+		 VALUES ('run-old', 'main', 'refs/heads/for/main/alice/feat', 'alice', 'feat', 'deadbeef',
+			'base0', 'merge0', 1, 'landed', '', 0, 1000, 1000, '', 0, 1, 0, 0, '', '', '')`,
+		`INSERT INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command)
+		 VALUES ('run-old', 0, 'lint', 'passed', 500, '', 'clean', '', 'true')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed v12 db: %q: %v", stmt, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close v12 handle: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version after migrate = %d, want %d", version, schemaVersion)
+	}
+	_, oldChecks, err := s.Run("run-old")
+	if err != nil {
+		t.Fatalf("Run(run-old) after migrate: %v", err)
+	}
+	if len(oldChecks) != 1 {
+		t.Fatalf("Run(run-old) checks = %d, want 1", len(oldChecks))
+	}
+	if oldChecks[0].PeakRSS != 0 || oldChecks[0].UserCPU != 0 || oldChecks[0].SysCPU != 0 {
+		t.Errorf("pre-v13 check row resource-usage fields = %+v, want all zero", oldChecks[0])
+	}
+
+	ctx := context.Background()
+	rec := sampleRecord("run-new", "main", time.Date(2026, 7, 20, 15, 0, 0, 0, time.UTC))
+	rec.Outcome = core.OutcomeLanded
+	rec.Checks = []core.CheckResult{
+		{Name: "test", Status: core.CheckPassed, Duration: time.Second,
+			PeakRSS: 123456789, UserCPU: 750 * time.Millisecond, SysCPU: 250 * time.Millisecond},
+	}
+	if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: "run-new", Record: rec}); err != nil {
+		t.Fatalf("Emit after migrate: %v", err)
+	}
+	_, newChecks, err := s.Run("run-new")
+	if err != nil {
+		t.Fatalf("Run(run-new): %v", err)
+	}
+	if len(newChecks) != 1 {
+		t.Fatalf("Run(run-new) checks = %d, want 1", len(newChecks))
+	}
+	if newChecks[0].PeakRSS != 123456789 || newChecks[0].UserCPU != 750*time.Millisecond || newChecks[0].SysCPU != 250*time.Millisecond {
+		t.Errorf("round-tripped resource-usage fields = %+v, want peakRSS=123456789 userCPU=750ms sysCPU=250ms", newChecks[0])
+	}
+}
+
 func TestStore_SatisfiesCoreChannel(t *testing.T) {
 	var _ core.Channel = (*Store)(nil)
 }
@@ -2364,6 +2450,112 @@ func TestStore_CheckStats_DedupesBatchMembers(t *testing.T) {
 	}
 	if st.MaxDuration != 3*time.Second {
 		t.Errorf("CheckStats[0].MaxDuration = %v, want 3s", st.MaxDuration)
+	}
+}
+
+// TestStore_CheckStats_ResourceUsageMedianIgnoresUnmeasuredRows is the
+// statistical-honesty test for issue #14's aggregates: four runs of the same
+// check, two carrying real resource-usage measurements and two carrying zero
+// (the "not measured" contract — e.g. a container-executor run). The
+// unmeasured rows must not drag the median toward zero or count toward Max,
+// and a check name with NO measured rows at all must report *Measured ==
+// false rather than a misleading zero.
+func TestStore_CheckStats_ResourceUsageMedianIgnoresUnmeasuredRows(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+
+	runs := []*core.RunRecord{
+		{
+			RunID: "usage-run-0", Target: "main",
+			Checks: []core.CheckResult{
+				{Name: "test", Status: core.CheckPassed, Duration: time.Second,
+					PeakRSS: 100_000_000, UserCPU: 1000 * time.Millisecond, SysCPU: 100 * time.Millisecond},
+				{Name: "unmeasured-only", Status: core.CheckPassed, Duration: time.Second},
+			},
+			Outcome: core.OutcomeLanded, StartedAt: base, EndedAt: base.Add(time.Second),
+		},
+		{
+			RunID: "usage-run-1", Target: "main",
+			Checks: []core.CheckResult{
+				{Name: "test", Status: core.CheckPassed, Duration: time.Second,
+					PeakRSS: 300_000_000, UserCPU: 3000 * time.Millisecond, SysCPU: 300 * time.Millisecond},
+			},
+			Outcome: core.OutcomeLanded, StartedAt: base.Add(time.Minute), EndedAt: base.Add(time.Minute + time.Second),
+		},
+		{
+			// A container-executor run (or a pre-v13 row): every field
+			// left at zero, "not measured" — must not pull the median
+			// down toward 0, and must not become the reported Max.
+			RunID: "usage-run-2", Target: "main",
+			Checks: []core.CheckResult{
+				{Name: "test", Status: core.CheckPassed, Duration: time.Second},
+				{Name: "unmeasured-only", Status: core.CheckPassed, Duration: time.Second},
+			},
+			Outcome: core.OutcomeLanded, StartedAt: base.Add(2 * time.Minute), EndedAt: base.Add(2*time.Minute + time.Second),
+		},
+		{
+			RunID: "usage-run-3", Target: "main",
+			Checks: []core.CheckResult{
+				{Name: "test", Status: core.CheckPassed, Duration: time.Second},
+				{Name: "unmeasured-only", Status: core.CheckPassed, Duration: time.Second},
+			},
+			Outcome: core.OutcomeLanded, StartedAt: base.Add(3 * time.Minute), EndedAt: base.Add(3*time.Minute + time.Second),
+		},
+	}
+	for _, rec := range runs {
+		if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: rec.Target, RunID: rec.RunID, Record: rec}); err != nil {
+			t.Fatalf("Emit(%s): %v", rec.RunID, err)
+		}
+	}
+
+	stats, err := s.CheckStats("main", base.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CheckStats: %v", err)
+	}
+	var testStat, unmeasuredStat *CheckStat
+	for i := range stats {
+		switch stats[i].Name {
+		case "test":
+			testStat = &stats[i]
+		case "unmeasured-only":
+			unmeasuredStat = &stats[i]
+		}
+	}
+	if testStat == nil {
+		t.Fatalf("CheckStats has no %q entry: %+v", "test", stats)
+	}
+	if unmeasuredStat == nil {
+		t.Fatalf("CheckStats has no %q entry: %+v", "unmeasured-only", stats)
+	}
+
+	// "test": 2 measured rows (100MB/1000ms/100ms and 300MB/3000ms/300ms)
+	// plus 2 unmeasured rows that must be excluded from median/max.
+	if !testStat.PeakRSSMeasured {
+		t.Fatal("test.PeakRSSMeasured = false, want true (2 rows measured it)")
+	}
+	if testStat.PeakRSSMax != 300_000_000 {
+		t.Errorf("test.PeakRSSMax = %d, want 300_000_000 (unmeasured zero rows must not become max)", testStat.PeakRSSMax)
+	}
+	if testStat.PeakRSSMedian != 200_000_000 {
+		t.Errorf("test.PeakRSSMedian = %d, want 200_000_000 (median of [100M,300M], excluding the two zero rows)", testStat.PeakRSSMedian)
+	}
+	if !testStat.UserCPUMeasured || testStat.UserCPUMax != 3000*time.Millisecond || testStat.UserCPUMedian != 2000*time.Millisecond {
+		t.Errorf("test UserCPU = measured=%v max=%v median=%v, want measured=true max=3s median=2s",
+			testStat.UserCPUMeasured, testStat.UserCPUMax, testStat.UserCPUMedian)
+	}
+	if !testStat.SysCPUMeasured || testStat.SysCPUMax != 300*time.Millisecond || testStat.SysCPUMedian != 200*time.Millisecond {
+		t.Errorf("test SysCPU = measured=%v max=%v median=%v, want measured=true max=300ms median=200ms",
+			testStat.SysCPUMeasured, testStat.SysCPUMax, testStat.SysCPUMedian)
+	}
+
+	// "unmeasured-only": every row is zero — the aggregate must be absent,
+	// not a reported zero.
+	if unmeasuredStat.PeakRSSMeasured || unmeasuredStat.UserCPUMeasured || unmeasuredStat.SysCPUMeasured {
+		t.Errorf("unmeasured-only *Measured = %+v, want all false (no row ever measured anything)", unmeasuredStat)
+	}
+	if unmeasuredStat.PeakRSSMax != 0 || unmeasuredStat.PeakRSSMedian != 0 {
+		t.Errorf("unmeasured-only PeakRSS max/median = %d/%d, want 0/0 when unmeasured", unmeasuredStat.PeakRSSMax, unmeasuredStat.PeakRSSMedian)
 	}
 }
 
