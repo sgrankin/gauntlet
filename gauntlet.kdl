@@ -134,3 +134,40 @@ executor "container" {
 //                                        // stall of ALL targets' loop, so
 //                                        // keep it well under poll-interval
 // }
+
+// deploy (optional): deployment environments — lanes that reconcile
+// refs/heads/deploy/<env> (desired: what the environment should run) against
+// refs/gauntlet/deployed/<env> (observed: what it last finished deploying
+// green). What each lane RUNS is repo config: `deploy` nodes in the check
+// spec, read from the revision being deployed. Absent block = feature off,
+// and a daemon with no `deploy` block behaves exactly as one built before
+// deployment existed. Deliberately left commented out: uncommenting this in
+// a copied config would immediately start creating and advancing deploy refs
+// on your remote. See docs/config.md's "Deployment" section for the full
+// reference (validation rules, park/retry semantics, drain behavior) and
+// docs/setup.md for the branch protection that gates who may deploy.
+// deploy {
+//     environment "dev" {
+//         source "main"              // a branch of the remote above; or
+//                                     // source env="dev" for another
+//                                     // environment's OBSERVED ref
+//         track                       // bare presence node (`track true` is
+//                                     // an error): the daemon keeps this
+//                                     // lane's desired ref at the source
+//                                     // tip. Omit for MANUAL — only a human
+//                                     // or `gauntlet deploy` moves it.
+//     }
+//     environment "prod" {
+//         source env="dev"            // promote what dev finished deploying
+//         track
+//         nodes "migrate" "app1"      // optional; default = the whole graph.
+//                                     // Selection is closed over `after`.
+//         max-parallel 4              // optional; default 1; range 1-64 —
+//                                     // within this env's graph only; nodes
+//                                     // still draw on max-executions
+//         on-desired-move "finish"    // optional; default shown — let an
+//                                     // in-flight graph complete when the
+//                                     // desired ref moves under it;
+//                                     // "cancel" kills it instead
+//     }
+// }

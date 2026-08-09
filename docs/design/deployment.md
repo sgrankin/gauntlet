@@ -1,6 +1,7 @@
 # Deployment: desired-state dispatch over deploy refs
 
-**Status:** proposed, rev 2 (environment lanes + node graph) · **Date:** 2026-08-08
+**Status:** shipped (D1–D4, 2026-08-09), rev 2 (environment lanes + node
+graph) · **Date:** 2026-08-08
 
 Gauntlet's answer to deployment today is the post-land hook — fire commands
 on the land event, coalesce a backlog, hand off to a real CD system when
@@ -388,6 +389,9 @@ pusher.
 
 ## Proposed ledger amendment
 
+*Ratified into DESIGN.md (D4) — the ledger's "Deployments as post-land
+hooks" row now carries this text, condensed.*
+
 > **AMENDED: Deployments as post-land hooks** — ~~the hook is the whole
 > deployment story~~ → hooks remain for land-reactions (notify, cache
 > warm); *deployment* moves to desired-state dispatch: per-environment
@@ -495,6 +499,58 @@ bends — decide extract-vs-parallel within the first spike, not after;
 observed-ref fetch must not disturb `Fetch`'s refspec-derived queue-state
 invariants (pins survived this, trial refs survived this, same care);
 and drain/idle integration is easy to forget and cheap to test early.
+
+## Follow-ups recorded during implementation
+
+Things this design describes that the shipped code does *not* do, recorded
+here rather than quietly forgotten. None of them is load-bearing; each is a
+deliberate stop, and the reference docs describe the shipped behavior.
+
+- **No trigger row, and no `after` edges, on `/deploy/{id}`.** The detail
+  page above sketches "trigger (tracked advance vs manual push, with pusher
+  where knowable)" and per-node `after` edges. `core.DeployRecord` carries
+  neither — a run records env, both SHAs, outcome, culprit, detail, timing,
+  and one `CheckResult` per declared node — so the page renders neither. A
+  blocked node's *failed* edges do appear (`BlockedBy` carries them, which
+  is the case that actually needs them). Adding a trigger means the tracker
+  recording *why* a desired ref moved, which today it does not know:
+  desired-ref movement is observed from refs, not from an event with a
+  pusher attached.
+- **`GET /api/v1/deploy/{id}` is history-only.** The HTML page falls back to
+  the live snapshot for a run still in flight (so the overview's "deploying"
+  link never 404s); the JSON route deliberately does not, on the grounds
+  that a JSON client polling a known run ID is better served by
+  `GET /api/v1/deploys`' `running` block than by a half-populated record.
+  With no `history` store, the JSON route is a flat 503 and the deploy
+  detail is dashboard-only.
+- **Slack lane threading is still open.** As decided, Slack posts a root
+  message per graph run and threads node failures under it. A
+  lane-anchored thread ("one thread per environment, forever") was left for
+  later, and so were reaction commands on deploy posts — a reaction anchors
+  to a run's (target, ref), and an environment lane is neither, so retry
+  lives on the API/dashboard/MCP until that lane-anchored metadata scheme
+  exists.
+- **`gauntlet validate -config` doesn't cross-check deploy nodes.**
+  `SpecRejectReason` — the shared gate the validate command and the queue
+  both call — covers checks, images, services, and receipts, not deploy
+  nodes. A deploy node naming an executor profile the daemon doesn't define
+  is caught at deploy time, as a spec-rejection park, not at validate time.
+  The deploy graph's own structure (names, commands, edges, cycles) *is*
+  validated, since that is plain spec parsing.
+- **The CLI can't resolve an environment's configured source.** The
+  porcelain sketch above shows `gauntlet deploy -env prod` meaning "desired
+  := source tip". The shipped command is a pure git client with no daemon
+  round-trip, so it cannot read daemon config, and requires `-rev` or
+  `-from-env` (the error says why and names both). `gauntlet promote` takes
+  `-from` and `-to` rather than defaulting `-from` to the configured source,
+  for the same reason. Restoring the sketch means either a daemon
+  round-trip (giving up "works while the daemon is down") or teaching the
+  CLI to read the operator's `gauntlet.kdl` — neither obviously worth it.
+- **`gauntlet deploy` fetches when the revision isn't local.** `git push
+  <sha>:<ref>` resolves its source locally, so the porcelain fetches the
+  resolved ref first when the object is missing — always, for a promotion,
+  since a normal clone never fetches `refs/gauntlet/deployed/*`. That is one
+  more remote round trip than the "just a push" sketch implies.
 
 ## Open questions
 

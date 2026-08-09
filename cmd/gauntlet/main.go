@@ -35,9 +35,10 @@ import (
 )
 
 func main() {
-	// "land", "status", "retry", "cancel", "hooks-cancel", "drain",
-	// "validate", "fmt", and "version" are client-side porcelain
-	// (cmd/gauntlet/land.go, cmd/gauntlet/status.go,
+	// "land", "deploy", "promote", "status", "retry", "cancel",
+	// "hooks-cancel", "drain", "validate", "fmt", and "version" are
+	// client-side porcelain (cmd/gauntlet/land.go,
+	// cmd/gauntlet/deploycmd.go, cmd/gauntlet/status.go,
 	// cmd/gauntlet/validate.go, cmd/gauntlet/fmt.go,
 	// cmd/gauntlet/version.go): thin HTTP/git clients, pure config
 	// validation ("validate"), a pure line-based whitespace normalizer over
@@ -54,6 +55,18 @@ func main() {
 		case "land":
 			if err := runLand(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "gauntlet land:", err)
+				os.Exit(1)
+			}
+			return
+		case "deploy":
+			if err := runDeploy(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet deploy:", err)
+				os.Exit(1)
+			}
+			return
+		case "promote":
+			if err := runPromote(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet promote:", err)
 				os.Exit(1)
 			}
 			return

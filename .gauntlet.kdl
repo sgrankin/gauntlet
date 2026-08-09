@@ -7,3 +7,18 @@ check "test" {
 check "build" {
     command "go" "build" "./..."
 }
+
+// deploy nodes (optional): the graph an environment runs when the daemon
+// deploys THIS revision — a name, a `command`, `after` edges, and an
+// optional `executor` profile, scheduled like checks. Environments
+// themselves are daemon config (gauntlet.kdl's `deploy` block); these nodes
+// are inert without one. Commented out because gauntlet's own repo declares
+// no environments — see docs/checks.md's "Deploy nodes" for the grammar, the
+// GAUNTLET_DEPLOY_* contract, and the affected-only skip pattern.
+// deploy "migrate" {
+//     command "./scripts/migrate"
+// }
+// deploy "app1" {
+//     command "./scripts/deploy" "app1"
+//     after "migrate"
+// }

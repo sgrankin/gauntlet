@@ -9,16 +9,18 @@ design rationale behind "refs are the queue" and "SQLite is disposable
 history", see [DESIGN.md](../DESIGN.md). See [docs/runbooks/](runbooks/) for
 step-shaped runbooks distilled from this guide.
 
-Scope note: this doc covers packaging and operating the daemon itself.
-Deployments run *as* post-land hooks (config.md's ["Hooks"](config.md#hooks)
-section) — ordered commands the daemon runs against the landed tree, via
-the same executor that runs checks — but gauntlet itself never grows a CD
-system past that (DESIGN.md's decision ledger, "Deployments as post-land
-hooks"): a hook that needs more (health checks, rollback, progressive
-delivery) hands off to a real CD system. Auth in front of the dashboard and
-anything past a single running instance are explicitly out of scope for
-gauntlet — front the daemon with your own
-reverse proxy/CD system for those.
+Scope note: this doc covers packaging and operating the daemon itself —
+**not** how the daemon deploys *your* code. Two separate things do that:
+post-land hooks (config.md's ["Hooks"](config.md#hooks) section), for
+reactions to a landing, and the deployment subsystem (config.md's
+["Deployment"](config.md#deployment), plus the branch-protection setup in
+[setup.md](setup.md#deploy-refs-and-branch-protection)), for environments as
+an ongoing concern. The boundary either way is the one from DESIGN.md's
+decision ledger: gauntlet schedules named commands and records what they
+said, and a command that needs more (health checks, rollback decisions,
+progressive delivery) hands off to a real CD system. Auth in front of the
+dashboard and anything past a single running instance are explicitly out of
+scope for gauntlet — front the daemon with your own reverse proxy for those.
 
 If a target's deploy hook runs slower than that target merges (a builder
 box running `make deploy` against a five-minute deploy while candidates

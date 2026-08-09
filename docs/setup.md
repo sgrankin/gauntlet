@@ -167,3 +167,46 @@ here are documented in [config.md](config.md).
    each check, and the land. This is export only — SQLite `history` (if
    configured) is a separate, always-local store; OTLP doesn't feed it and
    isn't fed by it.
+
+## Deploy refs and branch protection
+
+Deployment (see [config.md's "Deployment"](config.md#deployment)) has no
+approval model of its own, on purpose: **who may deploy to an environment is
+exactly who may push its desired ref**, `refs/heads/deploy/<env>`. The remote
+already enforces that better than gauntlet could — per-user, audited, and
+still working while the daemon is down — so this is the one-time setup that
+makes it real.
+
+1. Protect the namespace. On GitHub, add a **branch ruleset** (Settings →
+   Rules → Rulesets → New branch ruleset) targeting `deploy/**`, with
+   **Restrict updates** and **Restrict deletions** on, and a bypass list
+   naming exactly the humans and/or apps allowed to deploy. Keep
+   `prod` tighter than `dev`: a second ruleset targeting `deploy/prod`
+   alone, with its own (smaller) bypass list, is the usual shape. Rulesets
+   stack, so the `deploy/**` rules still apply.
+2. Give the **daemon's own identity push access** to the desired refs of
+   every environment configured with `track` — those the daemon advances
+   itself — and to `refs/gauntlet/deployed/*` (below). A purely `manual`
+   environment needs no daemon write access to its desired ref at all,
+   which is a fine way to make "only a human deploys prod" structural.
+3. Leave `refs/gauntlet/deployed/*` alone. Observed refs are daemon-owned
+   bookkeeping and are **not branches** — they sit outside `refs/heads/`, so
+   no branch ruleset targets them, they never appear in the branch list, and
+   nothing but the daemon should ever write one. That is protection by
+   namespace rather than by rule; the same arrangement GC pins and trial
+   refs already use, and proven pushable on GitHub. Force-pushing one by
+   hand is how you tell an environment it is running something it isn't.
+4. Verify: as an allowed user, `gauntlet deploy -env dev -rev main` (see
+   [api.md's CLI section](api.md#gauntlet-deploy--gauntlet-promote)) should
+   create or advance `deploy/dev` and the lane should pick it up on the next
+   poll; as a user outside the bypass list, the same command should be
+   rejected by the remote — with gauntlet contributing nothing to that
+   decision, which is the point.
+
+Two consequences worth stating plainly. A **tracked** environment's gate is
+upstream, not here: the daemon moves its desired ref for it, so what protects
+that lane is whatever protects its source branch (or the environment it
+promotes from). Manual mode is where branch protection earns its keep. And
+nothing in gauntlet's API, MCP server, or dashboard can move a desired ref —
+they retry and cancel, never deploy — so this is not a gate to be routed
+around by an operator with a `curl` command.

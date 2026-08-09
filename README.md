@@ -13,10 +13,10 @@ Requires git 2.38 or newer (`git merge-tree --write-tree`).
 - [DESIGN.md](DESIGN.md) — the design: model, decision ledger, invariants.
 - [docs/config.md](docs/config.md) — daemon configuration reference
   (history, dashboard, GitHub, Slack, OTLP, executors, services,
-  summaries, hooks, queue modes).
+  summaries, hooks, queue modes, deployment environments).
 - [docs/checks.md](docs/checks.md) — writing checks: the check spec, the
   `GAUNTLET_*` environment contract, logs, conditional execution, shared
-  services.
+  services, deploy nodes.
 - [docs/api.md](docs/api.md) — the JSON API, CLI, idle signal, and MCP
   server.
 - [docs/setup.md](docs/setup.md) — one-time integration setup and live
@@ -24,7 +24,7 @@ Requires git 2.38 or newer (`git merge-tree --write-tree`).
 - [docs/deploy.md](docs/deploy.md) — production deployment guide, plus
   step-by-step [runbooks](docs/runbooks/).
 - [docs/design/](docs/design/) — feature design docs: the queue core,
-  queue modes (batch/speculate), shared services, and scaling.
+  queue modes (batch/speculate), shared services, scaling, and deployment.
 
 ## Running
 
@@ -210,8 +210,49 @@ single-lane daemon. The optional nodes: SQLite run
 `history`, the web `dashboard`, `github` commit statuses, a duplex `slack`
 channel with reaction commands, `otlp` span export, the container
 `executor`, shared `services`, Claude merge `summarize`, per-target queue
-`mode` (serial/batch/speculate), and post-land `hook`s with backlog
-policies. See [docs/config.md](docs/config.md) for the full reference.
+`mode` (serial/batch/speculate), post-land `hook`s with backlog
+policies, and `deploy` environments (below).
+See [docs/config.md](docs/config.md) for the full reference.
+
+## Deploying your code (CD)
+
+Landing a change and *running* it are separate concerns, and gauntlet has a
+separate subsystem for the second: **desired-state dispatch over deploy
+refs**. Each environment is a lane between two refs —
+`refs/heads/deploy/<env>`, an ordinary branch saying what it *should* run,
+and `refs/gauntlet/deployed/<env>`, daemon-owned, advanced only once that
+environment's whole deploy graph has finished green.
+
+```sh
+gauntlet deploy -env prod -rev v1.4.2     # deploy a revision  (a CAS git push)
+gauntlet deploy -env prod -rev <old-sha>  # roll back          (also a git push)
+gauntlet promote -from dev -to prod       # promote what dev finished deploying
+```
+
+Everything falls out of that. Rollback, promotion, and re-deploy are ref
+pushes; **approval is branch protection** on `deploy/*` (host-enforced,
+audited, working while the daemon is down — nothing in gauntlet's API can
+move a desired ref); crash recovery is a rescan. An environment can also
+`track` a source — a branch, or another environment's *observed* ref — so
+`main` → `dev` → `prod` promotes automatically, each link independently
+level-triggered.
+
+What runs is a graph of `deploy` nodes declared in the deployed revision's
+*own* `.gauntlet.kdl` (`command`, `after`, `executor` — the check grammar,
+the same scheduler), so rolling back to last week's SHA runs last week's
+deploy graph. Nodes get the check environment contract plus
+`GAUNTLET_DEPLOY_ENV`/`_NODE`/`_SHA` and `GAUNTLET_DEPLOYED_SHA`, which makes
+affected-only deploys a one-line diff-and-skip.
+
+The scope line is unchanged: gauntlet is a deploy **dispatcher** — schedule
+named commands against a revision, record and display the outcomes — and
+never a CD **controller**. No health checks, no rollback decisions, no
+traffic shaping; a node that needs those drives the system that owns them.
+See [docs/config.md's "Deployment"](docs/config.md#deployment) for the
+environment block, [docs/checks.md's "Deploy
+nodes"](docs/checks.md#deploy-nodes) for the graph and its environment
+contract, and [docs/design/deployment.md](docs/design/deployment.md) for why
+it is shaped this way.
 
 ## Writing checks
 
@@ -231,9 +272,13 @@ capture and the affected-only/monorepo pattern.
 The dashboard serves human-readable queue state, run history, and per-check
 stats; the same bind also exposes a JSON API under `/api/v1` and an MCP
 server at `/mcp`, and `gauntlet status`/`retry`/`cancel`/`hooks-cancel` are
-thin CLI wrappers over the API — see [docs/api.md](docs/api.md). One-time
+thin CLI wrappers over the API — see [docs/api.md](docs/api.md). Deployment
+adds `/deploys` and `/deploy/{id}` pages, four `/api/v1/deploy*` routes, and
+four MCP tools; `gauntlet deploy`/`promote` are git porcelain rather than
+API clients, since deploying is a ref push. One-time
 integration setup (GitHub PAT, Slack app manifest, container executor,
-OTLP) is walked through in [docs/setup.md](docs/setup.md).
+OTLP, deploy-ref branch protection) is walked through in
+[docs/setup.md](docs/setup.md).
 
 ## Status
 
@@ -241,7 +286,10 @@ Feature-complete — serial/batch/speculate modes,
 local+container executors, dashboard/API/MCP, Slack duplex with reaction
 commands, GitHub statuses, post-land hooks, Claude merge summaries, full
 log capture, and park persistence are all shipped; post-completion
-consistency audit done.
+consistency audit done. **Deployment** (environment lanes over deploy refs,
+repo-declared deploy graphs, `/deploys` UI, API/MCP, `gauntlet
+deploy`/`promote`) shipped 2026-08-09 as phases D1–D4 — see
+[docs/design/deployment.md](docs/design/deployment.md).
 
 See [DESIGN.md](DESIGN.md) for the full design and rationale.
 
