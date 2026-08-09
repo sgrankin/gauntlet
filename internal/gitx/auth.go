@@ -41,6 +41,24 @@ func WithTokenSource(ts TokenSource, host string) Option {
 	}
 }
 
+// WithFetchRefspecs adds extra refspecs to remote.origin.fetch at New
+// time, so they ride the queue's existing `git fetch --prune origin`
+// rather than costing a second round trip (the deploy tracker's observed
+// refs, internal/deploy.FetchRefspec).
+//
+// LOAD-BEARING CONSTRAINT: every destination must live OUTSIDE
+// refs/remotes/origin/*. ListRefs derives gauntlet's entire view of ground
+// truth by stripping that one prefix, so a spec landing anything there
+// would inject refs into the queue's candidate/target scan — a ref the
+// remote does not have under refs/heads/. Keeping destinations elsewhere
+// makes ListRefs byte-identical with and without this option, structurally
+// rather than by argument.
+func WithFetchRefspecs(specs ...string) Option {
+	return func(r *Repo) {
+		r.fetchRefspecs = append(r.fetchRefspecs, specs...)
+	}
+}
+
 // askpassScript is the ephemeral GIT_ASKPASS helper. It contains NO
 // secret — the credential rides in the git subprocess's environment and
 // is read back here — so the file itself needs only lifecycle hygiene

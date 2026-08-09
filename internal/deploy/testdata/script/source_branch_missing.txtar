@@ -1,0 +1,17 @@
+# A tracked environment whose source branch does not exist: every tick is a
+# no-op. Config that is ahead of reality is an ordinary state — the branch
+# may simply not have been created yet — so it must not error and must not
+# invent a ref.
+
+deploy-env dev branch nosuchbranch track
+
+push-branch main files/v1
+tick
+tick
+tick
+
+assert-desired dev none
+assert-cas-attempts 0
+
+-- files/v1/app.txt --
+v1

@@ -1,0 +1,26 @@
+# Promotion: dev tracks a branch, prod tracks dev. An env source resolves
+# to the source environment's OBSERVED ref — what it has finished deploying
+# green — not its desired ref, so prod cannot run a revision dev has only
+# been ASKED to run.
+
+deploy-env dev branch main track
+deploy-env prod env dev track
+
+push-branch main files/v1
+
+tick
+assert-desired dev main
+# dev has never deployed anything, so prod's source is unresolvable and
+# its lane is a no-op — not an error, and no ref invented.
+assert-desired prod none
+assert-cas-attempts 1
+
+# D2's all-green graph completion, stood in for by hand.
+set-observed dev main
+tick
+assert-observed dev main
+assert-desired prod main
+assert-cas-attempts 2
+
+-- files/v1/app.txt --
+v1

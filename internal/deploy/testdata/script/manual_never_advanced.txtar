@@ -1,0 +1,32 @@
+# A manual environment's desired ref is untouchable by the daemon: never
+# created, never advanced, no matter how far its nominal source runs ahead.
+# Manual is what an operator switches an environment to during an incident,
+# so "the tracker never writes it" has to hold unconditionally.
+
+deploy-env prod branch main manual
+
+push-branch main files/v1
+tick
+tick
+assert-desired prod none
+assert-cas-attempts 0
+
+# A human deploys prod by hand.
+push-deploy-ref prod main
+assert-desired prod main
+
+# Remember where prod was pointed, then run the source well past it.
+force-branch pinned main
+push-branch main files/v2
+tick
+tick
+
+# Still exactly where the human put it: drift is the steady state of a
+# manual lane, not something to reconcile away.
+assert-desired prod pinned
+assert-cas-attempts 0
+
+-- files/v1/app.txt --
+v1
+-- files/v2/app.txt --
+v2

@@ -28,6 +28,10 @@ type Repo struct {
 	// remote operation via an ephemeral askpass helper — see auth.go.
 	tokens   TokenSource
 	authHost string
+
+	// fetchRefspecs are extra remote.origin.fetch entries beyond the
+	// canonical refs/heads/* mapping (WithFetchRefspecs) — see New.
+	fetchRefspecs []string
 }
 
 var _ core.GitRepo = (*Repo)(nil)
@@ -63,8 +67,22 @@ func New(ctx context.Context, dir, remoteURL string, opts ...Option) (*Repo, err
 			return nil, fmt.Errorf("gitx: set origin url: %w", err)
 		}
 	}
-	if _, err := r.run(ctx, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	// --replace-all, not a plain set: with WithFetchRefspecs this key
+	// legitimately holds several values, and `git config <name> <value>`
+	// fails outright ("cannot overwrite multiple values with a single
+	// value") against a multi-valued key. A state dir that once ran with
+	// deploy configured and is then started without it would otherwise
+	// refuse to open at all. Rewriting the whole key from scratch on every
+	// New makes the result depend only on this process's options —
+	// deterministic across restarts, and disabling the extra refspecs
+	// self-heals back to the single canonical value.
+	if _, err := r.run(ctx, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return nil, fmt.Errorf("gitx: configure fetch refspec: %w", err)
+	}
+	for _, spec := range r.fetchRefspecs {
+		if _, err := r.run(ctx, "config", "--add", "remote.origin.fetch", spec); err != nil {
+			return nil, fmt.Errorf("gitx: configure fetch refspec %s: %w", spec, err)
+		}
 	}
 	return r, nil
 }
@@ -97,6 +115,32 @@ func (r *Repo) ListRefs(ctx context.Context) (map[string]string, error) {
 			continue // skip the remote-tracking symbolic HEAD; not a real ref
 		}
 		refs["refs/heads/"+rest] = oid
+	}
+	return refs, nil
+}
+
+// ListLocalRefs returns every LOCAL ref under prefix (e.g.
+// "refs/gauntlet/deployed/") mapped to its OID, named verbatim — no
+// prefix rewriting, unlike ListRefs, because these refs are not a
+// remote-tracking view: WithFetchRefspecs mirrors them under their own
+// names, so the local name IS the remote name.
+//
+// Deliberately NOT part of core.GitRepo: adding it there would force
+// internal/queue's fake to grow a method for a surface the queue never
+// uses. Consumers that need it (internal/deploy) declare their own
+// one-method-wider interface, which *Repo satisfies.
+func (r *Repo) ListLocalRefs(ctx context.Context, prefix string) (map[string]string, error) {
+	out, err := r.run(ctx, "for-each-ref", "--format=%(objectname) %(refname)", prefix)
+	if err != nil {
+		return nil, fmt.Errorf("gitx: list-local-refs %s: %w", prefix, err)
+	}
+	refs := make(map[string]string)
+	for _, ln := range splitLines(out) {
+		oid, name, ok := strings.Cut(ln, " ")
+		if !ok {
+			continue
+		}
+		refs[name] = oid
 	}
 	return refs, nil
 }

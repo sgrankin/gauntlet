@@ -1,0 +1,28 @@
+# "Tracked" means "runs the source" — including when the source moves
+# BACKWARDS. There is deliberately no ancestry gate on the advance: a
+# force-reset source is exactly how a rollback reaches an environment, and
+# refusing to follow it would strand the environment on the bad revision.
+# Pinning is the config edit track -> manual, not an implicit rule here.
+
+deploy-env dev branch main track
+
+push-branch main files/v1
+force-branch v1 main
+tick
+assert-desired dev v1
+
+push-branch main files/v2
+tick
+assert-desired dev main
+assert-cas-attempts 2
+
+# The source is force-reset to the older revision.
+force-branch main v1
+tick
+assert-desired dev v1
+assert-cas-attempts 3
+
+-- files/v1/app.txt --
+v1
+-- files/v2/app.txt --
+v2

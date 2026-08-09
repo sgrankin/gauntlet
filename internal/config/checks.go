@@ -56,6 +56,31 @@ type CheckSpec struct {
 	// host; this knob only widens one candidate's slice of it.
 	MaxParallel int `kdl:"max-parallel"`
 
+	// Deploys declares this revision's deploy nodes (docs/design/
+	// deployment.md): the graph an environment runs when the daemon
+	// deploys THIS revision, read from the deployed revision's own tree —
+	// the deploy-side twin of "a candidate is tested by its own
+	// definition", which is what makes rolling an environment back to an
+	// older SHA run that SHA's graph and not today's.
+	//
+	// A deploy node is exactly a name, a command, `after` edges and an
+	// optional executor profile: the same "job is a named command, no DSL"
+	// wall checks live behind, with the same single sanctioned crack. No
+	// `image` and no `needs` — the design gives deploy nodes those four
+	// fields and no more.
+	//
+	// Deploy names live in their OWN namespace, disjoint from checks: a
+	// `check "migrate"` and a `deploy "migrate"` may coexist, a check's
+	// `after` can never resolve a deploy node, and a deploy's `after` can
+	// never resolve a check. The two graphs are never scheduled together —
+	// checks gate a candidate before it lands, deploy nodes run against an
+	// already-landed revision — so sharing a namespace would only
+	// manufacture collisions between unrelated things.
+	//
+	// An empty Deploys is legal: most repos have no deploy graph, and the
+	// `len(Checks) == 0` rule is deliberately not mirrored here.
+	Deploys []DeployNode `kdl:"deploy,multiple"`
+
 	// Workspace selects the filesystem model for this candidate's graph
 	// nodes (issue #9). "" (absent, the default) is SHARED: one writable
 	// export per run, handed to every check and image-build node —
@@ -182,6 +207,26 @@ type Receipt struct {
 	// by construction, so it can never appear as one of its own After
 	// entries via a legitimate reference.
 	After []string `kdl:"after"`
+}
+
+// DeployNode is one named deploy command (CheckSpec.Deploys). Its fields
+// are the deliberate whole of the deploy grammar — see CheckSpec.Deploys
+// for why there is no `image` and no `needs` here.
+type DeployNode struct {
+	Name    string   `kdl:",arg"`
+	Command []string `kdl:"command,child"`
+
+	// After names the deploy nodes (by DeployNode.Name) that must finish
+	// green before this one becomes ready — the same edge semantics, and
+	// the same unconditional validation (unknown name, self-edge,
+	// duplicate, cycle), as Check.After. It resolves against DEPLOY node
+	// names only; naming a check is the ordinary unknown-name error.
+	After []string `kdl:"after"`
+
+	// Executor names the operator-defined execution profile this node runs
+	// on, exactly as Check.Executor does; "" is the daemon's default
+	// executor.
+	Executor string `kdl:"executor"`
 }
 
 // EnvVar is one `env "NAME" "VALUE"` pair set inside a service's container.
@@ -535,6 +580,10 @@ func (cs *CheckSpec) validate() error {
 		return err
 	}
 
+	if err := cs.validateDeploys(); err != nil {
+		return err
+	}
+
 	// Zero is "left unset" (the field doc: means 1); like Daemon.Poll's
 	// zero-vs-absent ambiguity, an explicit `max-parallel 0` is
 	// indistinguishable from absence and gets the same serial default.
@@ -550,6 +599,156 @@ func (cs *CheckSpec) validate() error {
 		return fmt.Errorf("workspace must be \"isolated\" (or absent for shared), got %q", cs.Workspace)
 	}
 	return nil
+}
+
+// validateDeploys is the checks pass above, re-run over Deploys against
+// their own name set. A deliberate near-copy rather than a shared
+// generic: the two node kinds already differ (no needs, no image here)
+// and are on separate evolution paths, and a shared validator would have
+// to carry a flag per difference — a worse trade than fifty duplicated
+// lines whose error strings can be worded for the node kind at hand.
+func (cs *CheckSpec) validateDeploys() error {
+	// Two passes, same reason as the checks loop: `after` may reference a
+	// node declared later in the file.
+	seen := make(map[string]bool, len(cs.Deploys))
+	for _, d := range cs.Deploys {
+		if d.Name == "" {
+			return fmt.Errorf("deploy: name must not be empty")
+		}
+		// The run-graph node-name prefixes reserved for image builds and
+		// the receipt node, held against deploy nodes too: deploy nodes
+		// are scheduled into that same name space (docs/design/
+		// deployment.md, "the third tenant").
+		if strings.HasPrefix(d.Name, "image:") {
+			return fmt.Errorf("deploy %q: the \"image:\" name prefix is reserved for image-build nodes", d.Name)
+		}
+		if strings.HasPrefix(d.Name, "receipt:") {
+			return fmt.Errorf("deploy %q: the \"receipt:\" name prefix is reserved for the receipt node", d.Name)
+		}
+		if seen[d.Name] {
+			return fmt.Errorf("deploy %q: duplicate", d.Name)
+		}
+		seen[d.Name] = true
+	}
+
+	for _, d := range cs.Deploys {
+		if len(d.Command) == 0 {
+			return fmt.Errorf("deploy %q: command must not be empty", d.Name)
+		}
+		seenAfter := make(map[string]bool, len(d.After))
+		for _, a := range d.After {
+			if a == d.Name {
+				return fmt.Errorf("deploy %q: after %q: a deploy node cannot depend on itself", d.Name, a)
+			}
+			// seen holds DEPLOY names only, so naming a check here gets
+			// the ordinary unknown-name error — the namespaces are
+			// disjoint by construction, not by an extra check.
+			if !seen[a] {
+				return fmt.Errorf("deploy %q: after %q: no such deploy node declared", d.Name, a)
+			}
+			if seenAfter[a] {
+				return fmt.Errorf("deploy %q: after %q: duplicate", d.Name, a)
+			}
+			seenAfter[a] = true
+		}
+	}
+
+	return cs.validateDeployAcyclic()
+}
+
+// validateDeployAcyclic is validateAcyclic over Deploys — same tri-color
+// DFS, same declaration-order visiting so a given spec always names the
+// same node on the cycle.
+func (cs *CheckSpec) validateDeployAcyclic() error {
+	edges := make(map[string][]string, len(cs.Deploys))
+	for _, d := range cs.Deploys {
+		edges[d.Name] = d.After
+	}
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[string]int, len(cs.Deploys))
+	var visit func(name string) error
+	visit = func(name string) error {
+		color[name] = gray
+		for _, dep := range edges[name] {
+			switch color[dep] {
+			case gray:
+				return fmt.Errorf("deploy %q: after %q: dependency cycle", name, dep)
+			case white:
+				if err := visit(dep); err != nil {
+					return err
+				}
+			}
+		}
+		color[name] = black
+		return nil
+	}
+	for _, d := range cs.Deploys {
+		if color[d.Name] == white {
+			if err := visit(d.Name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// SelectDeployNodes resolves an environment's `nodes` selection against
+// this spec: nil or empty names selects the whole graph, otherwise the
+// transitive closure of names over After — naming a node pulls in every
+// ancestor it declares it needs, because running "app1" without the
+// "migrate" it depends on is exactly the silent lie spec rejection exists
+// to prevent (docs/design/deployment.md). The result is always in
+// DECLARATION order, never selection order, so a subgraph schedules
+// identically to the way it would as part of the whole graph.
+//
+// An unknown name is an error — the fail-closed stance: an environment
+// must never quietly deploy fewer nodes than its operator asked for.
+// Duplicate entries are deduped rather than rejected; a repeated name
+// asks for nothing new.
+//
+// Pure and unwired in D1: nothing schedules deploy nodes yet.
+func (cs *CheckSpec) SelectDeployNodes(names []string) ([]DeployNode, error) {
+	if len(names) == 0 {
+		return append([]DeployNode(nil), cs.Deploys...), nil
+	}
+	byName := make(map[string]*DeployNode, len(cs.Deploys))
+	for i := range cs.Deploys {
+		byName[cs.Deploys[i].Name] = &cs.Deploys[i]
+	}
+	wanted := make(map[string]bool, len(names))
+	var pull func(name string) error
+	pull = func(name string) error {
+		if wanted[name] {
+			return nil
+		}
+		node, ok := byName[name]
+		if !ok {
+			return fmt.Errorf("deploy node %q: no such deploy node declared", name)
+		}
+		wanted[name] = true
+		for _, a := range node.After {
+			if err := pull(a); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, n := range names {
+		if err := pull(n); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]DeployNode, 0, len(wanted))
+	for _, d := range cs.Deploys {
+		if wanted[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 // Isolated reports whether this spec selects per-node isolated

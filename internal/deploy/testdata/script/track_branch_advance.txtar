@@ -1,0 +1,33 @@
+# A tracked environment follows its source branch: the tracker CREATES the
+# desired ref on the first tick (a CAS-create from "no ref"), advances it
+# when the source lands something new, and does nothing at all when the
+# source hasn't moved.
+
+deploy-env dev branch main track
+
+push-branch main files/v1
+
+# Nothing exists until a tick runs: the tracker is the only writer of a
+# tracked lane's desired ref, and it hasn't run yet.
+assert-desired dev none
+
+tick
+assert-desired dev main
+assert-cas-attempts 1
+
+push-branch main files/v2
+tick
+assert-desired dev main
+assert-cas-attempts 2
+
+# Level-triggered, not edge-triggered: with the source unmoved, the pass
+# re-derives the same answer and pushes nothing. The CAS count is what
+# makes that a real assertion rather than a restatement of the last one.
+tick
+assert-desired dev main
+assert-cas-attempts 2
+
+-- files/v1/app.txt --
+v1
+-- files/v2/app.txt --
+v2

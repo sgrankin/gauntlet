@@ -26,6 +26,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
+	"github.com/sgrankin/gauntlet/internal/deploy"
 	"github.com/sgrankin/gauntlet/internal/gitx"
 	"github.com/sgrankin/gauntlet/internal/hooks"
 	"github.com/sgrankin/gauntlet/internal/obs"
@@ -238,6 +239,14 @@ func run() error {
 	gitOpts, err := gitAuthOptions(cfg, appTokens)
 	if err != nil {
 		return err
+	}
+	// Observed deploy refs ride the queue's own fetch when — and only
+	// when — deployment is configured, so an operator who never uses it
+	// pays nothing. The destination is outside refs/remotes/origin/*, so
+	// ListRefs (and therefore all queue state) is untouched either way;
+	// see gitx.WithFetchRefspecs.
+	if len(cfg.Deploy.Environments) > 0 {
+		gitOpts = append(gitOpts, gitx.WithFetchRefspecs(deploy.FetchRefspec))
 	}
 	repo, err := gitx.New(ctx, repoDir, cfg.Remote, gitOpts...)
 	if err != nil {
@@ -550,6 +559,33 @@ func run() error {
 			defer wg.Done()
 			if err := hr.Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "gauntlet: hooks: %v\n", err)
+			}
+		}()
+	}
+
+	// Deploy-ref tracker (internal/deploy): its own goroutine on its own
+	// ticker at the reconcile cadence, deliberately NOT folded into
+	// queue.Daemon. It shares no state with the queue — it never fetches
+	// (so it never contends with the queue's Fetch), reads are
+	// for-each-ref, writes are CAS on refs the queue does not know about —
+	// so parallel is both correct and the only shape that keeps
+	// internal/queue untouched. Drain is ctx cancellation: the tracker
+	// holds nothing that needs finishing.
+	if dt := buildDeployTracker(cfg, repo, os.Stderr); dt != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(cfg.Poll)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := dt.ReconcileOnce(ctx); err != nil {
+						fmt.Fprintf(os.Stderr, "gauntlet: deploy: %v\n", err)
+					}
+				}
 			}
 		}()
 	}

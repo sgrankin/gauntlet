@@ -62,6 +62,21 @@ const (
 	// every landing's hooks run, in order, none ever dropped.
 	defaultHooksPolicy = "queue"
 
+	// Deploy environment defaults, applied only when the `deploy` block
+	// declares at least one environment (see applyDefaults). "finish" is
+	// the conservative on-desired-move: a graph run that has already
+	// started migrating a database is not something to kill by default.
+	// max-parallel 1 mirrors CheckSpec.MaxParallel's serial default —
+	// overlap is always an explicit opt-in.
+	defaultOnDesiredMove     = "finish"
+	defaultDeployMaxParallel = 1
+
+	// maxAllowedDeployMaxParallel is Environment.MaxParallel's safety
+	// valve, the same stance (and the same value) as
+	// maxAllowedMaxParallel in checks.go: it rejects an obvious typo at
+	// load, it is not the real host bound — max-executions is.
+	maxAllowedDeployMaxParallel = 64
+
 	// defaultSummarizeModel matches internal/summarize.DefaultModel
 	// (duplicated here, not imported, per this file's existing pattern of
 	// owning its own defaults — see defaultGitHubTokenEnv et al.):
@@ -214,6 +229,7 @@ type Daemon struct {
 	Slack     Slack     `kdl:"slack"`     // Channel=="" ⇒ disabled
 	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (the default)
 	Services  Services  `kdl:"services"`  // len(Allow)==0 ⇒ disabled
+	Deploy    Deploy    `kdl:"deploy"`    // len(Environments)==0 ⇒ disabled
 
 	// Executors is the raw parse target for every `executor` node —
 	// applyDefaults splits it into Executor (the default profile: the one
@@ -577,6 +593,71 @@ type Services struct {
 	// value" from "operator never wrote one" — see validate()'s
 	// cross-check.
 	Runtime string `kdl:"runtime"`
+}
+
+// Deploy configures the optional deployment lanes (docs/design/
+// deployment.md). Environments are DAEMON config, not repo config:
+// deployment capability is operator-owned, like executor profiles and
+// hooks. len(Environments)==0 — a missing block, or a bare `deploy {}` —
+// disables the feature entirely, the same "required field non-empty is the
+// enable signal" pattern as Services.Allow.
+type Deploy struct {
+	Environments []Environment `kdl:"environment,multiple"`
+}
+
+// DeploySource is one environment's `source` node: exactly one of the two
+// spellings, `source "main"` (a branch) or `source env="dev"` (another
+// environment's OBSERVED ref, i.e. what that environment last finished
+// deploying green). validate() rejects neither-set and both-set.
+type DeploySource struct {
+	Branch string `kdl:",arg"`
+	Env    string `kdl:"env"`
+}
+
+// DeployTrack is the presence marker for a bare `track` node.
+//
+// This is a pointer-to-empty-struct rather than the *bool the field would
+// naturally want because kdl-go binds `track` to a bool by ARGUMENT, and a
+// bare argument-less node fails to unmarshal outright ("track expects 1
+// argument(s), 0 provided") — while `track true` would then be the only
+// legal spelling, which is not the grammar docs/design/deployment.md
+// defines. Binding a pointer-to-struct instead makes presence itself the
+// signal, reusing the mechanism Daemon.Summarize already documents (kdl-go
+// only allocates a pointer-typed child-node field when the node is present
+// in the document); `track true` stays a loud unmarshal error rather than a
+// second spelling.
+type DeployTrack struct{}
+
+// Environment is one deployment lane. Its desired ref is
+// refs/heads/deploy/<Name> and its observed ref refs/gauntlet/deployed/
+// <Name>, so Name is validated as a ref path component — see validate().
+type Environment struct {
+	Name   string       `kdl:",arg"`
+	Source DeploySource `kdl:"source"`
+
+	// Track present ⇒ the daemon owns this lane's desired ref and keeps it
+	// at the source's tip. Absent (nil) ⇒ MANUAL: the daemon never writes
+	// the desired ref at all, and a human (or porcelain) push is the only
+	// thing that moves it. Pinning an environment during an incident is
+	// exactly this config edit, per the design.
+	Track *DeployTrack `kdl:"track"`
+
+	// Nodes selects a subgraph of the revision's deploy nodes; empty means
+	// the whole graph. Selection is transitively closed over `after`
+	// (CheckSpec.SelectDeployNodes). Entries are checked here only for
+	// being non-empty and unique — whether a name exists is a property of
+	// the revision being deployed, so it is a per-revision spec gate, not
+	// a daemon-config one.
+	Nodes []string `kdl:"nodes"`
+
+	// MaxParallel bounds concurrency WITHIN this environment's graph.
+	// Defaults to 1 when the deploy block is present.
+	MaxParallel int `kdl:"max-parallel"`
+
+	// OnDesiredMove is what happens to an in-flight graph run when the
+	// desired ref moves under it: "finish" (the default) lets it complete,
+	// "cancel" kills it and starts the new revision.
+	OnDesiredMove string `kdl:"on-desired-move"`
 }
 
 // Summarize configures the optional Claude-written merge-commit body
@@ -965,6 +1046,21 @@ func (d *Daemon) applyDefaults() {
 		}
 	}
 
+	// Deploy: only defaulted when the block is present (at least one
+	// environment), so an absent block leaves every field of every struct
+	// at its zero value — same pattern as Services above.
+	if len(d.Deploy.Environments) > 0 {
+		for i := range d.Deploy.Environments {
+			e := &d.Deploy.Environments[i]
+			if e.OnDesiredMove == "" {
+				e.OnDesiredMove = defaultOnDesiredMove
+			}
+			if e.MaxParallel == 0 {
+				e.MaxParallel = defaultDeployMaxParallel
+			}
+		}
+	}
+
 	if d.Summarize != nil {
 		if d.Summarize.Model == "" {
 			d.Summarize.Model = defaultSummarizeModel
@@ -979,6 +1075,122 @@ func (d *Daemon) applyDefaults() {
 			d.Summarize.Timeout = defaultSummarizeTimeout
 		}
 	}
+}
+
+// validateDeploy checks the `deploy` block. A no-op when the block
+// declares no environments (the disabled state), so an absent block is
+// never held to any of these rules.
+func (d *Daemon) validateDeploy() error {
+	envs := d.Deploy.Environments
+	if len(envs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(envs))
+	for _, e := range envs {
+		if e.Name == "" {
+			return fmt.Errorf("deploy: environment: name must not be empty")
+		}
+		// The name is concatenated into refs/heads/deploy/<name> and
+		// refs/gauntlet/deployed/<name>, both of which the daemon pushes
+		// and reads, so it must be a single valid ref PATH COMPONENT.
+		// Same forbidden-character set as trial-refs/receipt-notes above
+		// (issue #7's grammar), plus '/' — a name with a slash would
+		// nest one environment's refs under another's namespace, and
+		// glob metacharacters would turn a ref name into a pattern.
+		if strings.Contains(e.Name, "/") {
+			return fmt.Errorf("deploy: environment %q: name must not contain '/'", e.Name)
+		}
+		if strings.ContainsAny(e.Name, "*?[\\~^: \t\n") || strings.Contains(e.Name, "..") || strings.Contains(e.Name, "@{") {
+			return fmt.Errorf("deploy: environment %q: name is not a valid ref name (no * ? [ \\ ~ ^ : .. @{ or whitespace)", e.Name)
+		}
+		if seen[e.Name] {
+			return fmt.Errorf("deploy: environment %q: duplicate", e.Name)
+		}
+		seen[e.Name] = true
+	}
+
+	for _, e := range envs {
+		switch {
+		case e.Source.Branch == "" && e.Source.Env == "":
+			return fmt.Errorf("deploy: environment %q: source is required", e.Name)
+		case e.Source.Branch != "" && e.Source.Env != "":
+			return fmt.Errorf("deploy: environment %q: source and source env= are mutually exclusive — pick one", e.Name)
+		}
+		// The branch form names a BRANCH, not a ref: the tracker resolves
+		// it as refs/heads/<branch>, so an operator writing the full ref
+		// would produce refs/heads/refs/heads/main and silently never
+		// resolve.
+		if strings.HasPrefix(e.Source.Branch, "refs/") {
+			return fmt.Errorf("deploy: environment %q: source %q must be a branch name, not a ref (drop the \"refs/\" prefix)", e.Name, e.Source.Branch)
+		}
+		if e.Source.Env != "" && !seen[e.Source.Env] {
+			return fmt.Errorf("deploy: environment %q: source env %q: no such environment declared", e.Name, e.Source.Env)
+		}
+		if e.MaxParallel < 1 || e.MaxParallel > maxAllowedDeployMaxParallel {
+			return fmt.Errorf("deploy: environment %q: max-parallel must be between 1 and %d, got %d", e.Name, maxAllowedDeployMaxParallel, e.MaxParallel)
+		}
+		switch e.OnDesiredMove {
+		case "finish", "cancel":
+		default:
+			return fmt.Errorf("deploy: environment %q: on-desired-move must be \"finish\" or \"cancel\", got %q", e.Name, e.OnDesiredMove)
+		}
+		seenNode := make(map[string]bool, len(e.Nodes))
+		for _, n := range e.Nodes {
+			if n == "" {
+				return fmt.Errorf("deploy: environment %q: nodes: name must not be empty", e.Name)
+			}
+			if seenNode[n] {
+				return fmt.Errorf("deploy: environment %q: nodes %q: duplicate", e.Name, n)
+			}
+			seenNode[n] = true
+		}
+	}
+
+	return d.validateDeployEnvAcyclic()
+}
+
+// validateDeployEnvAcyclic rejects any cycle in the environments' `source
+// env=` graph — including an environment sourcing itself, which would be a
+// lane that can never have a tip. Same tri-color DFS in declaration order
+// as CheckSpec.validateAcyclic, so a given config always names the same
+// environment on the cycle.
+func (d *Daemon) validateDeployEnvAcyclic() error {
+	source := make(map[string]string, len(d.Deploy.Environments))
+	for _, e := range d.Deploy.Environments {
+		if e.Source.Env != "" {
+			source[e.Name] = e.Source.Env
+		}
+	}
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[string]int, len(d.Deploy.Environments))
+	var visit func(name string) error
+	visit = func(name string) error {
+		color[name] = gray
+		if dep, ok := source[name]; ok {
+			switch color[dep] {
+			case gray:
+				return fmt.Errorf("deploy: environment %q: source env %q: dependency cycle", name, dep)
+			case white:
+				if err := visit(dep); err != nil {
+					return err
+				}
+			}
+		}
+		color[name] = black
+		return nil
+	}
+	for _, e := range d.Deploy.Environments {
+		if color[e.Name] == white {
+			if err := visit(e.Name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // pathAtOrUnder reports whether path is exactly reserved or a path
@@ -1513,6 +1725,10 @@ func (d *Daemon) validate() error {
 		} else if d.Services.Runtime != "docker" && d.Services.Runtime != "podman" {
 			return fmt.Errorf("services: runtime must be \"docker\" or \"podman\", got %q", d.Services.Runtime)
 		}
+	}
+
+	if err := d.validateDeploy(); err != nil {
+		return err
 	}
 
 	if d.Summarize != nil {

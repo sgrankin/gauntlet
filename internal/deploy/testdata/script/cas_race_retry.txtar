@@ -1,0 +1,25 @@
+# Another writer wins the desired ref between the tracker's ref snapshot
+# and its push. Losing a CAS is an ordinary outcome, not an error: the
+# tracker leaves the winner's value alone for that tick, and the NEXT tick
+# re-derives from it and advances normally.
+
+deploy-env dev branch main track
+
+push-branch main files/v1
+push-branch other files/other
+
+arm-race dev other
+tick
+
+# The racer's value stands; the tracker overwrote nothing.
+assert-desired dev other
+assert-cas-attempts 1
+
+tick
+assert-desired dev main
+assert-cas-attempts 2
+
+-- files/v1/app.txt --
+v1
+-- files/other/app.txt --
+other

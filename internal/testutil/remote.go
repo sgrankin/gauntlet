@@ -138,6 +138,16 @@ func (r *Remote) Ref(ref string) string {
 	return strings.TrimSpace(out.String())
 }
 
+// SetRef force-sets ref to oid directly on the bare remote, with no
+// history or fast-forward check — the plumbing equivalent of a human's
+// `git push --force`, and the only way to write refs outside
+// refs/heads/for/* (a deploy ref, an observed ref) that the candidate
+// helpers above don't cover. oid must already exist on the remote.
+func (r *Remote) SetRef(ref, oid string) {
+	r.t.Helper()
+	gitC(r.t, r.Dir, "update-ref", ref, oid)
+}
+
 // Parents returns commit sha's parent OIDs, in order, as recorded on the
 // remote, or nil if sha does not exist there. Used to assert Invariant 6 (a
 // landed merge commit's second parent is the candidate SHA verbatim)
