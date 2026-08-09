@@ -432,18 +432,32 @@ real-git Setups over one Cmds set, the `script_test.go` pattern) with
 scenarios asserting only ref movement. Smallest phase; proves the ref
 model end-to-end against a real remote before any command runs.
 
-**Phase D2 — graph execution.** The risky seam, taken deliberately: the
-node-graph scheduler (ready = `after` edges green, spec-order starts
-under caps, fail-fast culprit, blocked rows, `waited_ms`) currently lives
-woven into `internal/queue`'s run machinery (`reconcile.go`). Lift it
-into a reusable component (`internal/core` or a new `internal/graph`)
-that queue checks, image builds, and deploy nodes all drive — guarded by
-the existing queue scenario suite, whose event streams must stay
-**byte-identical** across the extraction (the suite exists precisely to
-make refactors like this provable; if extraction proves invasive, the
-fallback recorded here is a parallel minimal scheduler in
-`internal/deploy` and a later unification, accepting temporary
-duplication over destabilizing the queue). Then the lane runner: export
+**Phase D2 — graph execution.** The risky seam, and the extract-vs-
+parallel decision spike (2026-08-09) ran ahead of implementation and
+came back **parallel**: a minimal scheduler inside `internal/deploy`
+(~180 lines mirroring `advanceChecks`'s four steps: spec-order starts
+under two caps, drain-then-cull, spec-first culprit, blocked-row
+synthesis), NOT an extraction. Three findings decided it, recorded so
+the next reader doesn't re-litigate: (1) the "byte-identical event
+streams" guard the extraction plan leaned on is **currently unpinned** —
+the queue suite's `assert-event` checks kind existence, not order or
+content, so a provable extraction first requires a golden-event-stream
+pinning sub-project that doesn't exist; (2) only ~85 of the scheduler's
+lines are graph logic — the rest is queue tenancy (image/receipt
+validation mutating results mid-drain, batch attribution, trial-ref
+gates), and the worst coupling is an *ordering* contract an interface
+can't enforce; (3) the two tenants want different admission modes — the
+queue's non-blocking `TryAcquire`/`readyAt` bookkeeping exists only
+because the reconcile loop must never block, while a deploy lane is a
+goroutine (the hooks precedent) that simply blocks on `Acquire`, so a
+shared component carries both modes: more code than either caller has
+today. One piece IS shared now: `core.NodeGreen`, the
+skipped-counts-green predicate reconcile.go restates three times.
+Divergence guard: the six `parallel_test.go` behaviors are ported into
+`internal/deploy`'s scheduler tests under the same names. Future
+unification path, in order, if a third tenant appears: build the event-
+stream pin first, then a step-function `Advance` mode, then extraction —
+never extraction first. Then the lane runner: export
 of the desired revision (reuse `ExportTree` + workspace policy + mtimes),
 `GAUNTLET_DEPLOY_*` env, result-file skip protocol, candidate-code
 secret-stripping, GC pins, observed-ref CAS advance on all-green, parks +
