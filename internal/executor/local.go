@@ -161,6 +161,18 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 	if e.GitDir != "" {
 		cmd.Env = append(cmd.Env, core.EnvGitDir+"="+e.GitDir)
 	}
+	// Deploy coordinates, all four or none: DeployEnv is the discriminator
+	// and GAUNTLET_DEPLOYED_SHA is exported set-but-empty on a first-ever
+	// deploy (core.EnvDeployedSHA's doc — an empty previous revision is a
+	// real value of the protocol, unlike an absent git dir).
+	if job.DeployEnv != "" {
+		cmd.Env = append(cmd.Env,
+			core.EnvDeployEnv+"="+job.DeployEnv,
+			core.EnvDeployNode+"="+job.DeployNode,
+			core.EnvDeploySHA+"="+job.MergeSHA,
+			core.EnvDeployedSHA+"="+job.DeployedSHA,
+		)
+	}
 	// Shared-services env: appended after the built-ins, nil for
 	// checks with no `needs`. Networks is ModeNetwork-only (a shared
 	// runtime network) and has no meaning for a local subprocess, so it's

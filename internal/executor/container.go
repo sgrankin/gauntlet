@@ -456,7 +456,8 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 //	  -v <job.Dir>:<workdir>            # trial tree, read-write \
 //	  -v <resultDir>:/gauntlet          # writable result dir \
 //	  -v <p.GitDir>:/gauntlet-git:ro    # bare repo, only when GitDir is set \
-//	  -e GAUNTLET_* (all six, plus GAUNTLET_GIT_DIR when GitDir is set) \
+//	  -e GAUNTLET_* (all six, plus GAUNTLET_GIT_DIR when GitDir is set,
+//	                 plus the four GAUNTLET_DEPLOY_* on a deploy node) \
 //	  -v <cacheName>:<cachePath> ...    # persistent named cache volumes \
 //	  -v <mountHost>:<mountPath>[:ro] ... # operator-configured host bind mounts \
 //	  --network <n> ...                # one per job.Networks (ModeNetwork) \
@@ -503,6 +504,19 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 	)
 	if p.GitDir != "" {
 		args = append(args, "-e", core.EnvGitDir+"="+containerGitDir)
+	}
+	// Deploy coordinates, all four or none, exactly as the local executor
+	// renders them: DeployEnv is the discriminator, and
+	// GAUNTLET_DEPLOYED_SHA is passed set-but-empty on a first-ever deploy
+	// (core.EnvDeployedSHA's doc). A non-deploy job adds nothing here, so
+	// every existing argv is byte-identical.
+	if job.DeployEnv != "" {
+		args = append(args,
+			"-e", core.EnvDeployEnv+"="+job.DeployEnv,
+			"-e", core.EnvDeployNode+"="+job.DeployNode,
+			"-e", core.EnvDeploySHA+"="+job.MergeSHA,
+			"-e", core.EnvDeployedSHA+"="+job.DeployedSHA,
+		)
 	}
 	for _, c := range p.Caches {
 		args = append(args, "-v", c.Name+":"+c.Path)

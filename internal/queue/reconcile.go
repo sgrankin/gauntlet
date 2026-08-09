@@ -646,7 +646,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	// blocked rows; same-window finishers were already recorded above.
 	if r.culprit == "" {
 		for i := range r.checks {
-			if res, ok := r.results[r.checks[i].Name]; ok && (res.Err != nil || res.Status == core.CheckFailed) {
+			if res, ok := r.results[r.checks[i].Name]; ok && !core.NodeGreen(res) {
 				r.culprit = r.checks[i].Name
 				d.cancelRun(r)
 				break
@@ -690,10 +690,10 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		}
 		ready := true
 		for _, dep := range c.After {
-			// Green = Passed or Skipped with no Err — the same results
-			// that keep a candidate green. A non-green dep can't occur
-			// here (it would have set r.culprit above).
-			if res, ok := r.results[dep]; !ok || res.Err != nil || (res.Status != core.CheckPassed && res.Status != core.CheckSkipped) {
+			// core.NodeGreen — Passed or Skipped with no Err, the same
+			// results that keep a candidate green. A non-green dep can't
+			// occur here (it would have set r.culprit above).
+			if res, ok := r.results[dep]; !ok || !core.NodeGreen(res) {
 				ready = false
 				break
 			}
@@ -780,7 +780,7 @@ func (d *Daemon) materializeChecks(r *run) {
 		}
 		var blockedBy []string
 		for _, dep := range c.After {
-			if res, ok := r.results[dep]; !ok || res.Err != nil || (res.Status != core.CheckPassed && res.Status != core.CheckSkipped) {
+			if res, ok := r.results[dep]; !ok || !core.NodeGreen(res) {
 				blockedBy = append(blockedBy, dep)
 			}
 		}

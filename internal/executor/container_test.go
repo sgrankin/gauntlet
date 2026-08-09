@@ -1096,3 +1096,79 @@ func indexOfPair(s []string, flag, value string) int {
 func contains(s []string, v string) bool { return indexOf(s, v) != -1 }
 
 func containsPair(s []string, flag, value string) bool { return indexOfPair(s, flag, value) != -1 }
+
+// containerDeployJob is containerJob shaped as one node of a deploy graph:
+// the revision being deployed rides MergeSHA, DeployedSHA is the
+// environment's observed ref before this run.
+func containerDeployJob(command []string) core.CheckJob {
+	job := containerJob(command)
+	job.Name = "app1"
+	job.DeployEnv = "prod"
+	job.DeployNode = "app1"
+	job.MergeSHA = "desired-sha"
+	job.DeployedSHA = "observed-sha"
+	return job
+}
+
+// TestParams_RunArgs_DeployEnvVars: a deploy node's argv carries the four
+// GAUNTLET_DEPLOY_* variables on top of the unchanged check contract —
+// GAUNTLET_RESULT_FILE and the git-dir mount ride the existing plumbing, so
+// the diff-based skip protocol works in a container exactly as it does
+// locally.
+func TestParams_RunArgs_DeployEnvVars(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img", GitDir: "/state/repos/origin.git"}
+	job := containerDeployJob([]string{"./scripts/deploy", "app1"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	wantEnv := []string{
+		core.EnvDeployEnv + "=prod",
+		core.EnvDeployNode + "=app1",
+		core.EnvDeploySHA + "=desired-sha",
+		core.EnvDeployedSHA + "=observed-sha",
+		// Untouched by the deploy fields, and load-bearing for the skip
+		// protocol: the result file and the read-only bare repo that
+		// resolves both SHAs above.
+		core.EnvResultFile + "=/gauntlet/result",
+		core.EnvGitDir + "=" + containerGitDir,
+	}
+	for _, e := range wantEnv {
+		if !containsPair(got, "-e", e) {
+			t.Errorf("argv missing -e %q; argv=%v", e, got)
+		}
+	}
+}
+
+// TestParams_RunArgs_DeployedSHAEmptyStillPassed: an environment's
+// first-ever deploy passes GAUNTLET_DEPLOYED_SHA set-but-empty rather than
+// dropping the -e pair, the same stable contract the local executor
+// renders (core.EnvDeployedSHA's doc).
+func TestParams_RunArgs_DeployedSHAEmptyStillPassed(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img"}
+	job := containerDeployJob([]string{"true"})
+	job.DeployedSHA = ""
+
+	got := p.runArgs(job, "n", "/rd")
+
+	if !containsPair(got, "-e", core.EnvDeployedSHA+"=") {
+		t.Errorf("argv must pass an empty %s rather than omit it; argv=%v", core.EnvDeployedSHA, got)
+	}
+}
+
+// TestParams_RunArgs_NoDeployEnvVarsForCheckJob: DeployEnv is the whole
+// discriminator, so an ordinary check's argv is byte-identical to what it
+// was before deploys existed.
+func TestParams_RunArgs_NoDeployEnvVarsForCheckJob(t *testing.T) {
+	p := Params{Workdir: "/w", Image: "img"}
+	job := containerJob([]string{"true"})
+
+	got := p.runArgs(job, "n", "/rd")
+
+	for _, v := range []string{core.EnvDeployEnv, core.EnvDeployNode, core.EnvDeploySHA, core.EnvDeployedSHA} {
+		for i, arg := range got {
+			if strings.HasPrefix(arg, v+"=") {
+				t.Errorf("argv[%d] = %q: a non-deploy job must carry no deploy coordinates; argv=%v", i, arg, got)
+			}
+		}
+	}
+}

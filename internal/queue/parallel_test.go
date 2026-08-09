@@ -4,6 +4,17 @@
 // several nodes running. Built on the fake harness; the gated executor's
 // (RunID, Name)-keyed gates make concurrent in-flight checks exactly as
 // steppable as serial ones.
+//
+// DIVERGENCE GUARD: internal/deploy/graph_test.go ports every behavior
+// below under the same test names, against the deploy node-graph scheduler
+// — the second implementation the D2 spike chose over an extraction
+// (docs/design/deployment.md, Phase D2). The two are expected to differ in
+// admission mode (this one polls with TryAcquire because the reconcile loop
+// must never block; that one blocks on Acquire from its lane goroutine) and
+// in what happens after fail-fast (this one abandons in-flight checks; that
+// one waits them out). Everything else is meant to stay identical, and
+// changing a behavior here without visiting the port there is how the two
+// drift apart silently.
 package queue
 
 import (

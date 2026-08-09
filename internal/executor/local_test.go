@@ -650,3 +650,134 @@ func TestLocalExecutor_CommandNotFound_ResourceFieldsZero(t *testing.T) {
 		t.Errorf("SysCPU = %v, want 0", res.SysCPU)
 	}
 }
+
+// deployJob is baseJob shaped as one node of an environment's deploy graph:
+// the deploy coordinates set, OperatorOwned deliberately left FALSE — a
+// deploy command comes from the deployed revision's own repo spec, so it is
+// candidate-code class exactly like a check (docs/design/deployment.md,
+// "What runs": credentials).
+func deployJob(t *testing.T, command []string) core.CheckJob {
+	t.Helper()
+	job := baseJob(t, command)
+	job.Name = "app1"
+	job.DeployEnv = "prod"
+	job.DeployNode = "app1"
+	job.MergeSHA = "desired-sha" // the revision being deployed
+	job.DeployedSHA = "observed-sha"
+	return job
+}
+
+// TestLocalExecutor_DeployEnvVars pins the deploy half of the env contract:
+// all four GAUNTLET_DEPLOY_* variables, with the revision being deployed
+// riding MergeSHA, alongside the check contract a deploy node keeps
+// (GAUNTLET_RESULT_FILE is what makes a node's own "nothing to do here"
+// skip verdict possible).
+func TestLocalExecutor_DeployEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test "$%s" = "prod" || { echo "bad deploy env: $%s"; exit 1; }
+test "$%s" = "app1" || { echo "bad deploy node: $%s"; exit 1; }
+test "$%s" = "desired-sha" || { echo "bad deploy sha: $%s"; exit 1; }
+test "$%s" = "observed-sha" || { echo "bad deployed sha: $%s"; exit 1; }
+test "$%s" = "desired-sha" || { echo "merge sha must still name the same revision: $%s"; exit 1; }
+test -n "$%s" || { echo "result file var unset for a deploy node"; exit 1; }
+exit 0
+`,
+		core.EnvDeployEnv, core.EnvDeployEnv,
+		core.EnvDeployNode, core.EnvDeployNode,
+		core.EnvDeploySHA, core.EnvDeploySHA,
+		core.EnvDeployedSHA, core.EnvDeployedSHA,
+		core.EnvMergeSHA, core.EnvMergeSHA,
+		core.EnvResultFile,
+	)
+	cmd := script(t, dir, "deploy.sh", body)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), deployJob(t, cmd))
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+}
+
+// TestLocalExecutor_DeployedSHASetButEmptyOnFirstDeploy: an environment's
+// first-ever deploy has no previous observed revision, and the variable is
+// exported SET-BUT-EMPTY there rather than omitted — the deliberate
+// divergence from GAUNTLET_GIT_DIR's absent-when-unknown rule, so
+// `[ -z "$GAUNTLET_DEPLOYED_SHA" ]` is the whole first-deploy test.
+func TestLocalExecutor_DeployedSHASetButEmptyOnFirstDeploy(t *testing.T) {
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test -n "${%s+x}" || { echo "deployed sha var unset; want set-but-empty"; exit 1; }
+test -z "$%s" || { echo "deployed sha not empty: $%s"; exit 1; }
+exit 0
+`, core.EnvDeployedSHA, core.EnvDeployedSHA, core.EnvDeployedSHA)
+	cmd := script(t, dir, "deploy.sh", body)
+	job := deployJob(t, cmd)
+	job.DeployedSHA = "" // never deployed before
+
+	res := LocalExecutor{}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+}
+
+// TestLocalExecutor_NonDeployJobOmitsDeployEnvVars: DeployEnv is the whole
+// discriminator, so an ordinary check sees none of the four — a check
+// script must never find deploy coordinates it could act on.
+func TestLocalExecutor_NonDeployJobOmitsDeployEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+for v in %s %s %s %s; do
+    eval "set -- \${$v+x}"
+    test -z "$1" || { echo "deploy var $v set on a non-deploy job"; exit 1; }
+done
+exit 0
+`, core.EnvDeployEnv, core.EnvDeployNode, core.EnvDeploySHA, core.EnvDeployedSHA)
+	cmd := script(t, dir, "check.sh", body)
+
+	res := LocalExecutor{}.RunCheck(context.Background(), baseJob(t, cmd))
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed; output=%q", res.Status, res.Output)
+	}
+}
+
+// TestLocalExecutor_SecretEnvStrippedFromDeployJob pins the credential
+// stance for deploys (docs/design/deployment.md, "What runs"): a deploy
+// command is landed, gated, repo-authored code — candidate class — so
+// issue #13's stripping applies to it unchanged. Nothing about the deploy
+// fields exempts a job; only OperatorOwned does, and the lane runner leaves
+// it false. Deploy credentials arrive the way check credentials do: fixed
+// env on an operator-owned executor profile.
+func TestLocalExecutor_SecretEnvStrippedFromDeployJob(t *testing.T) {
+	const secretVar = "GAUNTLET_TEST_SECRET_VAR"
+	t.Setenv(secretVar, "must-not-leak-to-deploy-code")
+
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+test -z "${%s+x}" || { echo "secret var visible to deploy job: $%s"; exit 1; }
+test "$%s" = "prod" || { echo "deploy env missing: $%s"; exit 1; }
+exit 0
+`, secretVar, secretVar, core.EnvDeployEnv, core.EnvDeployEnv)
+	cmd := script(t, dir, "deploy.sh", body)
+	job := deployJob(t, cmd) // OperatorOwned: false (zero value) — candidate class
+
+	res := LocalExecutor{SecretEnv: []string{secretVar}}.RunCheck(context.Background(), job)
+
+	if res.Err != nil {
+		t.Fatalf("unexpected Err: %v", res.Err)
+	}
+	if res.Status != core.CheckPassed {
+		t.Fatalf("Status = %v, want CheckPassed (a deploy job is candidate class: secrets stripped); output=%q", res.Status, res.Output)
+	}
+}

@@ -11,12 +11,20 @@
 //     once that environment's whole deploy graph has finished green. The
 //     last revision known to be fully deployed.
 //
-// This package is the D1 slice: it reads both refs and CAS-advances
+// The Tracker here is the D1 slice: it reads both refs and CAS-advances
 // desired refs. It never fetches, never deletes a ref, never writes an
-// observed ref, and never runs a command — running the graph and
-// advancing observed is D2's half. That makes the tracker purely
+// observed ref, and never runs a command. That makes it purely
 // level-triggered: every tick re-derives the whole picture from refs, so
 // a missed tick, a crash, or a restart costs nothing but latency.
+//
+// graph.go adds D2's Scheduler — the node-graph runner an environment's
+// deploy executes under, a deliberate second implementation of the queue's
+// scheduler rather than an extraction of it. Nothing wires the two
+// together yet: the lane runner that exports the desired revision, builds
+// the CheckJobs, emits the deploy events, and CAS-advances the observed
+// ref on an all-green graph is still to come, so a Tracker's behavior is
+// unchanged and a daemon with no deploy config remains byte-identical to
+// one built before any of this existed.
 //
 // It imports internal/core (for ErrCASStale) and the standard library,
 // and deliberately NOT internal/config: cmd/gauntlet maps operator config

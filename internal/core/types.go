@@ -108,6 +108,30 @@ type CheckJob struct {
 	// ceiling (defense in depth against a job built without a bound).
 	ReceiptMaxBytes int
 
+	// DeployEnv, DeployNode and DeployedSHA are the deploy coordinates
+	// (docs/design/deployment.md, "What runs") of a job that is one node of
+	// an environment's deploy graph, and empty on every other job.
+	// DeployEnv — the environment being deployed — is the discriminator:
+	// non-empty is what makes every executor render the GAUNTLET_DEPLOY_*
+	// contract, the same protocol-data-on-the-job pattern ImageBuild and
+	// ReceiptCapture follow (a deploy job needs no env escape hatch; the
+	// executors own the rendering).
+	//
+	// DeployNode is the node's own name — the same string as Name, carried
+	// separately because Name is what the executor labels containers and
+	// logs with and a future node-name mangling (the "image:<name>"
+	// precedent) must not silently change what a deploy script reads.
+	// DeployedSHA is the environment's OBSERVED ref before this run, which
+	// is empty on an environment's first-ever deploy — the diff-based skip
+	// protocol's whole point is that a deploy script can tell "nothing
+	// changed here" from "no baseline exists" — while the revision BEING
+	// deployed rides MergeSHA, the field every executor already exports as
+	// GAUNTLET_MERGE_SHA and the queue already fills with "the tree that
+	// ran".
+	DeployEnv   string
+	DeployNode  string
+	DeployedSHA string
+
 	// Dir is the exported trial tree the check runs against.
 	Dir string
 
@@ -383,6 +407,42 @@ const (
 	// (LocalExecutor.GitDir / executor.Params.GitDir empty — the state of
 	// every hand-built executor in tests before this field existed).
 	EnvGitDir = "GAUNTLET_GIT_DIR"
+
+	// EnvDeployEnv, EnvDeployNode, EnvDeploySHA and EnvDeployedSHA are the
+	// deploy coordinates a DEPLOY node's command runs with
+	// (docs/design/deployment.md, "What runs"), on top of the check
+	// contract above — GAUNTLET_RESULT_FILE (a deploy node reports skipped
+	// exactly as a check does; that is how affected-only deploys stay
+	// cheap) and GAUNTLET_GIT_DIR (which resolves both SHAs below, so the
+	// `git diff $GAUNTLET_DEPLOYED_SHA..$GAUNTLET_DEPLOY_SHA -- app1/`
+	// pattern needs no clone) ride the existing plumbing untouched.
+	//
+	// All four are exported TOGETHER or not at all: a job with a
+	// CheckJob.DeployEnv is a deploy node and gets the whole set, a job
+	// without one gets none of it. EnvDeployedSHA is therefore exported
+	// SET-BUT-EMPTY on an environment's first-ever deploy rather than being
+	// omitted — the opposite of EnvGitDir's absent-when-unknown rule, and
+	// deliberately: git-dir absence is a property of the EXECUTOR's
+	// configuration (a check can't do anything about it), while an empty
+	// previous SHA is a real, expected value of the deploy protocol that a
+	// script must branch on. `[ -z "$GAUNTLET_DEPLOYED_SHA" ]` is the whole
+	// first-deploy test, and it works without the script also having to
+	// distinguish unset from empty.
+	EnvDeployEnv = "GAUNTLET_DEPLOY_ENV"
+
+	// EnvDeployNode is the deploy node's name (= CheckJob.DeployNode).
+	EnvDeployNode = "GAUNTLET_DEPLOY_NODE"
+
+	// EnvDeploySHA is the revision being deployed — the environment's
+	// desired ref (= CheckJob.MergeSHA, which the same job also exports as
+	// GAUNTLET_MERGE_SHA: one commit, named twice, so a script shared
+	// between checks and deploys can read either vocabulary).
+	EnvDeploySHA = "GAUNTLET_DEPLOY_SHA"
+
+	// EnvDeployedSHA is the environment's observed ref BEFORE this deploy
+	// (= CheckJob.DeployedSHA); empty on its first-ever deploy, and empty
+	// only then.
+	EnvDeployedSHA = "GAUNTLET_DEPLOYED_SHA"
 )
 
 // Outcome is a run's final disposition.
@@ -629,11 +689,60 @@ const (
 	// must ignore EventKind values they don't recognize rather than
 	// erroring.
 	EventRetryRequested
+
+	// EventDeployStarted reports that one environment's deploy graph run is
+	// about to start (internal/deploy, docs/design/deployment.md): DeployEnv
+	// is the environment, RunID the deploy run's own ID, DeploySHA the
+	// revision being deployed (the desired ref's value) and DeployedSHA the
+	// observed ref's value before this run ("" on an environment's
+	// first-ever deploy). It carries no Candidate and no Target: a deploy
+	// lane is addressed by environment, never by a candidate ref — which is
+	// also why deploy retry/cancel are env-addressed API calls rather than
+	// core.Commands. Additive like EventIgnoredRef: channel implementations
+	// must ignore EventKind values they don't recognize rather than
+	// erroring.
+	EventDeployStarted
+
+	// EventDeployNodeFinished reports one deploy node's outcome — the
+	// deploy twin of EventCheckFinished, and it carries its result the same
+	// way: CheckName is the node's name and Check its *CheckResult, so a
+	// channel can render per-node verdicts mid-graph without waiting for
+	// the run's terminal record. DeployEnv/RunID/DeploySHA/DeployedSHA
+	// identify the run, exactly as on EventDeployStarted. A node that never
+	// ran (blocked by a failed edge, or by the graph failing fast before it
+	// started) emits NOTHING here — blocked rows exist only in the terminal
+	// DeployRecord's Nodes slice, the same rule CheckBlocked follows in a
+	// run's record.
+	EventDeployNodeFinished
+
+	// EventDeployFinished is a deploy graph run's TERMINAL event and
+	// carries the finished *DeployRecord in Deploy — the deploy analogue of
+	// the run-terminal events' Record, and deliberately a separate field:
+	// the two consumers that treat a non-nil Record as "a finished RUN,
+	// render/persist it" (internal/slack, internal/history) must not
+	// mistake a deploy for one. DeployEnv/RunID/DeploySHA/DeployedSHA are
+	// set here too, so a channel can identify the lane without
+	// dereferencing the record. Emitted whatever the outcome — green,
+	// parked on a red node, errored, or concluded externally (a `cancel`
+	// policy desired move, drain) — since the lane's park state is exactly
+	// what an operator needs told.
+	EventDeployFinished
+
+	// numEventKinds counts the declared kinds — KEEP LAST, and add new
+	// kinds ABOVE it. The emit-site contract table (events_test.go) is
+	// checked for exactly this many entries, so a kind added without a
+	// contract entry fails a test instead of silently shipping an
+	// unspecified shape: event shapes have broken twice already (DESIGN.md,
+	// "Event shapes are the soft underbelly") and "extend the contract
+	// tests first" needs a mechanism, not a habit.
+	numEventKinds
 )
 
 // Event is one notification emitted to a Channel. Terminal events —
 // EventLanded, EventRejected, EventTrialConflict, EventSkipped, EventError —
-// carry the finished *RunRecord.
+// carry the finished *RunRecord; the deploy subsystem's terminal event,
+// EventDeployFinished, carries a *DeployRecord in Deploy instead. See
+// ValidateEvent for the whole emit-site contract in executable form.
 type Event struct {
 	Kind EventKind
 	At   time.Time
@@ -641,7 +750,17 @@ type Event struct {
 	Target    string
 	Candidate Candidate
 
-	RunID     string
+	// RunID identifies the run this event belongs to: a queue run's ID on
+	// every candidate/hook event, and the DEPLOY run's own ID on the three
+	// deploy kinds — one field, because "run-scoped events carry the run
+	// ID" (docs/design/core.md, "Event model") is a contract about
+	// joinability, not about which subsystem minted the ID. The two ID
+	// spaces never collide (both are unique per process) and no consumer
+	// joins across them: a deploy event carries no Candidate, so nothing
+	// that keys on (target, ref) sees one at all.
+	RunID string
+
+	// CheckName names the check, hook, or deploy NODE an event is about.
 	CheckName string
 
 	// HookIndex and HookCount are meaningful only on EventHookStarted
@@ -656,10 +775,11 @@ type Event struct {
 	HookCount int
 
 	// Check carries one finished result — the just-finished check on
-	// EventCheckFinished, or the just-finished hook on EventHookFinished —
-	// so channels can render per-check/per-hook verdicts (and durations)
-	// mid-run without waiting for the run's terminal RunRecord. nil on
-	// every other event kind. Channel implementations must nil-check
+	// EventCheckFinished, the just-finished hook on EventHookFinished, or
+	// the just-finished deploy node on EventDeployNodeFinished — so
+	// channels can render per-check/per-hook/per-node verdicts (and
+	// durations) mid-run without waiting for the run's terminal record. nil
+	// on every other event kind. Channel implementations must nil-check
 	// before dereferencing: older events, and any future EventKind, may
 	// carry nil here even on what looks like a finished-check line.
 	Check *CheckResult
@@ -678,7 +798,88 @@ type Event struct {
 	// other event, whose merge identity, when it has one, lives on Record.
 	MergeSHA string
 
+	// DeployEnv, DeploySHA and DeployedSHA are meaningful only on the three
+	// deploy kinds (the same additive, kind-specific pattern as
+	// CheckName/HookIndex/MergeSHA) and empty on every other event.
+	// DeployEnv is the environment whose lane this is; DeploySHA is the
+	// revision being deployed — the desired ref's value, and what the
+	// node's own GAUNTLET_DEPLOY_SHA holds; DeployedSHA is the observed
+	// ref's value BEFORE this run (GAUNTLET_DEPLOYED_SHA), empty on an
+	// environment's first-ever deploy and only then. Carried on every
+	// deploy event, terminal or not, so a channel can render the lane and
+	// the drift it is closing without holding the terminal record.
+	DeployEnv   string
+	DeploySHA   string
+	DeployedSHA string
+
+	// Deploy is set on EventDeployFinished — the deploy graph run's
+	// terminal record — and nil otherwise. Deliberately NOT Record: the
+	// consumers that read a non-nil Record as "a finished run, render and
+	// persist it" would otherwise have to learn to tell a deploy from a
+	// candidate landing, and every one of them predates deploys.
+	Deploy *DeployRecord
+
 	Detail string
+}
+
+// DeployRecord is the single structured fact produced by one deploy graph
+// run — the deploy twin of RunRecord, and the same kind of source of truth:
+// history rows, the deploy detail page, and the terminal event all build
+// from this one value rather than re-deriving anything.
+//
+// It is NOT correctness state. The refs remain the ground truth for what an
+// environment should and does run (docs/design/deployment.md: desired vs
+// observed); losing every record costs old detail pages and nothing else,
+// which is exactly why retry re-runs the whole graph instead of resuming
+// from the per-node rows here.
+type DeployRecord struct {
+	// Env is the environment; RunID is this graph run's own ID, the same
+	// one its events carry.
+	Env   string
+	RunID string
+
+	// DeploySHA is the revision this run deployed (the desired ref's value
+	// when it started); DeployedSHA is the observed ref's value before it,
+	// empty on an environment's first-ever deploy. The observed ref
+	// advances to DeploySHA only when Outcome is OutcomeLanded.
+	DeploySHA   string
+	DeployedSHA string
+
+	// Nodes holds one result per DECLARED node of this run's graph, in
+	// spec-declaration order, with Seq the 1-based spec position — the same
+	// durable per-node identity RunRecord.Checks carries, for the same
+	// reason (history's seq column and the log filename prefix key on it).
+	// A node that never ran is a CheckBlocked row naming its failed edges,
+	// exactly as in a run's record.
+	Nodes []CheckResult
+
+	// Outcome reuses the run vocabulary deliberately, one word per lane
+	// state an operator can act on: OutcomeLanded — the whole graph
+	// finished green (skipped counts green) and the observed ref advanced;
+	// OutcomeRejected — a node reported a red verdict, so the lane PARKS at
+	// DeploySHA and Culprit names the node; OutcomeError — a daemon-side
+	// failure (export, executor unreachable, cancelled slot wait), which
+	// parks the same way but is eligible for the standing auto-retry-once
+	// budget; OutcomeSkipped — the run was concluded externally (a `cancel`
+	// policy desired move, daemon drain), attributing no failure to
+	// anything. OutcomeConflict never occurs: a deploy has no trial merge.
+	Outcome Outcome
+
+	// Culprit names the node whose non-green result failed the graph — the
+	// explicit root failure, in spec order when several finished non-green
+	// in the same window, never inferred from whichever row landed last.
+	// Empty when Outcome is OutcomeLanded, and when the run was concluded
+	// externally with nothing to attribute.
+	Culprit string
+
+	// Detail is a human-readable explanation for the cases the rows above
+	// can't carry themselves — a spec rejection (no deploy nodes in the
+	// revision's tree, an environment naming a node that doesn't exist), a
+	// cancellation's reason.
+	Detail string
+
+	StartedAt time.Time
+	EndedAt   time.Time
 }
 
 // Command is an inbound instruction from a Channel (e.g. a Slack reaction
