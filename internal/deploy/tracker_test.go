@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,18 +16,36 @@ import (
 // stubGit is a deploy.Git whose every method is a field, for the cases the
 // scenario harness can't reach cheaply: a ref listing that fails, a push
 // that fails with something other than a lost CAS.
+//
+// The lane-runner half of the interface lives in run_test.go, alongside the
+// tests that need it. mu guards everything: a Tracker built with a runner
+// calls this from lane goroutines while a reconcile pass calls it from the
+// test's own. The tests in THIS file build no runner, so nothing there
+// races and their direct field reads stay honest.
 type stubGit struct {
+	mu       sync.Mutex
 	refs     map[string]string
 	local    map[string]string
 	refsErr  error
 	localErr error
 	casErr   func(remoteRef string) error
 	casCalls []casCall
+
+	// Lane-runner fixtures (run_test.go): tree is the revision content
+	// every ReadFileFromTree/ExportTree serves, and the *Err fields make
+	// each pre-graph step fail on demand.
+	tree      map[string]string
+	readErr   error
+	pinErr    error
+	exportErr error
+	pins      map[string]bool
 }
 
 type casCall struct{ Ref, Old, New string }
 
 func (g *stubGit) ListRefs(context.Context) (map[string]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.refsErr != nil {
 		return nil, g.refsErr
 	}
@@ -34,6 +53,8 @@ func (g *stubGit) ListRefs(context.Context) (map[string]string, error) {
 }
 
 func (g *stubGit) ListLocalRefs(_ context.Context, prefix string) (map[string]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.localErr != nil {
 		return nil, g.localErr
 	}
@@ -47,6 +68,8 @@ func (g *stubGit) ListLocalRefs(_ context.Context, prefix string) (map[string]st
 }
 
 func (g *stubGit) CASUpdate(_ context.Context, remoteRef, oldOID, newOID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.casCalls = append(g.casCalls, casCall{Ref: remoteRef, Old: oldOID, New: newOID})
 	if g.casErr != nil {
 		if err := g.casErr(remoteRef); err != nil {

@@ -1,0 +1,62 @@
+# The whole point of the machinery, end to end: a tracked environment's
+# desired ref advances, its graph runs from the DEPLOYED REVISION'S OWN
+# tree, and the observed ref advances only once every node finished green.
+#
+# The graph is the design doc's: migrate first, then app1 and app2 in
+# parallel. The apps are released OUT of spec order — app2 before app1 —
+# which is only possible if both were actually ready and running at once,
+# so it proves parallel readiness rather than asserting it.
+
+deploy-env dev branch main track max-parallel=3
+
+push-branch main graph/v1
+
+tick
+assert-desired dev main
+assert-observed dev none
+assert-deploy-running dev
+
+release-node dev migrate
+release-node dev app2
+release-node dev app1
+await-deploy dev 1
+
+# All green: the observed ref moved, and only now.
+assert-observed dev main
+assert-deploy-outcome dev landed
+assert-node-status dev migrate passed
+assert-node-status dev app1 passed
+assert-node-status dev app2 passed
+
+# One started, one node-finished per node, one terminal — in that order.
+assert-events deploy-started deploy-node-finished deploy-node-finished deploy-node-finished deploy-finished
+
+# The run's GC pin is released on the terminal path, not left to a sweep.
+assert-pins 0
+
+# In sync: the next tick finds no drift, parks nothing, and runs nothing.
+tick
+assert-deploy-park dev none
+! assert-deploy-running dev
+assert-deploy-starts dev 1
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1

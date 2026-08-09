@@ -563,15 +563,48 @@ func run() error {
 		}()
 	}
 
-	// Deploy-ref tracker (internal/deploy): its own goroutine on its own
-	// ticker at the reconcile cadence, deliberately NOT folded into
+	// KnownExecutorProfile/ImageCapableProfile: the queue (and the deploy
+	// lane runner just below) reject a spec naming an undefined profile, or
+	// an `image` on a non-container profile, before any of its commands
+	// start. Derived by executorPredicates (executor.go), shared with
+	// `gauntlet validate`'s cross-check mode so the gates can't drift apart.
+	known, imageCapable := executorPredicates(cfg)
+
+	// Deploy tracker + lane runner (internal/deploy): its own goroutine on
+	// its own ticker at the reconcile cadence, deliberately NOT folded into
 	// queue.Daemon. It shares no state with the queue — it never fetches
 	// (so it never contends with the queue's Fetch), reads are
 	// for-each-ref, writes are CAS on refs the queue does not know about —
 	// so parallel is both correct and the only shape that keeps
-	// internal/queue untouched. Drain is ctx cancellation: the tracker
-	// holds nothing that needs finishing.
-	if dt := buildDeployTracker(cfg, repo, os.Stderr); dt != nil {
+	// internal/queue untouched. What it DOES share is the daemon's honest
+	// capacity: deploy nodes take execution slots from the same `slots`
+	// semaphore checks and hooks draw from.
+	//
+	// notifyChans (snapshotted above, before the hooks runner joined chans)
+	// is the right fan-out for deploy events too: every channel that
+	// renders events, minus the hooks runner, which only ever acts on
+	// landings.
+	deploysDir := filepath.Join(*statePath, "deploys")
+	dt := buildDeployTracker(cfg, repo, deployRuntime{
+		Exec:  ex,
+		Slots: slots,
+		Emit: func(ctx context.Context, ev core.Event) {
+			for _, ch := range notifyChans {
+				_ = ch.Emit(ctx, ev)
+			}
+		},
+		KnownExecutorProfile: known,
+		WorkDir:              deploysDir,
+		LogDir:               logsDir,
+	}, os.Stderr)
+	if dt != nil {
+		// Mirrors trialsDir and hooksDir: deploysDir only ever holds a
+		// running graph's tree export, never anything that must survive a
+		// restart, so sweeping it at startup clears whatever a crash
+		// orphaned — safe unconditionally under the -state lock.
+		if err := sweepAndRecreate(deploysDir); err != nil {
+			return fmt.Errorf("sweep deploys dir: %w", err)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -582,6 +615,10 @@ func run() error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					// ctx, not a per-tick context, on purpose: a graph run
+					// started by this pass outlives the pass, and ctx
+					// cancellation is its hard stop (internal/deploy's
+					// startLane).
 					if err := dt.ReconcileOnce(ctx); err != nil {
 						fmt.Fprintf(os.Stderr, "gauntlet: deploy: %v\n", err)
 					}
@@ -635,13 +672,6 @@ func run() error {
 	if store != nil {
 		seedParks = buildSeedParks(store)
 	}
-
-	// KnownExecutorProfile/ImageCapableProfile: the queue rejects a spec
-	// naming an undefined profile, or an `image` on a non-container
-	// profile, before any of its commands start. Derived by
-	// executorPredicates (executor.go), shared with `gauntlet validate`'s
-	// cross-check mode so the two gates can't drift apart.
-	known, imageCapable := executorPredicates(cfg)
 
 	qcfg := queue.Config{
 		Targets:              cfg.Targets,
@@ -747,6 +777,11 @@ func run() error {
 		drainMu.Lock()
 		defer drainMu.Unlock()
 		d.Drain(deadline)
+		// The deploy lanes drain on the same signal, with the same
+		// meaning: no new graph run is admitted, in-flight ones finish
+		// (waited on below, after the queue stops landing). Nil-safe when
+		// deployment isn't configured.
+		dt.Drain()
 		if deadline.IsZero() {
 			return
 		}
@@ -816,6 +851,15 @@ func run() error {
 	// already returned on ctx.Done, today's crash-equivalent behavior.
 	if runErr == nil && ctx.Err() == nil && hr != nil {
 		hr.Drain(ctx)
+	}
+	// Same bargain for deploy lanes: a graceful drain lets an in-flight
+	// graph finish (and CAS its observed ref) rather than killing it
+	// mid-migration. Admission was already closed by beginDrain, so this
+	// waits on a finite set; a force (ctx cancelled) skips it and the runs
+	// die with the daemon — the crash-equivalent path deploy commands must
+	// tolerate anyway.
+	if runErr == nil && ctx.Err() == nil {
+		dt.Wait(ctx)
 	}
 	cancel() // stop the remaining background goroutines (Slack, dashboard, sampler, pruner)
 	wg.Wait()

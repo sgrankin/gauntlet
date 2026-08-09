@@ -1,0 +1,81 @@
+# on-desired-move "cancel": a newer revision landing under an in-flight
+# graph kills it immediately. The cancelled run is RECORDED (OutcomeSkipped,
+# naming what superseded it) and does NOT park — a cancellation is not a
+# failure, so the lane is free to reconcile the newer revision on the very
+# next tick. The observed ref only ever moves to a revision whose graph
+# actually finished green, which here is the second one.
+
+deploy-env dev branch main track max-parallel=3 on-desired-move=cancel
+
+push-branch main graph/v1
+force-branch v1 main
+
+tick
+assert-desired dev v1
+assert-deploy-running dev
+release-node dev migrate
+
+# A newer revision lands. This tick advances desired AND cancels the graph.
+push-branch main graph/v2
+tick
+assert-desired dev main
+await-deploy dev 1
+
+assert-deploy-outcome dev skipped
+assert-observed dev none
+assert-pins 0
+
+# No park: a cancelled run leaves nothing to clear.
+tick
+assert-deploy-park dev none
+assert-deploy-running dev
+
+release-node dev migrate
+release-node dev app1
+release-node dev app2
+await-deploy dev 2
+
+assert-observed dev main
+assert-deploy-outcome dev landed
+assert-deploy-starts dev 2
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1
+-- graph/v2/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v2/app.txt --
+v2

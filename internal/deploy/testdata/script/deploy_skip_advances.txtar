@@ -1,0 +1,52 @@
+# Skipped counts green. A node that reports "skipped" through the
+# result-file protocol has given its own verdict that this revision needs
+# nothing from it: the verdict satisfies its dependents' `after` edges, the
+# graph is green, and the observed ref advances exactly as if the command
+# had done work.
+#
+# This is what keeps a ten-app environment cheap — a revision that touched
+# one app skips the rest in seconds via the GAUNTLET_DEPLOYED_SHA diff — so
+# "skipped still advances observed" is the load-bearing half of it.
+
+deploy-env dev branch main track max-parallel=3
+
+push-branch main graph/v1
+
+tick
+assert-deploy-running dev
+
+release-node dev migrate
+# app1 decides this revision changed nothing under its own directory.
+release-node dev app1 skipped
+release-node dev app2
+await-deploy dev 1
+
+assert-deploy-outcome dev landed
+assert-node-status dev app1 skipped
+assert-node-status dev app2 passed
+assert-observed dev main
+
+tick
+assert-deploy-park dev none
+! assert-deploy-running dev
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1

@@ -1,0 +1,57 @@
+# Crash mid-graph, recovered from refs alone (Invariant 4). The tracker is
+# torn down with a graph half-run and rebuilt from scratch: every scrap of
+# in-memory state — the lane, its park, its budgets, its synced marker — is
+# gone, and the two refs are all that survive. Desired still differs from
+# observed, so the fresh tracker re-runs the whole graph and finishes it.
+#
+# This is also the blunt contract deploy commands live under: a crash, a
+# cancel-then-retry, or an ambiguous failure all re-run the graph, so
+# deploy commands MUST tolerate re-execution.
+
+deploy-env dev branch main track max-parallel=3
+
+push-branch main graph/v1
+
+tick
+assert-deploy-running dev
+release-node dev migrate
+
+# The daemon dies with app1/app2 in flight.
+restart-tracker
+await-deploy dev 1
+assert-deploy-outcome dev skipped
+assert-observed dev none
+
+# A fresh tracker, the same refs. Nothing tells it a run ever happened
+# except that desired still differs from observed — which is enough.
+tick
+assert-deploy-running dev
+release-node dev migrate
+release-node dev app1
+release-node dev app2
+await-deploy dev 2
+
+assert-observed dev main
+assert-deploy-outcome dev landed
+assert-deploy-starts dev 2
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1

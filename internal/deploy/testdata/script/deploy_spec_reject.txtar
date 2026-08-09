@@ -1,0 +1,68 @@
+# A spec rejection is a park, never a red verdict. This environment selects
+# a node ("release") that the deployed revision does not declare, so no
+# command exists to run — and an environment must never silently believe it
+# deployed when nothing ran (the fail-closed stance). Nothing starts, the
+# observed ref stays put, and the park's detail says exactly what was wrong.
+#
+# The fix arrives the way every fix does here: a new revision. The next one
+# declares the node, so the new desired SHA clears the park and the graph
+# runs — the same level-triggered path a rollback or a retry takes.
+
+deploy-env dev branch main track max-parallel=3 nodes=release
+
+push-branch main graph/v1
+
+tick
+await-deploy dev 1
+
+assert-deploy-outcome dev rejected
+assert-observed dev none
+# Nothing STARTED: a run rejected before its graph existed never claims
+# otherwise, so there is no started event to pair with the terminal one.
+assert-deploy-starts dev 0
+assert-pins 0
+
+tick
+assert-deploy-park dev main 'spec reject: deploy node "release"'
+! assert-deploy-running dev
+
+# Same desired revision, same answer: no re-run, however many ticks pass.
+tick
+! assert-deploy-running dev
+
+# A revision that declares the node clears the park and deploys.
+push-branch main graph/v2
+tick
+assert-deploy-park dev none
+assert-deploy-running dev
+
+release-node dev release
+await-deploy dev 2
+assert-deploy-outcome dev landed
+assert-observed dev main
+assert-deploy-starts dev 1
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+-- graph/v1/app.txt --
+v1
+-- graph/v2/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "release" {
+    command "./scripts/release"
+}
+-- graph/v2/app.txt --
+v2

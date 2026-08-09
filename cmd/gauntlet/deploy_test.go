@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/config"
+	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/deploy"
 	"github.com/sgrankin/gauntlet/internal/gitx"
 )
@@ -43,12 +45,12 @@ target "main" branch="main"
 // nil-means-not-configured contract as buildHooksRunner.
 func TestBuildDeployTracker_NilWithoutBlock(t *testing.T) {
 	cfg := loadDeployConfig(t, "")
-	if tr := buildDeployTracker(cfg, nil, io.Discard); tr != nil {
+	if tr := buildDeployTracker(cfg, nil, deployRuntime{}, io.Discard); tr != nil {
 		t.Fatalf("buildDeployTracker = %v with no deploy block, want nil", tr)
 	}
 	// A written-but-empty block is the same disabled state.
 	cfg = loadDeployConfig(t, "deploy {\n}\n")
-	if tr := buildDeployTracker(cfg, nil, io.Discard); tr != nil {
+	if tr := buildDeployTracker(cfg, nil, deployRuntime{}, io.Discard); tr != nil {
 		t.Fatalf("buildDeployTracker = %v for an empty deploy block, want nil", tr)
 	}
 }
@@ -77,7 +79,7 @@ deploy {
 }
 `)
 	var log strings.Builder
-	tr := buildDeployTracker(cfg, &stubDeployGit{}, &log)
+	tr := buildDeployTracker(cfg, &stubDeployGit{}, deployRuntime{}, &log)
 	if tr == nil {
 		t.Fatal("buildDeployTracker = nil with three environments configured")
 	}
@@ -136,7 +138,7 @@ deploy {
 }
 `)
 	git := &stubDeployGit{refs: map[string]string{"refs/heads/main": "aaa"}}
-	tr := buildDeployTracker(cfg, git, io.Discard)
+	tr := buildDeployTracker(cfg, git, deployRuntime{}, io.Discard)
 	if err := tr.ReconcileOnce(t.Context()); err != nil {
 		t.Fatalf("ReconcileOnce: %v", err)
 	}
@@ -162,3 +164,22 @@ func (g *stubDeployGit) CASUpdate(_ context.Context, remoteRef, _, newOID string
 	g.pushed = append(g.pushed, remoteRef+"="+newOID)
 	return nil
 }
+
+// The lane-runner half of deploy.Git. These wiring tests pass a zero
+// deployRuntime (no executor), so a Tracker built from them never runs a
+// graph and never calls any of them — they exist to satisfy the interface,
+// and fail loudly rather than silently succeeding if that ever changes.
+func (g *stubDeployGit) Pin(context.Context, string) error   { return errNoDeployRunner }
+func (g *stubDeployGit) Unpin(context.Context, string) error { return errNoDeployRunner }
+
+func (g *stubDeployGit) ReadFileFromTree(context.Context, string, string) ([]byte, error) {
+	return nil, errNoDeployRunner
+}
+
+func (g *stubDeployGit) ExportTree(context.Context, string, string) error { return errNoDeployRunner }
+
+func (g *stubDeployGit) RestoreMtimes(context.Context, string, string) (core.MtimeStats, error) {
+	return core.MtimeStats{}, errNoDeployRunner
+}
+
+var errNoDeployRunner = errors.New("stubDeployGit: the lane runner is not wired in this test")

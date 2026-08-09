@@ -1,0 +1,75 @@
+# A red node fails the graph fast and PARKS the lane: the observed ref does
+# not move, the nodes that never ran say so, and no amount of ticking
+# re-runs it. Clearing the park takes a new desired SHA or an explicit
+# retry — and a second red verdict parks again, because the auto-retry-once
+# budget is for OutcomeError (infra) and never for a verdict (an author
+# problem). That distinction is the whole point of this scenario.
+
+deploy-env dev branch main track max-parallel=3
+
+push-branch main graph/v1
+
+tick
+assert-deploy-running dev
+
+release-node dev migrate failed
+await-deploy dev 1
+
+# Half-deployed, recorded as exactly that: the culprit's verdict, and
+# blocked rows for the nodes whose edge failed.
+assert-deploy-outcome dev rejected
+assert-node-status dev migrate failed
+assert-node-status dev app1 blocked
+assert-node-status dev app2 blocked
+assert-observed dev none
+assert-pins 0
+
+tick
+assert-deploy-park dev main 'deploy node "migrate" failed'
+! assert-deploy-running dev
+
+# Level-triggered park: the desired ref hasn't moved, so re-deriving the
+# same picture must reach the same answer — not another run.
+tick
+! assert-deploy-running dev
+assert-deploy-starts dev 1
+
+# An explicit retry clears the park and re-runs the WHOLE graph.
+retry-deploy dev
+tick
+assert-deploy-running dev
+release-node dev migrate failed
+await-deploy dev 2
+assert-deploy-starts dev 2
+
+# Still red, so still parked: a verdict gets no automatic second chance.
+tick
+assert-deploy-park dev main
+! assert-deploy-running dev
+assert-observed dev none
+
+# Nothing left to retry once a human has done nothing about it? There is:
+# the park is still there, so a retry still finds one. What must NOT
+# happen is the daemon doing it by itself, which the tick above proves.
+retry-deploy dev
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1

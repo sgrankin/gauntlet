@@ -28,13 +28,25 @@ import (
 // one scheduler's behavior changes, the other's port fails or visibly
 // diverges — which is the point of writing them twice.
 
-// Node is one declared deploy node: a name and its `after` edges. The
-// slice order IS spec-declaration order — the durable per-node identity
-// (Seq, log filenames, row order) — so callers build it from the revision's
-// own spec and never sort it.
+// Node is one declared deploy node: a name, its `after` edges, and what to
+// run. The slice order IS spec-declaration order — the durable per-node
+// identity (Seq, log filenames, row order) — so callers build it from the
+// revision's own spec and never sort it.
+//
+// The scheduler itself reads only Name and After: Command and Executor are
+// carried here for Exec's benefit (the lane runner turns them into a
+// core.CheckJob), so that "what the graph is" and "what each node runs"
+// arrive as one value read from one spec rather than two lookups that could
+// disagree.
 type Node struct {
 	Name  string
 	After []string
+
+	// Command is the argv to execute; Executor names the operator-defined
+	// execution profile it runs on ("" = the daemon's default), gated
+	// against the daemon's known profiles at spec load.
+	Command  []string
+	Executor string
 }
 
 // Exec runs one node's command and returns its verdict. It is called on

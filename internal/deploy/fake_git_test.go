@@ -3,6 +3,8 @@ package deploy_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -22,11 +24,19 @@ import (
 //	           what gitx.ListRefs reconstructs from refs/remotes/origin/*
 //	observed — mirror of the remote's refs/gauntlet/deployed/*, which
 //	           deploy.FetchRefspec brings down under identical names
+//
+// It also stands in for the daemon's OBJECT store, which the lane runner
+// needs and the tracker never did: trees maps an OID to that revision's file
+// contents, so a fake ReadFileFromTree can serve the deploy spec a scenario
+// committed, and a fake ExportTree can materialize it on disk for real. Pins
+// live here too, so "unpinned on every terminal path" is assertable.
 type fakeRemote struct {
 	mu       sync.Mutex
 	remote   map[string]string
 	heads    map[string]string
 	observed map[string]string
+	trees    map[string]map[string]string
+	pins     map[string]bool
 	nextOID  int
 }
 
@@ -35,19 +45,34 @@ func newFakeRemote() *fakeRemote {
 		remote:   map[string]string{},
 		heads:    map[string]string{},
 		observed: map[string]string{},
+		trees:    map[string]map[string]string{},
+		pins:     map[string]bool{},
 	}
 }
 
-// commit mints a fresh OID and points branch at it — the fake's whole
-// notion of "somebody landed something". Contents are irrelevant here: the
-// tracker only ever compares OIDs.
-func (f *fakeRemote) commit(branch string) string {
+// commit mints a fresh OID, records files as that revision's tree, and
+// points branch at it — the fake's whole notion of "somebody landed
+// something". The tracker only ever compares OIDs; the LANE RUNNER reads
+// the tree, which is why contents are kept.
+func (f *fakeRemote) commit(branch string, files map[string]string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextOID++
 	oid := fmt.Sprintf("%040x", f.nextOID)
+	tree := make(map[string]string, len(files))
+	for path, content := range files {
+		tree[path] = content
+	}
+	f.trees[oid] = tree
 	f.remote["refs/heads/"+branch] = oid
 	return oid
+}
+
+// pinCount reports how many revisions are pinned right now.
+func (f *fakeRemote) pinCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.pins)
 }
 
 func (f *fakeRemote) setRef(ref, oid string) {
@@ -114,6 +139,76 @@ func (g fakeGit) CASUpdate(_ context.Context, remoteRef, oldOID, newOID string) 
 	return nil
 }
 
+// --- the lane runner's half of deploy.Git ---
+
+// Pin/Unpin record reachability the way gitx does: idempotent, and
+// unpinning something never pinned is a no-op rather than an error, so a
+// terminal path may unpin unconditionally.
+func (g fakeGit) Pin(_ context.Context, oid string) error {
+	g.r.mu.Lock()
+	defer g.r.mu.Unlock()
+	g.r.pins[oid] = true
+	return nil
+}
+
+func (g fakeGit) Unpin(_ context.Context, oid string) error {
+	g.r.mu.Lock()
+	defer g.r.mu.Unlock()
+	delete(g.r.pins, oid)
+	return nil
+}
+
+// ReadFileFromTree serves the revision's own committed content — the seam
+// that makes "the deploy graph comes from the tree being deployed" a real
+// statement in the fake suite rather than a real-git-only one. A missing
+// file is an error, exactly as `git cat-file` makes it.
+func (g fakeGit) ReadFileFromTree(_ context.Context, tree, path string) ([]byte, error) {
+	g.r.mu.Lock()
+	defer g.r.mu.Unlock()
+	files, ok := g.r.trees[tree]
+	if !ok {
+		return nil, fmt.Errorf("fake: no such tree %s", tree)
+	}
+	content, ok := files[path]
+	if !ok {
+		return nil, fmt.Errorf("fake: path %s does not exist in %s", path, tree)
+	}
+	return []byte(content), nil
+}
+
+// ExportTree writes the revision's files out for real: the export directory
+// a deploy node runs in is a genuine directory under both harnesses, so
+// nothing about the runner's export handling is fake-only.
+func (g fakeGit) ExportTree(_ context.Context, tree, dir string) error {
+	g.r.mu.Lock()
+	files, ok := g.r.trees[tree]
+	copied := make(map[string]string, len(files))
+	for path, content := range files {
+		copied[path] = content
+	}
+	g.r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("fake: no such tree %s", tree)
+	}
+	for path, content := range copied {
+		full := filepath.Join(dir, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RestoreMtimes is a no-op: the fake has no commit history to derive
+// per-path times from, and the policy it implements (deterministic export
+// metadata) is gitx's own contract, tested there.
+func (g fakeGit) RestoreMtimes(context.Context, string, string) (core.MtimeStats, error) {
+	return core.MtimeStats{}, nil
+}
+
 func copyRefs(in map[string]string, prefix string) map[string]string {
 	out := make(map[string]string, len(in))
 	for name, oid := range in {
@@ -165,6 +260,24 @@ func (g *racingGit) ListRefs(ctx context.Context) (map[string]string, error) {
 
 func (g *racingGit) ListLocalRefs(ctx context.Context, prefix string) (map[string]string, error) {
 	return g.inner.ListLocalRefs(ctx, prefix)
+}
+
+// The lane-runner methods pass straight through: nothing about a pin, a
+// spec read, or an export is worth racing, and a decorator that forgot one
+// would silently disable it.
+func (g *racingGit) Pin(ctx context.Context, oid string) error   { return g.inner.Pin(ctx, oid) }
+func (g *racingGit) Unpin(ctx context.Context, oid string) error { return g.inner.Unpin(ctx, oid) }
+
+func (g *racingGit) ReadFileFromTree(ctx context.Context, tree, path string) ([]byte, error) {
+	return g.inner.ReadFileFromTree(ctx, tree, path)
+}
+
+func (g *racingGit) ExportTree(ctx context.Context, tree, dir string) error {
+	return g.inner.ExportTree(ctx, tree, dir)
+}
+
+func (g *racingGit) RestoreMtimes(ctx context.Context, commit, dir string) (core.MtimeStats, error) {
+	return g.inner.RestoreMtimes(ctx, commit, dir)
 }
 
 func (g *racingGit) CASUpdate(ctx context.Context, remoteRef, oldOID, newOID string) error {

@@ -1,0 +1,84 @@
+# on-desired-move "finish" (the default): a newer revision landing under an
+# in-flight graph does NOT disturb it. The run completes against the
+# revision it started on, records it, advances observed to THAT revision —
+# and then the next tick sees the newer desired and runs again. One more
+# tick, one more run.
+
+deploy-env dev branch main track max-parallel=3 on-desired-move=finish
+
+push-branch main graph/v1
+force-branch v1 main
+
+tick
+assert-desired dev v1
+assert-deploy-running dev
+release-node dev migrate
+
+# A newer revision lands mid-graph. The tracker advances the DESIRED ref
+# (that is bookkeeping, and always safe) and leaves the running graph alone.
+push-branch main graph/v2
+tick
+assert-desired dev main
+assert-deploy-running dev
+
+release-node dev app1
+release-node dev app2
+await-deploy dev 1
+
+# The observed ref moved to the revision that actually finished green —
+# never to the one that merely became desired while it ran.
+assert-observed dev v1
+assert-deploy-outcome dev landed
+
+# One more tick, one more run: the newer revision now.
+tick
+assert-deploy-running dev
+release-node dev migrate
+release-node dev app1
+release-node dev app2
+await-deploy dev 2
+
+assert-observed dev main
+assert-deploy-starts dev 2
+assert-pins 0
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1
+-- graph/v2/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v2/app.txt --
+v2

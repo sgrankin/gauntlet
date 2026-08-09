@@ -1,0 +1,68 @@
+# The promotion pipeline, end to end: dev tracks main, prod tracks dev.
+# prod's source is dev's OBSERVED ref — what dev has finished deploying
+# GREEN — so prod cannot run a revision dev was merely asked to run, and
+# cannot start until dev's whole graph is done.
+#
+# There is no cross-environment scheduler anywhere in this: prod is
+# level-triggered on a ref that only a green dev graph advances. The
+# pipeline IS the chain of sources.
+
+deploy-env dev branch main track max-parallel=3
+deploy-env prod env dev track max-parallel=3
+
+push-branch main graph/v1
+
+tick
+assert-desired dev main
+assert-deploy-running dev
+# dev has deployed nothing, so prod's source is unresolvable: no ref
+# invented, no run started, and that is an ordinary state, not an error.
+assert-desired prod none
+! assert-deploy-running prod
+
+release-node dev migrate
+release-node dev app1
+release-node dev app2
+await-deploy dev 1
+assert-observed dev main
+
+# prod is still gated: its source resolves against this daemon's MIRROR of
+# the observed refs, which only the next fetch refreshes.
+assert-desired prod none
+! assert-deploy-running prod
+
+tick
+assert-desired prod main
+assert-deploy-running prod
+
+release-node prod migrate
+release-node prod app1
+release-node prod app2
+await-deploy prod 1
+
+assert-observed prod main
+assert-deploy-outcome prod landed
+assert-deploy-starts dev 1
+assert-deploy-starts prod 1
+assert-pins 0
+
+-- graph/v1/.gauntlet.kdl --
+check "test" {
+    command "true"
+}
+
+deploy "migrate" {
+    command "./scripts/migrate"
+}
+
+deploy "app1" {
+    command "./scripts/deploy" "app1"
+    after "migrate"
+}
+
+deploy "app2" {
+    command "./scripts/deploy" "app2"
+    after "migrate"
+}
+-- graph/v1/app.txt --
+v1
