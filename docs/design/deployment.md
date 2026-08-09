@@ -116,9 +116,15 @@ run-spanning state machine — a chain of sources *is* the pipeline, each
 link independently level-triggered, each resumable from refs alone after
 a crash. A cycle in `source env=` references is a config error at load.
 
-`dev` tracks `main`; `prod` and `prod2` track (or manually source)
-`env="dev"` — both branches being ordinary merge-queue targets landed via
-`for/main/...` and `for/release/...` as usual. A tracked environment's
+`dev` tracks `main`; `prod` and `prod2` track `env="dev"` — confirmed
+(2026-08-09 review) as the intended topology: promotion is automatic,
+every revision `dev` deploys green rolls to both prods, and incident
+pinning is the config edit below. Sources are **branches and environments
+only**, also confirmed: tag sources (track the newest `v*`) were
+considered and declined — tags don't move, the *newest matching* one
+does, and that resolution rule is exactly the kind of computed config
+this codebase keeps out; a release train lands onto a `release` branch
+and sources that. A tracked environment's
 rollback story is honest and blunt: the tracker will re-advance the ref on
 the next source move, because a tracked environment *means* "runs the
 source." Pinning during an incident is a config edit (`track` → `manual`)
@@ -268,8 +274,18 @@ in `waited_ms`, a separate deploy budget is the knob to add then, not now.
   recorded per-node results would make history rows *correctness* state,
   which they are forbidden to be (ledger: SQLite never holds correctness);
   the refs say desired ≠ observed, so the graph runs. Migration jobs make
-  this concrete and fine: every serious migration tool already tracks
-  applied migrations and no-ops on re-run.
+  this concrete: every serious migration tool already tracks applied
+  migrations and no-ops on re-run. One cost caveat, confirmed real by the
+  adopting team (2026-08-09): re-runs are *safe* but not always *cheap* —
+  a long backfill that half-applied before a failure re-runs from
+  wherever the tool's own ledger says it stopped, and the diff-based skip
+  protocol cannot help a same-revision retry (desired and observed
+  haven't moved, the diff is unchanged). The resume mechanism for
+  expensive steps is therefore the migration tool's applied-ledger, by
+  design: split long backfills into separately-recorded steps in the
+  tool, and gauntlet's whole-graph retry stays a cheap re-invoke. This is
+  the dispatcher/controller line again — step-level resume state belongs
+  to the tool that owns the steps, never to gauntlet's history rows.
 - **Desired moves mid-graph**: `finish` (default) lets the in-flight graph
   complete, records it, then reconciles again — one more tick, one more
   run. `cancel` kills it immediately (the `hooks-policy "cancel"`
@@ -321,10 +337,12 @@ cardinality is safe where run IDs were not.
 `EventDeployFinished` (terminal, carrying the record — per the emit-site
 contract; extend the contract tests first, event shapes are the standing
 soft underbelly). Slack posts a root message per graph run, threads node
-failures under it with the failing tail. No Slack reaction commands in
-v1 — a reaction anchors to a run's (target, ref) and an environment lane
-is neither; retry lives on the API/dashboard/MCP until a lane-anchored
-message metadata scheme is worth designing.
+failures under it with the failing tail — decided (2026-08-09) over a
+per-environment thread: it mirrors how candidate runs post today, and a
+lane-anchored thread scheme can be designed later if tracked-env chatter
+proves noisy. No Slack reaction commands in v1 — a reaction anchors to a
+run's (target, ref) and an environment lane is neither; retry lives on
+the API/dashboard/MCP until that lane-anchored metadata scheme exists.
 
 **API/MCP**: `GET /api/v1/deploys` (the overview), `GET /api/v1/deploy/{id}`,
 `POST /api/v1/deploy/retry`, `POST /api/v1/deploy/cancel` (env-addressed,
@@ -389,18 +407,15 @@ pusher.
 
 ## Open questions
 
-- **Tag sources.** `source "release"` as a branch is assumed;
-  environments sourced from tags (`v*`) would suit release-train shops
-  but complicate track semantics (tags don't move; the *newest matching*
-  tag does).
+Three earlier questions were resolved in the 2026-08-09 review and folded
+into the sections above: tag sources (declined — branches and
+environments only), promotion topology (auto-track confirmed for both
+prods), and Slack shape (root per graph run). Still open:
+
 - **Batch landings on a tracked source** produce N tip moves in quick
   succession; the tracker naturally coalesces to the last one seen per
   tick, but a `cancel`-policy environment could churn. Likely fine;
   measure before adding debounce.
-- **Slack lane threading** — a per-environment thread (root per lane,
-  replies per graph run) would read better than a message per run for
-  chatty tracked environments; needs the lane-anchored metadata scheme
-  noted above.
 - **Node-level cancel** — `deploy/cancel` kills the environment's whole
   in-flight graph; whether a single node is worth addressing (the batch
   member-cancel precedent says maybe) can wait for a real need.
