@@ -56,6 +56,29 @@ type LaneState struct {
 	// showing, but it is not a failure to act on.
 	LastError string
 
+	// Pending: this lane would start a graph run on the next pass — there
+	// is drift to close, the lane is not parked at that revision, and the
+	// runner would admit it. It is the lane runner's ADMISSION PREDICATE
+	// verbatim (run.go's canStart, recorded at its one call site) rather
+	// than a second derivation of "desired != observed", so it can never
+	// disagree with the decision it describes. Two consequences worth
+	// stating outright, both inherited from that predicate:
+	//
+	//   - false while the daemon is DRAINING. A draining daemon admits no
+	//     new graph run however loud the drift is, so a drain-time lane is
+	//     not "about to deploy" — which is exactly what lets the idle
+	//     signal (dashboard/api.go's idleSince) go idle during a drain
+	//     instead of being pinned open by work that will never start.
+	//   - false for a lane this process already deployed whose OBSERVED
+	//     ref mirror hasn't caught up yet (run.go's syncedSHA). That window
+	//     looks like drift and is not: the CAS already landed on the
+	//     remote, and the next fetch closes it with no run at all.
+	//
+	// A lane with a run already in flight reports false here and non-nil
+	// Running instead: the two together are "this lane is busy", which is
+	// how every consumer composes them.
+	Pending bool
+
 	// Running, Parked and LastResult are the lane RUNNER's published state
 	// (run.go), each nil when it doesn't apply: no graph in flight, no
 	// park, no run finished since this process started. They are freshly

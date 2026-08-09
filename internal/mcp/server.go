@@ -112,6 +112,28 @@ type Params struct {
 	// defines its own local ServiceStatus/ServicesStatus rather than
 	// importing internal/services or internal/dashboard.
 	ServicesSnapshot func() ServicesStatus
+
+	// DeploySnapshot mirrors dashboard.WithDeploySnapshot
+	// (deploy.Tracker.Snapshot via cmd/gauntlet's adapter): nil means this
+	// daemon has no `deploy` block at all, and the deploys tool reports
+	// "deploy not configured"; a nil RETURN means the tracker exists but no
+	// reconcile pass has published yet ("no snapshot yet"). See deploys.go
+	// for why this package defines its own DeployStatus rather than
+	// importing internal/deploy or internal/dashboard.
+	DeploySnapshot func() *DeployStatus
+
+	// DeployRetry clears an environment's park so the next pass re-runs its
+	// whole graph (deploy.Tracker.Retry); DeployCancel interrupts its
+	// in-flight graph run (deploy.Tracker.CancelCurrent). Both report
+	// whether anything was actually acted on, and both are nil when
+	// deployment isn't configured, in which case their tools report
+	// "deploy not configured" — the same word the HTTP routes' 503 carries.
+	//
+	// Neither can MOVE a desired ref, deliberately: deployment authority is
+	// push authority (branch protection on deploy/*), so no API, tool, or
+	// dashboard button deploys anything.
+	DeployRetry  func(env string) bool
+	DeployCancel func(env string) bool
 }
 
 // LiveHook mirrors hooks.LiveState (internal/hooks) / dashboard.LiveHook
@@ -252,6 +274,50 @@ func New(p Params) http.Handler {
 			"pending creates). Mirrors GET /api/v1/services. Use this to size idle-ttl/max-instances.",
 	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in servicesIn) (*sdkmcp.CallToolResult, servicesOut, error) {
 		out, err := handleServices(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "deploys",
+		Description: "Deployment overview: every environment lane's desired and observed revisions, the " +
+			"source it follows, its state (in sync / deploying / parked / pending / waiting), the nodes " +
+			"running right now, and recent finished deploys. Mirrors GET /api/v1/deploys. Pass env to " +
+			"limit it to one environment.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in deploysIn) (*sdkmcp.CallToolResult, deploysOut, error) {
+		out, err := handleDeploys(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "deploy",
+		Description: "Full detail for one deploy graph run by run ID, including every node's status, " +
+			"duration, and captured output — use this to debug why an environment is parked. Mirrors " +
+			"GET /api/v1/deploy/{id}. Requires run history to be enabled; a run still in flight has no " +
+			"record yet, so use the deploys tool's running block for that.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in deployIn) (*sdkmcp.CallToolResult, deployOut, error) {
+		out, err := handleDeploy(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "deploy_retry",
+		Description: "Clear an environment's park so the next reconcile pass re-runs its WHOLE deploy " +
+			"graph (green nodes re-run and either self-skip or re-execute idempotently). Same effect as " +
+			"POST /api/v1/deploy/retry. Reports \"no-op\" (not an error) when the lane isn't parked. This " +
+			"cannot deploy a different revision — that is a push of the environment's desired ref.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in deployActionIn) (*sdkmcp.CallToolResult, deployActionOut, error) {
+		out, err := handleDeployRetry(p, in)
+		return nil, out, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "deploy_cancel",
+		Description: "Interrupt an environment's in-flight deploy graph run. Same effect as " +
+			"POST /api/v1/deploy/cancel. Reports \"no-op\" (not an error) when nothing is running for " +
+			"that environment. The cancelled run does not park the lane, so the next pass reconciles " +
+			"fresh: this interrupts one attempt, it does not stop deploying.",
+	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in deployActionIn) (*sdkmcp.CallToolResult, deployActionOut, error) {
+		out, err := handleDeployCancel(p, in)
 		return nil, out, err
 	})
 
@@ -460,6 +526,20 @@ func idleSince(p Params, snap *queue.Snapshot) time.Time {
 		for _, ts := range snap.Targets {
 			if lh, ok := p.HookSnapshot(ts.Name); ok && (lh.Running || lh.BacklogDepth > 0) {
 				return time.Time{}
+			}
+		}
+	}
+	// Deploy lanes compose exactly as hooks do (see dashboard/api.go's
+	// idleSince for the full reasoning): a lane running a graph, OR one
+	// whose next pass would start one, keeps the daemon out of idle. Also
+	// evaluated over every lane regardless of in.Target, for the same reason
+	// hooks are — the idle signal is daemon-wide or it is nothing.
+	if p.DeploySnapshot != nil {
+		if ds := p.DeploySnapshot(); ds != nil {
+			for _, lane := range ds.Lanes {
+				if lane.Running != nil || lane.Pending {
+					return time.Time{}
+				}
 			}
 		}
 	}

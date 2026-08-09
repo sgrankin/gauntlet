@@ -1,0 +1,87 @@
+{{define "content"}}
+{{if not .StoreEnabled}}
+<p class="muted">history disabled</p>
+{{else}}
+
+<div class="headrow section">
+<span>
+<span class="tag {{.Deploy.Outcome.Class}}">{{.Deploy.Outcome.Word}}</span>
+{{if .Deploy.Culprit}} <span class="muted">&middot; <code>{{.Deploy.Culprit}}</code> failed</span>{{end}}
+{{if .ParkNote}} <span class="muted">&middot; {{.ParkNote}}</span>{{end}}
+{{if .InFlight}} <span class="muted">&middot; in flight — this page refreshes until it finishes</span>{{end}}
+</span>
+{{/* Both buttons POST to the JSON API from JS rather than being a <form>:
+     a plain form POST would need a CSRF token this no-auth, bind-to-a-
+     trusted-interface dashboard has no session to mint one against, and a
+     fetch() to the same origin is subject to the browser's preflight rules
+     instead. With JS off the buttons are inert — deliberately: retry and
+     cancel also live on the API, the MCP tools, and (for retry) a new
+     desired push, so no capability is lost, only a convenience. */}}
+<span class="actions">
+{{if .ShowRetry}}<button class="btn" type="button" data-deploy-action="retry" data-deploy-env="{{.Deploy.Env}}">retry</button>{{end}}
+{{if .ShowCancel}}<button class="btn danger" type="button" data-deploy-action="cancel" data-deploy-env="{{.Deploy.Env}}">cancel</button>{{end}}
+</span>
+</div>
+
+<dl class="kv">
+<dt>environment</dt><dd>{{.Deploy.Env}}{{if .Source}} <span class="muted">(tracks {{.Source}})</span>{{end}}</dd>
+<dt>revision</dt><dd>
+{{if .Deploy.DeployedSHA}}<code class="nowrap" title="{{.Deploy.DeployedSHA}}">{{shortSHA .Deploy.DeployedSHA}}</code> <span class="arrow">&rarr;</span> {{end}}
+<code class="nowrap" title="{{.Deploy.DeploySHA}}">{{shortSHA .Deploy.DeploySHA}}</code>
+{{if not .Deploy.DeployedSHA}} <span class="muted">(first deploy of this environment)</span>{{end}}
+</dd>
+<dt>outcome</dt><dd><span class="tag {{.Deploy.Outcome.Class}}">{{.Deploy.Outcome.Word}}</span>{{if .Deploy.Culprit}} <span class="muted">culprit</span> <code>{{.Deploy.Culprit}}</code>{{end}}</dd>
+<dt>timing</dt><dd>started {{.Deploy.StartedAt}}{{if .Deploy.EndedAt}} &middot; ended {{.Deploy.EndedAt}}{{end}} &middot; {{.Deploy.Duration}}</dd>
+{{if .Deploy.Detail}}<dt>detail</dt><dd>{{.Deploy.Detail}}</dd>{{end}}
+</dl>
+{{/* NOTE: no trigger or graph rows here. The mockup shows "trigger: tracked
+     advance" and "graph: migrate → app1, app2", and neither fact is in
+     core.DeployRecord — the record carries the lane, the revisions, the
+     nodes' results and the outcome, but not what moved the desired ref nor
+     the graph's edge structure. Rendering either would mean inventing it.
+     Both are a follow-up: the trigger needs the tracker to record WHY a
+     desired ref moved, the graph needs `after` edges persisted alongside the
+     node rows. */}}
+
+<h2>Nodes</h2>
+{{if .Nodes}}
+{{/* Rendered through the same checkRow partial /run/{id}'s checks use
+     (templates/_rows.html): a deploy node and a check record the same shape
+     of fact, so one template renders both and they cannot drift apart. */}}
+<div class="checklist">
+{{range .Nodes}}{{template "checkRow" .}}{{end}}
+</div>
+{{else if .InFlight}}
+{{if .RunningNodes}}
+<div class="nodes">
+{{range .RunningNodes}}
+<span class="node"><span class="chip chip-running"></span> {{.}} <span class="node-meta">running</span></span>
+{{end}}
+</div>
+{{else}}
+<p class="muted">no node running at this instant</p>
+{{end}}
+{{else}}
+<p class="muted">no nodes recorded</p>
+{{end}}
+
+{{if .Previous}}
+<h2>Previous deploys &middot; {{.Deploy.Env}}</h2>
+<div class="table-scroll">
+<table>
+<tr><th>deploy</th><th>revision</th><th>outcome</th><th>duration</th><th>finished</th></tr>
+{{range .Previous}}
+<tr>
+<td class="nowrap"><a href="/deploy/{{.RunID}}" class="mono">{{.RunID}}</a></td>
+<td class="nowrap"><code title="{{.ToFull}}">{{if .From}}{{.From}} &rarr; {{end}}{{.To}}</code></td>
+<td class="nowrap"><span class="chip chip-{{.ChipClass}}"></span> {{.Outcome}}</td>
+<td class="muted nowrap">{{.Duration}}</td>
+<td class="muted nowrap">{{.Finished}}</td>
+</tr>
+{{end}}
+</table>
+</div>
+{{end}}
+
+{{end}}
+{{end}}

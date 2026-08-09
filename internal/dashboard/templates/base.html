@@ -94,6 +94,10 @@ th { color: var(--muted); font-weight: 600; }
 .tag.bad { color: var(--bad); }
 .tag.warn { color: var(--warn); }
 .tag.neutral { color: var(--neutral); }
+/* .tag.accent: an IN-PROGRESS state ("deploying"), deliberately not .ok —
+   green reads as "done" at a glance, which is the one thing a deploy still
+   running must never say. */
+.tag.accent { color: var(--accent); }
 .muted { color: var(--muted); }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
 footer { margin-top: 2rem; }
@@ -118,13 +122,29 @@ footer { margin-top: 2rem; }
    one is needed (e.g. a check's status in its <details> summary), sits in
    ordinary text next to it rather than inside it, so chip contrast never
    has to be separately tuned per color per color-scheme. */
-.chip { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; vertical-align: text-bottom; }
+/* flex:none keeps a chip from being squeezed to nothing inside the flex
+   containers .chips/.node place it in (a chip is a fixed-size square, never
+   a shrinkable one). */
+.chip { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; vertical-align: text-bottom; flex: none; }
 .chip-ok { background: var(--ok); }
 .chip-bad { background: var(--bad); }
 .chip-warn { background: var(--warn); }
 .chip-conflict { background: var(--conflict); }
 .chip-error { background: var(--error); }
 .chip-neutral { background: var(--neutral); }
+/* chip-running: a node executing RIGHT NOW (/deploys' live cards). The pulse
+   is the only motion on this dashboard and it is load-bearing — "in flight"
+   vs. "finished" is the distinction the deploys page exists to make — but it
+   is also exactly the kind of motion a vestibular disorder reacts to, hence
+   the reduced-motion opt-out below, which keeps the (accent-colored,
+   distinct) chip and drops only the animation. */
+.chip-running { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .chip-running { animation: none; } }
+/* chip-blocked: a node that never ran because a prerequisite failed. Outlined
+   rather than filled, because it has no verdict of its own to color — filling
+   it would attribute a failure to the wrong node. */
+.chip-blocked { background: transparent; border: 2px dashed var(--muted); }
 /* chip-batched: a thin ring around a chip whose run landed as part of a
    batch — enough to read the strip as visually grouped without a
    redesign; the ring color is deliberately neutral (not tied to outcome)
@@ -195,6 +215,55 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 .check-command { background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-bottom: none; border-radius: 6px 6px 0 0; margin: .3rem 0 0; padding: .5rem .6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; overflow-x: auto; white-space: pre; }
 .check-command + pre.output { border-top: none; border-radius: 0 0 6px 6px; margin-top: 0; }
 
+/* --- deploy pages (/deploys, /deploy/{id}) -------------------------------- */
+/* .nodes/.node/.node-meta: the per-node status strip on an environment card
+   — one row per node, chip + name left, muted annotation pushed right by
+   margin-left:auto (rather than justify-content:space-between, so a long
+   node name wraps against the annotation instead of stretching away from
+   it). */
+.nodes { display: flex; flex-direction: column; gap: .25rem; margin: .5rem 0; }
+.node { display: flex; align-items: baseline; gap: .45rem; font-size: .88rem; }
+.node .chip { align-self: center; }
+.node-meta { margin-left: auto; color: var(--muted); font-size: .8rem; white-space: nowrap; }
+/* .shaline: observed → desired, or the single revision an in-sync lane runs.
+   Wraps rather than overflowing: two 12-char SHAs plus an arrow do not fit a
+   280px card column on a phone. */
+.shaline { display: flex; align-items: baseline; gap: .4rem; flex-wrap: wrap; font-size: .88rem; }
+.shaline .arrow { color: var(--muted); }
+/* .flow-scroll catches the source-chain SVG's own width the way .table-scroll
+   catches a wide table's: the strip grows with the environment count, and
+   that growth must scroll inside its own box rather than making <body>
+   scroll sideways. */
+.flow-scroll { overflow-x: auto; }
+.source-chain { display: block; }
+.chain-node { fill: var(--card); stroke: var(--border); }
+.chain-edge { stroke: var(--muted); stroke-width: 1.5; }
+.chain-edge-label { fill: var(--muted); font-size: 10px; }
+.chain-label { fill: var(--fg); font-size: 12.5px; font-weight: 600; }
+.chain-sub { font-size: 9.5px; }
+/* .headrow/.actions: a card or page heading with its status tag (or its
+   action buttons) pushed to the opposite edge, wrapping onto its own line
+   when the two can't share one. */
+.headrow { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.headrow h2 { margin: 0; }
+.actions { display: flex; gap: .5rem; }
+/* .kv: the deploy detail page's header facts. A definition list rather than
+   the <table> the run page uses, because these are label/value pairs with no
+   column semantics — and the grid keeps the labels a single shared width
+   without a table's layout rules. */
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: .15rem 1rem; font-size: .88rem; margin: .5rem 0 1rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* .btn: the dashboard's first buttons (deploy retry/cancel). Border/accent
+   voice borrowed from the existing link and card treatment rather than
+   introducing a filled-button style the rest of the UI has no use for. */
+.btn { display: inline-block; border: 1px solid var(--border); background: var(--card); color: var(--accent); border-radius: 6px; padding: .25rem .75rem; font-size: .85rem; font-weight: 600; font-family: inherit; cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn[disabled] { color: var(--muted); cursor: not-allowed; }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { border-color: var(--bad); }
+
 /* --- queue-depth chart (/checks) ----------------------------------------- */
 .depth-chart { background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 100%; height: auto; }
 .depth-axis { stroke: var(--border); stroke-width: 1; }
@@ -211,7 +280,7 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 </head>
 <body>
 <header>
-<nav><a href="/">targets</a><a href="/checks">checks</a></nav>
+<nav><a href="/">targets</a><a href="/checks">checks</a>{{if .HasDeploys}}<a href="/deploys">deploys</a>{{end}}</nav>
 <h1>{{.Title}}</h1>
 </header>
 <main>{{block "content" .}}{{end}}</main>
@@ -266,6 +335,42 @@ function applyTimeTooltips() {
   });
 }
 document.addEventListener('DOMContentLoaded', applyTimeTooltips);
+
+// Deploy actions (retry/cancel). These POST to the JSON API rather than
+// being a <form method="post">, deliberately: a form POST is a
+// cross-site-forgeable request and this dashboard has no session to mint a
+// CSRF token against (auth is out of scope — bind to a trusted interface),
+// whereas a fetch() carrying Content-Type: application/json is not a CORS
+// "simple request", so a cross-origin page cannot make the browser send it
+// without a preflight this server never answers. With JS disabled the
+// buttons are inert by design — every action here also exists on the API,
+// on the MCP tools, and (for retry) as a plain new push of the desired ref,
+// so nothing is lost but a convenience.
+//
+// The listener is delegated from <body>, which idiomorph morphs the
+// CHILDREN of rather than replacing, so it survives every auto-refresh tick;
+// a listener bound to the buttons themselves would not.
+var gauntletAutoRefresh = {{if .Refresh}}true{{else}}false{{end}};
+document.addEventListener('DOMContentLoaded', function () {
+  document.body.addEventListener('click', function (ev) {
+    var btn = ev.target.closest ? ev.target.closest('button[data-deploy-action]') : null;
+    if (!btn) return;
+    var action = btn.getAttribute('data-deploy-action');
+    var env = btn.getAttribute('data-deploy-env');
+    if (!action || !env) return;
+    btn.disabled = true;
+    fetch('/api/v1/deploy/' + action, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({env: env})
+    }).then(function () {
+      // A refreshing page (the overview) repaints itself on its next morph
+      // tick; a static one (the detail page) has to be told.
+      if (!gauntletAutoRefresh) location.reload();
+    }).catch(function () {}).finally(function () { btn.disabled = false; });
+  });
+});
 
 {{if .Refresh}}
 // Auto-refresh (DESIGN.md decision ledger): a plain <meta http-equiv=

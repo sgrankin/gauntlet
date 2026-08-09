@@ -584,11 +584,25 @@ func run() error {
 	// is the right fan-out for deploy events too: every channel that
 	// renders events, minus the hooks runner, which only ever acts on
 	// landings.
+	//
+	// deployObs is assigned below, only when a tracker actually exists —
+	// the Emit closure reads it at CALL time and *obs.DeployRecorder's
+	// Observe is nil-safe, so the ordering (closure built first, recorder
+	// second) costs nothing. There is no race to worry about either: the
+	// assignment happens on this goroutine before ReconcileOnce is ever
+	// called, and lane goroutines — the only other callers — are started by
+	// ReconcileOnce.
+	var deployObs *obs.DeployRecorder
 	deploysDir := filepath.Join(*statePath, "deploys")
 	dt := buildDeployTracker(cfg, repo, deployRuntime{
 		Exec:  ex,
 		Slots: slots,
 		Emit: func(ctx context.Context, ev core.Event) {
+			// Observability FIRST, before the channel fan-out: a slow or
+			// blocked channel must not delay or reorder the span tree, and
+			// the spans must exist even for a daemon with no channels
+			// configured at all.
+			deployObs.Observe(ctx, ev)
 			for _, ch := range notifyChans {
 				_ = ch.Emit(ctx, ev)
 			}
@@ -598,6 +612,14 @@ func run() error {
 		LogDir:               logsDir,
 	}, os.Stderr)
 	if dt != nil {
+		// Deploy spans + metrics (obs/deploy.go), wired ONLY when
+		// deployment is configured: a daemon with no `deploy` block
+		// registers no deploy instruments at all, rather than exporting a
+		// permanent zero for a subsystem it never runs.
+		deployObs = obs.NewDeployRecorder()
+		if _, err := obs.RegisterDeployGauge(deployObs.InFlight); err != nil {
+			return fmt.Errorf("otlp: register deploy gauge: %w", err)
+		}
 		// Mirrors trialsDir and hooksDir: deploysDir only ever holds a
 		// running graph's tree export, never anything that must survive a
 		// restart, so sweeping it at startup clears whatever a crash
@@ -832,7 +854,17 @@ func run() error {
 		}
 	}()
 
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, beginDrain, &wg)
+	// Deploy surfaces (D3): wired only when a tracker exists, so a daemon
+	// with no `deploy` block hides the deploys nav entry entirely and
+	// answers "deploy not configured" everywhere else — the standing
+	// pattern for an optional subsystem. dt.Retry/CancelCurrent are
+	// themselves nil-safe, but leaving the closures nil is what makes the
+	// SURFACES report "not configured" rather than a silent no-op.
+	var deployWire deployWiring
+	if dt != nil {
+		deployWire = deployWiring{Snapshot: dt.Snapshot, Retry: dt.Retry, Cancel: dt.CancelCurrent}
+	}
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, deployWire, beginDrain, &wg)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}

@@ -60,6 +60,9 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /run/{runID}/log/{checkName}", d.handleRunLog)
 	mux.HandleFunc("GET /batch/{batchID}", d.handleBatch)
 	mux.HandleFunc("GET /checks", d.handleChecks)
+	mux.HandleFunc("GET /deploys", d.handleDeploys)
+	mux.HandleFunc("GET /deploy/{runID}", d.handleDeploy)
+	mux.HandleFunc("GET /deploy/{runID}/log/{node}", d.handleDeployLog)
 	mux.HandleFunc("GET "+idiomorphURL, handleStatic)
 	d.mountAPIRoutes(mux)
 	return mux
@@ -151,6 +154,15 @@ type dash struct {
 	// this pool's tuning surface is for, and api.go's
 	// WithServicesSnapshot doc.
 	servicesSnapshot func() ServicesStatus
+
+	// deploySnapshot/deployRetry/deployCancel are nil unless New was called
+	// with the matching With* option (deployment isn't configured for this
+	// daemon). Nil deploySnapshot hides the deploys nav entry entirely and
+	// makes every deploy route render/report "not configured" — see
+	// deploys.go and api.go's WithDeploySnapshot doc.
+	deploySnapshot func() *DeployStatus
+	deployRetry    func(env string) bool
+	deployCancel   func(env string) bool
 }
 
 // --- / --------------------------------------------------------------------
@@ -470,6 +482,18 @@ func (d *dash) handleRunLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	d.serveLogFile(w, r, storedPath)
+}
+
+// serveLogFile is the second half of every full-log route: containment-check
+// storedPath against d.logRoot, open it, and stream it (transparently
+// decompressing a ".log.zst"). Extracted from handleRunLog verbatim — no
+// behavior change to GET /run/{id}/log/{name} — so the deploy node log route
+// (GET /deploy/{id}/log/{node}, deploys.go) serves its files through exactly
+// the same containment rule and the same failure vocabulary rather than a
+// second copy that could drift from it. The route-specific half (which table
+// the stored path is looked up in) stays in each handler.
+func (d *dash) serveLogFile(w http.ResponseWriter, r *http.Request, storedPath string) {
 	resolved, ok := resolveLogPath(d.logRoot, storedPath)
 	if !ok {
 		// Either LogRoot isn't configured, or the stored path (cleaned and
@@ -1232,6 +1256,14 @@ type baseData struct {
 	// hardcoding the path) so idiomorphVersion is the single place a
 	// re-vendor touches.
 	IdiomorphURL string
+
+	// HasDeploys gates the "deploys" nav entry: true only when this daemon
+	// actually has a deploy tracker wired (WithDeploySnapshot). A daemon
+	// with no `deploy` block must look byte-identical to one built before
+	// deployment existed — the standing pattern for every optional
+	// subsystem — so the nav link is absent rather than pointing at an
+	// empty page.
+	HasDeploys bool
 }
 
 // newBase is a method (rather than a free function) only so it can reach
@@ -1242,7 +1274,11 @@ func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool) baseDat
 	if snap != nil {
 		at = snap.At
 	}
-	return baseData{Title: title, Refresh: refresh, GeneratedAt: formatTime(at), Version: d.version, IdiomorphURL: idiomorphURL}
+	return baseData{
+		Title: title, Refresh: refresh, GeneratedAt: formatTime(at),
+		Version: d.version, IdiomorphURL: idiomorphURL,
+		HasDeploys: d.deploySnapshot != nil,
+	}
 }
 
 type indexData struct {

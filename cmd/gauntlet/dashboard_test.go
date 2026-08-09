@@ -1,10 +1,19 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sgrankin/gauntlet/internal/config"
+	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
+	"github.com/sgrankin/gauntlet/internal/deploy"
 	gauntletmcp "github.com/sgrankin/gauntlet/internal/mcp"
 	"github.com/sgrankin/gauntlet/internal/queue"
 	"github.com/sgrankin/gauntlet/internal/services"
@@ -221,4 +230,214 @@ func TestServicesStatus_EmptyPoolHasNoInstances(t *testing.T) {
 	if got := mcpServicesStatus(ps); len(got.Instances) != 0 {
 		t.Errorf("mcpServicesStatus(empty).Instances = %v, want empty", got.Instances)
 	}
+}
+
+// --- deploy wiring (D3) --------------------------------------------------------
+
+// testDeploySnapshot is one published deploy.Snapshot covering every field
+// the two adapters have to carry: a running lane, a parked one, and a
+// finished result — the three optional blocks, plus the typed Mode/Outcome
+// values that are exactly why these adapters can't be plain conversions.
+func testDeploySnapshot() *deploy.Snapshot {
+	now := time.Now()
+	return &deploy.Snapshot{
+		At: now,
+		Lanes: []deploy.LaneState{
+			{
+				Env: "prod", Mode: deploy.ModeTrack, Source: "env=dev",
+				SourceTip: "e5f6a7b8", Desired: "e5f6a7b8", Observed: "9c0d1e2f",
+				Drift: true, Pending: true,
+				LastAdvance: now.Add(-2 * time.Minute), LastError: "lost CAS",
+				Running: &deploy.LaneRun{
+					RunID: "deploy-1", DeploySHA: "e5f6a7b8", DeployedSHA: "9c0d1e2f",
+					StartedAt: now.Add(-time.Minute), Nodes: []string{"app1", "app2"},
+				},
+				Parked: &deploy.LanePark{
+					SHA: "e5f6a7b8", RunID: "deploy-0", Outcome: core.OutcomeRejected,
+					Detail: "node migrate failed", At: now.Add(-3 * time.Minute),
+				},
+				LastResult: &deploy.LaneResult{
+					RunID: "deploy-0", DeploySHA: "e5f6a7b8", DeployedSHA: "9c0d1e2f",
+					Outcome: core.OutcomeError, Culprit: "migrate", Detail: "executor unreachable",
+					StartedAt: now.Add(-4 * time.Minute), EndedAt: now.Add(-3 * time.Minute),
+				},
+			},
+			{Env: "dev", Mode: deploy.ModeManual, Source: "main", InSync: true, Desired: "a", Observed: "a"},
+		},
+	}
+}
+
+// TestDashboardDeployStatus_ConvertsFieldByField: the adapter carries every
+// field across, converting the two typed values (deploy.Mode, core.Outcome)
+// to the string forms the dashboard's mirror structs hold — the reason this
+// isn't a plain type conversion, exactly as for services.
+func TestDashboardDeployStatus_ConvertsFieldByField(t *testing.T) {
+	snap := testDeploySnapshot()
+	got := dashboardDeployStatus(snap)
+
+	if got == nil || len(got.Lanes) != 2 || !got.At.Equal(snap.At) {
+		t.Fatalf("converted snapshot = %+v", got)
+	}
+	lane := got.Lanes[0]
+	if lane.Env != "prod" || lane.Mode != "track" || lane.Source != "env=dev" {
+		t.Errorf("lane identity = %+v", lane)
+	}
+	if !lane.Drift || !lane.Pending || lane.InSync {
+		t.Errorf("lane flags = drift %v pending %v inSync %v, want true/true/false", lane.Drift, lane.Pending, lane.InSync)
+	}
+	if lane.LastError != "lost CAS" || !lane.LastAdvance.Equal(snap.Lanes[0].LastAdvance) {
+		t.Errorf("lane advance/error = %v / %q", lane.LastAdvance, lane.LastError)
+	}
+	if lane.Running == nil || lane.Running.RunID != "deploy-1" || len(lane.Running.Nodes) != 2 {
+		t.Errorf("running = %+v", lane.Running)
+	}
+	if lane.Parked == nil || lane.Parked.Outcome != "rejected" || lane.Parked.RunID != "deploy-0" {
+		t.Errorf("parked = %+v, want outcome rejected", lane.Parked)
+	}
+	if lane.LastResult == nil || lane.LastResult.Outcome != "error" || lane.LastResult.Culprit != "migrate" {
+		t.Errorf("lastResult = %+v, want outcome error with culprit migrate", lane.LastResult)
+	}
+	if got.Lanes[1].Mode != "manual" || !got.Lanes[1].InSync {
+		t.Errorf("second lane = %+v, want the manual in-sync lane", got.Lanes[1])
+	}
+
+	// The running node slice must be a COPY: the published Snapshot's own
+	// slices are never mutated after publication, but an adapter that
+	// aliased them would tie the surface's lifetime to the tracker's.
+	lane.Running.Nodes[0] = "clobbered"
+	if snap.Lanes[0].Running.Nodes[0] != "app1" {
+		t.Error("the adapter aliased the tracker's node slice instead of copying it")
+	}
+
+	if dashboardDeployStatus(nil) != nil {
+		t.Error("a nil snapshot (no pass published yet) must convert to nil")
+	}
+}
+
+// TestMCPDeployStatus_ConvertsFieldByField mirrors the above for the MCP
+// adapter — the two must not drift apart.
+func TestMCPDeployStatus_ConvertsFieldByField(t *testing.T) {
+	snap := testDeploySnapshot()
+	got := mcpDeployStatus(snap)
+
+	if got == nil || len(got.Lanes) != 2 {
+		t.Fatalf("converted snapshot = %+v", got)
+	}
+	lane := got.Lanes[0]
+	if lane.Env != "prod" || lane.Mode != "track" || !lane.Pending {
+		t.Errorf("lane = %+v", lane)
+	}
+	if lane.Running == nil || lane.Running.RunID != "deploy-1" {
+		t.Errorf("running = %+v", lane.Running)
+	}
+	if lane.Parked == nil || lane.Parked.Outcome != "rejected" {
+		t.Errorf("parked = %+v", lane.Parked)
+	}
+	if lane.LastResult == nil || lane.LastResult.Outcome != "error" {
+		t.Errorf("lastResult = %+v", lane.LastResult)
+	}
+	if mcpDeployStatus(nil) != nil {
+		t.Error("a nil snapshot must convert to nil")
+	}
+}
+
+// TestStartDashboard_NoDeployTracker is the wiring assertion the adapters
+// alone can't make: a daemon with no `deploy` block still SERVES the deploy
+// routes — they exist in every build — and every one of them answers "not
+// configured" rather than 404ing or panicking. This is the empty-state
+// contract end to end, through the real startDashboard.
+func TestStartDashboard_NoDeployTracker(t *testing.T) {
+	addr := reserveAddr(t)
+	cfg := &config.Daemon{Dashboard: config.Dashboard{Bind: addr}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	// Order matters: cancel first, THEN wait — the server goroutines only
+	// exit once ctx is done, so waiting before cancelling deadlocks.
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	startDashboard(ctx, cfg, func() *queue.Snapshot { return nil }, nil, nil, t.TempDir(),
+		nil, nil, nil, deployWiring{}, nil, &wg)
+
+	base := "http://" + addr
+	waitForServer(t, base+"/deploys")
+
+	// HTML: a 200 that says so, and no nav entry to it.
+	status, body := httpGet(t, base+"/deploys")
+	if status != http.StatusOK || !strings.Contains(body, "no environments configured") {
+		t.Errorf("GET /deploys = %d, body:\n%s", status, body)
+	}
+	if strings.Contains(body, `href="/deploys"`) {
+		t.Error("nav links /deploys on a daemon with no deploy tracker")
+	}
+
+	// JSON: 503, with the binding wording.
+	status, body = httpGet(t, base+"/api/v1/deploys")
+	if status != http.StatusServiceUnavailable || !strings.Contains(body, "deploy not configured") {
+		t.Errorf("GET /api/v1/deploys = %d %s, want 503 \"deploy not configured\"", status, body)
+	}
+	for _, path := range []string{"/api/v1/deploy/retry", "/api/v1/deploy/cancel"} {
+		status, body := httpPost(t, base+path, `{"env":"prod"}`)
+		if status != http.StatusServiceUnavailable || !strings.Contains(body, "deploy not configured") {
+			t.Errorf("POST %s = %d %s, want 503 \"deploy not configured\"", path, status, body)
+		}
+	}
+}
+
+// reserveAddr picks a free loopback address by binding and immediately
+// releasing it — the same technique doctor_test uses for its port probes.
+func reserveAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release reserved port: %v", err)
+	}
+	return addr
+}
+
+// waitForServer blocks until url answers, so the test never races
+// startDashboard's own ListenAndServe goroutine.
+func waitForServer(t *testing.T, url string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("dashboard never came up at %s", url)
+}
+
+func httpGet(t *testing.T, url string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+func httpPost(t *testing.T, url, body string) (int, string) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return resp.StatusCode, string(out)
 }

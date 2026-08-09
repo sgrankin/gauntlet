@@ -181,8 +181,17 @@ func (t *Tracker) stepLane(ctx context.Context, env Environment, ls *LaneState) 
 			// mutex it needs to record its own conclusion.
 			l.cancel()
 		}
-	case t.canStart(l, ls):
-		t.startLane(ctx, env, l, ls)
+	default:
+		// The admission predicate is consulted exactly once, and its answer
+		// is BOTH the decision to start and the published LaneState.Pending
+		// — one call site, so the flag an operator (and the idle signal)
+		// reads can never drift from the rule that actually admits runs.
+		// See LaneState.Pending's doc for what that inheritance implies
+		// about draining and about the syncedSHA mirror window.
+		ls.Pending = t.canStart(l, ls)
+		if ls.Pending {
+			t.startLane(ctx, env, l, ls)
+		}
 	}
 
 	ls.Running = l.runningState()

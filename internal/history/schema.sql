@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 13).
+-- schema.sql: gauntlet history store schema (user_version = 14).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -197,3 +197,77 @@ CREATE TABLE hook_runs (
   skipped     INTEGER NOT NULL DEFAULT 0,
   skip_reason TEXT NOT NULL DEFAULT ''
 );
+
+-- deploys/deploy_nodes (v14+) record one environment deploy graph run
+-- (docs/design/deployment.md, "Logs and history"): written once, from the
+-- TERMINAL core.EventDeployFinished's carried core.DeployRecord, exactly as
+-- runs/checks are written from a terminal RunRecord. The started and
+-- per-node-finished deploy events write NOTHING here — by the time the
+-- terminal event arrives its record already holds every node, in spec order,
+-- so a per-event row would capture nothing this one transaction doesn't.
+--
+-- Deliberately NOT a foreign key onto runs: a deploy is not a candidate run
+-- and shares no identity with one. Its run_id is minted by internal/deploy
+-- ("deploy-<utc>-<seq>-<env>-<sha12>"), which is also why it can never
+-- collide with a queue run ID even though both ID spaces meet in the same
+-- log directory root and the same dashboard route space.
+--
+-- History here is EFFICIENCY-ONLY, per the ledger: lose this database and
+-- the /deploys overview rebuilds itself from refs alone (desired, observed,
+-- and the live Snapshot); only old per-deploy detail pages are gone.
+--
+-- Deliberate omissions, so a later reader doesn't take them for oversights:
+-- no target column (a deploy is lane-addressed — environment, not target —
+-- and the two vocabularies must not be conflated); no batch/receipt/image
+-- columns (a deploy has no trial merge, no batch, no receipt, and its nodes
+-- build no candidate images); no materialize_ms (a deploy run exports one
+-- shared tree per run, never a per-node isolated workspace, so there is no
+-- per-node materialization cost to attribute). If any of those ever becomes
+-- real, it is a new column and a new version, not a repurposed one.
+CREATE TABLE deploys (
+  run_id       TEXT PRIMARY KEY,
+  env          TEXT NOT NULL,
+  -- deploy_sha is the revision this run deployed; deployed_sha is the
+  -- environment's observed ref BEFORE it ('' on a first-ever deploy — a real
+  -- value, not a missing one).
+  deploy_sha   TEXT NOT NULL,
+  deployed_sha TEXT NOT NULL DEFAULT '',
+  outcome      TEXT NOT NULL,             -- landed|rejected|skipped|error (never conflict: a deploy has no trial merge)
+  -- culprit names the node whose non-green result failed the graph, '' for a
+  -- green run and for one concluded externally with nothing to attribute.
+  culprit      TEXT NOT NULL DEFAULT '',
+  detail       TEXT NOT NULL DEFAULT '',
+  started_at   INTEGER NOT NULL,          -- unix millis
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL
+);
+-- Two indexes for the two questions the surfaces ask: one environment's
+-- recent deploys (the /deploys card strip and /deploy/{id}'s "previous
+-- deploys" table), and the daemon-wide recent list (the overview's table).
+CREATE INDEX idx_deploys_env_started ON deploys(env, started_at DESC);
+CREATE INDEX idx_deploys_started ON deploys(started_at DESC);
+
+-- deploy_nodes mirrors checks column-for-column minus the columns a deploy
+-- node cannot have (image, materialize_ms — see the deploys comment above),
+-- so the dashboard's /deploy/{id} renders node rows through the very same
+-- checkRow template a run's checks use: same seq identity, same blocked_by
+-- attribution, same waited_ms starvation signal, same best-effort usage
+-- capture.
+CREATE TABLE deploy_nodes (
+  run_id      TEXT NOT NULL REFERENCES deploys(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,              -- passed|failed|skipped|blocked
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',   -- captured output, verbatim (executor tail-caps at 64KiB)
+  log_path    TEXT NOT NULL DEFAULT '',   -- full per-node log file path, if one was written
+  command     TEXT NOT NULL DEFAULT '',
+  blocked_by  TEXT NOT NULL DEFAULT '',   -- comma-joined failed `after` edges ('blocked' rows only)
+  waited_ms   INTEGER NOT NULL DEFAULT 0,
+  peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
+  user_cpu_ms    INTEGER NOT NULL DEFAULT 0,
+  sys_cpu_ms     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX idx_deploy_nodes_name ON deploy_nodes(name);

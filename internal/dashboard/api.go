@@ -213,6 +213,131 @@ type ServicesStatus struct {
 	Instances    []ServiceStatus
 }
 
+// DeployStatus/DeployLane/DeployRun/DeployPark/DeployResult mirror
+// deploy.Snapshot and its LaneState/LaneRun/LanePark/LaneResult
+// field-for-field — the same "duplicated rather than imported" convention as
+// LiveHook and ServiceStatus above, and for the same reason: this package
+// renders every operator-visible fact about a subsystem without ever
+// importing it. Enum-ish fields (Mode, Outcome) are already the string form,
+// converted by cmd/gauntlet's adapter — the one place a deploy.Mode or a
+// core.Outcome value exists outside its own package.
+type DeployStatus struct {
+	// At is the instant the publishing reconcile pass ran; a stale snapshot
+	// is always a COMPLETE past picture, never a half-updated present one
+	// (deploy.Snapshot's own contract), so At is how a reader tells how
+	// stale rather than how trustworthy.
+	At    time.Time
+	Lanes []DeployLane
+}
+
+// DeployLane is one environment's published state.
+type DeployLane struct {
+	Env    string
+	Mode   string // "track" | "manual"
+	Source string // the config spelling: "main" or "env=dev"
+
+	SourceTip string
+	Desired   string
+	Observed  string
+
+	// InSync: desired == observed, i.e. the environment is running exactly
+	// what it was asked to run. Drift: the SOURCE has moved past desired —
+	// transient for a tracked lane, the steady state for a manual one.
+	InSync bool
+	Drift  bool
+
+	// Pending: this lane would start a graph run on the next pass — the
+	// runner's own admission predicate (deploy.LaneState.Pending), false
+	// while draining and false in the window between a green run's
+	// observed-ref push and the fetch that mirrors it back. Composed with
+	// Running by idleSince below.
+	Pending bool
+
+	LastAdvance time.Time
+	LastError   string
+
+	Running    *DeployRun
+	Parked     *DeployPark
+	LastResult *DeployResult
+}
+
+// DeployRun is the graph run currently in flight for a lane. Nodes are the
+// node names executing RIGHT NOW — a live gauge, empty both before the first
+// node starts and while the run winds down.
+type DeployRun struct {
+	RunID       string
+	DeploySHA   string
+	DeployedSHA string
+	StartedAt   time.Time
+	Nodes       []string
+}
+
+// DeployPark is a lane parked at one desired revision: cleared only by a new
+// desired SHA or an explicit retry.
+type DeployPark struct {
+	SHA     string
+	RunID   string
+	Outcome string
+	Detail  string
+	At      time.Time
+}
+
+// DeployResult summarizes the most recent finished graph run for a lane.
+type DeployResult struct {
+	RunID       string
+	DeploySHA   string
+	DeployedSHA string
+	Outcome     string
+	Culprit     string
+	Detail      string
+	StartedAt   time.Time
+	EndedAt     time.Time
+}
+
+// WithDeploySnapshot wires fn so /deploys, /deploy/{id} and
+// GET /api/v1/deploys can render the deploy tracker's published state
+// (deploy.Tracker.Snapshot via cmd/gauntlet's adapter). Without this option —
+// no `deploy` block configured for this daemon — the deploy nav entry is
+// hidden, /deploys renders "no environments configured", and the JSON routes
+// respond 503 "deploy not configured", mirroring WithServicesSnapshot's own
+// nil-safe degradation.
+//
+// fn returning nil means the tracker exists but no reconcile pass has
+// completed yet — the Starting treatment on HTML, 503 "no snapshot yet" on
+// JSON, exactly as a nil queue.Snapshot is handled.
+func WithDeploySnapshot(fn func() *DeployStatus) Option {
+	return func(d *dash) { d.deploySnapshot = fn }
+}
+
+// WithDeployRetry wires fn (deploy.Tracker.Retry) so POST
+// /api/v1/deploy/retry — and the retry button on a parked lane's card — can
+// clear a park so the next reconcile pass re-runs that environment's graph.
+// It reports whether a park was actually cleared; false is an ordinary
+// no-op, not an error. Without this option the route responds 503 "deploy
+// not configured".
+func WithDeployRetry(fn func(env string) bool) Option {
+	return func(d *dash) { d.deployRetry = fn }
+}
+
+// WithDeployCancel wires fn (deploy.Tracker.CancelCurrent) so POST
+// /api/v1/deploy/cancel can interrupt an environment's in-flight graph run,
+// reporting whether there was one to signal. Cancelling is not a way to stop
+// deploying — the lane reconciles fresh on the next tick — it is a way to
+// interrupt one attempt. Without this option the route responds 503 "deploy
+// not configured".
+func WithDeployCancel(fn func(env string) bool) Option {
+	return func(d *dash) { d.deployCancel = fn }
+}
+
+// recentDeploysLimit/laneDeployChips cap the two deploy history reads: the
+// daemon-wide "Recent deploys" table on /deploys (and its API mirror), and
+// the per-environment chip strip on each card. Both are a recent-activity
+// glance, the same stance hookRunsLimit takes.
+const (
+	recentDeploysLimit = 20
+	laneDeployChips    = 5
+)
+
 // WithServicesSnapshot wires fn so the index page's "Services" section and
 // GET /api/v1/services can render the shared-services pool: operators
 // sizing idle-ttl/max-instances need to SEE the pool. Without this option
@@ -241,6 +366,20 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
 	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
 	mux.HandleFunc("/api/v1/drain", d.handleAPIDrain)
+	mux.HandleFunc("GET /api/v1/deploys", d.handleAPIDeploys)
+	// The three /api/v1/deploy/... patterns are registered WITHOUT method
+	// verbs, and each handler checks r.Method itself. Not a style choice: a
+	// method-carrying "GET /api/v1/deploy/{id}" alongside a method-less
+	// "/api/v1/deploy/retry" is a genuine ServeMux CONFLICT (neither pattern
+	// matches a strict subset of the other — the literal one also accepts
+	// POST, the wildcard one also accepts other paths), which panics at
+	// registration. Dropping the verb from all three makes the literal
+	// patterns strictly more specific than the wildcard, which is exactly
+	// the precedence rule that resolves them — and the handlers still answer
+	// a wrong method with the same JSON 405 every other route here does.
+	mux.HandleFunc("/api/v1/deploy/retry", d.handleAPIDeployRetry)
+	mux.HandleFunc("/api/v1/deploy/cancel", d.handleAPIDeployCancel)
+	mux.HandleFunc("/api/v1/deploy/{id}", d.handleAPIDeploy)
 }
 
 // --- GET /api/v1/status ------------------------------------------------------
@@ -456,6 +595,24 @@ func (d *dash) idleSince(snap *queue.Snapshot) time.Time {
 		for _, ts := range snap.Targets {
 			if lh, ok := d.hookSnapshot(ts.Name); ok && (lh.Running || lh.BacklogDepth > 0) {
 				return time.Time{}
+			}
+		}
+	}
+	// Deploy lanes compose exactly as hooks do, and for the same reason: a
+	// deploy graph runs OUTSIDE the queue (internal/deploy, its own
+	// goroutines), so only this layer — which holds both snapshots — can
+	// combine them. Both halves of a lane's busy signal count: Running is
+	// "a graph is executing right now", Pending is "the next pass would
+	// start one", and a scale-to-zero timer that deallocated the builder
+	// between those two would kill the deploy it was about to admit.
+	// deploySnapshot nil (no deployment configured) leaves the composition
+	// exactly as it was.
+	if d.deploySnapshot != nil {
+		if ds := d.deploySnapshot(); ds != nil {
+			for _, lane := range ds.Lanes {
+				if lane.Running != nil || lane.Pending {
+					return time.Time{}
+				}
 			}
 		}
 	}
@@ -1196,6 +1353,324 @@ func (d *dash) handleAPIDrain(w http.ResponseWriter, r *http.Request) {
 	}
 	d.drain(deadline)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "draining"})
+}
+
+// --- deploy JSON API ----------------------------------------------------------
+
+// deployLaneJSON is one environment lane in GET /api/v1/deploys.
+type deployLaneJSON struct {
+	Env       string `json:"env"`
+	Mode      string `json:"mode"`
+	Source    string `json:"source"`
+	SourceTip string `json:"sourceTip,omitempty"`
+	Desired   string `json:"desired,omitempty"`
+	Observed  string `json:"observed,omitempty"`
+	InSync    bool   `json:"inSync"`
+	Drift     bool   `json:"drift"`
+	// Pending is "would start a graph run on the next pass" — see
+	// DeployLane.Pending. Present-and-false is meaningful here (it is half
+	// of the lane's busy signal), so it is NOT omitempty.
+	Pending     bool              `json:"pending"`
+	State       string            `json:"state"`
+	LastAdvance string            `json:"lastAdvance,omitempty"`
+	LastError   string            `json:"lastError,omitempty"`
+	Running     *deployRunJSON    `json:"running,omitempty"`
+	Parked      *deployParkJSON   `json:"parked,omitempty"`
+	LastResult  *deployResultJSON `json:"lastResult,omitempty"`
+}
+
+type deployRunJSON struct {
+	RunID       string   `json:"runID"`
+	DeploySHA   string   `json:"deploySHA"`
+	DeployedSHA string   `json:"deployedSHA,omitempty"`
+	StartedAt   string   `json:"startedAt"`
+	Nodes       []string `json:"nodes"`
+}
+
+type deployParkJSON struct {
+	SHA     string `json:"sha"`
+	RunID   string `json:"runID,omitempty"`
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail,omitempty"`
+	At      string `json:"at"`
+}
+
+type deployResultJSON struct {
+	RunID       string `json:"runID"`
+	DeploySHA   string `json:"deploySHA"`
+	DeployedSHA string `json:"deployedSHA,omitempty"`
+	Outcome     string `json:"outcome"`
+	Culprit     string `json:"culprit,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	StartedAt   string `json:"startedAt"`
+	EndedAt     string `json:"endedAt"`
+}
+
+// deploySummaryJSON is one row of the recent-deploys list (history's
+// deploys table).
+type deploySummaryJSON struct {
+	RunID       string `json:"runID"`
+	Env         string `json:"env"`
+	DeploySHA   string `json:"deploySHA"`
+	DeployedSHA string `json:"deployedSHA,omitempty"`
+	Outcome     string `json:"outcome"`
+	Culprit     string `json:"culprit,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	StartedAt   string `json:"startedAt"`
+	EndedAt     string `json:"endedAt"`
+	DurationMs  int64  `json:"durationMs"`
+}
+
+type deploysResponse struct {
+	SnapshotAt string           `json:"snapshotAt"`
+	Lanes      []deployLaneJSON `json:"lanes"`
+	// Recent is the daemon-wide recent-deploy list, omitted (not just
+	// empty) when history is disabled — the same signal statusResponse's
+	// IgnoredRefs gives.
+	Recent []deploySummaryJSON `json:"recent,omitempty"`
+}
+
+// handleAPIDeploys mirrors the /deploys overview: every lane's live state,
+// plus recent finished deploys when history is on. 503 "deploy not
+// configured" when no tracker was wired (no `deploy` block in daemon
+// config); 503 "no snapshot yet" when one exists but no reconcile pass has
+// published yet — the same two-step degradation GET /api/v1/status has for
+// the queue, with the extra first step because the whole subsystem is
+// optional.
+func (d *dash) handleAPIDeploys(w http.ResponseWriter, r *http.Request) {
+	snap, ok := d.deployStatus(w)
+	if !ok {
+		return
+	}
+
+	resp := deploysResponse{
+		SnapshotAt: formatRFC3339(snap.At),
+		Lanes:      make([]deployLaneJSON, 0, len(snap.Lanes)),
+	}
+	for _, lane := range snap.Lanes {
+		resp.Lanes = append(resp.Lanes, buildDeployLaneJSON(lane))
+	}
+	if d.store != nil {
+		rows, err := d.store.RecentDeploys("", recentDeploysLimit)
+		if err != nil {
+			log.Printf("dashboard: api: recent deploys: %v", err)
+		} else {
+			resp.Recent = make([]deploySummaryJSON, 0, len(rows))
+			for _, row := range rows {
+				resp.Recent = append(resp.Recent, deployRowToJSON(row))
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// deployStatus resolves the deploy snapshot for a JSON route, writing the
+// right 503 and reporting false when there is nothing to serve. Shared by
+// every read route so the two "absent" cases are worded in exactly one
+// place.
+func (d *dash) deployStatus(w http.ResponseWriter) (*DeployStatus, bool) {
+	if d.deploySnapshot == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "deploy not configured")
+		return nil, false
+	}
+	snap := d.deploySnapshot()
+	if snap == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "no snapshot yet")
+		return nil, false
+	}
+	return snap, true
+}
+
+func buildDeployLaneJSON(lane DeployLane) deployLaneJSON {
+	out := deployLaneJSON{
+		Env: lane.Env, Mode: lane.Mode, Source: lane.Source,
+		SourceTip: lane.SourceTip, Desired: lane.Desired, Observed: lane.Observed,
+		InSync: lane.InSync, Drift: lane.Drift, Pending: lane.Pending,
+		State:     laneState(lane),
+		LastError: lane.LastError,
+	}
+	if !lane.LastAdvance.IsZero() {
+		out.LastAdvance = formatRFC3339(lane.LastAdvance)
+	}
+	if r := lane.Running; r != nil {
+		out.Running = &deployRunJSON{
+			RunID: r.RunID, DeploySHA: r.DeploySHA, DeployedSHA: r.DeployedSHA,
+			StartedAt: formatRFC3339(r.StartedAt),
+			Nodes:     append([]string{}, r.Nodes...),
+		}
+	}
+	if p := lane.Parked; p != nil {
+		out.Parked = &deployParkJSON{
+			SHA: p.SHA, RunID: p.RunID, Outcome: p.Outcome, Detail: p.Detail,
+			At: formatRFC3339(p.At),
+		}
+	}
+	if lr := lane.LastResult; lr != nil {
+		out.LastResult = &deployResultJSON{
+			RunID: lr.RunID, DeploySHA: lr.DeploySHA, DeployedSHA: lr.DeployedSHA,
+			Outcome: lr.Outcome, Culprit: lr.Culprit, Detail: lr.Detail,
+			StartedAt: formatRFC3339(lr.StartedAt), EndedAt: formatRFC3339(lr.EndedAt),
+		}
+	}
+	return out
+}
+
+// laneState folds a lane's flags into the one word the overview card's tag
+// and this API's "state" field both show. Order is the priority an operator
+// reads them in: a parked lane is parked however much else is true of it, a
+// running one is deploying, and only then do the ref comparisons speak.
+func laneState(lane DeployLane) string {
+	switch {
+	case lane.Parked != nil:
+		return "parked"
+	case lane.Running != nil:
+		return "deploying"
+	case lane.Pending:
+		return "pending"
+	case lane.InSync:
+		return "in sync"
+	case lane.Desired == "":
+		return "never deployed"
+	default:
+		return "waiting"
+	}
+}
+
+func deployRowToJSON(row history.DeployRow) deploySummaryJSON {
+	return deploySummaryJSON{
+		RunID: row.RunID, Env: row.Env,
+		DeploySHA: row.DeploySHA, DeployedSHA: row.DeployedSHA,
+		Outcome: row.Outcome, Culprit: row.Culprit, Detail: row.Detail,
+		StartedAt: formatRFC3339(row.StartedAt), EndedAt: formatRFC3339(row.EndedAt),
+		DurationMs: row.Duration.Milliseconds(),
+	}
+}
+
+// deployDetailResponse is GET /api/v1/deploy/{id}: one finished graph run
+// and its node rows. History-backed only — unlike the HTML page, which also
+// falls back to the live snapshot for a run still in flight (so the
+// overview's "deploying" link never 404s), a JSON client polling a run it
+// already knows the ID of is better served by GET /api/v1/deploys' own
+// `running` block than by a half-populated detail record.
+type deployDetailResponse struct {
+	RunID       string      `json:"runID"`
+	Env         string      `json:"env"`
+	DeploySHA   string      `json:"deploySHA"`
+	DeployedSHA string      `json:"deployedSHA,omitempty"`
+	Outcome     string      `json:"outcome"`
+	Culprit     string      `json:"culprit,omitempty"`
+	Detail      string      `json:"detail,omitempty"`
+	StartedAt   string      `json:"startedAt"`
+	EndedAt     string      `json:"endedAt"`
+	DurationMs  int64       `json:"durationMs"`
+	Nodes       []checkJSON `json:"nodes"`
+}
+
+func (d *dash) handleAPIDeploy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if d.store == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "history disabled")
+		return
+	}
+
+	id := r.PathValue("id")
+	row, nodes, err := d.store.Deploy(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		log.Printf("dashboard: api: deploy %s: %v", id, err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	resp := deployDetailResponse{
+		RunID: row.RunID, Env: row.Env,
+		DeploySHA: row.DeploySHA, DeployedSHA: row.DeployedSHA,
+		Outcome: row.Outcome, Culprit: row.Culprit, Detail: row.Detail,
+		StartedAt: formatRFC3339(row.StartedAt), EndedAt: formatRFC3339(row.EndedAt),
+		DurationMs: row.Duration.Milliseconds(),
+		Nodes:      make([]checkJSON, 0, len(nodes)),
+	}
+	for _, n := range nodes {
+		resp.Nodes = append(resp.Nodes, checkJSON{
+			Seq: n.Seq, Name: n.Name, Status: n.Status,
+			DurationMs: n.Duration.Milliseconds(), Err: n.Err,
+			Output:  n.Output,
+			LogPath: n.LogPath,
+			LogURL:  d.deployLogURL(row.RunID, n.Name, n.LogPath),
+
+			PeakRSSBytes: n.PeakRSS,
+			UserCPUMs:    n.UserCPU.Milliseconds(),
+			SysCPUMs:     n.SysCPU.Milliseconds(),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// deployActionRequest is the body of both mutating deploy routes: just the
+// environment, since a deploy lane has no ref or run to name — the
+// hook-cancel precedent (hookCancelRequest), for the same reason.
+type deployActionRequest struct {
+	Env string `json:"env"`
+}
+
+// handleAPIDeployRetry clears env's park so the next reconcile pass re-runs
+// its whole graph (deploy.Tracker.Retry). Like POST /api/v1/hooks/cancel and
+// unlike POST /api/v1/retry, this calls straight through synchronously and
+// its result is known immediately: "retried" when a park was actually
+// cleared, "no-op" when the lane wasn't parked — a normal outcome, not an
+// error.
+//
+// Note what this route CANNOT do, deliberately: it never moves a desired
+// ref. Deployment authority is push authority (branch protection on
+// deploy/*), so the API can retry and cancel and never deploy.
+func (d *dash) handleAPIDeployRetry(w http.ResponseWriter, r *http.Request) {
+	d.handleDeployAction(w, r, d.deployRetry, "retried")
+}
+
+// handleAPIDeployCancel interrupts env's in-flight graph run
+// (deploy.Tracker.CancelCurrent): "cancelled" when a run was signalled,
+// "no-op" when nothing was running. The cancelled run records an externally
+// concluded outcome and does NOT park, so the lane reconciles fresh — this
+// interrupts one attempt, it does not stop deploying.
+func (d *dash) handleAPIDeployCancel(w http.ResponseWriter, r *http.Request) {
+	d.handleDeployAction(w, r, d.deployCancel, "cancelled")
+}
+
+// handleDeployAction is the shared body of the two mutating deploy routes:
+// same method gate, same 400 on a missing env, same 503 when deployment
+// isn't configured, same 202 {"status": ...} shape — only the wired closure
+// and the success word differ.
+func (d *dash) handleDeployAction(w http.ResponseWriter, r *http.Request, fn func(string) bool, done string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req deployActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Env == "" {
+		writeJSONError(w, http.StatusBadRequest, "env is required")
+		return
+	}
+	if fn == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "deploy not configured")
+		return
+	}
+	status := "no-op"
+	if fn(req.Env) {
+		status = done
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
 }
 
 // --- shared JSON helpers -----------------------------------------------------

@@ -26,6 +26,21 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
+	// insertDeploySQL/insertDeployNodeSQL back one finished deploy graph run
+	// (Store.writeDeployRecord, v14+): keyed on run_id and run_id+seq
+	// respectively, so a re-emitted terminal deploy event replaces its own
+	// rows rather than duplicating them — the same idempotency the runs and
+	// checks writes have.
+	insertDeploySQL = `
+INSERT OR REPLACE INTO deploys (
+	run_id, env, deploy_sha, deployed_sha, outcome, culprit, detail,
+	started_at, ended_at, duration_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	insertDeployNodeSQL = `
+INSERT OR REPLACE INTO deploy_nodes (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
 	insertDepthSQL = `
 INSERT OR REPLACE INTO queue_depth (at, target, waiting, in_flight, parked)
 VALUES (?, ?, ?, ?, ?)`
@@ -818,6 +833,144 @@ LIMIT ?`, target, limit)
 		return nil, fmt.Errorf("history: hook run summaries %s: %w", target, err)
 	}
 	return out, nil
+}
+
+// DeployRow is one row of the deploys table (v14+): one finished deploy
+// graph run for one environment, as read back for the /deploys overview and
+// the /deploy/{id} detail page. Deliberately NOT a RunRow: a deploy is
+// lane-addressed (environment, revision) where a run is candidate-addressed
+// (target, ref, trial merge), and collapsing the two would force every
+// consumer to reason about which half of a merged struct is meaningful.
+//
+// Its per-node rows, by contrast, ARE CheckRows — see Deploy below.
+type DeployRow struct {
+	RunID string
+	Env   string
+
+	// DeploySHA is the revision this run deployed; DeployedSHA is the
+	// environment's observed ref before it, "" on a first-ever deploy (a
+	// real value, not a missing one — core.DeployRecord's own contract).
+	DeploySHA   string
+	DeployedSHA string
+
+	// Outcome is the run vocabulary reused: landed|rejected|skipped|error.
+	// "conflict" never occurs — a deploy has no trial merge. Culprit names
+	// the node that failed the graph ("" for a green run, and for one
+	// concluded externally with nothing to attribute).
+	Outcome string
+	Culprit string
+	Detail  string
+
+	StartedAt time.Time
+	EndedAt   time.Time
+	Duration  time.Duration
+}
+
+const selectDeployColumns = `run_id, env, deploy_sha, deployed_sha, outcome, culprit, detail,
+	started_at, ended_at, duration_ms`
+
+// RecentDeploys returns the most recent deploy runs, newest first, capped at
+// limit. An empty env means EVERY environment (the /deploys overview's
+// daemon-wide "Recent deploys" table); a non-empty one filters to that
+// lane (an environment card's recent-chip strip, and /deploy/{id}'s
+// "previous deploys" table). Both orderings are index-served —
+// idx_deploys_started and idx_deploys_env_started respectively.
+//
+// Empty env deliberately means "all" rather than "the environment whose
+// name is the empty string": env is NOT NULL in the schema and every writer
+// supplies a real environment name (core.ValidateEvent rejects a deploy
+// event with no DeployEnv), so no row can ever legitimately match "".
+// Contrast BatchMembers, where an empty batch ID is a real stored value for
+// every non-batch run and therefore must return nothing.
+func (s *Store) RecentDeploys(env string, limit int) ([]DeployRow, error) {
+	query := `SELECT ` + selectDeployColumns + ` FROM deploys ORDER BY started_at DESC LIMIT ?`
+	args := []any{limit}
+	if env != "" {
+		query = `SELECT ` + selectDeployColumns + ` FROM deploys WHERE env = ? ORDER BY started_at DESC LIMIT ?`
+		args = []any{env, limit}
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("history: recent deploys: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DeployRow
+	for rows.Next() {
+		d, err := scanDeployRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("history: recent deploys: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history: recent deploys: %w", err)
+	}
+	return out, nil
+}
+
+// Deploy returns runID's deploy row and its node rows in seq order.
+// Unknown runID surfaces as sql.ErrNoRows (wrapped), exactly as Run does for
+// an unknown run — the dashboard and API both key their 404 off that.
+//
+// The node rows are CheckRows on purpose, not a deploy-specific type: a
+// deploy node and a check record the same shape of fact (name, status,
+// duration, output, log path, command, blocked-by, slot wait, resource
+// usage), so reusing the type is what lets /deploy/{id} render its node
+// list through the very same checkRow template /run/{id} uses. Image and
+// Materialized are always zero here — deploy_nodes has no such columns
+// (schema.sql's own "deliberate omissions" note).
+func (s *Store) Deploy(runID string) (DeployRow, []CheckRow, error) {
+	row := s.db.QueryRow(`SELECT `+selectDeployColumns+` FROM deploys WHERE run_id = ?`, runID)
+	dep, err := scanDeployRow(row)
+	if err != nil {
+		return DeployRow{}, nil, fmt.Errorf("history: deploy %s: %w", runID, err)
+	}
+
+	rows, err := s.db.Query(
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms FROM deploy_nodes WHERE run_id = ? ORDER BY seq`,
+		runID,
+	)
+	if err != nil {
+		return DeployRow{}, nil, fmt.Errorf("history: deploy %s nodes: %w", runID, err)
+	}
+	defer rows.Close()
+
+	var nodes []CheckRow
+	for rows.Next() {
+		var c CheckRow
+		var durationMS, waitedMS, userCPUms, sysCPUms int64
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.PeakRSS, &userCPUms, &sysCPUms); err != nil {
+			return DeployRow{}, nil, fmt.Errorf("history: deploy %s nodes: %w", runID, err)
+		}
+		c.Duration = time.Duration(durationMS) * time.Millisecond
+		c.Waited = time.Duration(waitedMS) * time.Millisecond
+		c.UserCPU = time.Duration(userCPUms) * time.Millisecond
+		c.SysCPU = time.Duration(sysCPUms) * time.Millisecond
+		nodes = append(nodes, c)
+	}
+	if err := rows.Err(); err != nil {
+		return DeployRow{}, nil, fmt.Errorf("history: deploy %s nodes: %w", runID, err)
+	}
+	return dep, nodes, nil
+}
+
+// scanDeployRow scans one selectDeployColumns-shaped row into a DeployRow,
+// serving both RecentDeploys (multi-row) and Deploy (single-row) through the
+// same rowScanner interface scanRunRow uses.
+func scanDeployRow(row rowScanner) (DeployRow, error) {
+	var d DeployRow
+	var startedMS, endedMS, durationMS int64
+	if err := row.Scan(
+		&d.RunID, &d.Env, &d.DeploySHA, &d.DeployedSHA, &d.Outcome, &d.Culprit, &d.Detail,
+		&startedMS, &endedMS, &durationMS,
+	); err != nil {
+		return DeployRow{}, err
+	}
+	d.StartedAt = time.UnixMilli(startedMS)
+	d.EndedAt = time.UnixMilli(endedMS)
+	d.Duration = time.Duration(durationMS) * time.Millisecond
+	return d, nil
 }
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, letting

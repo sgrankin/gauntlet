@@ -696,3 +696,79 @@ func TestSyncedMarker_NoDoubleRunBeforeTheMirrorCatchesUp(t *testing.T) {
 		t.Errorf("lane still reports a run in flight: %+v", lane.Running)
 	}
 }
+
+// TestPending_TracksTheAdmissionPredicate pins LaneState.Pending as exactly
+// what it claims to be: the runner's own admission answer, published rather
+// than re-derived. Drift on an unparked, unsynced lane admits (and starts) a
+// run and reports Pending; a lane that is parked, draining, or in sync
+// reports false — the three ways canStart says no that an operator (and the
+// idle signal) must not mistake for "about to deploy".
+func TestPending_TracksTheAdmissionPredicate(t *testing.T) {
+	h := newRunHarness(t)
+
+	// Nothing configured to deploy yet: no source tip, no desired ref.
+	h.tick()
+	if h.lane().Pending {
+		t.Error("Pending on a lane with no revision to deploy")
+	}
+
+	// Drift, unparked, not synced: admitted this very pass, which is the
+	// same answer as "the next pass would have started one".
+	h.git.setRef("refs/heads/main", "sha1")
+	h.tick()
+	if lane := h.lane(); !lane.Pending || lane.Running == nil {
+		t.Fatalf("drift did not admit a run: pending=%v running=%+v", lane.Pending, lane.Running)
+	}
+
+	// While that run is in flight the lane is busy, not pending — the two
+	// are composed by consumers, never both claimed at once after the
+	// starting pass.
+	h.tick()
+	if lane := h.lane(); lane.Pending || lane.Running == nil {
+		t.Errorf("a lane with a run in flight: pending=%v running=%+v, want pending=false running set", lane.Pending, lane.Running)
+	}
+
+	// Parked at this revision: level-triggered, so no pass admits it.
+	h.release("migrate", core.CheckResult{Status: core.CheckFailed})
+	h.awaitFinished(1)
+	h.tick()
+	if lane := h.lane(); lane.Pending || lane.Parked == nil {
+		t.Fatalf("a parked lane: pending=%v parked=%+v, want pending=false parked set", lane.Pending, lane.Parked)
+	}
+
+	// Draining: the drift is real and stays unclosed, deliberately.
+	if !h.tr.Retry("dev") {
+		t.Fatal("Retry did not clear the park")
+	}
+	h.tr.Drain()
+	h.tick()
+	if lane := h.lane(); lane.Pending {
+		t.Errorf("a draining daemon reported a pending lane: %+v", lane)
+	}
+}
+
+// TestPending_FalseWhileTheMirrorCatchesUp is the syncedSHA half of
+// Pending's contract: between a green run's observed-ref CAS on the remote
+// and the fetch that mirrors it locally, the lane still LOOKS like it has
+// drift. Publishing Pending there would tell the idle signal a deploy is
+// imminent when the work is already done.
+func TestPending_FalseWhileTheMirrorCatchesUp(t *testing.T) {
+	h := newRunHarness(t)
+	h.git.setRef("refs/heads/main", "sha1")
+	h.tick()
+	h.releaseGreen()
+	h.awaitFinished(1)
+
+	// Reconcile without mirroring: observed is still empty locally.
+	if err := h.tr.ReconcileOnce(h.ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if lane := h.lane(); lane.Pending || lane.Running != nil {
+		t.Fatalf("the pre-mirror window: pending=%v running=%+v, want neither", lane.Pending, lane.Running)
+	}
+
+	h.tick()
+	if lane := h.lane(); lane.Pending || !lane.InSync {
+		t.Errorf("once mirrored: pending=%v inSync=%v, want pending=false inSync=true", lane.Pending, lane.InSync)
+	}
+}

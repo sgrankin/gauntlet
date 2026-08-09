@@ -181,6 +181,13 @@ type Slack struct {
 	roots   map[string]rootInfo // root message ts -> (target, ref)
 	notify  chan struct{}
 
+	// deployRoot is the deploy lane's own root index: deploy run ID -> root
+	// message ts (deploy.go). Deliberately a SECOND map rather than an entry
+	// in runRoot/roots — see deploy.go's header for why a deploy root must
+	// never appear in the reaction-ownership index. Bounded exactly like
+	// runRoot: every terminal deploy event deletes its run's entry.
+	deployRoot map[string]string
+
 	// refRetry tracks reaction-minted retries so the next trial-clean for
 	// the same (target, ref) threads under the old root instead of starting
 	// a fresh one (see postRetryRoot). Bounded the same way batchRecs is: entries
@@ -287,18 +294,19 @@ func New(p Params) *Slack {
 	}
 
 	return &Slack{
-		channel:   p.Channel,
-		api:       api,
-		smc:       smc,
-		log:       logw,
-		outbox:    make(chan core.Event, outboxBuffer),
-		cmds:      make(chan core.Command, cmdsBuffer),
-		runRoot:   make(map[string]string),
-		roots:     make(map[string]rootInfo),
-		notify:    make(chan struct{}),
-		batchRecs: make(map[string]*batchEntry),
-		refRetry:  make(map[refRetryKey]refRetryEntry),
-		now:       time.Now,
+		channel:    p.Channel,
+		api:        api,
+		smc:        smc,
+		log:        logw,
+		outbox:     make(chan core.Event, outboxBuffer),
+		cmds:       make(chan core.Command, cmdsBuffer),
+		runRoot:    make(map[string]string),
+		roots:      make(map[string]rootInfo),
+		deployRoot: make(map[string]string),
+		notify:     make(chan struct{}),
+		batchRecs:  make(map[string]*batchEntry),
+		refRetry:   make(map[refRetryKey]refRetryEntry),
+		now:        time.Now,
 
 		allowedUsers: allowed,
 	}
@@ -426,6 +434,16 @@ func (s *Slack) handleOutbound(ctx context.Context, ev core.Event) {
 		s.postHookFinished(ctx, ev)
 	case ev.Kind == core.EventHookSkipped:
 		s.postHookSkipped(ctx, ev)
+	// Deploy lane (deploy.go). These sit BELOW the ev.Record != nil case
+	// above and can never be shadowed by it: a deploy event carries its
+	// record in ev.Deploy, never ev.Record, precisely so the two never get
+	// confused here (core.Event's own doc on the split).
+	case ev.Kind == core.EventDeployStarted:
+		s.postDeployStarted(ctx, ev)
+	case ev.Kind == core.EventDeployNodeFinished:
+		s.postDeployNodeFinished(ctx, ev)
+	case ev.Kind == core.EventDeployFinished:
+		s.postDeployFinished(ctx, ev)
 		// EventHookStarted is deliberately a no-op here: live hook-in-progress
 		// state is the dashboard/API's job (hooks.LiveState's surface), not
 		// Slack's. A standalone top-level message per hook start, on top of

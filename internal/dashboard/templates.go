@@ -36,18 +36,29 @@ var templateFuncs = template.FuncMap{
 	"compactRef": compactRef,
 }
 
-// mustParse builds a template set from base.html plus one page file and
-// panics on error — template syntax errors are a programmer mistake, caught
-// at package init (and by the tests that exercise every page), never a
-// runtime condition.
+// mustParse builds a template set from base.html, the shared row partials
+// (_rows.html), and one page file, panicking on error — template syntax
+// errors are a programmer mistake, caught at package init (and by the tests
+// that exercise every page), never a runtime condition.
+//
+// _rows.html is parsed into EVERY page's set rather than only the pages that
+// use it: it defines named partials and no "content", so a page that never
+// references checkRow is byte-identical with or without it, and the
+// alternative — a per-page list of which partials to include — is bookkeeping
+// with nothing to buy it. Two pages render checkRow today (/run/{id}'s checks
+// and hooks, /deploy/{id}'s nodes), which is why it moved out of run.html in
+// the first place.
 func mustParse(page string) *template.Template {
-	return template.Must(template.New(page).Funcs(templateFuncs).ParseFS(templatesFS, "templates/base.html", "templates/"+page))
+	return template.Must(template.New(page).Funcs(templateFuncs).ParseFS(templatesFS,
+		"templates/base.html", "templates/_rows.html", "templates/"+page))
 }
 
 var (
-	indexTmpl  = mustParse("index.html")
-	targetTmpl = mustParse("target.html")
-	runTmpl    = mustParse("run.html")
-	batchTmpl  = mustParse("batch.html")
-	checksTmpl = mustParse("checks.html")
+	indexTmpl   = mustParse("index.html")
+	targetTmpl  = mustParse("target.html")
+	runTmpl     = mustParse("run.html")
+	batchTmpl   = mustParse("batch.html")
+	checksTmpl  = mustParse("checks.html")
+	deploysTmpl = mustParse("deploys.html")
+	deployTmpl  = mustParse("deploy.html")
 )

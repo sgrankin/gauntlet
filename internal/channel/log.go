@@ -76,6 +76,17 @@ func (c *LogChannel) Emit(ctx context.Context, ev core.Event) error {
 			line += "\n" + block
 		}
 	}
+	// A deploy graph run's terminal record (core.EventDeployFinished): the
+	// same two-part treatment a run's record gets — a compact summary line,
+	// then the failing node's output tail — over a DIFFERENT field, because
+	// a deploy is not a run and must never be rendered as one (core.Event's
+	// own reason for keeping Deploy and Record apart).
+	if ev.Deploy != nil {
+		line += "\n" + formatDeployRecord(ev.Deploy)
+		if block := formatFailureBlock(firstFailingNode(ev.Deploy)); block != "" {
+			line += "\n" + block
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fmt.Fprintln(c.w, line)
@@ -139,6 +150,16 @@ func (c *LogChannel) Commands() <-chan core.Command {
 func formatEvent(ev core.Event) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s kind=%s target=%s", ev.At.Format(timeFormat), eventKindString(ev.Kind), ev.Target)
+	// Deploy events are lane-addressed, not candidate-addressed: they carry
+	// no target, ref, or candidate SHA at all (core.ValidateEvent enforces
+	// the converse for every other kind), so env= and sha= are what makes a
+	// deploy line greppable the way ref=/sha= makes a queue line greppable.
+	if core.DeployKind(ev.Kind) {
+		fmt.Fprintf(&b, " env=%s", ev.DeployEnv)
+		if ev.DeploySHA != "" {
+			fmt.Fprintf(&b, " sha=%s", shortSHA(ev.DeploySHA))
+		}
+	}
 	if ev.Candidate.Ref != "" {
 		fmt.Fprintf(&b, " ref=%s", ev.Candidate.Ref)
 	}
@@ -177,6 +198,51 @@ func formatRunRecord(rec *core.RunRecord) string {
 		fmt.Fprintf(&b, " detail=%q", rec.Detail)
 	}
 	return b.String()
+}
+
+// formatDeployRecord renders one finished deploy graph run as a compact
+// summary line, the deploy twin of formatRunRecord: the lane and revisions
+// it moved between, the outcome, one term per declared node (blocked rows
+// included — they're part of what happened), and the culprit/detail when
+// there is one to name.
+func formatDeployRecord(rec *core.DeployRecord) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  deploy=%s env=%s outcome=%s sha=%s",
+		rec.RunID, rec.Env, outcomeString(rec.Outcome), shortSHA(rec.DeploySHA))
+	if rec.DeployedSHA != "" {
+		fmt.Fprintf(&b, " from=%s", shortSHA(rec.DeployedSHA))
+	}
+	b.WriteString(" nodes=[")
+	for i, cr := range rec.Nodes {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%s=%s(%s)", cr.Name, checkStatusString(cr.Status), cr.Duration)
+	}
+	fmt.Fprintf(&b, "] wall=%s", rec.EndedAt.Sub(rec.StartedAt))
+	if rec.Culprit != "" {
+		fmt.Fprintf(&b, " culprit=%s", rec.Culprit)
+	}
+	if rec.Detail != "" {
+		fmt.Fprintf(&b, " detail=%q", rec.Detail)
+	}
+	return b.String()
+}
+
+// firstFailingNode is core.RunRecord.FirstFailure's shape for a
+// DeployRecord: the first node whose verdict is red or which errored — the
+// one whose output tail the summary above should be followed by. Kept local
+// rather than pushed onto core.DeployRecord for the same reason every
+// package here keeps its own outcomeString: the rendering packages own how
+// they read a record, and core owns only its shape.
+func firstFailingNode(rec *core.DeployRecord) *core.CheckResult {
+	for i := range rec.Nodes {
+		n := &rec.Nodes[i]
+		if n.Status == core.CheckFailed || n.Err != nil {
+			return n
+		}
+	}
+	return nil
 }
 
 const timeFormat = "2006-01-02T15:04:05.000Z07:00"
@@ -222,6 +288,16 @@ func eventKindString(k core.EventKind) string {
 		return "hook_skipped"
 	case core.EventRetryRequested:
 		return "retry_requested"
+	case core.EventTrialMerged:
+		return "trial_merged"
+	case core.EventVerified:
+		return "verified"
+	case core.EventDeployStarted:
+		return "deploy_started"
+	case core.EventDeployNodeFinished:
+		return "deploy_node_finished"
+	case core.EventDeployFinished:
+		return "deploy_finished"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(k))
 	}

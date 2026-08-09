@@ -1,0 +1,108 @@
+{{define "content"}}
+{{if not .Configured}}
+<p class="muted">no environments configured</p>
+<p class="muted"><small>Deployment is optional: a daemon with no <code>deploy { environment ... }</code> block runs exactly as it did before this page existed.</small></p>
+{{else if .Starting}}
+<p class="muted">starting up — no reconcile pass has completed yet</p>
+{{else}}
+
+{{/* Source-chain strip: the promotion topology, derived from each lane's
+     own source (a branch, or another environment's observed ref). Scrolls
+     inside .flow-scroll rather than pushing the page sideways on a narrow
+     viewport — the same containment .table-scroll gives a wide table. */}}
+<div class="section">
+{{/* The tracker's own snapshot instant, distinct from the footer's render
+     time: a pass that fails to read refs publishes nothing, so a stale
+     snapshot is a COMPLETE past picture and this is how a viewer tells how
+     old it is. */}}
+<p class="muted">lane state as of {{.SnapshotAt}}</p>
+<p class="muted">source chain — an environment's input is a branch, or another environment's <em>observed</em> (green-deployed) revision</p>
+<div class="flow-scroll">{{.SourceChain}}</div>
+</div>
+
+<div class="grid section">
+{{range .Lanes}}
+<div class="card">
+<div class="headrow">
+<h2>{{.Env}}</h2>
+<span class="tag {{.State.Class}}">{{.State.Word}}</span>
+</div>
+<p class="muted">tracks <code>{{.Source}}</code>{{if eq .Mode "manual"}} <span title="the daemon never moves this environment's desired ref; a human push does">· manual</span>{{end}}</p>
+
+{{/* Desired vs observed. In sync collapses to one revision (they are equal
+     by definition); drift renders old → new, which is the loud state. */}}
+<div class="shaline">
+{{if .InSync}}
+<span class="muted">running</span> <code class="nowrap" title="{{.DesiredFull}}">{{.Desired}}</code> <span class="muted">· desired = observed</span>
+{{else}}
+<code class="nowrap" title="observed — last fully green deploy: {{.ObservedFull}}">{{if .Observed}}{{.Observed}}{{else}}never deployed{{end}}</code>
+<span class="arrow">&rarr;</span>
+<code class="nowrap" title="desired — what this environment is asked to run: {{.DesiredFull}}">{{if .Desired}}{{.Desired}}{{else}}-{{end}}</code>
+{{end}}
+</div>
+
+{{if .Nodes}}
+<div class="nodes">
+{{range .Nodes}}
+<span class="node"><span class="chip chip-{{.ChipClass}}" title="{{.Meta}}"></span> {{.Name}} <span class="node-meta">{{.Meta}}</span></span>
+{{end}}
+</div>
+{{else if .LastSummary}}
+<p class="muted">{{.LastSummary}}</p>
+{{end}}
+
+{{if .RunID}}
+<p><a href="/deploy/{{.RunID}}">deploy {{.RunID}}</a> <span class="muted">· started {{.RunElapsed}} ago</span></p>
+{{else if .LastRunID}}
+<p>
+<span class="muted">last deploy</span> <a href="/deploy/{{.LastRunID}}">{{.LastAgo}}</a>
+<span class="muted">· {{.LastOutcome.Word}} · {{.LastDuration}}</span>
+{{if .ShowRetry}}<button class="btn" type="button" data-deploy-action="retry" data-deploy-env="{{.Env}}">retry</button>{{end}}
+</p>
+{{else if .ShowRetry}}
+<p><button class="btn" type="button" data-deploy-action="retry" data-deploy-env="{{.Env}}">retry</button></p>
+{{end}}
+{{if .ParkDetail}}<p class="muted"><small>{{.ParkDetail}}</small></p>{{end}}
+{{if .LastError}}<p class="muted"><small>last ref push: {{.LastError}}</small></p>{{end}}
+
+{{if .Recent}}
+<p class="chips"><span class="muted" style="font-size:.8rem">recent:</span>
+{{range .Recent}}<a href="/deploy/{{.RunID}}" class="chip chip-{{.ChipClass}}" title="{{.Title}}"></a>{{end}}
+</p>
+{{end}}
+</div>
+{{end}}
+</div>
+
+<div class="section">
+<h2>Recent deploys</h2>
+{{if .Recent}}
+<div class="table-scroll">
+<table>
+<tr><th>deploy</th><th>env</th><th>revision</th><th>outcome</th><th>culprit</th><th>duration</th><th>finished</th></tr>
+{{range .Recent}}
+<tr>
+<td class="nowrap"><a href="/deploy/{{.RunID}}" class="mono">{{.RunID}}</a></td>
+<td>{{.Env}}</td>
+<td class="nowrap"><code title="{{.ToFull}}">{{if .From}}{{.From}} &rarr; {{end}}{{.To}}</code></td>
+<td class="nowrap"><span class="chip chip-{{.ChipClass}}"></span> {{.Outcome}}</td>
+<td class="nowrap">{{if .Culprit}}<code>{{.Culprit}}</code>{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+<td class="muted nowrap">{{.Duration}}{{if .Live}}&hellip;{{end}}</td>
+<td class="muted nowrap">{{if .Finished}}{{.Finished}}{{else}}&mdash;{{end}}</td>
+</tr>
+{{end}}
+</table>
+</div>
+{{else if .StoreEnabled}}
+<p class="muted">no deploys recorded yet</p>
+{{end}}
+{{if not .StoreEnabled}}
+{{/* With history off the only rows here are the live lanes (a run in flight
+     has no stored row by construction), so say why the rest is missing
+     rather than letting an almost-empty table imply nothing ever ran. */}}
+<p class="muted">history disabled</p>
+{{end}}
+</div>
+
+{{end}}
+{{end}}

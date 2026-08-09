@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 13
+const schemaVersion = 14
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -130,6 +130,12 @@ func Open(path string) (*Store, error) {
 //     sys_cpu_ms (best-effort per-check resource usage — core.CheckResult.
 //     PeakRSS/UserCPU/SysCPU, issue #14; zero means not measured, same as
 //     a pre-v13 row), stamp user_version=13, loop.
+//   - 13 (schema v13: no deploys/deploy_nodes tables): CREATE TABLE both
+//     (one environment deploy graph run and its per-node rows —
+//     core.DeployRecord, docs/design/deployment.md's "Logs and history"),
+//     stamp user_version=14, loop. Purely additive: nothing about an
+//     existing runs/checks row changes, and a daemon with no deploy
+//     environments configured simply never writes to either table.
 //   - schemaVersion: already current, no-op.
 //
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
@@ -304,6 +310,54 @@ CREATE TABLE hook_runs (
 			if _, err := db.Exec(`PRAGMA user_version = 13`); err != nil {
 				return fmt.Errorf("history: set user_version=13: %w", err)
 			}
+		case 13:
+			if _, err := db.Exec(`
+CREATE TABLE deploys (
+  run_id       TEXT PRIMARY KEY,
+  env          TEXT NOT NULL,
+  deploy_sha   TEXT NOT NULL,
+  deployed_sha TEXT NOT NULL DEFAULT '',
+  outcome      TEXT NOT NULL,
+  culprit      TEXT NOT NULL DEFAULT '',
+  detail       TEXT NOT NULL DEFAULT '',
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL
+)`); err != nil {
+				return fmt.Errorf("history: migrate v13->v14 (deploys table): %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX idx_deploys_env_started ON deploys(env, started_at DESC)`); err != nil {
+				return fmt.Errorf("history: migrate v13->v14 (deploys env index): %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX idx_deploys_started ON deploys(started_at DESC)`); err != nil {
+				return fmt.Errorf("history: migrate v13->v14 (deploys started index): %w", err)
+			}
+			if _, err := db.Exec(`
+CREATE TABLE deploy_nodes (
+  run_id      TEXT NOT NULL REFERENCES deploys(run_id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  err         TEXT NOT NULL DEFAULT '',
+  output      TEXT NOT NULL DEFAULT '',
+  log_path    TEXT NOT NULL DEFAULT '',
+  command     TEXT NOT NULL DEFAULT '',
+  blocked_by  TEXT NOT NULL DEFAULT '',
+  waited_ms   INTEGER NOT NULL DEFAULT 0,
+  peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
+  user_cpu_ms    INTEGER NOT NULL DEFAULT 0,
+  sys_cpu_ms     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (run_id, seq)
+)`); err != nil {
+				return fmt.Errorf("history: migrate v13->v14 (deploy_nodes table): %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX idx_deploy_nodes_name ON deploy_nodes(name)`); err != nil {
+				return fmt.Errorf("history: migrate v13->v14 (deploy_nodes index): %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 14`); err != nil {
+				return fmt.Errorf("history: set user_version=14: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -381,6 +435,22 @@ func (s *Store) Emit(ctx context.Context, ev core.Event) error {
 		return s.writeHookStarted(ctx, ev)
 	case core.EventHookSkipped:
 		return s.writeHookSkipped(ctx, ev)
+	case core.EventDeployFinished:
+		// The one deploy event that writes anything: it is the terminal one,
+		// and it carries the whole graph run in ev.Deploy (core.Event's own
+		// contract, enforced by core.ValidateEvent). EventDeployStarted and
+		// EventDeployNodeFinished fall through to the Record == nil return
+		// below and write NOTHING — deliberately, for exactly the reason
+		// writeRecord's own comment gives about per-check events: by the
+		// time this arrives, ev.Deploy.Nodes already holds every node in
+		// spec order, so a per-event row would capture nothing this
+		// transaction doesn't. (Note EventDeployFinished carries no
+		// *RunRecord at all — a deploy is not a candidate run — so it must
+		// be keyed off Kind here rather than reaching writeRecord.)
+		if ev.Deploy != nil {
+			return s.writeDeployRecord(ctx, ev.Deploy)
+		}
+		return nil
 	}
 	if ev.Record == nil {
 		return nil
@@ -489,6 +559,73 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			cr.SysCPU.Milliseconds(),
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("history: commit: %w", err)
+	}
+	return nil
+}
+
+// writeDeployRecord writes one finished deploy graph run (core.DeployRecord,
+// carried by the terminal core.EventDeployFinished) as one deploys row plus
+// one deploy_nodes row per declared node, in a single transaction — the
+// deploy twin of writeRecord, with the same INSERT OR REPLACE idempotency:
+// re-emitting the same record is a no-op beyond redundant writes.
+//
+// seq mirrors writeRecord's rule exactly (CheckResult.Seq - 1 when stamped,
+// the slice index otherwise) because it means the same thing on both sides:
+// it is the node's spec-declaration position, and it is what keeps a stored
+// row aligned with the `<seq>-<name>.log.zst` filename prefix
+// internal/deploy's nodeLogPath writes.
+func (s *Store) writeDeployRecord(ctx context.Context, rec *core.DeployRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("history: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, insertDeploySQL,
+		rec.RunID,
+		rec.Env,
+		rec.DeploySHA,
+		rec.DeployedSHA,
+		outcomeString(rec.Outcome),
+		rec.Culprit,
+		rec.Detail,
+		rec.StartedAt.UnixMilli(),
+		rec.EndedAt.UnixMilli(),
+		rec.EndedAt.Sub(rec.StartedAt).Milliseconds(),
+	); err != nil {
+		return fmt.Errorf("history: insert deploy: %w", err)
+	}
+
+	for i, cr := range rec.Nodes {
+		seq := i
+		if cr.Seq > 0 {
+			seq = cr.Seq - 1
+		}
+		if _, err := tx.ExecContext(ctx, insertDeployNodeSQL,
+			rec.RunID,
+			seq,
+			cr.Name,
+			checkStatusString(cr.Status),
+			cr.Duration.Milliseconds(),
+			errString(cr.Err),
+			cr.Output,
+			cr.LogPath,
+			joinCommand(cr.Command),
+			// blocked_by: comma-joined, same convention (and same caveat)
+			// as the checks table's own column — set only on blocked rows,
+			// where it names the failed `after` edges.
+			strings.Join(cr.BlockedBy, ","),
+			cr.Waited.Milliseconds(),
+			cr.PeakRSS,
+			cr.UserCPU.Milliseconds(),
+			cr.SysCPU.Milliseconds(),
+		); err != nil {
+			return fmt.Errorf("history: insert deploy node: %w", err)
 		}
 	}
 

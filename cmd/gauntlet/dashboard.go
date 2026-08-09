@@ -12,6 +12,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
+	"github.com/sgrankin/gauntlet/internal/deploy"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/hooks"
 	gauntletmcp "github.com/sgrankin/gauntlet/internal/mcp"
@@ -22,6 +23,20 @@ import (
 // dashboardShutdownTimeout bounds the dashboard's graceful shutdown so
 // daemon exit is never hung waiting on a slow client.
 const dashboardShutdownTimeout = 5 * time.Second
+
+// deployWiring is the deploy subsystem's half of the dashboard/MCP wiring:
+// the tracker's published snapshot plus its two operator entry points. Every
+// field is nil when deployment isn't configured (main.go's buildDeployTracker
+// returned nil), in which case both surfaces degrade to their documented
+// "deploy not configured" responses — exactly as store == nil degrades every
+// history-backed view. Grouped into one struct rather than three more
+// positional parameters, which startDashboard's signature is already long
+// on.
+type deployWiring struct {
+	Snapshot func() *deploy.Snapshot
+	Retry    func(env string) bool
+	Cancel   func(env string) bool
+}
 
 // startDashboard starts the read-only web dashboard (plus its JSON API, work
 // chunk E4, and the MCP server, work chunk E5) on cfg.Dashboard.Bind, if
@@ -67,7 +82,12 @@ const dashboardShutdownTimeout = 5 * time.Second
 // ServicesSnapshot (the services tool) — services.Pool.Snapshot itself,
 // nil-safely mirroring hookSnapshot: nil here means both surfaces simply
 // omit the pool entirely (design §10's tuning instrument, S5-style parity).
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, drain func(time.Time), wg *sync.WaitGroup) {
+//
+// dep carries the deploy subsystem's wiring (see deployWiring above): all
+// three fields nil when no environment is configured, in which case the
+// deploys nav entry is hidden, /deploys says so, and every deploy route on
+// both surfaces answers "deploy not configured".
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep deployWiring, drain func(time.Time), wg *sync.WaitGroup) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -116,6 +136,26 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 			return dashboardServicesStatus(servicesSnapshot())
 		}))
 	}
+	// Deployment (docs/design/deployment.md, "Surfaces"): the tracker's
+	// Snapshot feeds /deploys, /deploy/{id} and their JSON/MCP mirrors;
+	// Retry/CancelCurrent back the two env-addressed mutating routes. Like
+	// servicesSnapshot above these can't be plain type conversions —
+	// deploy.Mode and core.Outcome are typed values the dashboard/MCP
+	// structs carry as strings — so dashboardDeployStatus/mcpDeployStatus
+	// convert field by field, keeping this the one place either package's
+	// deploy structs are built and neither one importing internal/deploy.
+	if dep.Snapshot != nil {
+		opts = append(opts, dashboard.WithDeploySnapshot(func() *dashboard.DeployStatus {
+			return dashboardDeployStatus(dep.Snapshot())
+		}))
+	}
+	if dep.Retry != nil {
+		opts = append(opts, dashboard.WithDeployRetry(dep.Retry))
+	}
+	if dep.Cancel != nil {
+		opts = append(opts, dashboard.WithDeployCancel(dep.Cancel))
+	}
+
 	// drain (main.go's beginDrain) backs POST /api/v1/drain; the lifecycle
 	// it produces is already in the Snapshot, so GET /api/v1/status needs
 	// no extra wiring (issue #8).
@@ -145,6 +185,12 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 			return mcpServicesStatus(servicesSnapshot())
 		}
 	}
+	if dep.Snapshot != nil {
+		mcpParams.DeploySnapshot = func() *gauntletmcp.DeployStatus {
+			return mcpDeployStatus(dep.Snapshot())
+		}
+	}
+	mcpParams.DeployRetry, mcpParams.DeployCancel = dep.Retry, dep.Cancel
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", gauntletmcp.New(mcpParams))
 	mux.Handle("/", dashboard.New(snapshot, store, opts...))
@@ -207,6 +253,112 @@ func mcpServicesStatus(ps services.PoolStatus) gauntletmcp.ServicesStatus {
 		})
 	}
 	return out
+}
+
+// dashboardDeployStatus converts a *deploy.Snapshot into
+// *dashboard.DeployStatus, field by field for the same reason
+// dashboardServicesStatus exists: deploy.Mode and core.Outcome are typed
+// values, the dashboard's mirror structs carry their string forms, and
+// internal/dashboard must not import internal/deploy just to render a lane.
+//
+// A nil snapshot (the tracker exists but no reconcile pass has published
+// yet) passes through as nil — the dashboard's own "no snapshot yet"
+// degradation, the same shape queue.Daemon.Snapshot has.
+func dashboardDeployStatus(snap *deploy.Snapshot) *dashboard.DeployStatus {
+	if snap == nil {
+		return nil
+	}
+	out := &dashboard.DeployStatus{At: snap.At, Lanes: make([]dashboard.DeployLane, 0, len(snap.Lanes))}
+	for _, l := range snap.Lanes {
+		lane := dashboard.DeployLane{
+			Env: l.Env, Mode: string(l.Mode), Source: l.Source,
+			SourceTip: l.SourceTip, Desired: l.Desired, Observed: l.Observed,
+			InSync: l.InSync, Drift: l.Drift, Pending: l.Pending,
+			LastAdvance: l.LastAdvance, LastError: l.LastError,
+		}
+		if r := l.Running; r != nil {
+			lane.Running = &dashboard.DeployRun{
+				RunID: r.RunID, DeploySHA: r.DeploySHA, DeployedSHA: r.DeployedSHA,
+				StartedAt: r.StartedAt, Nodes: append([]string(nil), r.Nodes...),
+			}
+		}
+		if p := l.Parked; p != nil {
+			lane.Parked = &dashboard.DeployPark{
+				SHA: p.SHA, RunID: p.RunID, Outcome: deployOutcomeString(p.Outcome),
+				Detail: p.Detail, At: p.At,
+			}
+		}
+		if lr := l.LastResult; lr != nil {
+			lane.LastResult = &dashboard.DeployResult{
+				RunID: lr.RunID, DeploySHA: lr.DeploySHA, DeployedSHA: lr.DeployedSHA,
+				Outcome: deployOutcomeString(lr.Outcome), Culprit: lr.Culprit, Detail: lr.Detail,
+				StartedAt: lr.StartedAt, EndedAt: lr.EndedAt,
+			}
+		}
+		out.Lanes = append(out.Lanes, lane)
+	}
+	return out
+}
+
+// mcpDeployStatus mirrors dashboardDeployStatus into gauntletmcp's own
+// structs — see that function's doc for why this can't be a plain type
+// conversion, and mcpServicesStatus for the precedent.
+func mcpDeployStatus(snap *deploy.Snapshot) *gauntletmcp.DeployStatus {
+	if snap == nil {
+		return nil
+	}
+	out := &gauntletmcp.DeployStatus{At: snap.At, Lanes: make([]gauntletmcp.DeployLane, 0, len(snap.Lanes))}
+	for _, l := range snap.Lanes {
+		lane := gauntletmcp.DeployLane{
+			Env: l.Env, Mode: string(l.Mode), Source: l.Source,
+			SourceTip: l.SourceTip, Desired: l.Desired, Observed: l.Observed,
+			InSync: l.InSync, Drift: l.Drift, Pending: l.Pending,
+			LastAdvance: l.LastAdvance, LastError: l.LastError,
+		}
+		if r := l.Running; r != nil {
+			lane.Running = &gauntletmcp.DeployRun{
+				RunID: r.RunID, DeploySHA: r.DeploySHA, DeployedSHA: r.DeployedSHA,
+				StartedAt: r.StartedAt, Nodes: append([]string(nil), r.Nodes...),
+			}
+		}
+		if p := l.Parked; p != nil {
+			lane.Parked = &gauntletmcp.DeployPark{
+				SHA: p.SHA, RunID: p.RunID, Outcome: deployOutcomeString(p.Outcome),
+				Detail: p.Detail, At: p.At,
+			}
+		}
+		if lr := l.LastResult; lr != nil {
+			lane.LastResult = &gauntletmcp.DeployResult{
+				RunID: lr.RunID, DeploySHA: lr.DeploySHA, DeployedSHA: lr.DeployedSHA,
+				Outcome: deployOutcomeString(lr.Outcome), Culprit: lr.Culprit, Detail: lr.Detail,
+				StartedAt: lr.StartedAt, EndedAt: lr.EndedAt,
+			}
+		}
+		out.Lanes = append(out.Lanes, lane)
+	}
+	return out
+}
+
+// deployOutcomeString renders a core.Outcome as the same lowercase word
+// history stores and every surface displays. Deliberately the RUN
+// vocabulary, not deploy prose ("deployed", "parked"): these strings are the
+// wire values dashboard/MCP consumers key on and history rows carry, and the
+// display translation happens at the rendering edge, once, per surface.
+func deployOutcomeString(o core.Outcome) string {
+	switch o {
+	case core.OutcomeLanded:
+		return "landed"
+	case core.OutcomeRejected:
+		return "rejected"
+	case core.OutcomeConflict:
+		return "conflict"
+	case core.OutcomeSkipped:
+		return "skipped"
+	case core.OutcomeError:
+		return "error"
+	default:
+		return "unknown"
+	}
 }
 
 // depthHeartbeat bounds how long a target's queue_depth series can go

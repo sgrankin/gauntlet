@@ -424,3 +424,151 @@ func TestLogChannel_CommandsNeverYields(t *testing.T) {
 		// expected: nothing arrived
 	}
 }
+
+// TestLogChannel_EventKindNames: every kind gauntlet actually emits has a
+// real name here. eventKindString's default renders "unknown(N)" so an
+// unnamed kind can never break Emit — which is precisely why one would
+// otherwise ship silently, greppable only as a number. The three deploy
+// kinds are this slice's addition; trial_merged and verified were genuinely
+// missing and are named here too.
+func TestLogChannel_EventKindNames(t *testing.T) {
+	want := map[core.EventKind]string{
+		core.EventQueued:             "queued",
+		core.EventTrialClean:         "trial_clean",
+		core.EventTrialConflict:      "trial_conflict",
+		core.EventTrialMerged:        "trial_merged",
+		core.EventCheckStarted:       "check_started",
+		core.EventCheckFinished:      "check_finished",
+		core.EventVerified:           "verified",
+		core.EventLanded:             "landed",
+		core.EventRejected:           "rejected",
+		core.EventSkipped:            "skipped",
+		core.EventError:              "error",
+		core.EventIgnoredRef:         "ignored_ref",
+		core.EventHookStarted:        "hook_started",
+		core.EventHookFinished:       "hook_finished",
+		core.EventHookSkipped:        "hook_skipped",
+		core.EventRetryRequested:     "retry_requested",
+		core.EventDeployStarted:      "deploy_started",
+		core.EventDeployNodeFinished: "deploy_node_finished",
+		core.EventDeployFinished:     "deploy_finished",
+	}
+	for kind, name := range want {
+		if got := eventKindString(kind); got != name {
+			t.Errorf("eventKindString(%d) = %q, want %q", int(kind), got, name)
+		}
+	}
+}
+
+// TestLogChannel_EmitDeployEvents: a deploy event is lane-addressed, so its
+// line is greppable by env= and sha= rather than by ref=/target=.
+func TestLogChannel_EmitDeployEvents(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   core.Event
+		want []string
+	}{
+		{
+			name: "started",
+			ev: core.Event{
+				Kind: core.EventDeployStarted, RunID: "deploy-1",
+				DeployEnv: "prod", DeploySHA: "e5f6a7b8c9d0e1f2", DeployedSHA: "9c0d1e2f3a4b5c6d",
+			},
+			want: []string{"kind=deploy_started", "env=prod", "sha=e5f6a7b8", "run=deploy-1"},
+		},
+		{
+			name: "node finished",
+			ev: core.Event{
+				Kind: core.EventDeployNodeFinished, RunID: "deploy-1", CheckName: "migrate",
+				DeployEnv: "prod", DeploySHA: "e5f6a7b8c9d0e1f2",
+				Check: &core.CheckResult{Name: "migrate", Status: core.CheckPassed, Duration: 22 * time.Second},
+			},
+			want: []string{"kind=deploy_node_finished", "env=prod", "check=migrate", "status=passed", "duration=22s"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c := NewLogChannel(&buf)
+			if err := c.Emit(context.Background(), tc.ev); err != nil {
+				t.Fatalf("Emit: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("line %q missing %q", buf.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestLogChannel_EmitDeployRecordSummary: the terminal deploy event renders
+// its carried record as a compact summary line — every declared node,
+// blocked rows included — followed by the failing node's output tail, the
+// same two-part treatment a run's terminal record gets.
+func TestLogChannel_EmitDeployRecordSummary(t *testing.T) {
+	started := time.Now().Add(-2 * time.Minute)
+	rec := &core.DeployRecord{
+		RunID: "deploy-9", Env: "prod2",
+		DeploySHA: "e5f6a7b8c9d0", DeployedSHA: "9c0d1e2f3a4b",
+		Nodes: []core.CheckResult{
+			{Name: "migrate", Status: core.CheckFailed, Duration: 24 * time.Second, Output: "line one\nlock wait timeout"},
+			{Name: "app1", Status: core.CheckBlocked, BlockedBy: []string{"migrate"}},
+		},
+		Outcome: core.OutcomeRejected, Culprit: "migrate", Detail: "migrate failed",
+		StartedAt: started, EndedAt: started.Add(24 * time.Second),
+	}
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), core.Event{
+		Kind: core.EventDeployFinished, RunID: rec.RunID,
+		DeployEnv: rec.Env, DeploySHA: rec.DeploySHA, DeployedSHA: rec.DeployedSHA,
+		Deploy: rec,
+	}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"kind=deploy_finished", "deploy=deploy-9", "env=prod2", "outcome=rejected",
+		"sha=e5f6a7b8", "from=9c0d1e2f",
+		"migrate=failed(24s)", "app1=blocked(0s)",
+		"culprit=migrate", `detail="migrate failed"`,
+		"    | lock wait timeout",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered deploy record %q missing %q", out, want)
+		}
+	}
+}
+
+// TestLogChannel_EmitDeployRecordGreenHasNoFailureBlock: a green graph run
+// summarizes and stops — there is no failing node to tail.
+func TestLogChannel_EmitDeployRecordGreenHasNoFailureBlock(t *testing.T) {
+	started := time.Now().Add(-time.Minute)
+	rec := &core.DeployRecord{
+		RunID: "deploy-ok", Env: "dev", DeploySHA: "abcdef012345",
+		Nodes: []core.CheckResult{
+			{Name: "migrate", Status: core.CheckPassed, Duration: time.Second, Output: "noisy but fine"},
+			{Name: "app1", Status: core.CheckSkipped, Output: "no diff"},
+		},
+		Outcome: core.OutcomeLanded, StartedAt: started, EndedAt: started.Add(time.Second),
+	}
+	var buf bytes.Buffer
+	c := NewLogChannel(&buf)
+	if err := c.Emit(context.Background(), core.Event{
+		Kind: core.EventDeployFinished, RunID: rec.RunID,
+		DeployEnv: rec.Env, DeploySHA: rec.DeploySHA, Deploy: rec,
+	}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "outcome=landed") {
+		t.Errorf("rendered %q, want outcome=landed", out)
+	}
+	if strings.Contains(out, "    | ") {
+		t.Errorf("rendered %q, want no failure block for an all-green graph", out)
+	}
+	if strings.Contains(out, "from=") {
+		t.Errorf("rendered %q, want no from= for a first-ever deploy (empty DeployedSHA)", out)
+	}
+}

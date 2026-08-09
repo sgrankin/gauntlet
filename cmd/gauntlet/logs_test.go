@@ -89,3 +89,35 @@ func TestPruneLogFiles_IgnoresNonDirectoryEntries(t *testing.T) {
 		t.Errorf("stray file %s removed (err=%v), want left alone (not a directory)", strayFile, err)
 	}
 }
+
+// TestPruneLogFiles_SweepsDeployRunDirs: deploy node logs live under
+// <logDir>/<deployRunID>/<seq>-<node>.log.zst — the same per-run directory
+// layout a candidate run's checks use, deliberately, so the existing
+// retention sweep covers them with no knowledge that deploys exist at all
+// (internal/deploy's nodeLogPath). This is the test that would fail if a
+// later change gave deploy logs a directory shape of their own (a nested
+// deploys/ root, say), silently exempting them from retention.
+func TestPruneLogFiles_SweepsDeployRunDirs(t *testing.T) {
+	logDir := t.TempDir()
+	now := time.Now()
+	cutoff := now.Add(-30 * 24 * time.Hour)
+
+	// The real ID shape internal/deploy mints: deploy-<utc>-<seq>-<env>-<sha12>.
+	oldDeploy := mkLogDir(t, logDir, "deploy-20260709T101112Z-4-prod-e5f6a7b8c9d0", cutoff.Add(-time.Hour))
+	freshDeploy := mkLogDir(t, logDir, "deploy-20260805T101112Z-9-prod-9c0d1e2f3a4b", cutoff.Add(time.Hour))
+	oldRun := mkLogDir(t, logDir, "20260709T101112Z-4-aabbccdd", cutoff.Add(-time.Hour))
+
+	if err := pruneLogFiles(logDir, cutoff); err != nil {
+		t.Fatalf("pruneLogFiles: %v", err)
+	}
+
+	if _, err := os.Stat(oldDeploy); !os.IsNotExist(err) {
+		t.Errorf("old deploy log dir %s survived the sweep (err=%v)", oldDeploy, err)
+	}
+	if _, err := os.Stat(oldRun); !os.IsNotExist(err) {
+		t.Errorf("old run log dir %s survived the sweep (err=%v)", oldRun, err)
+	}
+	if _, err := os.Stat(freshDeploy); err != nil {
+		t.Errorf("fresh deploy log dir %s was swept: %v", freshDeploy, err)
+	}
+}
