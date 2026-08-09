@@ -405,6 +405,83 @@ pusher.
 > rollback, promotion, and re-deploy are ref pushes; approval is branch
 > protection; crash recovery is rescan (Invariant 4).
 
+## Implementation plan
+
+Four phases, each independently landable through the merge queue, each
+inert until the next is ready: a daemon config with no `deploy` block
+stays **byte-identical to today** at every phase — the standing pattern
+for every optional subsystem. The deploy machinery lives in a new
+`internal/deploy` package, a sibling of `internal/hooks` (operator-driven
+runner consuming `core`/`gitx`/`executor` interfaces), never inside
+`internal/queue` — the queue core stays a merge queue (Invariant 8's
+spirit: the deploy subsystem sees the same interfaces channels and
+executors do).
+
+**Phase D1 — config and ref plumbing, nothing executes.**
+`internal/config`: `deploy` nodes in the repo spec (`checks.go` — name,
+command, `after`, `executor`, with the existing graph validation and
+known-profile gates) and the daemon `deploy { environment ... }` block
+(`daemon.go` — source branch/`env=`, `track`, `nodes`, `max-parallel`,
+`on-desired-move`; cycle detection over `env=` sources at load).
+`internal/gitx`: fetch coverage for `refs/gauntlet/deployed/*` alongside
+the existing refspec, CAS helpers reused as-is. `internal/deploy`: the
+**tracker** only — derive lane state from refs each tick, advance tracked
+desired refs (branch and `env=` sources), Snapshot fields. Tests: config
+rejection tables; a deploy testscript harness skeleton (fake-git and
+real-git Setups over one Cmds set, the `script_test.go` pattern) with
+scenarios asserting only ref movement. Smallest phase; proves the ref
+model end-to-end against a real remote before any command runs.
+
+**Phase D2 — graph execution.** The risky seam, taken deliberately: the
+node-graph scheduler (ready = `after` edges green, spec-order starts
+under caps, fail-fast culprit, blocked rows, `waited_ms`) currently lives
+woven into `internal/queue`'s run machinery (`reconcile.go`). Lift it
+into a reusable component (`internal/core` or a new `internal/graph`)
+that queue checks, image builds, and deploy nodes all drive — guarded by
+the existing queue scenario suite, whose event streams must stay
+**byte-identical** across the extraction (the suite exists precisely to
+make refactors like this provable; if extraction proves invasive, the
+fallback recorded here is a parallel minimal scheduler in
+`internal/deploy` and a later unification, accepting temporary
+duplication over destabilizing the queue). Then the lane runner: export
+of the desired revision (reuse `ExportTree` + workspace policy + mtimes),
+`GAUNTLET_DEPLOY_*` env, result-file skip protocol, candidate-code
+secret-stripping, GC pins, observed-ref CAS advance on all-green, parks +
+retry + auto-retry-once, `on-desired-move` finish/cancel, drain
+integration (a draining daemon finishes in-flight graphs like it
+finishes hook backlogs — no new admission). Events
+(`EventDeployStarted`/`NodeFinished`/`Finished`) land **contract-tests
+first** — event shapes are the standing soft underbelly. Scenario tests:
+migrate→apps green path, culprit+blocked, skip-advances-observed,
+mid-graph desired move under both policies, crash-restart re-run,
+cancel.
+
+**Phase D3 — record and surfaces.** `internal/history`: schema vNN with
+`deploys` + `deploy_nodes` tables (efficiency-only, per the ledger); log
+files under `<state>/logs/deploy-<id>/<node>.log.zst` inside the existing
+retention sweep. Dashboard: `/deploys` and `/deploy/{id}` per the
+mockup, nav entry, morph refresh. API/MCP: `GET /api/v1/deploys`,
+`GET /api/v1/deploy/{id}`, `POST /api/v1/deploy/{retry,cancel}` + MCP
+mirrors (env-addressed, the hook-cancel out-of-band precedent). Slack
+root-per-run posting; `ghstatus` deliberately ignores deploy events
+(the same CD-boundary stance it takes on hooks). OTel: `gauntlet.deploy`
+span tree + node terminal metrics (env/node/outcome attributes only —
+config/spec-bounded cardinality). The idle signal composes deploy
+activity exactly as it composes hooks (scaling.md's scale-to-zero
+depends on it).
+
+**Phase D4 — porcelain and docs.** `gauntlet deploy` / `gauntlet promote`
+(the `land.go` pattern: thin CAS-push porcelain, no daemon round-trip);
+docs/config.md and docs/checks.md reference sections; README; the
+branch-protection recipe for `deploy/*` in docs/setup.md; and the
+DESIGN.md ledger amendment above, ratified as part of the final landing.
+
+Watch items going in: the scheduler extraction (D2) is where the plan
+bends — decide extract-vs-parallel within the first spike, not after;
+observed-ref fetch must not disturb `Fetch`'s refspec-derived queue-state
+invariants (pins survived this, trial refs survived this, same care);
+and drain/idle integration is easy to forget and cheap to test early.
+
 ## Open questions
 
 Three earlier questions were resolved in the 2026-08-09 review and folded
