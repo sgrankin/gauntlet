@@ -111,7 +111,12 @@ func openTestStore(t *testing.T) *history.Store {
 }
 
 func sampleRecord(runID, target string) *core.RunRecord {
-	started := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
+	// Relative to now, never a fixed date: these records feed CheckStats'
+	// rolling since-window (the checks tool queries 720h), so a pinned
+	// calendar date silently ages out of the window and the stats
+	// assertions go empty — which is exactly how this helper's original
+	// 2026-07-05 seed broke a month after it was written.
+	started := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 	return &core.RunRecord{
 		RunID:  runID,
 		Target: target,
