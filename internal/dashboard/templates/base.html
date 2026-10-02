@@ -6,229 +6,158 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {{if .Refresh}}<noscript><meta http-equiv="refresh" content="5"></noscript>{{end}}
 <title>{{.Title}} · gauntlet</title>
+<script>
+function gauntletSetColorMode(mode) {
+  if (mode === 'light' || mode === 'dark') document.documentElement.setAttribute('data-theme', mode);
+  else document.documentElement.removeAttribute('data-theme');
+}
+var gauntletColorMode = 'system';
+try { gauntletColorMode = localStorage.getItem('gauntlet:color-mode') || 'system'; } catch (e) {}
+if (['system', 'light', 'dark'].indexOf(gauntletColorMode) < 0) gauntletColorMode = 'system';
+gauntletSetColorMode(gauntletColorMode);
+</script>
 <style>
 :root {
-  color-scheme: light dark;
-  /* Page background is the soft gray, --card the white content surface —
-     inverted from this pair's own names because --bg is also what
-     pre.output (below) paints itself with: a captured-output block wants to
-     read as recessed relative to whatever card contains it, and the one
-     variable already meaning "the surface behind everything" is exactly the
-     right value for that, in light mode as much as dark. */
-  --bg: #f6f8fa;
-  --fg: #1b1f23;
-  --muted: #656d76;
-  --border: #d0d7de;
+  color-scheme: light;
+  --bg: #ffffff;
   --card: #ffffff;
-  --ok: #1a7f37;
-  --bad: #cf222e;
-  --warn: #9a6700;
+  --fg: #000000;
+  --muted: #424242;
+  --border: #000000;
+  --accent: #000000;
+  --ok: #22622c;
+  --bad: #a00000;
+  --warn: #765400;
   --conflict: #bc4c00;
   --error: #8250df;
-  --neutral: #656d76;
-  --accent: #0969da;
+  --neutral: #555555;
+  --desktop: #aaaaaa;
+  --desktop-pattern: repeating-conic-gradient(#aaa 0% 25%, #bbb 0% 50%);
+  --bar: #eeeeee;
+  --inactive-tab: #d8d8d8;
+  --rule: #cccccc;
+  --output: #ffffff;
+  --shadow: #000000;
+  --face: Geneva, Chicago, Arial, sans-serif;
+  --title-glow: none;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    /* Unchanged by the light-mode --bg/--card inversion above: dark mode
-       already had --card lighter than --bg (a card standing out by being
-       brighter, not darker, than the page it sits on) — the same visual
-       relationship light mode now also has, just reached from the opposite
-       direction (card lighter vs. card whiter). */
-    --bg: #0d1117;
-    --fg: #e6edf3;
-    --muted: #9198a1;
-    --border: #30363d;
-    --card: #161b22;
-    --ok: #3fb950;
-    --bad: #f85149;
-    --warn: #d29922;
-    --conflict: #e0812c;
-    --error: #a371f7;
-    --neutral: #9198a1;
-    --accent: #58a6ff;
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #15110b;
+    --card: #15110b;
+    --fg: #ffd28a;
+    --muted: #bb9762;
+    --border: #856333;
+    --accent: #ffcf80;
+    --ok: #e1b86e;
+    --bad: #ff9876;
+    --warn: #ffd86c;
+    --conflict: #ffb267;
+    --error: #d4a9be;
+    --neutral: #bb9762;
+    --desktop: #0b0906;
+    --desktop-pattern: none;
+    --bar: #211a10;
+    --inactive-tab: #19140d;
+    --rule: #433522;
+    --output: #100d08;
+    --shadow: #050402;
+    --face: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    --title-glow: 0 0 8px #e7a44925;
   }
 }
-* { box-sizing: border-box; }
-body {
-  background: var(--bg);
-  color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  margin: 0;
-  padding: 1.5rem;
-  line-height: 1.4;
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #15110b;
+  --card: #15110b;
+  --fg: #ffd28a;
+  --muted: #bb9762;
+  --border: #856333;
+  --accent: #ffcf80;
+  --ok: #e1b86e;
+  --bad: #ff9876;
+  --warn: #ffd86c;
+  --conflict: #ffb267;
+  --error: #d4a9be;
+  --neutral: #bb9762;
+  --desktop: #0b0906;
+  --desktop-pattern: none;
+  --bar: #211a10;
+  --inactive-tab: #19140d;
+  --rule: #433522;
+  --output: #100d08;
+  --shadow: #050402;
+  --face: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  --title-glow: 0 0 8px #e7a44925;
 }
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-header { margin-bottom: 1.5rem; }
-header nav a { margin-right: 1rem; font-size: .9rem; }
-h1 { font-size: 1.3rem; margin: .3rem 0 0; }
-h2 { font-size: 1.05rem; margin: 0 0 .3rem; }
-table { border-collapse: collapse; width: 100%; }
-th, td { padding: .35rem .6rem; border-bottom: 1px solid var(--border); text-align: left; font-size: .88rem; vertical-align: top; }
-th { color: var(--muted); font-weight: 600; }
-/* .table-scroll wraps every <table> in the templates (mobile overflow
-   fix): a nowrap cell (SHA, run ID, timestamp) has an unbreakable min-content
-   width, so on a narrow viewport the table as a whole wants to be wider than
-   its container — without this wrapper that pressure bubbles up to <body>
-   and the WHOLE PAGE scrolls sideways. overflow-x:auto here catches that
-   growth at the table's own box instead: the table is free to be wider than
-   the wrapper, and only the wrapper's contents scroll to reveal it. This
-   only works because `table` above stays width:100% (never a min-width) —
-   auto table layout still respects each cell's min-content size and grows
-   past 100% of a 100%-width table when a nowrap cell demands it; a table
-   fighting to StAY at exactly 100% would instead be forced to shrink those
-   cells, which is what used to make a starved SHA cell (mono +
-   overflow-wrap:anywhere, see .nowrap's own doc below) shatter character-by-
-   character instead of overflowing cleanly.
-   Doubles as this pass's "tables read as being on a white surface" fix:
-   border/background/radius mirror .card, so a table becomes its own content
-   surface on the gray page rather than sitting flush on the body background. */
-.table-scroll { overflow-x: auto; border: 1px solid var(--border); background: var(--card); border-radius: 8px; margin: .5rem 0 1rem; }
-.table-scroll table { margin: 0; }
-.card { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; min-width: 0; overflow-wrap: anywhere; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
-.grid > * { min-width: 0; }
-.tag { display: inline-block; padding: .05rem .5rem; border-radius: 1rem; font-size: .78rem; font-weight: 600; border: 1px solid currentColor; }
-.tag.ok { color: var(--ok); }
-.tag.bad { color: var(--bad); }
-.tag.warn { color: var(--warn); }
-.tag.neutral { color: var(--neutral); }
-/* .tag.accent: an IN-PROGRESS state ("deploying"), deliberately not .ok —
-   green reads as "done" at a glance, which is the one thing a deploy still
-   running must never say. */
-.tag.accent { color: var(--accent); }
+* { box-sizing: border-box; }
+html { min-height: 100%; background: var(--desktop-pattern) 0 0 / 4px 4px, var(--desktop); }
+body { max-width: 1120px; margin: 24px auto; padding: 18px 20px; border: 2px solid var(--border); box-shadow: 4px 4px 0 var(--shadow); background: var(--bg); color: var(--fg); font: 14px/1.5 var(--face); }
+a { color: var(--accent); text-decoration: underline; }
+a:hover { text-decoration: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+h1 { margin: 0; font-size: 16px; overflow-wrap: anywhere; text-shadow: var(--title-glow); }
+h2 { margin: 0 0 8px; font-size: 15px; }
+p { margin: 12px 0; }
+header { margin: -18px -20px 20px; }
+.titlebar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 5px 12px; background: var(--bar); border-bottom: 2px solid var(--border); }
+.titlebar h1 { flex: 1; text-align: center; }
+.appearance { font-size: 12px; }
+.appearance label { display: flex; align-items: center; gap: 6px; }
+select { color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 3px; font: inherit; padding: 3px 5px; }
+nav { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 6px; padding: 10px 20px 0; background: var(--bar); border-bottom: 1px solid var(--border); }
+nav a { margin-bottom: -1px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px 4px 0 0; background: var(--inactive-tab); color: var(--muted); text-decoration: none; }
+nav a:hover { background: var(--bg); color: var(--fg); }
+nav a[aria-current="page"] { background: var(--bg); color: var(--fg); border-bottom-color: var(--bg); font-weight: 700; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 18px; }
+.card { padding: 14px; border: 1px solid var(--border); background: var(--card); box-shadow: 2px 2px 0 var(--shadow); }
+.card h2 { padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.section { margin-bottom: 28px; }
 .muted { color: var(--muted); }
-code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
-footer { margin-top: 2rem; }
-.section { margin-bottom: 1.5rem; }
-/* nowrap: run IDs (e.g. 20260705T224731Z-5-bb12231a0a65), formatted
-   timestamps, and short SHAs (<code>, which is mono + overflow-wrap:anywhere
-   below) all contain characters a table cell will otherwise wrap or break on
-   at awkward points — applied directly to the cell or link, not to <table>
-   generally, since plenty of other columns (topic, reason) should still
-   wrap. Combined with .table-scroll above, this is also the mobile-overflow
-   fix for SHA cells specifically: without white-space:nowrap, a starved
-   narrow cell lets overflow-wrap:anywhere break the SHA one character per
-   line (vertical "shattering"); nowrap forbids any break at all, which
-   pushes the table past 100% width instead — exactly what .table-scroll
-   exists to catch with a horizontal scrollbar rather than letting it
-   shatter or bleed into the page. */
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; overflow-wrap: anywhere; }
 .nowrap { white-space: nowrap; }
-
-/* --- status chips: shared between /, /t/{target} and /run/{id} ---------
-   A chip is always a small solid-fill square, never text (bullet 5's
-   "filled squares without text" option) — the human-readable word, when
-   one is needed (e.g. a check's status in its <details> summary), sits in
-   ordinary text next to it rather than inside it, so chip contrast never
-   has to be separately tuned per color per color-scheme. */
-/* flex:none keeps a chip from being squeezed to nothing inside the flex
-   containers .chips/.node place it in (a chip is a fixed-size square, never
-   a shrinkable one). */
-.chip { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; vertical-align: text-bottom; flex: none; }
-.chip-ok { background: var(--ok); }
-.chip-bad { background: var(--bad); }
-.chip-warn { background: var(--warn); }
-.chip-conflict { background: var(--conflict); }
-.chip-error { background: var(--error); }
-.chip-neutral { background: var(--neutral); }
-/* chip-running: a node executing RIGHT NOW (/deploys' live cards). The pulse
-   is the only motion on this dashboard and it is load-bearing — "in flight"
-   vs. "finished" is the distinction the deploys page exists to make — but it
-   is also exactly the kind of motion a vestibular disorder reacts to, hence
-   the reduced-motion opt-out below, which keeps the (accent-colored,
-   distinct) chip and drops only the animation. */
+.table-scroll { overflow-x: auto; border: 1px solid var(--border); box-shadow: 2px 2px 0 var(--shadow); }
+table { width: 100%; border-collapse: collapse; text-align: left; }
+th, td { padding: 7px 10px; vertical-align: top; }
+th { background: var(--bar); border-bottom: 1px solid var(--border); color: var(--muted); }
+td { border-bottom: 1px solid var(--rule); }
+tr:last-child td { border-bottom: 0; }
+.tag { display: inline-block; padding: 0 .35em; font-size: .85em; font-weight: 600; border: 1px solid currentColor; text-decoration: none; }
+.tag.ok { color: var(--ok); } .tag.bad { color: var(--bad); } .tag.warn { color: var(--warn); }
+.tag.neutral { color: var(--neutral); } .tag.accent { color: var(--accent); }
+.chip { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--border); vertical-align: text-bottom; flex: none; }
+.chip-ok { background: var(--ok); } .chip-bad { background: var(--bad); } .chip-warn { background: var(--warn); }
+.chip-conflict { background: var(--conflict); } .chip-error { background: var(--error); } .chip-neutral { background: var(--neutral); }
 .chip-running { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.chip-blocked { background: transparent; border: 2px dashed var(--muted); }
+.chip-batched { box-shadow: 0 0 0 2px var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.check-ratio { margin-left: .3rem; font-variant-numeric: tabular-nums; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .chip-running { animation: none; } }
-/* chip-blocked: a node that never ran because a prerequisite failed. Outlined
-   rather than filled, because it has no verdict of its own to color — filling
-   it would attribute a failure to the wrong node. */
-.chip-blocked { background: transparent; border: 2px dashed var(--muted); }
-/* chip-batched: a thin ring around a chip whose run landed as part of a
-   batch — enough to read the strip as visually grouped without a
-   redesign; the ring color is deliberately neutral (not tied to outcome)
-   so it layers over any chip-<class> fill. */
-.chip-batched { box-shadow: 0 0 0 2px var(--accent); }
-.chips { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; min-width: 0; }
-/* .check-ratio: the compact "✓ passed/total" next to a run's outcome chip
-   on target.html's Recent runs table only — index.html's bare chip strip
-   never renders this (see runSummary.CheckRatio's doc: a chip there is a
-   filled square, never text, by design). tabular-nums keeps the digits from
-   jittering width as different rows show 1-2 vs 10+ checks. */
-.check-ratio { margin-left: .3rem; font-variant-numeric: tabular-nums; }
-
-/* --- pipeline stacked list (/t/{target}) --------------------------------- */
 .pipeline-run { border-top: 1px solid var(--border); padding-top: .6rem; margin-top: .6rem; }
-.pipeline-run:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.pipeline-run:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
 .pipeline-members { margin: .2rem 0 .4rem; padding-left: 1.2rem; }
-
-/* --- per-check output (/run/{id}) --------------------------------------- */
-/* .checklist is carded like .table-scroll above (gray-page/white-card pass):
-   border/background/radius mirror .card, so the whole check list reads as
-   one content surface rather than sitting flush on the body. This is also
-   why pre.output's own var(--bg) background (below) reads as "recessed" —
-   it's --bg (the page's own gray) nested inside this white --card box, the
-   same relation a native inset panel has to its dialog. padding is
-   horizontal only: each .check-row still owns its own vertical padding/
-   border-bottom, so the card's padding here only needs to keep row content
-   off the card's own left/right border. */
-.checklist { margin: .5rem 0 1rem; border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 0 .8rem; }
-/* .check-row is the one shared "row" box, whichever element carries it: a
-   plain <div class="check-row"> (no output) or a <details class="check-row">
-   (has output, run.html) — the padding/border-bottom belongs to that outer
-   box either way, so a collapsed details row measures identically to a
-   plain div row, and an expanded one still puts its bottom border AFTER the
-   <pre class="output"> (the details box encloses both summary and pre),
-   not in between them. Giving the SAME rule to <summary> too (the previous
-   shape of this CSS) doubles both the border and the padding on the details
-   element, which owns them once already as its parent box — that was the
-   double-border/indent bug this rule fixes. summary itself only needs its
-   own display/cursor/marker treatment now, no box of its own. */
-.check-row { display: block; padding: .4rem .2rem; border-bottom: 1px solid var(--border); font-size: .88rem; }
-/* The last row's own border-bottom would otherwise sit right on top of
-   .checklist's now-added bottom border (a thin double line) — every row
-   above it still wants the separator, just not the final one. */
-.checklist .check-row:last-child { border-bottom: none; }
+.checklist { margin: .5rem 0 1rem; border: 1px solid var(--border); background: var(--card); padding: 0 .8rem; box-shadow: 2px 2px 0 var(--shadow); }
+.check-row { display: block; padding: 11px 2px; border-bottom: 1px solid var(--rule); font-size: .95em; }
+.checklist .check-row:last-child { border-bottom: 0; }
 details.check-row summary { display: block; cursor: pointer; }
-details.check-row summary::marker { color: var(--muted); }
-/* The inner wrapper aligns the check name and metadata; summary owns the disclosure. */
-.check-summary-line { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
+.check-summary-line { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: .6rem; }
 .check-summary-name { min-width: 0; overflow-wrap: anywhere; }
-.check-summary-meta { white-space: nowrap; flex: none; }
-pre.output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .6rem; margin: .3rem 0 .6rem; overflow-x: auto; overflow-y: auto; max-height: 30em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; white-space: pre; }
-/* .check-command: the check's argv, echoed above its output (v8,
-   command-echo). Sized/backgrounded like pre.output but flattened on the
-   bottom edge and glued to it via the adjacent-sibling rule below, so the
-   two read as one bordered box with a colored command line on top — the
-   tangled pipeline-log look. The adjacent-sibling selector (rather than e.g.
-   a shared wrapper div) means a check whose Command is "" (a pre-v8 row)
-   renders no .check-command element at all and pre.output silently keeps
-   its normal fully-rounded standalone box — no empty header bar, no dangling
-   flattened corner. overflow-x:auto + white-space:pre so a long command
-   scrolls in its own box exactly like pre.output does, never the page. */
-.check-command { background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-bottom: none; border-radius: 6px 6px 0 0; margin: .3rem 0 0; padding: .5rem .6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; overflow-x: auto; white-space: pre; }
-.check-command + pre.output { border-top: none; border-radius: 0 0 6px 6px; margin-top: 0; }
-
-/* --- deploy pages (/deploys, /deploy/{id}) -------------------------------- */
-/* .nodes/.node/.node-meta: the per-node status strip on an environment card
-   — one row per node, chip + name left, muted annotation pushed right by
-   margin-left:auto (rather than justify-content:space-between, so a long
-   node name wraps against the annotation instead of stretching away from
-   it). */
+.check-summary-meta { flex: none; }
+details.check-row summary .check-summary-name::before { content: "›"; display: inline-block; width: .8rem; color: var(--muted); }
+details.check-row[open] summary .check-summary-name::before { content: "⌄"; }
+pre.output, .check-command { background: var(--output); border: 1px solid var(--border); padding: .6rem; margin: .3rem 0 .6rem; overflow-x: auto; font: .9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }
+pre.output { overflow-y: auto; max-height: 30em; }
+.check-command { color: var(--accent); border-bottom: 0; margin-bottom: 0; }
+.check-command + pre.output { border-top: 0; margin-top: 0; }
 .nodes { display: flex; flex-direction: column; gap: .25rem; margin: .5rem 0; }
-.node { display: flex; align-items: baseline; gap: .45rem; font-size: .88rem; }
+.node { display: flex; align-items: baseline; flex-wrap: wrap; gap: .45rem; font-size: .95em; }
 .node .chip { align-self: center; }
-.node-meta { margin-left: auto; color: var(--muted); font-size: .8rem; white-space: nowrap; }
-/* .shaline: observed → desired, or the single revision an in-sync lane runs.
-   Wraps rather than overflowing: two 12-char SHAs plus an arrow do not fit a
-   280px card column on a phone. */
-.shaline { display: flex; align-items: baseline; gap: .4rem; flex-wrap: wrap; font-size: .88rem; }
+.node-meta { margin-left: auto; color: var(--muted); font-size: .9em; }
+.shaline { display: flex; align-items: baseline; gap: .4rem; flex-wrap: wrap; }
 .shaline .arrow { color: var(--muted); }
-/* .flow-scroll catches the source-chain SVG's own width the way .table-scroll
-   catches a wide table's: the strip grows with the environment count, and
-   that growth must scroll inside its own box rather than making <body>
-   scroll sideways. */
 .flow-scroll { overflow-x: auto; }
 .source-chain { display: block; }
 .chain-node { fill: var(--card); stroke: var(--border); }
@@ -236,77 +165,61 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 .chain-edge-label { fill: var(--muted); font-size: 10px; }
 .chain-label { fill: var(--fg); font-size: 12.5px; font-weight: 600; }
 .chain-sub { font-size: 9.5px; }
-/* .headrow/.actions: a card or page heading with its status tag (or its
-   action buttons) pushed to the opposite edge, wrapping onto its own line
-   when the two can't share one. */
 .headrow { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .headrow h2 { margin: 0; }
-.actions { display: flex; gap: .5rem; }
-/* .kv: the deploy detail page's header facts. A definition list rather than
-   the <table> the run page uses, because these are label/value pairs with no
-   column semantics — and the grid keeps the labels a single shared width
-   without a table's layout rules. */
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: .15rem 1rem; font-size: .88rem; margin: .5rem 0 1rem; }
+.actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: .15rem 1rem; font-size: .95em; margin: .5rem 0 1rem; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-/* .btn: the dashboard's first buttons (deploy retry/cancel). Border/accent
-   voice borrowed from the existing link and card treatment rather than
-   introducing a filled-button style the rest of the UI has no use for. */
-.btn { display: inline-block; border: 1px solid var(--border); background: var(--card); color: var(--accent); border-radius: 6px; padding: .25rem .75rem; font-size: .85rem; font-weight: 600; font-family: inherit; cursor: pointer; }
+.btn { display: inline-block; border: 2px solid var(--border); background: var(--bar); color: var(--fg); border-radius: 4px; box-shadow: 1px 1px 0 var(--shadow); padding: 3px 12px; font: 600 .9em var(--face); cursor: pointer; }
 .btn:hover { border-color: var(--accent); }
-.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:active { background: var(--fg); color: var(--bg); box-shadow: none; }
 .btn[disabled] { color: var(--muted); cursor: not-allowed; }
-.btn.danger { color: var(--bad); }
-.btn.danger:hover { border-color: var(--bad); }
-
-/* --- queue-depth chart (/checks) ----------------------------------------- */
-.depth-chart { background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 100%; height: auto; }
+.btn.danger { color: var(--bad); } .btn.danger:active { color: var(--bg); }
+.depth-chart { background: var(--card); border: 1px solid var(--border); max-width: 100%; height: auto; }
 .depth-axis { stroke: var(--border); stroke-width: 1; }
-.depth-label { fill: var(--muted); font-size: 9px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.depth-label { fill: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .depth-waiting { fill: none; stroke: var(--accent); stroke-width: 2; }
 .depth-inflight { fill: none; stroke: var(--ok); stroke-width: 2; }
 .depth-parked { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 3 2; }
-.legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 2px; margin: 0 .3rem 0 .9rem; vertical-align: middle; }
+.legend-dot { display: inline-block; width: .7rem; height: .7rem; margin: 0 .3rem 0 .9rem; vertical-align: middle; }
 .legend-dot:first-child { margin-left: 0; }
-.legend-dot.waiting { background: var(--accent); }
-.legend-dot.inflight { background: var(--ok); }
-.legend-dot.parked { background: var(--muted); }
-
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-nav a[aria-current="page"] { font-weight: 700; text-decoration: underline; }
+.legend-dot.waiting { background: var(--accent); } .legend-dot.inflight { background: var(--ok); } .legend-dot.parked { background: var(--muted); }
+footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; }
 .skip-link { position: absolute; top: -5rem; padding: .5rem; background: var(--card); z-index: 10; }
 .skip-link:focus { top: .5rem; }
-.js-only { display: none; } .js .js-only { display: flex; }
-.js-action { display: none; } .js .js-action { display: inline-block; }
-.live-controls { align-items: center; flex-wrap: wrap; gap: .5rem; font-size: .8rem; }
-.live-status { color: var(--muted); }
-.live-status[data-state="error"] { color: var(--bad); }
-.feedback { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); max-width: calc(100% - 2rem); width: max-content; border: 1px solid var(--border); border-left: 4px solid var(--ok); border-radius: 6px; background: var(--card); padding: .7rem 1rem; z-index: 5; box-shadow: 0 2px 12px #0002; }
-.feedback[data-state="error"] { border-left-color: var(--bad); }
-.feedback[hidden] { display: none; }
+.js-only, .js-action { display: none; } .js .js-only { display: flex; } .js .js-action { display: inline-block; }
+.live-controls { justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: 18px; font-size: 12px; }
+.live-status { color: var(--muted); } .live-status[data-state="error"] { color: var(--bad); }
+.feedback { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); max-width: calc(100% - 2rem); width: max-content; border: 1px solid var(--border); border-left: 4px solid var(--ok); background: var(--card); padding: .7rem 1rem; z-index: 5; box-shadow: 2px 2px 0 var(--shadow); }
+.feedback[data-state="error"] { border-left-color: var(--bad); } .feedback[hidden] { display: none; }
 .feedback button { margin-left: .6rem; }
-.check-summary-line { flex-wrap: wrap; }
-.check-summary-meta { white-space: normal; }
-.actions { flex-wrap: wrap; }
-h1 { overflow-wrap: anywhere; }
-details.check-row summary .check-summary-name::before { content: "›"; display: inline-block; width: .8rem; color: var(--muted); }
-details.check-row[open] summary .check-summary-name::before { content: "⌄"; }
-@media (max-width: 600px) { body { padding: 1rem; } .grid { grid-template-columns: minmax(0, 1fr); } .btn { min-height: 36px; } }
+@media (max-width: 600px) {
+  body { margin: 12px 8px; padding: 14px 12px; }
+  header { margin: -14px -12px 16px; }
+  nav { padding: 10px 12px 0; }
+  .grid { grid-template-columns: minmax(0, 1fr); }
+  .btn, select { min-height: 36px; }
+  .titlebar h1 { flex-basis: 100%; }
+  .appearance { margin-left: auto; }
+  th, td { padding: 7px 8px; }
+}
 </style>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 <header>
-<nav aria-label="Main navigation"><a href="/"{{if eq .Nav "targets"}} aria-current="page"{{end}}>targets</a><a href="/checks"{{if eq .Nav "checks"}} aria-current="page"{{end}}>checks</a>{{if .HasDeploys}}<a href="/deploys"{{if eq .Nav "deploys"}} aria-current="page"{{end}}>deploys</a>{{end}}</nav>
-<div class="headrow">
+<div class="titlebar">
 <h1>{{.Title}}</h1>
+<div id="appearance" class="appearance js-only"><label>Theme <select id="color-mode"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark · amber</option></select></label></div>
+</div>
+<nav aria-label="Main navigation"><a href="/"{{if eq .Nav "targets"}} aria-current="page"{{end}}>Targets</a><a href="/checks"{{if eq .Nav "checks"}} aria-current="page"{{end}}>Checks</a>{{if .HasDeploys}}<a href="/deploys"{{if eq .Nav "deploys"}} aria-current="page"{{end}}>Deployments</a>{{end}}</nav>
+</header>
 {{if .Refresh}}<div id="live-controls" class="live-controls js-only">
 <span id="live-status" class="live-status" role="status">Live · every 5s</span>
 <button class="btn" type="button" id="pause-updates" aria-pressed="false">Pause updates</button>
 <button class="btn" type="button" id="refresh-now">Refresh now</button>
 </div>{{end}}
-</div>
-</header>
 <main id="main" tabindex="-1">{{block "content" .}}{{end}}</main>
 <footer class="muted"><small>{{if .Refresh}}Snapshot{{else}}Rendered{{end}} {{.GeneratedAt}}{{if .Version}} · gauntlet {{.Version}}{{end}}</small></footer>
 <div id="action-feedback" class="feedback" role="status" aria-live="polite" hidden><span id="action-message"></span><button class="btn" id="dismiss-feedback" type="button">Dismiss</button></div>
@@ -341,6 +254,13 @@ function showFeedback(message, failed) {
 }
 document.addEventListener('DOMContentLoaded', function () {
   applyTimeTooltips();
+  var colorMode = document.getElementById('color-mode');
+  colorMode.value = gauntletColorMode;
+  colorMode.addEventListener('change', function () {
+    gauntletColorMode = colorMode.value;
+    gauntletSetColorMode(gauntletColorMode);
+    try { localStorage.setItem('gauntlet:color-mode', gauntletColorMode); } catch (e) {}
+  });
   document.body.addEventListener('click', function (ev) {
     if (ev.target.closest('#dismiss-feedback')) {
       document.getElementById('action-feedback').hidden = true;
@@ -426,7 +346,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (!doc.getElementById('main')) throw new Error('Invalid dashboard response');
         Idiomorph.morph(document.body, doc.body, {callbacks: {
           beforeNodeMorphed: function (oldNode) {
-            return oldNode.id !== 'action-feedback' && oldNode.id !== 'live-controls';
+            return oldNode.id !== 'action-feedback' && oldNode.id !== 'live-controls' && oldNode.id !== 'appearance';
           },
           beforeAttributeUpdated: function (name, node) {
             return !(name === 'open' && node.tagName === 'DETAILS');

@@ -1090,6 +1090,14 @@ the dashboard listener and requires a dashboard bind address and a populated
 secret environment variable. [Review integration](design/reviews.md#polling-and-optional-webhooks)
 includes configuration, webhook registration, ingress, freshness, and recovery.
 
+## Dashboard appearance
+
+The dashboard uses a Classic Mac-inspired light theme and an amber terminal
+dark theme. The **Theme** selector offers **System**, **Light**, and **Dark ·
+amber**. System follows the browser preference; an explicit choice is remembered
+in that browser across pages and restarts. With JavaScript disabled, the browser
+preference still selects the theme.
+
 ## Failure review
 
 Absent `failure-review` disables model classification and check retries. Enable
