@@ -36,6 +36,7 @@ type Repo struct {
 	// fetchRefspecs are extra remote.origin.fetch entries beyond the
 	// canonical refs/heads/* mapping (WithFetchRefspecs) — see New.
 	fetchRefspecs []string
+	signing       *sshSigning
 }
 
 var _ core.GitRepo = (*Repo)(nil)
@@ -191,21 +192,21 @@ func parseConflictPaths(lines []string) []string {
 	return paths
 }
 
-// CommitTree creates a commit object from tree and parents. This is the
-// only object gauntlet ever creates (Invariant 6). message is passed via
-// stdin so multi-paragraph trailers survive intact.
-//
-// who's identity is forced via identityEnv, not just the "-c
-// user.name=.../-c user.email=..." arguments below: git's own precedence
-// puts GIT_AUTHOR_*/GIT_COMMITTER_* environment ahead of -c config, so a
-// daemon process that inherits those variables from its own ambient
-// environment would otherwise get the ENV identity on the commit, not who
-// — empirically confirmed (TestCommitTreeIdentityImmuneToAmbientEnv;
-// before this fix, the equivalent case was the -u-suppressed failure in
-// TestCommitTreeTwoParentsWithTrailers). The -c flags stay for a reader
-// checking `git log --format=%an` against a config-only mental model;
-// identityEnv is what actually decides it.
+// CommitTree creates a commit with the configured identity and optional
+// daemon signature. Ambient Git author/committer variables cannot override who.
 func (r *Repo) CommitTree(ctx context.Context, tree string, parents []string, message string, who core.Identity) (string, error) {
+	seed, err := r.commitTreeUnsigned(ctx, tree, parents, message, who)
+	if err != nil || r.signing == nil {
+		return seed, err
+	}
+	raw, err := r.run(ctx, "cat-file", "commit", seed)
+	if err != nil {
+		return "", err
+	}
+	return r.writeCommit(ctx, raw)
+}
+
+func (r *Repo) commitTreeUnsigned(ctx context.Context, tree string, parents []string, message string, who core.Identity) (string, error) {
 	args := []string{
 		"-c", "user.name=" + who.Name,
 		"-c", "user.email=" + who.Email,

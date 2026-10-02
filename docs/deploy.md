@@ -45,7 +45,8 @@ containerize (topology (b), below).
 
 1. **Install git ≥ 2.40** (see "Required git version" below) and whatever
    toolchains your check spec's commands need (Go, Node, a JDK, ... —
-   gauntlet itself only needs `git` on `$PATH`; it provisions nothing).
+   gauntlet itself needs `git` on `$PATH`, plus `ssh-keygen` when
+   [commit signing](config.md#commit-signing) is enabled; it provisions nothing).
 2. **Build a static binary** and copy it to the box:
 
    ```sh

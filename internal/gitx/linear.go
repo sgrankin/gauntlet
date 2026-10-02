@@ -51,8 +51,8 @@ func (r *Repo) ReplayTree(ctx context.Context, base, candidate, sourceBase strin
 }
 
 // LinearCommit preserves the source author and jj's change-id header. It
-// deliberately drops signatures, which are invalid after changing parents
-// or the message. Gerrit's Change-Id is part of the message, not this header.
+// drops invalid source signatures and optionally signs the final replacement.
+// Gerrit's Change-Id is part of the message, not this header.
 func (r *Repo) LinearCommit(ctx context.Context, tree, base, source, message string, who core.Identity) (string, error) {
 	r.sourceMu.Lock()
 	defer r.sourceMu.Unlock()
@@ -84,7 +84,7 @@ func (r *Repo) LinearCommit(ctx context.Context, tree, base, source, message str
 	}
 	// Ask git to format and validate the new committer identity/date, then
 	// write the complete object so the nonstandard jj header survives.
-	seed, err := r.CommitTree(ctx, tree, []string{base}, message, who)
+	seed, err := r.commitTreeUnsigned(ctx, tree, []string{base}, message, who)
 	if err != nil {
 		return "", err
 	}
@@ -105,8 +105,7 @@ func (r *Repo) LinearCommit(ctx context.Context, tree, base, source, message str
 		b.WriteString(changeID + "\n")
 	}
 	b.WriteString("\n" + strings.TrimRight(message, "\n") + "\n")
-	out, err := runGit(ctx, r.dir, strings.NewReader(b.String()), "hash-object", "-t", "commit", "-w", "--stdin")
-	return strings.TrimSpace(out), err
+	return r.writeCommit(ctx, b.String())
 }
 
 // FindLanding searches only the target's first-parent ledger. A source SHA

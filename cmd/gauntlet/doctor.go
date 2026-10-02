@@ -198,6 +198,15 @@ func buildProbes(env *doctorEnv) []probe {
 	probes = append(probes, probe{"git", func(ctx context.Context) probeResult { return probeGit(ctx) }})
 	probes = append(probes, probe{"state", func(ctx context.Context) probeResult { return probeState(env.statePath) }})
 
+	if env.cfg.Signing != nil {
+		cfg := env.cfg
+		probes = append(probes, probe{"commit-signing", func(context.Context) probeResult {
+			if _, err := gitSigningOptions(cfg); err != nil {
+				return fail(err.Error(), "install ssh-keygen and configure a readable signing key")
+			}
+			return pass("SSH signer and key file available; signing authority tested when creating a commit")
+		}})
+	}
 	if env.cfg.History.Path != "" {
 		path := env.cfg.History.Path
 		probes = append(probes, probe{"history", func(ctx context.Context) probeResult { return probeHistory(path) }})

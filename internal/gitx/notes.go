@@ -132,10 +132,28 @@ func (r *Repo) AddNote(ctx context.Context, localWorkRef, sha string, payload []
 	args := []string{
 		"-c", "user.name=" + who.Name,
 		"-c", "user.email=" + who.Email,
+		"-c", "commit.gpgsign=false",
 		"notes", "--ref=" + localWorkRef, "add", "-C", blobSHA, sha,
 	}
 	if _, err := runGitEnv(ctx, r.dir, nil, identityEnv(who), args...); err != nil {
 		return "", fmt.Errorf("gitx: add note %s on %s: %w", sha, localWorkRef, err)
+	}
+	if r.signing != nil {
+		unsigned, err := r.run(ctx, "rev-parse", localWorkRef)
+		if err != nil {
+			return "", err
+		}
+		raw, err := r.run(ctx, "cat-file", "commit", strings.TrimSpace(unsigned))
+		if err != nil {
+			return "", err
+		}
+		signed, err := r.writeCommit(ctx, raw)
+		if err != nil {
+			return "", err
+		}
+		if _, err := r.run(ctx, "update-ref", localWorkRef, signed, strings.TrimSpace(unsigned)); err != nil {
+			return "", err
+		}
 	}
 	return blobSHA, nil
 }

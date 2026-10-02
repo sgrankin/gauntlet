@@ -190,6 +190,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	signingOpts, err := gitSigningOptions(cfg)
+	if err != nil {
+		return err
+	}
+	gitOpts = append(gitOpts, signingOpts...)
 	// Observed deploy refs ride the queue's own fetch when — and only
 	// when — deployment is configured, so an operator who never uses it
 	// pays nothing. The destination is outside refs/remotes/origin/*, so

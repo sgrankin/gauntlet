@@ -253,6 +253,7 @@ type Daemon struct {
 	Summarize *Summarize `kdl:"summarize"`
 
 	FailureReview *FailureReview `kdl:"failure-review"`
+	Signing       *Signing       `kdl:"signing"`
 }
 
 // History configures the optional SQLite run-history store. Path=="" disables
@@ -825,6 +826,9 @@ func applyExecutorDefaults(e *Executor) {
 }
 
 func (d *Daemon) applyDefaults() {
+	if d.Signing != nil && d.Signing.Timeout == 0 {
+		d.Signing.Timeout = 10 * time.Second
+	}
 	if d.FailureReview != nil {
 		d.FailureReview.defaults()
 	}
@@ -1345,6 +1349,9 @@ func pathAtOrUnder(path, reserved string) bool {
 // candidate commands. Operator-owned hooks may retain them.
 func (d *Daemon) SecretEnvNames() []string {
 	var names []string
+	if d.Signing != nil {
+		names = append(names, "SSH_AUTH_SOCK")
+	}
 	if d.FailureReview != nil {
 		names = append(names, d.FailureReview.TokenEnv)
 	}
@@ -1372,6 +1379,11 @@ func (d *Daemon) SecretEnvNames() []string {
 }
 
 func (d *Daemon) validate() error {
+	if d.Signing != nil {
+		if err := d.Signing.validate(); err != nil {
+			return err
+		}
+	}
 	if d.FailureReview != nil {
 		if err := d.FailureReview.validate(); err != nil {
 			return err
