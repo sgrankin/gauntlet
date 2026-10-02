@@ -234,6 +234,15 @@ func buildProbes(env *doctorEnv) []probe {
 		probes = append(probes, probe{"summarize-token-env", func(ctx context.Context) probeResult { return probeSummarizeTokenEnv(cfg) }})
 	}
 
+	if env.cfg.FailureReview != nil {
+		cfg := env.cfg
+		probes = append(probes, probe{"failure-review", func(context.Context) probeResult {
+			if _, err := buildFailureReview(cfg); err != nil {
+				return fail(err.Error(), "configure the failure-review credential and executable before starting")
+			}
+			return pass("failure review configured; model access not probed")
+		}})
+	}
 	profiles := containerProfiles(env.cfg)
 	// Runtime usages are derived from container-kind executor profiles PLUS
 	// (when configured) the services pool, which shells out to a runtime of

@@ -17,7 +17,8 @@ limitation, and Gerrit setup.
 - [DESIGN.md](DESIGN.md) — the design: model, decision ledger, invariants.
 - [docs/config.md](docs/config.md) — daemon configuration reference
   (history, dashboard, GitHub, Slack, OTLP, executors, services,
-  summaries, hooks, queue modes, deployment environments).
+  summaries, hooks, queue modes, deployment environments,
+  [failure review](docs/config.md#failure-review)).
 - [docs/checks.md](docs/checks.md) — writing checks: the check spec, the
   `GAUNTLET_*` environment contract, logs, conditional execution, shared
   services, deploy nodes.

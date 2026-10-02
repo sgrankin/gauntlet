@@ -408,7 +408,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		// is the one place a CheckResult crosses back from "what was run" to
 		// "what history records" — see core.CheckResult.Command's doc.
 		if len(needs) == 0 || d.cfg.Services == nil {
-			res := d.exec.RunCheck(spanCtx, job) // unchanged path: hooks & needs-free checks
+			res := d.cfg.FailureReview.Run(spanCtx, job, d.exec.RunCheck)
 			res.Command = job.Command
 			res.Materialized = materialized
 			stampConsumedImage(&res, job)
@@ -422,19 +422,16 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		}
 		defer d.cfg.Services.Release(ens) // refcount--; last-used is touched on release, not ensure
 		job.ServiceEnv, job.Networks = ens.Env, ens.Networks
-		res := d.exec.RunCheck(spanCtx, job)
+		res := d.cfg.FailureReview.Run(spanCtx, job, func(ctx context.Context, attempt core.CheckJob) core.CheckResult {
+			res := d.exec.RunCheck(ctx, attempt)
+			if res.Err == nil && res.Status == core.CheckFailed && d.cfg.Services.AnyDead(ctx, ens) {
+				res.Err = fmt.Errorf("service died mid-run (park-as-error); check output retained above")
+			}
+			return res
+		})
 		res.Command = job.Command
 		res.Materialized = materialized
 		stampConsumedImage(&res, job)
-		if res.Err == nil && res.Status == core.CheckFailed {
-			// Only a genuinely red verdict re-probes — a passing check
-			// never touches AnyDead.
-			if d.cfg.Services.AnyDead(spanCtx, ens) {
-				res.Err = fmt.Errorf("service died mid-run (park-as-error); check output retained above")
-				// res.Output/LogPath are left exactly as RunCheck set them,
-				// for the skeptical.
-			}
-		}
 		result <- res
 	}()
 	r.inflight[check.Name] = &checkInFlight{name: check.Name, cancel: cancel, result: result, span: span, start: start, waited: waited}

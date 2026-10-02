@@ -17,6 +17,7 @@ import (
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/flaky"
 	"github.com/sgrankin/gauntlet/internal/obs"
 	"github.com/sgrankin/gauntlet/internal/services"
 )
@@ -24,6 +25,9 @@ import (
 // Config supplies queue policy and dependencies. Remote connection and
 // polling belong to the command package.
 type Config struct {
+	// FailureReview retries selected failed checks before publishing a red result.
+	FailureReview *flaky.Retrier
+
 	// Reviews is an optional forge admission adapter. Its snapshots augment
 	// ordinary queue refs; the core retains the same scheduler and CAS land.
 	Reviews core.ReviewSource

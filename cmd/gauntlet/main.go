@@ -637,7 +637,12 @@ func run() error {
 		seedParks = buildSeedParks(store)
 	}
 
+	failureReview, err := buildFailureReview(cfg)
+	if err != nil {
+		return err
+	}
 	qcfg := queue.Config{
+		FailureReview:        failureReview,
 		Targets:              cfg.Targets,
 		CheckSpec:            cfg.CheckSpec,
 		Committer:            cfg.Committer,

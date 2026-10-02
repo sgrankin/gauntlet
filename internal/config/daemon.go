@@ -251,6 +251,8 @@ type Daemon struct {
 	// against its own unmarshal tests), so nil here means "the summarize
 	// node is absent" unambiguously, independent of what's inside it.
 	Summarize *Summarize `kdl:"summarize"`
+
+	FailureReview *FailureReview `kdl:"failure-review"`
 }
 
 // History configures the optional SQLite run-history store. Path=="" disables
@@ -823,6 +825,9 @@ func applyExecutorDefaults(e *Executor) {
 }
 
 func (d *Daemon) applyDefaults() {
+	if d.FailureReview != nil {
+		d.FailureReview.defaults()
+	}
 	if p := d.GitHub.PullRequests; p != nil {
 		if p.PollInterval == 0 {
 			p.PollInterval = 30 * time.Second
@@ -1340,6 +1345,9 @@ func pathAtOrUnder(path, reserved string) bool {
 // candidate commands. Operator-owned hooks may retain them.
 func (d *Daemon) SecretEnvNames() []string {
 	var names []string
+	if d.FailureReview != nil {
+		names = append(names, d.FailureReview.TokenEnv)
+	}
 	if g := d.Gerrit; g != nil {
 		names = append(names, g.UsernameEnv, g.TokenEnv)
 	}
@@ -1364,6 +1372,11 @@ func (d *Daemon) SecretEnvNames() []string {
 }
 
 func (d *Daemon) validate() error {
+	if d.FailureReview != nil {
+		if err := d.FailureReview.validate(); err != nil {
+			return err
+		}
+	}
 	if d.Remote == "" {
 		return fmt.Errorf("remote: must not be empty")
 	}
