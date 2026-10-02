@@ -136,6 +136,7 @@ type ServicePool interface {
 // cmd's history-backed SeedParks closure can build one without importing
 // any unexported queue type.
 type ParkSeed struct {
+	Version string
 	Ref     string
 	SHA     string
 	Outcome core.Outcome

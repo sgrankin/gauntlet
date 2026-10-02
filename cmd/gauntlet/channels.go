@@ -123,7 +123,7 @@ func buildSeedParks(store *history.Store) func(target string) []queue.ParkSeed {
 				continue // an outcome string history never actually writes; defensive only
 			}
 			out = append(out, queue.ParkSeed{
-				Ref: v.Ref, SHA: v.SHA, Outcome: outcome, Reason: v.Detail, At: v.EndedAt, RunID: v.RunID,
+				Ref: v.Ref, SHA: v.SHA, Version: v.Version, Outcome: outcome, Reason: v.Detail, At: v.EndedAt, RunID: v.RunID,
 			})
 		}
 		return out

@@ -15,8 +15,8 @@ INSERT OR REPLACE INTO runs (
 	run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
 	base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
 	batch_id, position, batch_size, speculated, recovered,
-	receipt_ref, receipt_blob, receipt_published
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	receipt_ref, receipt_blob, receipt_published, candidate_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
 INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms)
@@ -69,20 +69,21 @@ ON CONFLICT(run_id) DO UPDATE SET skipped = 1, skip_reason = excluded.skip_reaso
 
 // RunRow is one row of the runs table, as read back for the dashboard.
 type RunRow struct {
-	RunID          string
-	Target         string
-	CandidateRef   string
-	CandidateUser  string
-	CandidateTopic string
-	CandidateSHA   string
-	BaseOID        string
-	MergeSHA       string
-	TrialClean     bool
-	Outcome        string // landed|rejected|conflict|skipped|error
-	Detail         string
-	StartedAt      time.Time
-	EndedAt        time.Time
-	Duration       time.Duration
+	RunID            string
+	Target           string
+	CandidateRef     string
+	CandidateUser    string
+	CandidateTopic   string
+	CandidateSHA     string
+	CandidateVersion string
+	BaseOID          string
+	MergeSHA         string
+	TrialClean       bool
+	Outcome          string // landed|rejected|conflict|skipped|error
+	Detail           string
+	StartedAt        time.Time
+	EndedAt          time.Time
+	Duration         time.Duration
 
 	// BatchID groups this run with its sibling per-member run rows when it
 	// landed as part of a batch (empty for serial and speculate runs;
@@ -254,7 +255,7 @@ type DepthPoint struct {
 const selectRunColumns = `run_id, target, candidate_ref, candidate_user, candidate_topic, candidate_sha,
 	base_oid, merge_sha, trial_clean, outcome, detail, started_at, ended_at, duration_ms,
 	batch_id, position, batch_size, speculated, recovered,
-	receipt_ref, receipt_blob, receipt_published`
+	receipt_ref, receipt_blob, receipt_published, candidate_version`
 
 // RecentRuns returns target's most recent runs, newest first, capped at
 // limit. Each row also carries its own ChecksTotal/ChecksPassed — see
@@ -624,6 +625,7 @@ func (s *Store) DepthSeries(target string, since time.Time) ([]DepthPoint, error
 // unparsed here since history never imports internal/core (cmd's SeedParks
 // closure, the sole caller, maps it back to core.Outcome).
 type RefVerdict struct {
+	Version string
 	Ref     string
 	SHA     string
 	Outcome string
@@ -689,9 +691,9 @@ type RefVerdict struct {
 // boundary itself is untested.
 func (s *Store) LatestTerminalPerRef(target string) ([]RefVerdict, error) {
 	rows, err := s.db.Query(`
-SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at, t.run_id
+SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at, t.run_id, t.candidate_version
 FROM (
-	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at, run_id,
+	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at, run_id, candidate_version,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY candidate_ref
 	           ORDER BY started_at DESC, run_id DESC
@@ -710,7 +712,7 @@ WHERE t.rn = 1 AND (ri.at IS NULL OR ri.at <= t.ended_at)`, target, target)
 	for rows.Next() {
 		var v RefVerdict
 		var endedMS int64
-		if err := rows.Scan(&v.Ref, &v.SHA, &v.Outcome, &v.Detail, &endedMS, &v.RunID); err != nil {
+		if err := rows.Scan(&v.Ref, &v.SHA, &v.Outcome, &v.Detail, &endedMS, &v.RunID, &v.Version); err != nil {
 			return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
 		}
 		v.EndedAt = time.UnixMilli(endedMS)
@@ -980,7 +982,7 @@ type rowScanner interface {
 }
 
 // scanRunRow scans one selectRunColumns-shaped row into a RunRow. extra, when
-// given, is appended to the Scan destination list after the fixed 22 —
+// given, is appended to the Scan destination list after the fixed run columns —
 // RecentRuns' query below additionally selects a check-count aggregate that
 // no other RunRow-returning method needs, so its caller passes pointers for
 // those trailing columns rather than this function knowing about them itself.
@@ -994,7 +996,7 @@ func scanRunRow(row rowScanner, extra ...any) (RunRow, error) {
 		&r.BaseOID, &r.MergeSHA, &trialClean, &r.Outcome, &r.Detail,
 		&startedMS, &endedMS, &durationMS,
 		&r.BatchID, &r.Position, &r.BatchSize, &speculated, &recovered,
-		&r.ReceiptRef, &r.ReceiptBlob, &r.ReceiptPublished,
+		&r.ReceiptRef, &r.ReceiptBlob, &r.ReceiptPublished, &r.CandidateVersion,
 	}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return RunRow{}, err

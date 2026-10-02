@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 15).
+-- schema.sql: gauntlet history store schema (user_version = 14).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -63,8 +63,7 @@ CREATE TABLE runs (
   -- not a duplicate of that row.
   receipt_ref       TEXT NOT NULL DEFAULT '',
   receipt_blob      TEXT NOT NULL DEFAULT '',
-  receipt_published TEXT NOT NULL DEFAULT '',
-  candidate_version TEXT NOT NULL DEFAULT '' -- review metadata/admission identity (v15+)
+  receipt_published TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
 CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';

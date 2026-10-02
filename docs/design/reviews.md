@@ -117,8 +117,11 @@ additional write permissions. Git transport must also be authenticated
 Polling requires no webhook ingress. This first adapter scans PR/comment
 history so stack-wide requests survive root closure and daemon restarts;
 that can consume substantial API quota in repositories with long histories.
-Review parks are re-evaluated on restart because persisted park records
-currently omit the review metadata version. Commands waiting on admission
+With history enabled, review parks survive restart for the same source SHA
+and metadata/request version. A new revision, edited landing message, or new
+request invalidates the park. Pre-v15 records have no version and are safely
+re-evaluated once after upgrading. In-flight trials are rebuilt after restart;
+Git target history remains the authority for completed landings. Commands waiting on admission
 have no separate acknowledgement comment;
 trial/status events start once admitted. Webhook-backed intake and detailed
 blocked-request feedback remain follow-up work.

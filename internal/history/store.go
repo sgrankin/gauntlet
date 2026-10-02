@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -358,6 +358,13 @@ CREATE TABLE deploy_nodes (
 			if _, err := db.Exec(`PRAGMA user_version = 14`); err != nil {
 				return fmt.Errorf("history: set user_version=14: %w", err)
 			}
+		case 14:
+			if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN candidate_version TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v14->v15: %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 15`); err != nil {
+				return fmt.Errorf("history: set user_version=15: %w", err)
+			}
 		case schemaVersion:
 			return nil
 		default:
@@ -500,6 +507,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		rec.ReceiptRef,
 		rec.ReceiptBlob,
 		rec.ReceiptPublished,
+		rec.Candidate.Version,
 	); err != nil {
 		return fmt.Errorf("history: insert run: %w", err)
 	}

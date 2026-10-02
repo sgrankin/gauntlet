@@ -208,7 +208,7 @@ func (d *Daemon) seedParksOnce(target string) {
 			m = make(map[string]parkEntry)
 			d.done[target] = m
 		}
-		m[seed.Ref] = parkEntry{SHA: seed.SHA, Outcome: seed.Outcome, Reason: seed.Reason, At: seed.At, RunID: seed.RunID}
+		m[seed.Ref] = parkEntry{SHA: seed.SHA, Version: seed.Version, Outcome: seed.Outcome, Reason: seed.Reason, At: seed.At, RunID: seed.RunID}
 	}
 }
 

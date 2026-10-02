@@ -67,9 +67,7 @@ func TestDeploySchema_FreshOpenStampsCurrentVersion(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("fresh user_version = %d, want %d", version, schemaVersion)
 	}
-	if schemaVersion != 14 {
-		t.Fatalf("schemaVersion = %d, want 14 (the deploy-tables version)", schemaVersion)
-	}
+
 	for _, table := range []string{"deploys", "deploy_nodes"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
@@ -101,6 +99,7 @@ func TestMigrate_V13ToV14(t *testing.T) {
 	// Roll the database back to exactly what v13 was: no deploy tables (and
 	// with them, no deploy indexes — SQLite drops a table's indexes with it).
 	for _, stmt := range []string{
+		`ALTER TABLE runs DROP COLUMN candidate_version`,
 		`DROP TABLE deploy_nodes`,
 		`DROP TABLE deploys`,
 		`PRAGMA user_version = 13`,
