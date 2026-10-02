@@ -158,15 +158,16 @@ func (g *Gerrit) Candidates(ctx context.Context) ([]core.Candidate, error) {
 		base := r.Commit.Parents[0].Commit
 		candidate := core.Candidate{Ref: gerritSlot(target, c.Number), Target: target, Topic: c.Subject, SHA: c.CurrentRevision, Source: "gerrit", SourceBase: base, Message: r.Commit.Message,
 			ReviewURL: strings.TrimRight(g.p.APIURL, "/") + "/c/" + g.p.Project + "/+/" + strconv.Itoa(c.Number)}
-		if parent, ok := bySHA[base]; ok {
-			if parent.Branch != c.Branch {
-				continue
-			}
+		parent, dependent := bySHA[base]
+		if dependent && parent.Branch != c.Branch {
+			continue
+		}
+		if err := g.p.Git.FetchReview(ctx, r.Ref, fmt.Sprintf("refs/gauntlet/reviews/gerrit/%d", c.Number), c.CurrentRevision); err != nil {
+			return nil, err
+		}
+		if dependent {
 			candidate.DependsOn = gerritSlot(target, parent.Number)
 		} else {
-			if err := g.p.Git.FetchReview(ctx, r.Ref, fmt.Sprintf("refs/gauntlet/reviews/gerrit/%d", c.Number), c.CurrentRevision); err != nil {
-				return nil, err
-			}
 			landed, err := g.p.Git.ReviewBaseLanded(ctx, c.Branch, base)
 			if err != nil {
 				return nil, err
@@ -176,9 +177,6 @@ func (g *Gerrit) Candidates(ctx context.Context) ([]core.Candidate, error) {
 			}
 		}
 		candidate.Version = version(candidate, 0)
-		if err := g.p.Git.FetchReview(ctx, r.Ref, fmt.Sprintf("refs/gauntlet/reviews/gerrit/%d", c.Number), c.CurrentRevision); err != nil {
-			return nil, err
-		}
 		out = append(out, candidate)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
