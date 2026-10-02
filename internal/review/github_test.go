@@ -128,7 +128,7 @@ func TestGitHubStackAdmission(t *testing.T) {
 		command string
 		want    int
 	}{
-		{"@gauntlet merge", 2}, {"@gauntlet merge-stack", 0}, {"@gauntlet merge-ready", 2}, {"@gauntlet merge-prefix 2", 2}, {"@gauntlet merge-prefix 3", 0}, {"@gauntlet cancel", 0},
+		{"@gauntlet merge", 0}, {"@gauntlet merge stack", 2}, {"@gauntlet merge-stack", 0}, {"@gauntlet merge-ready", 2}, {"@gauntlet merge-prefix 2", 2}, {"@gauntlet merge-prefix 3", 0}, {"@gauntlet cancel", 0},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			f := newGitHubFixture(t)
@@ -152,9 +152,70 @@ func TestGitHubStackAdmission(t *testing.T) {
 	}
 }
 
+func TestGitHubSingleMergeRejectsPrerequisites(t *testing.T) {
+	for _, native := range []bool{true, false} {
+		t.Run(fmt.Sprintf("native=%v", native), func(t *testing.T) {
+			f := newGitHubFixture(t)
+			if !native {
+				for i := range f.pulls {
+					f.pulls[i].Stack = nil
+					if i > 0 {
+						f.pulls[i].Base.Ref = f.pulls[i-1].Head.Ref
+					}
+				}
+			}
+			f.approvals[3] = true
+			f.request(1, "@gauntlet merge")
+			f.request(2, "@gauntlet merge")
+			for range 2 {
+				cs, err := f.g.Candidates(context.Background())
+				if err != nil || len(cs) != 1 || cs[0].SHA != f.pulls[0].Head.SHA {
+					t.Fatalf("unsafe request admitted, or unrelated request blocked: %+v %v", cs, err)
+				}
+				// Reconstruct from GitHub comments, including rejection feedback.
+				f.g = NewGitHub(f.g.p)
+			}
+			if len(f.commands[2]) != 2 || !strings.Contains(f.commands[2][1].Body, "@gauntlet merge stack") {
+				t.Fatalf("missing or duplicated rejection feedback: %+v", f.commands[2])
+			}
+			f.request(2, "@gauntlet merge stack")
+			cs, err := f.g.Candidates(context.Background())
+			if err != nil || len(cs) != 2 || cs[1].SHA != f.pulls[1].Head.SHA {
+				t.Fatalf("explicit request should include A+B, never C: %+v %v", cs, err)
+			}
+			f.request(2, "@gauntlet merge")
+			if err := f.g.Validate(context.Background(), cs[1]); err == nil {
+				t.Fatal("unsafe replacement command passed pre-landing validation")
+			}
+		})
+	}
+}
+
+func TestGitHubStackThroughRequest(t *testing.T) {
+	f := newGitHubFixture(t)
+	if err := f.g.Request(context.Background(), 2, "merge-through", 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.commands[2]) != 1 || f.commands[2][0].Body != "@gauntlet merge stack" {
+		t.Fatalf("incorrect CLI command: %+v", f.commands[2])
+	}
+	f.commands[2][0].User.Login = "maintainer"
+	f.approvals[1] = false
+	cs, err := f.g.Candidates(context.Background())
+	if err != nil || len(cs) != 0 {
+		t.Fatalf("unready prerequisite admitted: %+v %v", cs, err)
+	}
+	f.approvals[1] = true
+	f.approvals[2] = false
+	cs, err = f.g.Candidates(context.Background())
+	if err != nil || len(cs) != 0 {
+		t.Fatalf("part of an unready requested stack admitted: %+v %v", cs, err)
+	}
+}
+
 func TestGitHubReadinessAndCurrency(t *testing.T) {
 	f := newGitHubFixture(t)
-	f.request(2, "@gauntlet merge")
+	f.request(2, "@gauntlet merge stack")
 	cs, err := f.g.Candidates(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +282,7 @@ func TestGitHubLandingClosureIdempotentAndRepushSafe(t *testing.T) {
 	for _, repush := range []bool{false, true} {
 		t.Run(fmt.Sprint(repush), func(t *testing.T) {
 			f := newGitHubFixture(t)
-			f.request(2, "@gauntlet merge")
+			f.request(2, "@gauntlet merge stack")
 			cs, err := f.g.Candidates(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -442,7 +503,7 @@ func TestGitHubUnauthorizedRefreshAndFailure(t *testing.T) {
 func TestGitHubSkipsUnrelatedClosedHistory(t *testing.T) {
 	f := newGitHubFixture(t)
 	f.pulls = append(f.pulls, pull{Number: 4, State: "closed", Head: ref{Ref: "old-feature"}, Base: ref{Ref: "main"}})
-	f.request(2, "@gauntlet merge")
+	f.request(2, "@gauntlet merge stack")
 	cs, err := f.g.Candidates(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -509,7 +570,7 @@ func TestGitHubForkHeadUsesBaseRepositoryPullRef(t *testing.T) {
 		t.Fatalf("fork not fetched via base repo: %+v %v", cs, f.git.remoteRefs)
 	}
 	f.pulls[1].Base.Ref = f.pulls[0].Head.Ref
-	f.request(2, "@gauntlet merge")
+	f.request(2, "@gauntlet merge stack")
 	if _, err := f.g.Candidates(context.Background()); err == nil {
 		t.Fatal("fork branch mistaken for a base-repository prerequisite")
 	}

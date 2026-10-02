@@ -388,9 +388,11 @@ is a push of the environment's desired ref.
 ## Requesting a GitHub PR landing
 
 `gauntlet land-pr -config gauntlet.kdl -pr 123` posts a permission-checked
-`@gauntlet merge` comment. Optional mutually exclusive `-stack`, `-ready`,
-`-prefix N`, and `-cancel` flags request the whole stack, ready prefix,
-bottom N unlanded PRs, or cancellation. Enable `github pull-requests`
+`@gauntlet merge` comment, which requests only that PR and is rejected if
+it has an open prerequisite. Optional mutually exclusive `-stack`,
+`-whole-stack`, `-ready`, `-prefix N`, and `-cancel` flags request the stack
+through that PR, the entire stack, ready prefix, bottom N unlanded PRs, or
+cancellation. `-stack` posts `@gauntlet merge stack`. Enable `github pull-requests`
 in the daemon config first. The command acknowledges posting; landing
 remains asynchronous.
 

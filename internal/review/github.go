@@ -103,10 +103,11 @@ type comment struct {
 }
 
 type request struct {
-	PR     pull
-	ID     int64
-	Action string
-	Count  int
+	PR       pull
+	ID       int64
+	Action   string
+	Count    int
+	Notified bool
 }
 
 // Command accepts one whole line, not quoted prose or a substring. A count
@@ -117,7 +118,14 @@ func Command(body, bot string) (string, int) {
 		return "", 0
 	}
 	switch fields[1] {
-	case "merge", "merge-stack", "merge-ready", "cancel":
+	case "merge":
+		if len(fields) == 2 {
+			return "merge", 0
+		}
+		if len(fields) == 3 && fields[2] == "stack" {
+			return "merge-through", 0
+		}
+	case "merge-stack", "merge-ready", "cancel":
 		if len(fields) == 2 {
 			return fields[1], 0
 		}
@@ -233,7 +241,16 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 			result = request{PR: p, ID: c.ID, Action: action, Count: count}
 		}
 	}
+	for _, c := range cs {
+		if strings.Contains(c.Body, stackRejectionMarker(result.ID)) {
+			result.Notified = true
+		}
+	}
 	return result, nil
+}
+
+func stackRejectionMarker(id int64) string {
+	return fmt.Sprintf("<!-- gauntlet:stack-required:%d -->", id)
 }
 
 func (g *GitHub) writer(ctx context.Context, login string) (bool, error) {
@@ -478,7 +495,7 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 			members, branch = native.members, native.branch
 		} else {
 			var err error
-			members, branch, err = g.stack(ctx, r.PR, open, r.Action != "merge" && r.Action != "cancel")
+			members, branch, err = g.stack(ctx, r.PR, open, r.Action != "merge" && r.Action != "merge-through" && r.Action != "cancel")
 			if err != nil {
 				return nil, err
 			}
@@ -490,6 +507,24 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 		if r.Action == "cancel" {
 			delete(selected, slot(target, r.PR.Number))
 			continue
+		}
+		if r.Action == "merge" || r.Action == "merge-through" {
+			end := slices.IndexFunc(members, func(p pull) bool { return p.Number == r.PR.Number })
+			if end < 0 {
+				return nil, fmt.Errorf("PR #%d is absent from its stack", r.PR.Number)
+			}
+			members = members[:end+1]
+			if r.Action == "merge" && slices.ContainsFunc(members[:end], func(p pull) bool { return p.State == "open" }) {
+				// A rejected request admits no prerequisites, even if another
+				// request independently admits them. Feedback survives restarts.
+				if fetch && !r.Notified {
+					body := fmt.Sprintf("Cannot merge PR #%d alone: it has unlanded prerequisite PRs. Use `@%s merge stack` to request the stack through this PR; all members must be ready.\n\n%s", r.PR.Number, g.p.Bot, stackRejectionMarker(r.ID))
+					if err := g.call(ctx, "POST", g.endpoint(fmt.Sprintf("/issues/%d/comments", r.PR.Number)), map[string]string{"body": body}, nil); err != nil {
+						return nil, err
+					}
+				}
+				continue
+			}
 		}
 		var prefix []core.Candidate
 		var previous, sourceBase string
@@ -666,6 +701,9 @@ func (g *GitHub) Landed(ctx context.Context, c core.Candidate, commit string) er
 func (g *GitHub) Request(ctx context.Context, number int, action string, count int) error {
 	defer g.Invalidate()
 	body := "@" + g.p.Bot + " " + action
+	if action == "merge-through" {
+		body = "@" + g.p.Bot + " merge stack"
+	}
 	if action == "merge-prefix" {
 		body += " " + strconv.Itoa(count)
 	}

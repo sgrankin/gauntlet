@@ -75,14 +75,20 @@ replayed in comment order across the stack:
 
 | Command | Meaning for A → B → C |
 |---|---|
-| `@gauntlet merge` on B | Request A and B; both must be ready |
+| `@gauntlet merge` on B | Reject while A is open; never implicitly request A |
+| `@gauntlet merge stack` on B | Request A and B; both must be ready; C is excluded |
 | `@gauntlet merge-stack` | Request the entire stack; all must be ready |
 | `@gauntlet merge-ready` | Request the ready prefix from the bottom |
 | `@gauntlet merge-prefix 2` | Request the bottom two unlanded PRs; both must be ready |
 | `@gauntlet cancel` | Withdraw this PR's request; its dependents cannot run without it |
 
 `gauntlet land-pr -config gauntlet.kdl -pr 123` posts the same request.
-Use `-stack`, `-ready`, `-prefix N`, or `-cancel` for the other commands.
+Use `-stack` to request the stack through that PR, `-whole-stack` for the entire
+stack, or `-ready`, `-prefix N`, and `-cancel` for the other commands.
+Plain `merge` is rejected when a prerequisite PR remains open, even if it has
+an independent queue request. The bot posts an explanation once per rejected
+request; other PRs can still enter the queue. Closed prerequisites require
+actual target landing evidence before their successor can enter.
 The CLI caller's GitHub identity must have the required permission too.
 For a stack-wide request, cancel on the PR that carries that request to
 withdraw it; a separate later request may admit prerequisites again.

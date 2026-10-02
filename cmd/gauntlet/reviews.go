@@ -55,8 +55,9 @@ func buildReviewSource(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) (co
 func runLandPR(args []string) error {
 	f := flag.NewFlagSet("land-pr", flag.ContinueOnError)
 	path := f.String("config", "", "daemon config with github pull-requests enabled")
-	number := f.Int("pr", 0, "PR number; merge includes its unlanded ancestors")
-	stack := f.Bool("stack", false, "request the whole stack")
+	number := f.Int("pr", 0, "PR number; default requests only this PR")
+	stack := f.Bool("stack", false, "request the stack through this PR")
+	wholeStack := f.Bool("whole-stack", false, "request the entire stack, including successors")
 	ready := f.Bool("ready", false, "request the ready prefix from the bottom")
 	count := f.Int("prefix", 0, "request the bottom N unlanded PRs")
 	cancel := f.Bool("cancel", false, "withdraw this PR's queue request")
@@ -67,13 +68,13 @@ func runLandPR(args []string) error {
 		return fmt.Errorf("-config and positive -pr required")
 	}
 	choices := 0
-	for _, v := range []bool{*stack, *ready, *count > 0, *cancel} {
+	for _, v := range []bool{*stack, *wholeStack, *ready, *count > 0, *cancel} {
 		if v {
 			choices++
 		}
 	}
 	if choices > 1 || *count < 0 {
-		return fmt.Errorf("choose at most one of -stack, -ready, -prefix, -cancel")
+		return fmt.Errorf("choose at most one of -stack, -whole-stack, -ready, -prefix, -cancel")
 	}
 	cfg, err := config.LoadDaemon(*path)
 	if err != nil {
@@ -88,6 +89,9 @@ func runLandPR(args []string) error {
 	}
 	action := "merge"
 	if *stack {
+		action = "merge-through"
+	}
+	if *wholeStack {
 		action = "merge-stack"
 	}
 	if *ready {
