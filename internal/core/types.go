@@ -1,19 +1,11 @@
-// Package core defines gauntlet's domain vocabulary: the nouns and verbs
-// shared by every other package. It holds no behavior and depends on
-// nothing but the standard library, so that config, gitx, executor, channel,
-// obs, and queue can all depend on it without depending on each other.
+// Package core defines the shared queue, check, and deployment types.
 package core
 
 import "time"
 
-// Candidate identifies one queue slot. The ref name is the durable identity —
-// resubmit is re-pushing the same name, cancellation is deleting it,
-// attribution is parsed from it — while SHA is simply what gets tested this
-// tick and changes on every re-push.
-//
-// Ref has the form "refs/heads/for/<target>/<user>/<topic>". User may be ""
-// for solo setups where the ref is "refs/heads/for/<target>/<topic>"; see the
-// ref grammar in docs/design/core.md ("Candidate ref grammar").
+// Candidate identifies a queue slot and its current revision. Ordinary
+// slots use refs/heads/for/<target>/<user>/<topic>; forge adapters supply
+// virtual slots.
 type Candidate struct {
 	Ref    string
 	Target string
@@ -21,10 +13,9 @@ type Candidate struct {
 	Topic  string
 	SHA    string
 
-	// Review candidates are supplied by a forge adapter rather than a queue
-	// branch. SourceBase bounds this change's delta (especially in a stack),
-	// Message is the title/description to land, and Version pins all review
-	// inputs, including dependencies and admission intent, beyond the head SHA.
+	// Review adapters supply Source, Message, and ReviewURL. SourceBase bounds
+	// the change's delta; DependsOn names its prerequisite slot. Version
+	// identifies review metadata and admission intent beyond SHA.
 	Source     string
 	SourceBase string
 	Message    string
@@ -56,89 +47,35 @@ type CheckJob struct {
 	// Command is the argv to execute; Command[0] is the program.
 	Command []string
 
-	// Executor names the operator-defined execution profile this job runs
-	// on (config.Check.Executor, copied verbatim by the queue); "" means
-	// the default executor. Routing happens in executor.Mux — the daemon
-	// binary's Executor implementation when profiles are configured. The
-	// queue itself never interprets the name beyond a config-owned
-	// known-profile predicate at spec load (Invariant 8: the core stays
-	// executor-agnostic).
+	// Executor names an operator-defined execution profile. Empty selects the
+	// default; executor.Mux handles routing.
 	Executor string
 
-	// OperatorOwned is true iff this job's Command comes from the
-	// daemon's own operator-written config, never from a candidate's own
-	// repo spec — today that means exactly one thing: internal/hooks's
-	// Runner sets it on every post-land hook job it builds. Every other
-	// CheckJob constructor (internal/queue's checks, image builds, and
-	// receipt producers, all built from a candidate's OWN
-	// `.gauntlet.kdl`) leaves it false — CANDIDATE CODE, by construction.
-	//
-	// The distinction exists for exactly one consumer:
-	// executor.LocalExecutor.RunCheck's config-named-secret env filter
-	// (issue #13 Gap 1, docs/checks.md). A hook is operator-owned daemon
-	// config and legitimately uses the same credentials the daemon itself
-	// holds (a deploy hook driving `gh`); a candidate's check/build/receipt
-	// command is attacker-controlled the moment someone can push a `for/`
-	// ref, so it must never observe them. Nothing else about a CheckJob —
-	// hooks and checks share every other field — distinguishes the two,
-	// which is why this is an explicit bool rather than something inferred
-	// from Name or another field already in play.
+	// OperatorOwned permits access to the daemon's configured credential
+	// environment. Set only for commands from operator config, such as hooks;
+	// repo-defined checks, image builds, and receipts leave it false.
 	OperatorOwned bool
 
-	// ImageBuild marks this job as a candidate-image BUILD
-	// (config.Image): the executor exports EnvImageResultFile instead of
-	// EnvResultFile and returns the file's content verbatim in
-	// CheckResult.Image for the queue to validate. Never set together
-	// with Image below.
+	// ImageBuild captures EnvImageResultFile into CheckResult.Image for queue
+	// validation. Mutually exclusive with Image and ReceiptCapture.
 	ImageBuild bool
 
-	// Image, when non-empty, is the captured immutable identity a
-	// CONSUMER check runs in — the container executor uses it in place of
-	// its profile's static image. Stamped by the queue from the build
-	// node's validated result; meaningless to the local executor (specs
-	// naming an image are gated onto container profiles at run start).
+	// Image is the validated immutable image identity for a consumer check.
+	// Container executors use it instead of their configured image.
 	Image string
 
-	// ReceiptCapture marks this job as the RECEIPT node (issue #13,
-	// config.CheckSpec.Receipt): the executor exports EnvReceiptResultFile
-	// instead of EnvResultFile and returns the file's raw captured bytes
-	// verbatim in CheckResult.Receipt for the queue to validate (empty,
-	// unreadable, and oversized are all the RECEIPT node's own red
-	// verdict — one root cause, mirroring ImageBuild's validation
-	// boundary). Never set together with ImageBuild — a spec's receipt and
-	// its image builds are distinct nodes.
+	// ReceiptCapture reads EnvReceiptResultFile into CheckResult.Receipt.
+	// Receipts cannot report skipped and are distinct from image builds.
 	ReceiptCapture bool
 
-	// ReceiptMaxBytes bounds how much of the receipt result file the
-	// executor will ever read (queue.Config.ReceiptNotes.MaxBytes,
-	// threaded through so the bounded read — MaxBytes+1, to let the queue
-	// detect an oversized result — happens before the job's ephemeral
-	// scratch dir is removed, since the queue itself never gets a second
-	// chance to read the file). Meaningful only when ReceiptCapture is
-	// set; zero there falls back to the executor's own generous internal
-	// ceiling (defense in depth against a job built without a bound).
+	// ReceiptMaxBytes bounds capture to this value plus one byte, so the queue
+	// can detect overflow before the executor removes its scratch directory.
+	// Zero selects the executor's internal ceiling.
 	ReceiptMaxBytes int
 
-	// DeployEnv, DeployNode and DeployedSHA are the deploy coordinates
-	// (docs/design/deployment.md, "What runs") of a job that is one node of
-	// an environment's deploy graph, and empty on every other job.
-	// DeployEnv — the environment being deployed — is the discriminator:
-	// non-empty is what makes every executor render the GAUNTLET_DEPLOY_*
-	// contract, the same protocol-data-on-the-job pattern ImageBuild and
-	// ReceiptCapture follow (a deploy job needs no env escape hatch; the
-	// executors own the rendering).
-	//
-	// DeployNode is the node's own name — the same string as Name, carried
-	// separately because Name is what the executor labels containers and
-	// logs with and a future node-name mangling (the "image:<name>"
-	// precedent) must not silently change what a deploy script reads.
-	// DeployedSHA is the environment's OBSERVED ref before this run, which
-	// is empty on an environment's first-ever deploy — the diff-based skip
-	// protocol's whole point is that a deploy script can tell "nothing
-	// changed here" from "no baseline exists" — while the revision BEING
-	// deployed rides MergeSHA, the field every executor already exports as
-	// GAUNTLET_MERGE_SHA and the queue already fills with "the tree that
-	// ran".
+	// DeployEnv enables the GAUNTLET_DEPLOY_* environment. DeployNode names
+	// the graph node; DeployedSHA is the previously observed revision, empty
+	// on the first deploy. MergeSHA is the revision being deployed.
 	DeployEnv   string
 	DeployNode  string
 	DeployedSHA string
@@ -146,59 +83,39 @@ type CheckJob struct {
 	// Dir is the exported trial tree the check runs against.
 	Dir string
 
-	// LogPath, if non-empty, is the file the executor tees this check's
-	// combined stdout+stderr to, in full — alongside (never instead of)
-	// the tail-capped in-band Output (DESIGN.md "Full per-check log
-	// files"). The queue assigns it (Config.LogDir); empty means no file
-	// is written at all, which is also the correct fallback when a
-	// non-empty LogPath's file can't be created — see CheckResult.LogPath
-	// and the executor's handling. Assigning this is purely additive: an
-	// executor that doesn't know about it is free to ignore it.
+	// LogPath receives the full combined output, alongside the bounded Output
+	// tail. Empty disables file logging; inability to create the file does not
+	// fail the check.
 	LogPath string
 
 	// BaseSHA is the target tip the trial merge was built onto.
 	BaseSHA string
 
-	// MergeSHA is the tested merge commit (base + Candidate.SHA).
+	// MergeSHA is the exact tested commit, whether a normalized landing or a
+	// legacy merge.
 	MergeSHA string
 
 	Candidate Candidate
 
-	// NOTE: Clean is reserved for a future clean-build escape hatch
-	// (Invariant 7: a cache-poisoning workaround) — architected for, not
-	// triggerable, in the core loop itself. Always false today. See
-	// docs/design/core.md ("Deliberately not built").
+	// Clean is reserved for a future cache-bypass request and is currently
+	// always false.
 	Clean bool
 
-	// ServiceEnv is extra environment (GAUNTLET_SVC_<NAME>_HOST/PORT) for
-	// this check's resolved `needs`, appended after the built-in
-	// GAUNTLET_* vars by every executor. nil for checks with no needs and
-	// for hooks.
-	//
-	// NOTE: hooks cannot declare `needs` at all — internal/hooks builds
-	// CheckJob with no needs grammar — a deliberate scope decision. See
-	// docs/design/services.md ("Deliberately not built").
+	// ServiceEnv supplies GAUNTLET_SVC_<NAME>_HOST/PORT after the built-in
+	// environment. Nil for checks without needs and for hooks.
 	ServiceEnv []string
 
-	// Networks are container networks the check must join to reach its
-	// services (ModeNetwork — a shared runtime, e.g. the container
-	// executor). The container executor adds one --network per entry; the
-	// local executor ignores it (ModePublish reaches the service at
-	// 127.0.0.1 instead). nil for no-needs checks, hooks, and publish mode.
+	// Networks lists the service networks a container check must join. Local
+	// checks use published ports and ignore it.
 	Networks []string
 }
 
-// CheckStatus is a check's three-valued verdict.
+// CheckStatus is a check's verdict.
 type CheckStatus int
 
 const (
-	// CheckFailed means the check reported a real verdict of "not green":
-	// a non-zero exit, or a failure to even start the command (e.g. the
-	// command is missing or not executable). Both are the author's problem
-	// to fix, so both park the (ref, SHA) rather than retrying forever.
-	//
-	// CheckFailed is deliberately the zero value: a CheckResult whose Status
-	// was never assigned must read as a failure, never as a silent pass.
+	// CheckFailed includes nonzero exits and command-start failures. It is the
+	// zero value so an unset result cannot pass.
 	CheckFailed CheckStatus = iota
 
 	// CheckPassed means the check exited 0 and did not report skipped.
@@ -209,70 +126,34 @@ const (
 	// history doesn't lie about what actually ran.
 	CheckSkipped
 
-	// CheckBlocked means the check never ran because a prerequisite —
-	// an `after` edge, or the run failing before this check could start —
-	// did not end green (CheckResult.BlockedBy names it). Deliberately
-	// distinct from CheckSkipped: skipped is the CHECK's own successful
-	// "nothing to do here" verdict and counts green, while blocked is the
-	// run telling the truth that this command never executed at all. A
-	// blocked result carries no Duration, Output, or start time, and a run
-	// containing one is never green — the root failure is the run's
-	// rejection cause, recorded explicitly, never inferred from whichever
-	// result happened to finish last.
+	// CheckBlocked means a prerequisite or the run's root failure prevented
+	// execution. Unlike CheckSkipped, it is not green; BlockedBy identifies
+	// the cause.
 	CheckBlocked
 )
 
-// CheckResult is one check's outcome within a run.
-//
-// Status is meaningful only when Err is nil. Err is reserved for
-// daemon-caused, non-verdict failures — context cancellation (the ref or
-// target moved mid-check) or executor I/O failure (e.g. could not create a
-// temp dir) — never for the checked command itself failing to run or
-// exiting non-zero. Those are verdicts (CheckFailed), not Err.
+// CheckResult reports a check verdict. Status is meaningful only when Err
+// is nil. Command-start failures and nonzero exits are CheckFailed; Err is
+// reserved for cancellation and executor infrastructure failures.
 type CheckResult struct {
 	Name string
 
-	// Image is the immutable image identity this row is about: for an
-	// image-BUILD node, the result-file content the build produced (read
-	// back verbatim by the executor, validated by the queue); for a
-	// consumer check, the identity it actually ran in (stamped by the
-	// queue alongside Command). "" everywhere else. Provenance — history
-	// records exactly which bytes ran (issue #2's "explain what ran").
+	// Image records the build result or the immutable image a consumer used.
+	// Empty for other jobs.
 	Image string
 
-	// Receipt is the RECEIPT node's captured raw payload bytes (issue
-	// #13), set only by an executor handling a ReceiptCapture job and only
-	// consumed by the queue's own validation (advanceChecks) — it is never
-	// persisted onto a stored CheckResult or history row; a validated
-	// payload is moved onto the run struct (in memory only) and this
-	// field is cleared either way. nil means the result file could not be
-	// read at all (missing, or genuinely unreadable) — distinct from a
-	// non-nil EMPTY slice, which means the file was opened and read
-	// successfully but contained zero bytes; the queue's validation
-	// reports a different one-line root cause for each.
+	// Receipt holds raw captured bytes until the queue validates and clears
+	// them; it is never persisted. Nil means unreadable, while a non-nil empty
+	// slice means an empty file.
 	Receipt []byte
 
-	// Seq is the check's 1-based SPEC-DECLARATION position — the durable
-	// per-check identity history's seq column and the log filename prefix
-	// share. Stamped by the queue when it materializes a run's record
-	// (never by executors); 0 means "unknown" (a hand-built result, or a
-	// record predating this field), in which case history falls back to
-	// the row's slice index — identical whenever the record is a
-	// contiguous spec prefix, which every pre-parallelism record was.
-	// With parallel checks an externally-concluded run's record can have
-	// GAPS (a later check finished while an earlier one was still
-	// running when the run was aborted), and only this field keeps the
-	// stored seq aligned with the on-disk `<seq>-<name>.log.zst` prefix.
+	// Seq is the 1-based spec position, preserving check identity and log
+	// filenames when parallel completion leaves gaps. Zero lets history use
+	// the slice index for older records.
 	Seq int
 
-	// Command is the argv that was actually submitted for this check
-	// (= CheckJob.Command at the time RunCheck was called), copied onto the
-	// result by the queue right after the executor returns (internal/queue/
-	// reconcile.go's startCheck) rather than by the Executor implementations
-	// themselves. Nil for a result a test builds by hand without going
-	// through startCheck (e.g. GatedExecutor.Release's caller-supplied
-	// CheckResult) — history/dashboard treat that the same as an old
-	// pre-v8 row that predates this field: no command echo rendered.
+	// Command is the argv submitted to the executor, copied onto the result by
+	// the queue. Nil for older or hand-built records.
 	Command []string
 
 	Status CheckStatus
@@ -280,63 +161,32 @@ type CheckResult struct {
 	// Output is the check's captured output, tail-capped (64 KiB).
 	Output string
 
-	// LogPath is set iff the executor actually wrote the full,
-	// uncapped log file at CheckJob.LogPath: empty both when no file was
-	// requested (CheckJob.LogPath == "") and when one was requested but
-	// couldn't be created (a log-less fallback — losing the log file must
-	// never fail the check itself, so that failure is silent here, not an
-	// Err). Callers that want the complete record use this path; Output
-	// stays the fast tail-capped inline view either way.
+	// LogPath names the full output file only if the executor created it. File
+	// creation failure leaves it empty without failing the check.
 	LogPath string
 
 	Duration time.Duration
 
-	// Waited is how long the check sat READY — every `after` prerequisite
-	// green, its run below max-parallel — but unable to start because the
-	// daemon-wide execution cap had no free slot. Zero when it started
-	// immediately (the common case, and always under an unlimited cap).
-	// Recorded so an operator can tell capacity starvation from a slow
-	// command: a long Duration is the check's own cost, a long Waited is
-	// the host's.
+	// Waited measures time ready to run but waiting for a daemon-wide
+	// execution slot.
 	Waited time.Duration
 
-	// Materialized is how long this node's private workspace took to
-	// materialize (git archive extract + the history-mtime pass) before
-	// its command ran — isolated-workspace mode only (issue #9), zero in
-	// shared mode where the run's single export happens once up front and
-	// is not attributed to any one check. Recorded separately from Waited
-	// (slot wait) and Duration (the command) so an operator can evaluate
-	// whether per-node materialization is a material cost of isolation.
+	// Materialized measures private workspace export and timestamp restoration
+	// in isolated mode. Zero in shared mode.
 	Materialized time.Duration
 
-	// PeakRSS is the peak resident-set size the check's process (and any
-	// descendants its own children reaped via wait(2), transitively)
-	// touched over its lifetime, in BYTES. Zero means "not measured" —
-	// either the executor has no reliable source for it (issue #14's
-	// container-executor investigation: --rm removes the container
-	// before any terminal stat is retrievable, so the container executor
-	// always leaves this zero rather than approximate) or the command
-	// never actually ran (a daemon-side failure before exec). Best-effort
-	// observability only, captured for history/telemetry — see
-	// docs/design's issue #14 slice notes; NEVER an input to Status or
-	// any other verdict.
+	// PeakRSS is peak resident memory in bytes, including reaped descendants
+	// where supported. Zero means unmeasured. Resource usage never affects the
+	// verdict.
 	PeakRSS int64
 
-	// UserCPU and SysCPU are the check's process (and reaped-descendant)
-	// time spent in user space and in the kernel on its behalf,
-	// respectively — the same rusage the OS accumulates through wait(2)
-	// that PeakRSS comes from, and the same zero-means-unmeasured and
-	// never-a-verdict-input rules apply. A CPU-bound command shows UserCPU
-	// well above SysCPU; an I/O-bound one shows the reverse.
+	// UserCPU and SysCPU are process and reaped-descendant CPU times. Zero
+	// means unmeasured.
 	UserCPU time.Duration
 	SysCPU  time.Duration
 
-	// BlockedBy, set only when Status is CheckBlocked, names the
-	// prerequisite check(s) whose non-green end blocked this one — the
-	// direct `after` edges that failed, or, for a check with no failed
-	// edge of its own (it was in flight or independent when the run went
-	// red), the run's root failing check. Structured rather than prose so
-	// history and channels can link the culprit.
+	// BlockedBy identifies failed prerequisites or the run's root failure. Set
+	// only for CheckBlocked.
 	BlockedBy []string
 
 	// Err is set only for daemon-caused non-verdict failures. See Status
@@ -369,85 +219,34 @@ const (
 	// CheckSkipped, and an empty or absent file is CheckPassed.
 	EnvResultFile = "GAUNTLET_RESULT_FILE"
 
-	// EnvRunID is the run's ID (= CheckJob.RunID), exported so a check's
-	// own test harness can namespace shared external services (e.g. a
-	// scratch database on a shared SQL Server) per run. This is groundwork
-	// for a future shared-services design: concurrent runs — the
-	// speculate window, or a batch's members, each of which runs its own
-	// checks over the same shared external services — need a token that
-	// distinguishes them, and the run ID is the one identity already
-	// unique per run that a check couldn't otherwise see.
+	// EnvRunID namespaces external resources per run. It is shared by all
+	// checks and all members of a batch.
 	EnvRunID = "GAUNTLET_RUN_ID"
 
-	// EnvImageResultFile is the path an IMAGE-BUILD job (CheckJob.
-	// ImageBuild) must write its captured immutable image identity to —
-	// a local image ID (`sha256:...`, e.g. docker buildx's --iidfile
-	// output) or a digest-pinned registry reference
-	// (`registry/repo@sha256:...`). Exported INSTEAD of EnvResultFile:
-	// builds have no skipped verdict, and the two protocols must not be
-	// conflated. A non-zero exit is a build failure regardless of the
-	// file; exit 0 with a missing, empty, or mutable (tag-shaped) result
-	// is ALSO a build failure — the queue validates the content, the
-	// executor only reads it back (CheckResult.Image).
+	// EnvImageResultFile replaces EnvResultFile for builds. The executor
+	// captures an image ID or digest reference; the queue rejects missing,
+	// empty, or mutable results. Nonzero exit always fails.
 	EnvImageResultFile = "GAUNTLET_IMAGE_RESULT_FILE"
 
-	// EnvReceiptResultFile is the path a RECEIPT job (CheckJob.
-	// ReceiptCapture) must write its captured payload to — exported
-	// INSTEAD of EnvResultFile, the same "distinct protocol, never
-	// conflated" contract as EnvImageResultFile: a receipt has no skipped
-	// verdict, and a non-zero exit is a receipt failure regardless of the
-	// file. The executor reads the file back RAW (bounded to
-	// CheckJob.ReceiptMaxBytes+1) and hands it to the queue verbatim via
-	// CheckResult.Receipt for validation (empty/unreadable/oversized are
-	// all rejected there, not here) — unlike an image reference, a
-	// receipt payload has no shape the executor itself can check.
+	// EnvReceiptResultFile replaces EnvResultFile for receipts. The executor
+	// captures raw bytes, bounded by ReceiptMaxBytes+1; the queue validates
+	// them. Nonzero exit always fails.
 	EnvReceiptResultFile = "GAUNTLET_RECEIPT_RESULT_FILE"
 
-	// EnvGitDir is a git dir (usable as GIT_DIR or `git --git-dir`) holding
-	// every object the *_SHA vars above name — the daemon's own bare repo,
-	// which contains the trial merge commit whether or not it ever lands.
-	// The trial tree itself is exported without a .git (git archive), so
-	// this is what lets an affected-only check resolve
-	// `git diff $GAUNTLET_BASE_SHA $GAUNTLET_MERGE_SHA`, or derive
-	// content-based cache keys (`git log -1 -- <inputs>`), without
-	// maintaining its own clone. Read-only by contract: the container
-	// executor mounts it :ro at a fixed in-container path; the local
-	// executor exports the daemon's live repo path and trusts the check
-	// (the same own-developers threat model as everything else). Absent
-	// entirely when the executor wasn't told where the repo lives
-	// (LocalExecutor.GitDir / executor.Params.GitDir empty — the state of
-	// every hand-built executor in tests before this field existed).
+	// EnvGitDir points to the daemon's object store so checks can resolve the
+	// supplied SHAs. Read-only by contract; omitted when the executor has no
+	// configured Git directory.
 	EnvGitDir = "GAUNTLET_GIT_DIR"
 
-	// EnvDeployEnv, EnvDeployNode, EnvDeploySHA and EnvDeployedSHA are the
-	// deploy coordinates a DEPLOY node's command runs with
-	// (docs/design/deployment.md, "What runs"), on top of the check
-	// contract above — GAUNTLET_RESULT_FILE (a deploy node reports skipped
-	// exactly as a check does; that is how affected-only deploys stay
-	// cheap) and GAUNTLET_GIT_DIR (which resolves both SHAs below, so the
-	// `git diff $GAUNTLET_DEPLOYED_SHA..$GAUNTLET_DEPLOY_SHA -- app1/`
-	// pattern needs no clone) ride the existing plumbing untouched.
-	//
-	// All four are exported TOGETHER or not at all: a job with a
-	// CheckJob.DeployEnv is a deploy node and gets the whole set, a job
-	// without one gets none of it. EnvDeployedSHA is therefore exported
-	// SET-BUT-EMPTY on an environment's first-ever deploy rather than being
-	// omitted — the opposite of EnvGitDir's absent-when-unknown rule, and
-	// deliberately: git-dir absence is a property of the EXECUTOR's
-	// configuration (a check can't do anything about it), while an empty
-	// previous SHA is a real, expected value of the deploy protocol that a
-	// script must branch on. `[ -z "$GAUNTLET_DEPLOYED_SHA" ]` is the whole
-	// first-deploy test, and it works without the script also having to
-	// distinguish unset from empty.
+	// The deploy variables are exported together when CheckJob.DeployEnv is
+	// set. EnvDeployedSHA is set but empty on the first deploy, allowing
+	// scripts to distinguish it from a missing deploy environment.
 	EnvDeployEnv = "GAUNTLET_DEPLOY_ENV"
 
 	// EnvDeployNode is the deploy node's name (= CheckJob.DeployNode).
 	EnvDeployNode = "GAUNTLET_DEPLOY_NODE"
 
-	// EnvDeploySHA is the revision being deployed — the environment's
-	// desired ref (= CheckJob.MergeSHA, which the same job also exports as
-	// GAUNTLET_MERGE_SHA: one commit, named twice, so a script shared
-	// between checks and deploys can read either vocabulary).
+	// EnvDeploySHA is the desired revision, also exported as EnvMergeSHA.
 	EnvDeploySHA = "GAUNTLET_DEPLOY_SHA"
 
 	// EnvDeployedSHA is the environment's observed ref BEFORE this deploy
@@ -460,8 +259,8 @@ const (
 type Outcome int
 
 const (
-	// OutcomeLanded means the merge commit was CAS-pushed to the target
-	// and the candidate's slot was CAS-deleted.
+	// OutcomeLanded means the tested commit reached the target. Slot deletion
+	// or forge acknowledgement may still need recovery.
 	OutcomeLanded Outcome = iota
 
 	// OutcomeRejected means a check failed, or the candidate's check spec
@@ -503,7 +302,7 @@ type RunRecord struct {
 
 	Trial TrialMerge
 
-	// Checks holds each check's result in the order it ran.
+	// Checks holds results in check-spec order.
 	Checks []CheckResult
 
 	Outcome Outcome
@@ -525,16 +324,9 @@ type RunRecord struct {
 	// serial/speculate).
 	Position int
 
-	// BatchSize is the batch's member count. Construction sites that never
-	// touch batching (serial/speculate's tryStartTrial/rejectRun/
-	// rejectPreMerge/recoverLanded, internal/queue) leave it at Go's zero
-	// value, 0 — NOT 1 — so a consumer reading BatchSize straight off an
-	// in-memory RunRecord must gate on BatchID != "" (empty for serial/
-	// speculate) rather than assume "0 or 1 means a lone run". Only
-	// history.Store normalizes it to 1 at write time (batchSizeOrDefault,
-	// internal/history/store.go) for the persisted/queried value — a row
-	// read back from history.RunRow.BatchSize (or the dashboard/CLI JSON
-	// derived from it) is always >= 1.
+	// BatchSize is the member count when BatchID is non-empty. Serial and
+	// speculative in-memory records leave it zero; history normalizes it to
+	// one.
 	BatchSize int
 
 	// Speculated is true iff this run was tested on a *predicted* base
@@ -543,39 +335,14 @@ type RunRecord struct {
 	// tested commit either way (Invariant 1).
 	Speculated bool
 
-	// Recovered is true iff this record was synthesized by crash recovery
-	// (queue/reconcile.go's recoverLanded) rather than produced by an
-	// actual trial+check run: cand.SHA was found already landed, so no
-	// merge happened and no checks ran here. MergeSHA may still be
-	// populated on a Recovered record (recoverLanded best-effort looks up
-	// the landing merge that already exists), but that must NOT be read as
-	// "checks ran, safe to treat like a normal landing" — internal/hooks's
-	// Runner gates its "run hooks vs. emit EventHookSkipped" decision on
-	// this field specifically, not on MergeSHA's presence, precisely so a
-	// recovered landing never auto-runs hooks (e.g. re-triggering a deploy)
-	// merely because its merge SHA happened to be identifiable.
+	// Recovered marks a landing discovered in target history without running
+	// checks here. Hooks must not auto-run for recovered records, even when
+	// MergeSHA is known.
 	Recovered bool
 
-	// ReceiptRef, ReceiptBlob, and ReceiptPublished carry the receipt-notes
-	// provenance of a run whose note was CONFIRMED PUBLISHED (issue #13):
-	// ReceiptRef is the configured notes ref the receipt was published
-	// under, ReceiptBlob is the published note's blob SHA
-	// (core.NotePublishResult.NoteBlobSHA), and ReceiptPublished is a small
-	// vocabulary — "published" (a fresh note commit) or "already-present"
-	// (PublishNote's idempotent AlreadyPublished outcome; still a landing
-	// success) — describing which. All three are "" when receipt-notes
-	// policy is disabled or the spec declares no receipt.
-	//
-	// NOT gated on the run actually landing: publication happens
-	// immediately before the target CAS (queue's landRun), and the queue
-	// stamps these three fields onto every member's record right then —
-	// before that CAS is even attempted — specifically so a run whose
-	// publish succeeded but then lost the target race (stale CAS, crash,
-	// a disjoint concurrent writer) still carries them despite ending
-	// Skipped or Error, not Landed. That orphan is deliberate: it is
-	// exactly the record that most needs this data, since a confirmed
-	// note now exists for a merge that never landed. Purely provenance,
-	// like Speculated/Recovered above: never read back by queue logic.
+	// ReceiptRef, ReceiptBlob, and ReceiptPublished record confirmed note
+	// publication, even if the subsequent target CAS fails. ReceiptPublished
+	// is "published" or "already-present"; empty values mean no publication.
 	ReceiptRef       string
 	ReceiptBlob      string
 	ReceiptPublished string

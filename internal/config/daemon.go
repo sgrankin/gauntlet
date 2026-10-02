@@ -1,13 +1,5 @@
-// Package config parses gauntlet's two KDL config files into plain structs:
-// the admin-written daemon config and the repo-side check spec. This is the
-// only package that touches KDL, so the config language stays swappable and
-// callers depend on the structs and LoadDaemon/ParseChecks signatures, never
-// on kdl-go directly.
-//
-// kdl-go's unmarshaler has thin validation (no required-field or
-// non-negative-value enforcement), so every exported load function here runs
-// a Go-side validation pass afterward; its errors name the offending
-// node/field.
+// Package config parses and validates the daemon and repo-side KDL files.
+// Callers depend on plain structs, not the KDL parser.
 package config
 
 import (
@@ -39,12 +31,8 @@ const (
 	defaultTrialRefPrefix    = "refs/gauntlet/trials"
 	defaultTrialRefRetention = 24 * time.Hour
 
-	// defaultReceiptNotesRef and defaultReceiptNotesMaxBytes are
-	// GitHub.ReceiptNotes's per-field defaults, applied only when the
-	// `receipt-notes` block is present (see that field's doc) and the
-	// field is left unset. maxAllowedReceiptBytes is the hard ceiling
-	// max-bytes may not exceed even when explicitly set — see
-	// ReceiptNotes's doc for why this one caps rather than just defaults.
+	// Receipt defaults apply only when the notes block is present. The hard
+	// ceiling bounds captured payloads.
 	defaultReceiptNotesRef      = "refs/notes/gauntlet/receipts"
 	defaultReceiptNotesMaxBytes = 65536
 	maxAllowedReceiptBytes      = 1 << 20 // 1 MiB
@@ -55,11 +43,7 @@ const (
 	defaultRuntime              = "container"
 	defaultWorkdir              = "/workspace"
 
-	// defaultHooksPolicy is applied to a target's hooks-policy whenever
-	// the target has at least one hook and left hooks-policy unset (see
-	// Target.HooksPolicy and applyDefaults) — "queue" reproduces the
-	// pre-policy behavior (internal/hooks, hooks v2's decision ledger):
-	// every landing's hooks run, in order, none ever dropped.
+	// Hook policy defaults to running every landing in order.
 	defaultHooksPolicy = "queue"
 
 	// Deploy environment defaults, applied only when the `deploy` block
@@ -77,31 +61,16 @@ const (
 	// load, it is not the real host bound — max-executions is.
 	maxAllowedDeployMaxParallel = 64
 
-	// defaultSummarizeModel matches internal/summarize.DefaultModel
-	// (duplicated here, not imported, per this file's existing pattern of
-	// owning its own defaults — see defaultGitHubTokenEnv et al.):
-	// Sonnet-class, per the operator decision to move the default off
-	// Haiku now that Effort (below) makes the intelligence/cost tradeoff
-	// configurable; prompt quality for this task was validated live
-	// against claude-sonnet-5.
+	// Summary defaults match internal/summarize without importing that
+	// package.
 	defaultSummarizeModel     = "claude-sonnet-5"
 	defaultSummarizeAPIKeyEnv = "ANTHROPIC_API_KEY"
 
-	// defaultSummarizeEffort is applied whenever the "summarize" section
-	// is present and effort is left unset — "medium" balances quality
-	// against the per-call cost/latency this synchronous call adds to
-	// every clean trial (see defaultSummarizeTimeout below). Once
-	// defaulted, Summarize.Effort is never "" for a loaded config — see
-	// validSummarizeEfforts and validate()'s check below.
+	// Effort defaults when the summarize block is present.
 	defaultSummarizeEffort = "medium"
 
-	// defaultSummarizeTimeout bounds the one Messages API call
-	// Config.MergeBody makes, synchronously, on the single-threaded
-	// reconcile loop, before that trial's checks even start (closing-review
-	// FIX 2) — every target's reconciliation stalls behind it. Kept well
-	// under defaultPoll so a slow-but-not-hung summarizer call never eats
-	// a whole poll interval; see the Summarize.Timeout field doc and
-	// README.md's Summaries section for the full contract.
+	// Summary calls are synchronous; keep their timeout below the poll
+	// interval.
 	defaultSummarizeTimeout = 5 * time.Second
 
 	// defaultMaxBatch, defaultWindow, and defaultOnBatchRed are the
@@ -341,23 +310,8 @@ type GitHub struct {
 	// Daemon.Summarize.
 	TrialRefs *GitHubTrialRefs `kdl:"trial-refs"`
 
-	// ReceiptNotes is the `receipt-notes { ref ...; max-bytes ... }`
-	// block (issue #13): its presence — not any one field's non-emptiness
-	// — enables the daemon's commitment to publish every landing's
-	// receipt (CheckSpec.Receipt's captured command result) as a git note
-	// on the tested merge SHA before landing, for every target this
-	// GitHub block covers. A pointer for the same presence-signalling
-	// reason as TrialRefs/Summarize: a bare `receipt-notes {}` with
-	// nothing set must still count as enabled. Absent ⇒ disabled, zero
-	// behavior change.
-	//
-	// This config slice (issue #13's config-surface half) only exposes
-	// and validates this field; a later slice wires actual note
-	// publication. The load-time consequence THIS slice does implement is
-	// queue.SpecRejectReason's receipt-policy gate, both directions: a
-	// spec with no receipt is rejected when this is set, and a spec
-	// declaring one is rejected when this is nil (see that function's
-	// doc).
+	// ReceiptNotes requires each run to publish a receipt before landing. Nil
+	// disables the policy and rejects specs declaring receipts.
 	ReceiptNotes *ReceiptNotes `kdl:"receipt-notes"`
 }
 
@@ -720,8 +674,7 @@ type Summarize struct {
 type Target struct {
 	Name   string `kdl:",arg"`
 	Branch string `kdl:"branch"`
-	// Squash is the default for loaded configs. Merge is a migration escape
-	// hatch for existing deployments; hand-built queue fixtures retain it.
+	// Landing selects squash (the loaded default) or legacy merge behavior.
 	Landing string `kdl:"landing"`
 
 	// Hooks are this target's post-land hooks (DESIGN.md's decision
@@ -730,72 +683,22 @@ type Target struct {
 	// means no hooks.
 	Hooks []Hook `kdl:"hook,multiple"`
 
-	// HooksPolicy controls what happens to this target's hook backlog
-	// when landings outpace hook execution (e.g. deploys slower than
-	// merges) — internal/hooks.Policy: "queue" (default; every landing's
-	// hooks run, none dropped), "coalesce" (a newer landing queued behind
-	// an older one drops the older; what's already running finishes
-	// undisturbed), or "cancel" (coalesce, plus the currently running
-	// landing's hooks are cancelled mid-hook for the newer one). Only
-	// meaningful when Hooks is non-empty — applyDefaults only defaults it
-	// (to "queue") in that case, and validate() rejects it being set on a
-	// target with no hooks at all, since there is no backlog to have a
-	// policy about.
+	// HooksPolicy selects queue, coalesce, or cancel behavior for the hook
+	// backlog. Relevant only when hooks exist.
 	HooksPolicy string `kdl:"hooks-policy"`
 
-	// Mode selects this target's queueing discipline: "serial" (default)
-	// tests and lands one candidate at a time, the baseline discipline;
-	// "batch" merges up to MaxBatch queued candidates into one --no-ff
-	// chain and runs a single check suite over the combined tree;
-	// "speculate" pipelines up to Window runs, each testing its own
-	// candidate chained onto the predicted (not-yet-landed) tip of the run
-	// ahead of it.
-	//
-	// "" is the zero value and means "serial" everywhere Mode is read.
-	// Unlike HooksPolicy, applyDefaults deliberately does NOT normalize ""
-	// to "serial" here: a target with no mode configured must keep
-	// reporting Mode=="" so a zero Target{} sees serial without any
-	// special-casing in internal/queue's lane model — "the fields' zero
-	// value already means serial".
+	// Mode selects serial, batch, or speculate admission. Empty defaults to
+	// serial.
 	Mode string `kdl:"mode"` // serial (default) | batch | speculate
 
-	// MaxBatch caps how many queued candidates one batch run combines
-	// into a single --no-ff chain and check suite. Legal only when
-	// Mode=="batch" — validate() rejects it being set for any other mode.
-	// Defaults to 8 when Mode=="batch" and left unset (zero).
-	//
-	// Bounded to [1, maxAllowedMaxBatch] (64) — a cap chosen here, not a
-	// hard requirement: each additional batch member costs one more
-	// synchronous Config.MergeBody/summarize call on the reconcile loop
-	// before checks even start, so an unbounded max-batch could stall the
-	// whole daemon for many multiples of summarize.timeout on a single
-	// refill.
+	// MaxBatch bounds batch members. Valid only in batch mode; defaults to 4.
 	MaxBatch int `kdl:"max-batch"`
 
-	// Window is the speculation pipeline depth: up to this many runs are
-	// in flight at once for the target — a fixed window; see
-	// WindowStart/WindowMax/WindowHalveOnRed below for the reserved
-	// adaptive-governor knobs. Legal only when Mode=="speculate"; defaults
-	// to 4 when left unset (zero).
-	//
-	// Bounded to [1, maxAllowedWindow] (32) — a cap chosen here, not a
-	// hard requirement. Each speculative run executes at most one check at
-	// a time, so Window is ALSO the maximum number of concurrent check
-	// processes/containers this target drives against the build executor:
-	// an operator sizing window is sizing builder concurrency, not just
-	// queue depth.
+	// Window bounds speculative runs. Valid only in speculate mode; defaults
+	// to 4.
 	Window int `kdl:"window"`
 
-	// OnBatchRed selects the batch red-recovery strategy: "serial"
-	// (default) re-queues every batch member unparked and re-forms them
-	// one at a time on the next refill until the culprit is found and
-	// parked, then batching resumes; "bisect" is a reserved growth path
-	// only. Legal only when Mode=="batch".
-	//
-	// "bisect" is accepted here so config stays forward-compatible, but is
-	// not implemented: LoadDaemon rejects a target that sets on-batch-red
-	// "bisect" with a "reserved for a future release" error, rather than
-	// silently running it as "serial".
+	// OnBatchRed selects serial fallback. Bisect is reserved and rejected.
 	OnBatchRed string `kdl:"on-batch-red"` // serial (default) | bisect (reserved, rejected)
 
 	// WindowStart, WindowMax, and WindowHalveOnRed reserve the config
@@ -1239,22 +1142,8 @@ func (d *Daemon) validateDeployEnvAcyclic() error {
 	return nil
 }
 
-// pathAtOrUnder reports whether path is exactly reserved or a path
-// underneath it, after cleaning both operands (so a trailing slash, a
-// repeated separator, or a "/." spelling of the same path can't dodge the
-// comparison). An empty reserved never matches — Executor.Workdir is only
-// ever "" for kind "local", where mounts have no effect at all (see
-// cmd/gauntlet's buildExecutor), and a "" root would otherwise wrongly
-// match every absolute path via the separator-prefix check below.
-// validateAppRemote enforces issue #6's app-mode remote contract: the App
-// automatically authenticates git against the configured remote, so the
-// remote must be (a) HTTPS — installation tokens cannot authenticate SSH —
-// (b) credential-free — the ledger already flags URL-embedded credentials
-// as readable by checks through the mounted GAUNTLET_GIT_DIR — and (c) the
-// SAME host and owner/repo the github block names, canonicalized. A
-// mismatch is a startup error, never a silent fallback to ambient auth: an
-// operator who selected app auth must never discover months later that git
-// was quietly using something else.
+// validateAppRemote requires a credential-free HTTPS URL matching the
+// configured GitHub API host and repository.
 func validateAppRemote(remote, apiURL, repo string) error {
 	u, err := url.Parse(remote)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -1433,29 +1322,8 @@ func pathAtOrUnder(path, reserved string) bool {
 	return path == reserved || strings.HasPrefix(path, reserved+string(filepath.Separator))
 }
 
-// SecretEnvNames returns the environment variable NAMES (never values)
-// that d's configured integrations declare as operator-secret credential
-// sources: github's token-env in static-token mode, slack's
-// app-token-env/bot-token-env, and summarize's api-key-env — exactly the
-// vocabulary issue #13's Gap 1 requires the local executor to strip from
-// every CANDIDATE-CODE command environment (checks, image builds, receipt
-// producers; post-land hooks are exempt — see core.CheckJob.OperatorOwned —
-// being operator-owned daemon config themselves, e.g. a deploy hook driving
-// `gh`). cmd/gauntlet threads this straight into executor.LocalExecutor's
-// SecretEnv field at construction; callers that build a Daemon by hand
-// (tests) get the same collection logic by calling this method rather than
-// re-deriving it, so the two can never drift.
-//
-// Call after applyDefaults has run (LoadDaemon always does) so each env-var
-// field already carries its resolved default rather than an unresolved "".
-//
-// Only a name the config ACTUALLY declares as a secret source is
-// collected, never the whole vocabulary regardless of mode: github's
-// TokenEnv is a credential source only in static-token mode (Auth == nil)
-// — an app-mode github block puts no static token in the daemon's own
-// environment at all (ghauth mints installation tokens in-process), so
-// there is nothing to strip. Likewise a disabled section (Repo/Channel
-// empty, Summarize nil) contributes nothing.
+// SecretEnvNames identifies configured credential variables to strip from
+// candidate commands. Operator-owned hooks may retain them.
 func (d *Daemon) SecretEnvNames() []string {
 	var names []string
 	if g := d.Gerrit; g != nil {

@@ -1,11 +1,5 @@
-// Command gauntlet runs the merge-queue daemon: it reads a daemon config,
-// opens (or creates) a local bare-repo clone of the configured remote under
-// the state directory, and reconciles candidates onto their targets on a
-// fixed poll interval until asked to stop.
-//
-// This file is wiring only — flags, config load, dependency construction,
-// and the run loop. All behavior lives in the internal packages it wires
-// together.
+// Command gauntlet runs the merge queue and its administrative clients.
+// This package loads configuration and wires the internal services.
 package main
 
 import (
@@ -35,21 +29,7 @@ import (
 )
 
 func main() {
-	// "land", "deploy", "promote", "status", "retry", "cancel",
-	// "hooks-cancel", "drain", "validate", "fmt", and "version" are
-	// client-side porcelain (cmd/gauntlet/land.go,
-	// cmd/gauntlet/deploycmd.go, cmd/gauntlet/status.go,
-	// cmd/gauntlet/validate.go, cmd/gauntlet/fmt.go,
-	// cmd/gauntlet/version.go): thin HTTP/git clients, pure config
-	// validation ("validate"), a pure line-based whitespace normalizer over
-	// internal/kdlfmt ("fmt" — see that package's doc; issue #12), or (for
-	// "version") pure local info — none of them run the daemon. "doctor"
-	// (cmd/gauntlet/doctor.go) is NOT pure porcelain like the rest of this
-	// list: it actively probes the host and network the daemon is about to
-	// run on/against (git, -state, auth, remote, executor runtimes, the
-	// dashboard port) — read-only except for minting a real GitHub App
-	// token in app-auth mode — but like them, it never runs the daemon loop
-	// itself. Everything else is the daemon itself.
+	// Dispatch administrative clients before constructing the daemon.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "land-pr":

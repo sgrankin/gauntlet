@@ -1,16 +1,7 @@
-// Package queue is the reconcile loop: the per-target state machine that
-// drives a candidate from "queued ref" through trial merge, named checks,
-// and land (or park). It knows nothing about how checks run, how events reach a human, or how git
-// plumbing works underneath — it sees only core.GitRepo, core.Executor, and
-// core.Channel, which is the mechanism for Invariant 8 (executor/channel
-// agnosticism).
-//
-// The reconcile pass (ReconcileOnce) is single-threaded and never overlaps
-// itself: the only other goroutines are per-check executor runs, which
-// communicate back solely by sending once on a one-shot result channel that
-// ReconcileOnce reads non-blockingly. There are no locks; every test can
-// therefore control exactly when a pass happens and when each check's
-// verdict lands.
+// Package queue reconciles candidate revisions, runs checks, and lands
+// verified history. ReconcileOnce is single-threaded. Check workers return
+// results through channels; snapshots and drain requests provide the
+// concurrent interfaces.
 package queue
 
 import (
@@ -30,12 +21,8 @@ import (
 	"github.com/sgrankin/gauntlet/internal/services"
 )
 
-// Config is the subset of the admin daemon config (internal/config.Daemon)
-// the queue itself needs: which targets to reconcile, where each
-// candidate's own check spec lives in its trial tree, the committer identity
-// for merge commits, and the merge-message template. Remote and Poll are
-// cmd-level concerns — dialing the core.GitRepo and driving Run's tick
-// channel — the queue is agnostic to both.
+// Config supplies queue policy and dependencies. Remote connection and
+// polling belong to the command package.
 type Config struct {
 	// Reviews is an optional forge admission adapter. Its snapshots augment
 	// ordinary queue refs; the core retains the same scheduler and CAS land.
@@ -56,189 +43,74 @@ type Config struct {
 	// omit an empty user rather than being used as-is.
 	MergeMessage string
 
-	// MergeBody optionally builds a prose body for the merge commit
-	// message (internal/summarize, a Claude-written summary of what the
-	// branch did), inserted between the subject and the Gauntlet-*
-	// trailers. nil disables it entirely — no body paragraph, ever.
-	// Called at most once per trial, immediately before
-	// buildMergeMessage; its return is trimmed and, if non-empty, becomes
-	// the body.
-	//
-	// This is best-effort by contract: the queue never retries it, never
-	// treats an error or empty return as a failure, and never blocks a
-	// landing on it — a body-less message is exactly as valid as one with
-	// a summary. Bounding the call (a timeout, a real deadline) is the
-	// caller's job, not the queue's: passing a ctx with no deadline here
-	// would let a hung MergeBody wedge the whole reconcile loop, since
-	// ReconcileOnce is never concurrent with itself. cmd's wiring closure
-	// is where that policy belongs (queue stays policy-free per this
-	// package's own doc comment).
+	// MergeBody supplies an optional legacy merge message body. Empty results
+	// do not fail a run; the caller must bound this synchronous operation with
+	// a deadline.
 	MergeBody func(ctx context.Context, cand core.Candidate, baseOID string) string
 
-	// WorkDir is the directory trial-tree export dirs are created under:
-	// os.MkdirTemp(WorkDir, ...). Empty selects the OS default temp dir —
-	// this field only lets an operator (or a test) pin exports to a known,
-	// sweepable location; the queue itself never sweeps WorkDir (that's
-	// cmd's job).
+	// WorkDir holds temporary trial exports. Empty uses the OS temp directory;
+	// startup cleanup belongs to the command package.
 	WorkDir string
 
-	// LogDir is the directory full per-check log files are written under
-	// (DESIGN.md "Full per-check log files"): each check's job gets
-	// LogPath = filepath.Join(LogDir, runID, "<seq>-<sanitized-name>.log")
-	// — seq is the check's 1-based position in the spec, so two names that
-	// sanitize identically never alias onto one file (reconcile.go) —
-	// and the executor tees the check's combined output there in addition
-	// to the tail-capped in-band CheckResult.Output. Empty disables log
-	// files entirely (CheckJob.LogPath stays "" for every check).
-	// Unlike WorkDir's trial export
-	// dirs, log files under LogDir are never removed by the queue: they
-	// outlive their run by design (the dashboard's "full log" link, an
-	// API/MCP path) — retention/pruning is a separate mechanism, not the
-	// reconcile loop's job.
+	// LogDir holds full check logs named by run, spec position, and sanitized
+	// check name. Empty disables file logging. Retention is managed outside
+	// the queue.
 	LogDir string
 
-	// SeedParks, if non-nil, is consulted once per target — on that
-	// target's very first reconcileTarget call this Daemon instance ever
-	// makes, never again — to pre-seed d.done (the park list) from run
-	// history before that first pass's own pick even happens (park
-	// persistence across restarts).
-	//
-	// This is efficiency state, never correctness state (DESIGN.md's
-	// decision ledger, "SQLite for history only", sharpened): Invariant 4's
-	// crash recovery already reconstructs every correctness-relevant fact
-	// from refs alone, with or without this. What a restart loses today is
-	// purely a pointless re-test of a SHA already proven red before the
-	// crash — SeedParks exists only to skip that, by asking history
-	// (internal/history's LatestTerminalPerRef) for each candidate ref's
-	// most recent verdict. Every seed is filtered twice before it can do
-	// anything: reconcileTarget only keeps seeds whose Outcome is
-	// red-family (Rejected/Conflict/Error) — a landed or skipped ref is
-	// never seeded — and then the very next call, syncBookkeeping's
-	// existing SHA-currency check, drops any seed whose ref has since
-	// vanished or moved to a new SHA, exactly as it already does to a live
-	// park on a re-push. A stale or missing db therefore costs at most some
-	// avoidable re-tests; it can never manufacture a landing or suppress a
-	// real one. nil (the default) disables seeding entirely.
+	// SeedParks restores red verdicts once per target at startup. Seeds are
+	// discarded when the candidate revision or metadata changes. A missing
+	// history store only causes retesting.
 	SeedParks func(target string) []ParkSeed
 
-	// Services is the shared-services pool this daemon consumes for checks
-	// declaring `needs` (see docs/design/services.md, "The model: a cache
-	// entry, not a supervised unit"). nil ⇒ services
-	// disabled entirely: hooks and needs-free checks are unaffected either
-	// way, but a check spec that itself declares service/needs is rejected
-	// loudly at parse time (config.CheckSpec.RequiresServices, the gating
-	// check right after every config.ParseChecks call site) rather than
-	// silently running without its dependency.
+	// Services resolves check needs. Nil rejects specs declaring services or
+	// needs.
 	Services ServicePool
 
-	// Slots is the daemon-wide execution-capacity semaphore (the operator's
-	// `max-executions` cap — see core.Slots): the scheduler TryAcquires one
-	// slot per check before starting it and the check's goroutine releases
-	// it after executor cleanup, so a ready check on a saturated host
-	// simply stays ready (accruing CheckResult.Waited) until a later tick
-	// finds a slot. nil means unlimited — the zero-config default and the
-	// pre-cap behavior exactly. The SAME instance should be handed to the
-	// hooks Runner (and any future image-build machinery) so every bounded
-	// execution on the host shares one budget.
+	// Slots limits simultaneous executions. Ready checks wait when full;
+	// workers release their slots after cleanup. Nil is unlimited. Share it
+	// with hooks and deployment runners.
 	Slots *core.Slots
 
-	// KnownExecutorProfile reports whether a repo-selected executor
-	// profile name (config.Check.Executor / config.Image.Executor)
-	// resolves to a configured profile. Consulted once per run at spec
-	// load, right beside the RequiresServices gate: a spec naming an
-	// unknown profile is rejected loudly before any of its commands
-	// start — a configuration error, never a red check verdict. nil means
-	// no named profiles exist, so only the default ("", never consulted)
-	// is legal. This is a predicate, not an executor registry, on
-	// purpose: the queue core stays executor-agnostic (Invariant 8) —
-	// actual routing lives in the Executor implementation (executor.Mux).
+	// KnownExecutorProfile validates named profiles before commands run. Nil
+	// permits only the default profile.
 	KnownExecutorProfile func(name string) bool
 
-	// HistoryMtimes enables the deterministic-mtimes pass after every
-	// trial export (config's `export { mtimes "history" }`): the exported
-	// tree's file timestamps are rewritten to history-derived committer
-	// times via GitRepo.RestoreMtimes before any check can observe the
-	// tree. A pass failure is an infrastructure error (OutcomeError park)
-	// — never a silent wall-clock tree claiming stable-cache metadata.
+	// HistoryMtimes restores history-derived timestamps after export. Failure
+	// is an infrastructure error.
 	HistoryMtimes bool
 
-	// ImageCapableProfile reports whether profile name ("" = the default
-	// executor) can run a candidate-built image — i.e. is a container
-	// profile. Gated at spec load like KnownExecutorProfile: a check
-	// naming an image (config.Check.Image) on a local-kind profile can
-	// never work (there is no rootfs to swap), so it rejects before any
-	// command starts. nil means no profile can (a daemon wired without
-	// this predicate predates or disables candidate images).
+	// ImageCapableProfile identifies profiles that can run candidate-built
+	// images. Nil permits none.
 	ImageCapableProfile func(name string) bool
 
-	// AutoRetryErrors enables the auto-retry-once behavior (DESIGN.md
-	// decision ledger, "Auto-retry once on infra-error parks"; see also
-	// docs/design/scaling.md, "The one real prerequisite: auto-requeue on
-	// infra errors"): an OutcomeError park is automatically
-	// cleared and re-queued exactly once per (ref, SHA) — maybeAutoRetry
-	// (autoretry.go), called from every OutcomeError park site in
-	// reconcile.go. False is this package's own zero-value default,
-	// matching queue's policy-free stance (this package documents defaults,
-	// it doesn't opinionate on them): internal/config/daemon.go's
-	// Daemon.AutoRetryErrors defaults to true at the config-loading layer,
-	// and cmd/gauntlet wires the resolved value straight through.
+	// AutoRetryErrors grants one retry per ref/SHA for infrastructure
+	// failures. Loaded daemon configs default it to true; the queue's zero
+	// value is false.
 	AutoRetryErrors bool
 
-	// TrialRefs enables trial-ref publication (issue #7, config's `github
-	// { trial-ref-prefix ... }`): after CommitTree, the run's chain-tip
-	// merge is CAS-published under an immutable remote ref
-	// (TrialRefPrefix/<run-id>) so its MergeSHA is resolvable on the
-	// remote and can carry a verification commit status. Off ⇒ today's
-	// behavior verbatim (no ref, no EventTrialMerged/EventVerified,
-	// candidate-SHA statuses). A publish failure is an infrastructure
-	// error (OutcomeError park), never a candidate rejection.
+	// TrialRefs publishes the tested tip before checks, making it resolvable
+	// for remote verification statuses. Publication failure is an
+	// infrastructure error.
 	TrialRefs bool
 
-	// TrialRefPrefix is the ref namespace trial merges publish under —
-	// e.g. "refs/gauntlet/trials" (the default; a custom namespace,
-	// deliberately NOT refs/heads/**, to avoid UI clutter and workflow
-	// triggers — see the issue #7 spike). Each run's ref is
-	// TrialRefPrefix + "/" + runID. Meaningful only when TrialRefs is set.
+	// TrialRefPrefix names the namespace for TrialRefs: <prefix>/<run-id>. It
+	// must not overlap candidate refs.
 	TrialRefPrefix string
 
-	// TrialRefRetention is how long a NON-landing run's trial ref is kept
-	// after its terminal outcome before the reaper CAS-deletes it, so a
-	// failed synthetic merge stays inspectable briefly. A landing deletes
-	// its ref immediately (the target now reaches the merge). Zero means
-	// delete on terminal, no retention. Meaningful only when TrialRefs is
-	// set.
+	// TrialRefRetention keeps failed trial refs inspectable until the reaper
+	// removes them. Zero deletes on termination; landed refs are deleted
+	// immediately.
 	TrialRefRetention time.Duration
 
-	// ReceiptNotes mirrors config.GitHub.ReceiptNotes's presence (issue
-	// #13, config's `github { receipt-notes { ... } }`): nil disables the
-	// feature entirely, byte-identical to today's behavior — a spec
-	// declaring a receipt is rejected (SpecRejectReason), no "receipt:*"
-	// node is ever scheduled (buildRunNodes), and landRun never calls
-	// GitRepo.PublishNote. Non-nil both enables the policy (SpecRejectReason
-	// then also rejects a spec declaring NO receipt) and carries the two
-	// knobs publication itself needs: Ref (the notes ref every receipt is
-	// published under) and MaxBytes (the captured-result size ceiling — the
-	// executor's bounded read and the queue's own validation both key off
-	// it). Reusing config.ReceiptNotes directly (rather than a parallel core
-	// type) costs no new import boundary: the queue already depends on
-	// internal/config for config.Target/config.Check/config.CheckSpec
-	// throughout this package.
-	//
-	// cmd/gauntlet wires this straight from cfg.GitHub.ReceiptNotes; a
-	// hand-built queue.Config (tests, or any caller that never sets it)
-	// simply leaves it nil, matching every other unwired optional-feature
-	// default in this struct.
+	// ReceiptNotes requires a receipt node and publishes its payload before
+	// the target CAS. Nil disables publication and rejects specs with
+	// receipts.
 	ReceiptNotes *config.ReceiptNotes
 }
 
-// ServicePool is the subset of *services.Pool the queue consumes. Its
-// blocking methods (EnsureAll/AnyDead) MUST be called only from a
-// check-execution goroutine (see docs/design/services.md, "Lifecycle:
-// ensure, release, reap") — reconcile.go's startCheck wrapper
-// is the only call site; ReconcileOnce/advanceLane/refillLane/startRun never
-// call any of these. Safe for concurrent use — *services.Pool satisfies this
-// structurally, with no explicit `var _ ServicePool = (*services.Pool)(nil)`
-// needed.
+// ServicePool resolves and releases shared services. Blocking methods must
+// run in check workers, never on the reconcile loop. Implementations must
+// be safe for concurrent use.
 type ServicePool interface {
 	// EnsureAll resolves every name in needs against svcs to a ready
 	// instance, BLOCKING (create + up-to-ReadyTimeout ready-poll). Errors
@@ -270,10 +142,8 @@ type ParkSeed struct {
 	Reason  string
 	At      time.Time
 
-	// RunID is the terminal run that produced this verdict, mirrored
-	// straight through to parkEntry.RunID (seedParksOnce) — "" for history
-	// predating this field, in which case the seeded park simply renders
-	// unlinked on the dashboard, same as any other RunID-less park.
+	// RunID links the park to its terminal history record. Empty for older
+	// history.
 	RunID string
 }
 
@@ -335,24 +205,16 @@ type run struct {
 	dir       string // exported trial tree; removed on every terminal transition
 	checks    []config.Check
 
-	// maxParallel is how many of this run's checks may be in flight at
-	// once — the spec's max-parallel with zero already normalized to 1 at
-	// run construction, so schedulers never re-interpret the default. At 1
-	// with no `after` edges, scheduling degenerates to the pre-parallelism
-	// contract exactly: one check at a time, in declaration order.
+	// maxParallel bounds running checks; defaults are resolved when the run is
+	// created.
 	maxParallel int
 
-	// inflight holds every currently-running check by name; empty both
-	// before the first start and once the verdict is determined. Mutated
-	// only on the reconcile goroutine (the per-check goroutines communicate
-	// solely via their one-shot result channels).
+	// inflight is owned by the reconcile loop. Workers send results through
+	// the stored channels.
 	inflight map[string]*checkInFlight
 
-	// results holds every finished check's result by name. rec.Checks is
-	// deliberately NOT built incrementally from these: materializeChecks
-	// fills every member's record once, in spec-declaration order — the
-	// durable per-check identity history/seq/log filenames key on — when
-	// the run concludes (green, red, or cancelled).
+	// results holds completed checks. materializeChecks writes them to member
+	// records in spec order once the run concludes.
 	results map[string]core.CheckResult
 
 	// readyAt stamps when a ready check first found no free execution slot
@@ -361,34 +223,21 @@ type run struct {
 	// starts; a check that starts immediately never appears here.
 	readyAt map[string]time.Time
 
-	// culprit is the first check (in spec-consumption order) to finish
-	// red or errored — the run's explicit root failure. "" while the run
-	// is healthy. Set once; never inferred from whichever result happened
-	// to land last (parallel completion makes that ordering meaningless).
+	// culprit is the first failure consumed in spec order. It is set once,
+	// independently of worker completion order.
 	culprit string
 
-	// imageRefs maps image name -> the build node's VALIDATED immutable
-	// identity (config.CheckSpec.Images; nil when the spec declares
-	// none). Written when an "image:<name>" node's result is consumed
-	// green, read by startCheck to stamp consumer jobs. A consumer can
-	// only become ready once its implicit edge onto the build node is
-	// green, so a ready consumer always finds its ref here.
+	// imageRefs holds validated build identities. Consumer dependency edges
+	// ensure each identity exists before use.
 	imageRefs map[string]string
 
 	// materialized guards materializeChecks's one-time fill of the member
 	// records' Checks slices.
 	materialized bool
 
-	// receiptPayload holds the receipt node's validated captured bytes
-	// (issue #13), in memory only, once its "receipt:<name>" node finishes
-	// green (advanceChecks) — nil for a spec with no receipt, or before the
-	// node finishes. receiptProducer names the node that produced it
-	// (always "receipt:<name>" today; carried explicitly rather than
-	// re-derived, for provenance). Publication (landRun) reads these
-	// immediately before the target CAS and never earlier — a non-head
-	// speculative run, or one later invalidated, may hold a validated
-	// payload it never publishes, which is correct: publication happens
-	// only at the moment a run actually lands (see landRun's doc).
+	// receiptPayload and receiptProducer hold a validated receipt until
+	// landing. A speculative run may finish validation without ever
+	// publishing.
 	receiptPayload  []byte
 	receiptProducer string
 
@@ -399,34 +248,21 @@ type run struct {
 	receiptBlobSHA   string
 	receiptPublished string
 
-	// services is spec.Services verbatim — set once in startRun/
-	// finishBatchStart, read-only for the rest of the run's life: no
-	// cross-goroutine mutation, no race. startCheck's per-check goroutine
-	// reads it (alongside the started check's own Needs) to resolve
-	// `needs` against declared Service specs.
+	// services is the immutable spec snapshot shared with check workers.
 	services []config.Service
 
-	// isolated selects per-node private workspaces (issue #9,
-	// CheckSpec.Workspace == "isolated"): when set, dir is "" (no shared
-	// export) and each check materializes its own copy of chainTree (the
-	// exact tested tree) in startCheck. Read-only for the run's life, set
-	// once at start.
+	// isolated gives each node a private export of chainTree. In that mode dir
+	// is empty.
 	isolated bool
 
 	verdict runVerdict // set by advanceChecks, consumed by advanceLane
 
-	// verifiedEmitted guards the once-per-run EventVerified emit (the
-	// verdict-goes-green transition, issue #7): advanceChecks can re-run
-	// the green-detection block on a tick where the run isn't landed the
-	// same pass, so the emit is edge-triggered, not level.
+	// verifiedEmitted makes the all-green event edge-triggered across repeated
+	// ticks.
 	verifiedEmitted bool
 
-	// trialRef, when non-empty, is the published immutable remote ref
-	// naming this run's chain-tip merge (issue #7's trial-ref publication,
-	// Config.TrialRefs). Set once in startRun/finishBatchStart after the
-	// CAS-create push confirms; CAS-deleted at land (landRun) and, for a
-	// non-landing terminal, retained for Config.TrialRefRetention then
-	// reaped. Empty when the feature is off or the merge never published.
+	// trialRef names the published tested tip. It is deleted on landing or
+	// retained for the configured failure interval.
 	trialRef string
 
 	rootCtx  context.Context
@@ -462,27 +298,15 @@ type Daemon struct {
 	cfg      Config
 	now      func() time.Time
 
-	// order assigns each candidate ref (per target) a monotonically
-	// increasing sequence number the first time it's observed — the FIFO
-	// key, tie-broken lexically by ref. done is a park list, sticky per
-	// (ref, SHA): entries clear only when the
-	// ref's SHA changes, the ref vanishes, or a CommandRetry clears it
-	// explicitly (command.go), never when some other candidate lands. Both
-	// are keyed by target name, then by ref, and are fully reconstructible
-	// from ground truth — losing them (a restart) costs at most some
-	// re-tests, never correctness.
+	// order assigns FIFO sequence numbers; done holds parks by target and ref.
+	// Parks clear on revision/metadata changes, disappearance, or explicit
+	// retry.
 	order map[string]map[string]int64
 	done  map[string]map[string]parkEntry
 	seq   int64
 
-	// autoRetried is the once-per-(ref,SHA) auto-retry budget for
-	// OutcomeError parks (autoretry.go's maybeAutoRetry):
-	// target -> ref -> the SHA already auto-retried. Same shape and same
-	// reconstructible-after-restart argument as done above — losing this
-	// (a restart) only re-grants one already-spent auto-retry per
-	// still-parked ref, never an unbounded retry loop. syncBookkeeping
-	// prunes it in lockstep with done: a vanished ref or a moved SHA drops
-	// its entry, so a new SHA on the same ref always gets a fresh budget.
+	// autoRetried records the ref/SHA pairs that spent their infrastructure
+	// retry. Restarting renews that budget.
 	autoRetried map[string]map[string]string
 
 	// ignoredRefs dedupes core.EventIgnoredRef: ref -> last-emitted-for SHA,
@@ -494,97 +318,42 @@ type Daemon struct {
 	// one whose runs slice is empty, is an idle target.
 	lanes map[string]*lane
 
-	// batchFallback is batch mode's in-memory red-recovery flag (see
-	// docs/design/queue-modes.md, "Red-recovery: serial fallback"):
-	// target -> true while a prior batch run for it went
-	// red and no landing has occurred since. refillLane consults it to
-	// force the next refill into refillSerialOne (one candidate at a time,
-	// normal single-culprit park semantics) instead of refillBatch;
-	// landRun deletes the entry on any successful landing for that target,
-	// resuming batching. Reconstructible in the sense that losing it (a
-	// restart) costs at most one extra batch-red round before the culprit
-	// is found again — never a correctness issue (no ref reflects this
-	// flag; it's pure scheduling policy, not state any Invariant depends
-	// on).
+	// batchFallback selects serial retries after a red batch, until the next
+	// successful landing.
 	batchFallback map[string]bool
 
-	// seeded marks, per target, whether Config.SeedParks has already been
-	// consulted for it: set true the first time reconcileTarget
-	// runs for that target, regardless of whether SeedParks is nil or
-	// returned anything — so seeding is attempted at most once per target
-	// per Daemon lifetime, never on a later restart-free reconcile pass.
+	// seeded prevents reading park history more than once per target.
 	seeded map[string]bool
 
-	// reaperArmed marks whether Config.Services.ArmReaper has already been
-	// called: set true at the
-	// end of the first ReconcileOnce pass that completes a full sweep over
-	// every target, never again. Left false forever when Config.Services is
-	// nil. Unlike seeded (per-target), this is once per Daemon lifetime,
-	// full stop — the reaper must not run until every target's in-flight
-	// work from before a restart has had one whole pass to re-ensure (and
-	// so refcount) whatever it still needs (see docs/design/services.md,
-	// "Lifecycle: ensure, release, reap").
+	// reaperArmed delays service reaping until the first complete pass has
+	// restored active references.
 	reaperArmed bool
 
-	// landedPins maps chain-tip merge OIDs to their target's ref name for
-	// runs whose GC pin (core.GitRepo.Pin) must outlive the run itself:
-	// landings (the chain becomes locally reachable through
-	// refs/remotes/origin/<branch> only once a Fetch reflects the push, and
-	// post-land hooks may export the merge from a backlog well after
-	// landing) and ambiguous target-push failures (the push may have taken
-	// effect server-side despite the client-visible error — landRun's
-	// Skip-not-park rationale). landRun registers the pin here instead of
-	// letting finalizeRun release it; ReconcileOnce releases an entry only
-	// once the tick's fetched target ref actually REACHES the tip
-	// (IsAncestor) — "a Fetch succeeded" alone isn't the anchor, e.g. a
-	// lagging read replica can serve the pre-push tip. An entry that never
-	// anchors (a genuinely failed ambiguous push, a target force-pushed to
-	// discard its landing) is deliberately retained: one stale ref per rare
-	// event, swept — like every crash-stranded pin — by the next startup's
-	// pin sweep (Invariant 4: stranded pins protect nothing a fresh process
-	// still needs). In-memory only, reconstructible in that same weak sense.
+	// landedPins retains trial tips after successful or ambiguous target
+	// pushes. Release only after fetch proves target reachability; lagging
+	// replicas are not sufficient. Unresolved pins survive until the startup
+	// sweep.
 	landedPins map[string]string
 
-	// trialReap holds published trial refs (issue #7) awaiting deletion
-	// after their run's non-landing terminal — keyed by ref name, valued
-	// by the merge SHA the ref names and the instant it may be reaped
-	// (now + Config.TrialRefRetention). reapTrialRefs CAS-deletes each on
-	// or after its instant, keyed on the stored SHA so a ref recreated or
-	// changed by another daemon/operator is never removed. A landing
-	// deletes its ref immediately (landRun) and never enters here.
-	// In-memory only: crash orphans are swept at boot by cmd, mirroring
-	// the pin sweep.
+	// trialReap holds failed trial refs until their retention deadline.
+	// Deletion uses the recorded SHA; startup sweeps crash orphans.
 	trialReap map[string]trialReapEntry
 
-	// idleSince is buildSnapshot's own tracked idle-transition instant (see
-	// docs/design/scaling.md, "Axis 2 — park the builder"; and
-	// Snapshot.IdleSince's own doc): zero while the
-	// queue is busy, stamped with the tick's snap.At the moment every target
-	// goes idle, and held steady across however many idle ticks follow.
-	// Reconcile-goroutine-only, like order/done/lanes above — buildSnapshot
-	// is the sole reader and writer, and it only ever runs there.
+	// idleSince tracks the queue's transition to idle; only buildSnapshot
+	// reads and writes it.
 	idleSince time.Time
 
-	// tick counts completed ReconcileOnce passes, solely to rotate the
-	// target-iteration starting offset when a daemon-wide execution cap is
-	// configured (see ReconcileOnce): under slot contention, a fixed
-	// config-order iteration would let the first target's ready checks
-	// permanently absorb every freed slot. Uncapped daemons never rotate,
-	// keeping event ordering byte-identical to the pre-cap behavior.
+	// tick rotates target admission under slot contention, preventing config-
+	// order starvation.
 	tick int64
 
 	// snap holds the most recently published Snapshot; nil until the first
 	// successful ReconcileOnce pass completes.
 	snap atomic.Pointer[Snapshot]
 
-	// Graceful-drain state (issue #8). Drain() is called from a signal or
-	// HTTP goroutine, so the REQUEST is mutex-guarded (drainReqMu); the
-	// LIVE state (draining/drainSince/drainDeadline) is reconcile-
-	// goroutine-only like idleSince/order/lanes, synced from the request
-	// once per tick by syncDrainRequest. Once draining, no new candidate
-	// is admitted and no speculation window extends (refill gating), and
-	// infra parks are not auto-retried, so the active set is finite; the
-	// Run loop exits cleanly once it empties.
+	// Drain requests are mutex-protected; syncDrainRequest transfers them to
+	// reconcile-owned state. Draining stops admission and automatic retries,
+	// leaving a finite active set.
 	drainReqMu    sync.Mutex
 	drainReq      bool
 	drainReqDL    time.Time
