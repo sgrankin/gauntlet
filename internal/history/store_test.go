@@ -2707,7 +2707,7 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 
 	// Seed some rows so the read side has something to scan.
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		rec := sampleRecord(fmt.Sprintf("seed-%d", i), "main", base.Add(time.Duration(i)*time.Second))
 		if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: rec.RunID, Record: rec}); err != nil {
 			t.Fatalf("seed Emit(%d): %v", i, err)
@@ -2719,11 +2719,11 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, writers+readers)
 
-	for w := 0; w < writers; w++ {
+	for w := range writers {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			for i := 0; i < 20; i++ {
+			for i := range 20 {
 				rec := sampleRecord(fmt.Sprintf("writer-%d-%d", w, i), "main", base.Add(time.Duration(w*100+i)*time.Second))
 				if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: rec.RunID, Record: rec}); err != nil {
 					errs <- fmt.Errorf("writer %d emit %d: %w", w, i, err)
@@ -2732,11 +2732,9 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 			}
 		}(w)
 	}
-	for r := 0; r < readers; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 20; i++ {
+	for range readers {
+		wg.Go(func() {
+			for range 20 {
 				if _, err := s.RecentRuns("main", 10); err != nil {
 					errs <- fmt.Errorf("RecentRuns: %w", err)
 					return
@@ -2746,7 +2744,7 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	done := make(chan struct{})

@@ -196,7 +196,7 @@ func (r *Repo) PublishNote(ctx context.Context, remoteRef, sha string, payload [
 	localRef := NotesWorkRef(remoteRef)
 
 	var lastErr error
-	for attempt := 0; attempt < publishNoteMaxAttempts; attempt++ {
+	for attempt := range publishNoteMaxAttempts {
 		tip, err := r.FetchNotesRef(ctx, remoteRef)
 		if err != nil {
 			return core.NotePublishResult{}, fmt.Errorf("gitx: publish note: %w", err)

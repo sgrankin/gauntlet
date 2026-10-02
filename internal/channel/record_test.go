@@ -75,7 +75,7 @@ func TestRecordingChannel_ConcurrentEmit(t *testing.T) {
 	const n = 200
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			_ = c.Emit(context.Background(), core.Event{Kind: core.EventQueued, Target: "main"})

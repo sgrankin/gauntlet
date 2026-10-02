@@ -21,7 +21,7 @@ func isolatedSpecFile(maxParallel int, entries ...string) map[string]string {
 		fmt.Fprintf(&b, "check %q {\n    command \"true\"\n", name)
 		if deps != "" {
 			fmt.Fprintf(&b, "    after")
-			for _, d := range strings.Split(deps, "+") {
+			for d := range strings.SplitSeq(deps, "+") {
 				fmt.Fprintf(&b, " %q", d)
 			}
 			fmt.Fprintf(&b, "\n")
@@ -97,7 +97,7 @@ func TestIsolated_MaterializeFailureIsError(t *testing.T) {
 
 	// The errored result lands on the run's result channel; drain it.
 	var outcome core.Outcome
-	for i := 0; i < 100000; i++ {
+	for range 100000 {
 		h.reconcile()
 		if recs := h.ch.Records(); len(recs) > 0 {
 			outcome = recs[len(recs)-1].Outcome

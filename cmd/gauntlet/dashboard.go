@@ -441,9 +441,7 @@ func shouldRecord(last, current depthTuple, lastAt, now time.Time) bool {
 // goroutine exits on ctx.Done() — see startDashboard's doc for why main
 // waits on it before closing store.
 func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ticker := time.NewTicker(cfg.History.SampleEvery)
 		defer ticker.Stop()
 
@@ -485,5 +483,5 @@ func startDepthSampler(ctx context.Context, cfg *config.Daemon, snapshot func() 
 				}
 			}
 		}
-	}()
+	})
 }

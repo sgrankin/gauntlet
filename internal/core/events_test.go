@@ -58,7 +58,7 @@ var contract = [numEventKinds]kindContract{
 // EventKind shifts numEventKinds, and an unfilled slot in the table has an
 // empty name.
 func TestEventContract_CoversEveryKind(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		if contract[k].name == "" {
 			t.Errorf("EventKind(%d) has no emit-site contract entry: declare what it carries before emitting it", int(k))
 		}
@@ -71,7 +71,7 @@ func TestEventContract_CoversEveryKind(t *testing.T) {
 // TerminalKind doesn't recognize (the copy-paste that ships an event
 // nothing persists) fails here.
 func TestEventContract_TerminalAndDeployClassification(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		c := contract[k]
 		if got := TerminalKind(k); got != c.terminal {
 			t.Errorf("TerminalKind(%s) = %v, want %v", c.name, got, c.terminal)
@@ -110,7 +110,7 @@ func wellShaped(k EventKind) Event {
 }
 
 func TestValidateEvent_WellShapedKindsPass(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		if err := ValidateEvent(wellShaped(k)); err != nil {
 			t.Errorf("ValidateEvent(%s) = %v, want nil", contract[k].name, err)
 		}
@@ -121,7 +121,7 @@ func TestValidateEvent_WellShapedKindsPass(t *testing.T) {
 // contract, for both subsystems: a terminal event with no record is the
 // shape history's writer silently drops.
 func TestValidateEvent_TerminalWithoutRecord(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		if !contract[k].terminal {
 			continue
 		}
@@ -134,7 +134,7 @@ func TestValidateEvent_TerminalWithoutRecord(t *testing.T) {
 }
 
 func TestValidateEvent_NonTerminalWithRecord(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		if contract[k].terminal {
 			continue
 		}
@@ -151,7 +151,7 @@ func TestValidateEvent_NonTerminalWithRecord(t *testing.T) {
 // deploy node event, which is the same shape for the same reason: a channel
 // renders per-node verdicts mid-graph or it waits for the terminal record.
 func TestValidateEvent_FinishedKindsCarryTheirResult(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		if !contract[k].check {
 			continue
 		}
@@ -239,7 +239,7 @@ func TestValidateEvent_DeployFinishedRecordMustAgree(t *testing.T) {
 // fields as kind-scoped as CheckName and MergeSHA already are: a candidate
 // event that sets one is a copy-paste, not a feature.
 func TestValidateEvent_NonDeployKindsCarryNoDeployFields(t *testing.T) {
-	for k := EventKind(0); k < numEventKinds; k++ {
+	for k := range numEventKinds {
 		if contract[k].deploy {
 			continue
 		}

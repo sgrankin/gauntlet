@@ -50,7 +50,7 @@ type fakeIssuer struct {
 	now func() time.Time
 
 	mu     sync.Mutex
-	mints  int32
+	mints  atomic.Int32
 	fail   bool          // respond 401 instead of minting
 	block  chan struct{} // when non-nil, requests wait here first
 	expiry time.Duration // token lifetime from now(); default 1h
@@ -76,7 +76,7 @@ func (f *fakeIssuer) handler() http.HandlerFunc {
 			http.Error(w, `{"message":"issuer says no"}`, http.StatusUnauthorized)
 			return
 		}
-		n := atomic.AddInt32(&f.mints, 1)
+		n := f.mints.Add(1)
 		if exp == 0 {
 			exp = time.Hour
 		}
@@ -172,7 +172,7 @@ func TestApp_LazyMintAndCache(t *testing.T) {
 	h := newAppHarness(t)
 	ctx := context.Background()
 
-	if n := atomic.LoadInt32(&h.issuer.mints); n != 0 {
+	if n := h.issuer.mints.Load(); n != 0 {
 		t.Fatalf("mints before first Token = %d, want 0 (lazy)", n)
 	}
 	tok1, err := h.app.Token(ctx)
@@ -191,7 +191,7 @@ func TestApp_LazyMintAndCache(t *testing.T) {
 	if tok2 != tok1 {
 		t.Fatalf("token changed inside validity: %q -> %q", tok1, tok2)
 	}
-	if n := atomic.LoadInt32(&h.issuer.mints); n != 1 {
+	if n := h.issuer.mints.Load(); n != 1 {
 		t.Fatalf("mints = %d, want 1", n)
 	}
 }
@@ -226,7 +226,7 @@ func TestApp_ConcurrentCallersShareOneMint(t *testing.T) {
 	tokens := make([]string, callers)
 	errs := make([]error, callers)
 	var wg sync.WaitGroup
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -240,7 +240,7 @@ func TestApp_ConcurrentCallersShareOneMint(t *testing.T) {
 	close(gate)
 	wg.Wait()
 
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		if errs[i] != nil {
 			t.Fatalf("caller %d: %v", i, errs[i])
 		}
@@ -248,7 +248,7 @@ func TestApp_ConcurrentCallersShareOneMint(t *testing.T) {
 			t.Fatalf("caller %d got %q, want the one shared mint", i, tokens[i])
 		}
 	}
-	if n := atomic.LoadInt32(&h.issuer.mints); n != 1 {
+	if n := h.issuer.mints.Load(); n != 1 {
 		t.Fatalf("mints = %d, want 1 (singleflight)", n)
 	}
 }
@@ -279,7 +279,7 @@ func TestApp_InvalidateForcesOneFreshMint(t *testing.T) {
 	if tok3 != tok2 {
 		t.Fatalf("stale Invalidate replaced a fresh token: %q -> %q", tok2, tok3)
 	}
-	if n := atomic.LoadInt32(&h.issuer.mints); n != 2 {
+	if n := h.issuer.mints.Load(); n != 2 {
 		t.Fatalf("mints = %d, want 2", n)
 	}
 }
@@ -319,7 +319,7 @@ func TestApp_WaitersShareMintFailure(t *testing.T) {
 	const callers = 4
 	errs := make([]error, callers)
 	var wg sync.WaitGroup
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

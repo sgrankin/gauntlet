@@ -301,7 +301,7 @@ func TestReconcileOnce_ManualNeverWrites(t *testing.T) {
 		Environments: []deploy.Environment{{Name: "prod", SourceBranch: "main", Mode: deploy.ModeManual}},
 		Git:          git,
 	})
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := tr.ReconcileOnce(context.Background()); err != nil {
 			t.Fatalf("ReconcileOnce: %v", err)
 		}

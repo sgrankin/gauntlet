@@ -59,7 +59,7 @@ func (c *stepClock) now() time.Time {
 // inside a semaphore.
 func (c *stepClock) awaitCalls(t *testing.T, want int) {
 	t.Helper()
-	for i := 0; i < 1_000_000; i++ {
+	for range 1_000_000 {
 		c.mu.Lock()
 		got := c.calls
 		c.mu.Unlock()
@@ -209,7 +209,7 @@ func awaitRun(t *testing.T, ch <-chan schedResult) schedResult {
 // order without a wall-clock sleep.
 func waitSlotsInUse(t *testing.T, s *core.Slots, want int) {
 	t.Helper()
-	for i := 0; i < 1_000_000; i++ {
+	for range 1_000_000 {
 		if s.InUse() == want {
 			return
 		}

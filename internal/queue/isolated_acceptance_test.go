@@ -179,7 +179,7 @@ func TestIsolated_CapBoundsInFlightMaterialization(t *testing.T) {
 
 	// Drive several reconciles while the slot is held: the second node is
 	// ready but slotless, so it must not begin materializing.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		h.reconcile()
 		runtime.Gosched()
 	}

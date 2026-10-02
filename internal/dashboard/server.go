@@ -1204,10 +1204,7 @@ func chipTitle(outcomeWord, topic string, startedAt, now time.Time) string {
 
 // relAgo renders t relative to now as a short "Nx ago" string.
 func relAgo(t, now time.Time) string {
-	d := now.Sub(t)
-	if d < 0 {
-		d = 0
-	}
+	d := max(now.Sub(t), 0)
 	switch {
 	case d < time.Minute:
 		return "just now"

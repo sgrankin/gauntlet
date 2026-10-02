@@ -31,6 +31,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"regexp"
@@ -258,7 +259,7 @@ func lsRemote(remote string, patterns ...string) (map[string]string, error) {
 	}
 	refs := make(map[string]string)
 	peeled := make(map[string]string)
-	for _, line := range strings.Split(stdout.String(), "\n") {
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			continue
@@ -270,9 +271,7 @@ func lsRemote(remote string, patterns ...string) (map[string]string, error) {
 		}
 		refs[name] = oid
 	}
-	for name, oid := range peeled {
-		refs[name] = oid
-	}
+	maps.Copy(refs, peeled)
 	return refs, nil
 }
 

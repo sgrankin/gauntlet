@@ -717,7 +717,7 @@ printf '%%s' %q > "$%s"
 		t.Fatalf("read receipt env dump: %v", err)
 	}
 	envNames := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimRight(string(envDump), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(envDump), "\n"), "\n") {
 		name, _, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
@@ -839,7 +839,7 @@ printf '%%s' %q > "$%s"
 	dump := string(envDump)
 
 	envNames := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimRight(dump, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(dump, "\n"), "\n") {
 		name, _, ok := strings.Cut(line, "=")
 		if !ok {
 			continue

@@ -273,7 +273,7 @@ func (r *Repo) Log(ctx context.Context, base, tip string) ([]CommitInfo, error) 
 		return nil, fmt.Errorf("gitx: log %s..%s: %w", base, tip, err)
 	}
 	var commits []CommitInfo
-	for _, rec := range strings.Split(out, "\x1e") {
+	for rec := range strings.SplitSeq(out, "\x1e") {
 		rec = strings.TrimPrefix(rec, "\n") // git terminates each %...\x1e record with its own newline
 		if rec == "" {
 			continue
@@ -586,8 +586,7 @@ func (e *gitError) Error() string {
 func (e *gitError) Unwrap() error { return e.cause }
 
 func (e *gitError) exitCode() int {
-	var ee *exec.ExitError
-	if errors.As(e.cause, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](e.cause); ok {
 		return ee.ExitCode()
 	}
 	return -1

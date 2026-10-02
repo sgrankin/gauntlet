@@ -100,8 +100,8 @@ func diffLines(a, b []string) []diffOp {
 	}
 
 	mk := func(kind opKind, s string) diffOp {
-		if strings.HasSuffix(s, noNLSentinel) {
-			return diffOp{kind: kind, line: strings.TrimSuffix(s, noNLSentinel), noNL: true}
+		if before, ok := strings.CutSuffix(s, noNLSentinel); ok {
+			return diffOp{kind: kind, line: before, noNL: true}
 		}
 		return diffOp{kind: kind, line: s}
 	}
@@ -166,14 +166,8 @@ func buildHunks(ops []diffOp, context int) []hunk {
 	type window struct{ start, end int }
 	windows := make([]window, len(regions))
 	for k, r := range regions {
-		s := r[0] - context
-		if s < 0 {
-			s = 0
-		}
-		e := r[1] + context
-		if e > len(ops) {
-			e = len(ops)
-		}
+		s := max(r[0]-context, 0)
+		e := min(r[1]+context, len(ops))
 		windows[k] = window{s, e}
 	}
 	merged := []window{windows[0]}

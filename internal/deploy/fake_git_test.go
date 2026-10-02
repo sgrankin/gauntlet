@@ -3,6 +3,7 @@ package deploy_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,9 +61,7 @@ func (f *fakeRemote) commit(branch string, files map[string]string) string {
 	f.nextOID++
 	oid := fmt.Sprintf("%040x", f.nextOID)
 	tree := make(map[string]string, len(files))
-	for path, content := range files {
-		tree[path] = content
-	}
+	maps.Copy(tree, files)
 	f.trees[oid] = tree
 	f.remote["refs/heads/"+branch] = oid
 	return oid
@@ -183,9 +182,7 @@ func (g fakeGit) ExportTree(_ context.Context, tree, dir string) error {
 	g.r.mu.Lock()
 	files, ok := g.r.trees[tree]
 	copied := make(map[string]string, len(files))
-	for path, content := range files {
-		copied[path] = content
-	}
+	maps.Copy(copied, files)
 	g.r.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("fake: no such tree %s", tree)

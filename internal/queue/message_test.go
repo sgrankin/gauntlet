@@ -41,7 +41,7 @@ func TestBuildMergeMessage(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildMergeMessage: %v", err)
 			}
-			subject := strings.SplitN(got, "\n", 2)[0]
+			subject, _, _ := strings.Cut(got, "\n")
 			if subject != tc.wantSubj {
 				t.Errorf("subject = %q, want %q", subject, tc.wantSubj)
 			}

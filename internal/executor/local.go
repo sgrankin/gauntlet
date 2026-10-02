@@ -243,8 +243,7 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 	}
 
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			// Nonzero exit is a verdict regardless of the result file: the
 			// file only splits the exit-0 case, it is not an exit-code
 			// convention.

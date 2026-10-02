@@ -156,7 +156,7 @@ func TestRunLog_TruncatedZstFrameServesPartialContentNoPanic(t *testing.T) {
 	// been fully decodable, giving a genuine non-empty partial decode
 	// rather than truncating inside the only block there is.
 	var content strings.Builder
-	for i := 0; i < 40000; i++ {
+	for i := range 40000 {
 		fmt.Fprintf(&content, "LINE-%06d the complete uncapped log line\n", i)
 	}
 	fullContent := content.String()

@@ -8,6 +8,7 @@ package queue
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -225,12 +226,7 @@ func TestCommand_CancelBatchMemberReQueuesSiblings(t *testing.T) {
 }
 
 func containsRef(refs []string, ref string) bool {
-	for _, r := range refs {
-		if r == ref {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(refs, ref)
 }
 
 // TestCommand_CancelSpeculateHeadBubblesSuffix covers speculate mode:

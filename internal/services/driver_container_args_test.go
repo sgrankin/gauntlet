@@ -1,6 +1,7 @@
 package services
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/config"
@@ -41,12 +42,7 @@ func TestCreateArgs_Resources(t *testing.T) {
 }
 
 func containsArg(args []string, s string) bool {
-	for _, a := range args {
-		if a == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(args, s)
 }
 
 func hasFlagValue(args []string, flag, value string) bool {

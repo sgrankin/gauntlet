@@ -31,7 +31,7 @@ func FailureTail(res *CheckResult, maxLines, maxBytes int) string {
 	}
 
 	var lines []string
-	for _, ln := range strings.Split(res.Output, "\n") {
+	for ln := range strings.SplitSeq(res.Output, "\n") {
 		if strings.TrimSpace(ln) == "" {
 			continue
 		}

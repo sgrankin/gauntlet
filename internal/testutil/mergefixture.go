@@ -49,7 +49,7 @@ func NewUnpushedMerge(t *testing.T, seedFiles, candFiles map[string]string) *Unp
 	cand := bare("rev-parse", candRef)
 	// merge-tree prints the tree OID on line 1; a conflict exits non-zero
 	// here (bare fails the test), which is what the doc contract promises.
-	tree := strings.SplitN(bare("merge-tree", "--write-tree", base, cand), "\n", 2)[0]
+	tree, _, _ := strings.Cut(bare("merge-tree", "--write-tree", base, cand), "\n")
 	merge := bare("-c", "user.name=Gauntlet", "-c", "user.email=gauntlet@ci.example",
 		"commit-tree", "--no-gpg-sign", tree, "-p", base, "-p", cand, "-m", "trial merge")
 

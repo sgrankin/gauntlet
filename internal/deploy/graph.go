@@ -131,10 +131,7 @@ func (s *Scheduler) Run(ctx context.Context) (rows []core.CheckResult, culprit s
 	if now == nil {
 		now = time.Now
 	}
-	maxParallel := s.MaxParallel
-	if maxParallel < 1 {
-		maxParallel = 1
-	}
+	maxParallel := max(s.MaxParallel, 1)
 
 	// runCtx is what nodes run under: cancelling it is the fail-fast, and
 	// it dies with ctx so an external cancellation reaches the commands

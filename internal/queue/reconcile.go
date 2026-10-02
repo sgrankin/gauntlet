@@ -46,9 +46,9 @@ func parseCandidateRef(ref string) (target, user, topic string, ok bool) {
 	if remainder == "" {
 		return "", "", "", false // target with no topic at all
 	}
-	if j := strings.Index(remainder, "/"); j >= 0 {
-		user = remainder[:j]
-		topic = remainder[j+1:]
+	if before, after, ok := strings.Cut(remainder, "/"); ok {
+		user = before
+		topic = after
 		if user == "" || topic == "" {
 			return "", "", "", false
 		}
@@ -1191,15 +1191,12 @@ func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip
 // caught the same way once it becomes a future refill's head (see
 // recoverLanded's doc comment for the per-member recovery walkthrough).
 func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate) {
-	maxBatch := t.MaxBatch
-	if maxBatch < 1 {
-		// Defensive only: production config (config.LoadDaemon) always
-		// defaults/validates MaxBatch >= 1 for Mode=="batch". A hand-built
-		// queue.Config (as tests may construct) that leaves it zero still
-		// gets correct, if degenerate, one-at-a-time batch behavior rather
-		// than an empty pick every tick.
-		maxBatch = 1
-	}
+	// Defensive only: production config (config.LoadDaemon) always
+	// defaults/validates MaxBatch >= 1 for Mode=="batch". A hand-built
+	// queue.Config (as tests may construct) that leaves it zero still
+	// gets correct, if degenerate, one-at-a-time batch behavior rather
+	// than an empty pick every tick.
+	maxBatch := max(t.MaxBatch, 1)
 
 	picked := d.pickUpTo(t.Name, cands, maxBatch, nil)
 	if len(picked) == 0 {
@@ -1595,13 +1592,10 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 // has room again (a landing, a bubble, or the culprit's own park/re-queue
 // freeing a slot).
 func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, l *lane) {
-	window := t.Window
-	if window < 1 {
-		// Defensive only: production config (config.LoadDaemon) always
-		// defaults/validates Window >= 1 for Mode=="speculate". Mirrors
-		// refillBatch's maxBatch guard for a hand-built queue.Config.
-		window = 1
-	}
+	// Defensive only: production config (config.LoadDaemon) always
+	// defaults/validates Window >= 1 for Mode=="speculate". Mirrors
+	// refillBatch's maxBatch guard for a hand-built queue.Config.
+	window := max(t.Window, 1)
 
 	var runs []*run
 	if l != nil {

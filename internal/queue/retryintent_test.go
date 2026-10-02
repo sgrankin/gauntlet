@@ -11,6 +11,7 @@ package queue
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -188,9 +189,9 @@ func mustReconcile(t *testing.T, d *Daemon) {
 func currentRunIDFrom(t *testing.T, ch *channel.RecordingChannel) string {
 	t.Helper()
 	evs := ch.Events()
-	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].RunID != "" {
-			return evs[i].RunID
+	for _, ev := range slices.Backward(evs) {
+		if ev.RunID != "" {
+			return ev.RunID
 		}
 	}
 	t.Fatal("no event with a RunID found")
@@ -210,7 +211,7 @@ func releaseCheck(t *testing.T, d *Daemon, ch *channel.RecordingChannel, runID, 
 	}
 	before := len(ch.Events())
 	exec.Release(runID, name, result)
-	for i := 0; i < 100000; i++ {
+	for range 100000 {
 		mustReconcile(t, d)
 		if checkFinishedObserved(ch.Events()[before:], runID, name) {
 			return

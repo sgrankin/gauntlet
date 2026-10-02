@@ -11,7 +11,7 @@
 # the plain binary directly on that host instead (docs/deploy.md §"warm
 # builder VM"); it does not use this image at all.
 
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 ARG VERSION=devel
 WORKDIR /src
 COPY go.mod go.sum ./

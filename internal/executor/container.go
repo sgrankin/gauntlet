@@ -361,8 +361,7 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 	}
 
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			// Nonzero exit is a verdict regardless of the result file,
 			// same as LocalExecutor: the file only splits the exit-0 case.
 			res := core.CheckResult{

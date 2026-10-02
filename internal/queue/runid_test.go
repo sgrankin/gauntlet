@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -62,9 +63,9 @@ func TestReconcile_SameSecondIdenticalTreeRetestGetsDistinctRunID(t *testing.T) 
 	currentRunID := func() string {
 		t.Helper()
 		evs := ch.Events()
-		for i := len(evs) - 1; i >= 0; i-- {
-			if evs[i].RunID != "" {
-				return evs[i].RunID
+		for _, ev := range slices.Backward(evs) {
+			if ev.RunID != "" {
+				return ev.RunID
 			}
 		}
 		t.Fatal("no event with a RunID found")

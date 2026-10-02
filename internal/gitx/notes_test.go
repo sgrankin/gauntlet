@@ -359,7 +359,7 @@ func TestPublishNoteBlobSHAAgreesWithTreeLookup(t *testing.T) {
 	localRef := gitx.NotesWorkRef(testNotesRef)
 	out := rawGit(t, dir, nil, "ls-tree", "-r", localRef)
 	found := ""
-	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
 		// "<mode> blob <sha>\t<path>"
 		fields := strings.Fields(line)
 		if len(fields) < 3 {

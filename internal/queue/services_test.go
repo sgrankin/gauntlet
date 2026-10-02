@@ -128,7 +128,7 @@ func serviceCheckSpec(checkNames ...string) map[string]string {
 // its own EventCheckFinished.
 func waitForRunTerminal(h *testHarness, runID string) core.Event {
 	h.t.Helper()
-	for i := 0; i < 100000; i++ {
+	for range 100000 {
 		h.reconcile()
 		for _, e := range h.ch.Events() {
 			if e.RunID == runID && isTerminalEventKind(e.Kind) {

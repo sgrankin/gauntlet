@@ -473,7 +473,7 @@ func TestRunner_DropWhenFull(t *testing.T) {
 	})
 
 	// Fill the queue to capacity without a drainer running.
-	for i := 0; i < queueBuffer; i++ {
+	for i := range queueBuffer {
 		ev := landedEvent("main", &core.RunRecord{RunID: "r", MergeSHA: "m"})
 		if err := r.Emit(context.Background(), ev); err != nil {
 			t.Fatalf("Emit #%d: %v", i, err)
@@ -713,7 +713,7 @@ func TestRunner_RunDrainsQueueInOrder(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rec := &core.RunRecord{RunID: "run", Target: "main", MergeSHA: "merge-sha"}
 		if err := r.Emit(ctx, landedEvent("main", rec)); err != nil {
 			t.Fatalf("Emit: %v", err)
@@ -765,7 +765,7 @@ func TestRunner_DrainRunsBacklogThenExits(t *testing.T) {
 	// Queue three landings' hooks, then drain. All three must run before
 	// Run exits — a backlog dropped on drain would be silent permanent
 	// loss.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rec := &core.RunRecord{RunID: "run", Target: "main", MergeSHA: "merge-sha"}
 		if err := r.Emit(ctx, landedEvent("main", rec)); err != nil {
 			t.Fatalf("Emit: %v", err)

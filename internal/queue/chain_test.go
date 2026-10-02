@@ -81,7 +81,7 @@ func firstParentChain(t *testing.T, gitDir, tip string, n int) []chainCommit {
 		t.Fatalf("git log --first-parent %s: %v", tip, err)
 	}
 	var commits []chainCommit
-	for _, ln := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+	for ln := range strings.SplitSeq(strings.TrimRight(string(out), "\n"), "\n") {
 		if ln == "" {
 			continue
 		}

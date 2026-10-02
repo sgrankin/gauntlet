@@ -38,7 +38,7 @@ func TestFindLandingMergeRespectsBound(t *testing.T) {
 
 	// Stack two more landings on top so oldCand's own merge sits 3
 	// first-parent merge-commit steps behind the tip.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		fillerRef := remote.PushCandidate("main", "bob", fmt.Sprintf("filler%d", i), map[string]string{fmt.Sprintf("b%d.txt", i): "b\n"})
 		if err := repo.Fetch(ctx); err != nil {
 			t.Fatalf("Fetch: %v", err)

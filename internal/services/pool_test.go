@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -178,23 +179,13 @@ func (f *fakeDriver) createsFor(key string) int {
 func (f *fakeDriver) wasDestroyed(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, n := range f.destroyed {
-		if n == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(f.destroyed, name)
 }
 
 func (f *fakeDriver) wasTailed(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, n := range f.tailed {
-		if n == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(f.tailed, name)
 }
 
 func portString(p int) string {

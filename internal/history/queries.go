@@ -2,7 +2,7 @@ package history
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -578,7 +578,7 @@ func medianAndMax(vals []int64) (median, max int64, ok bool) {
 	if len(vals) == 0 {
 		return 0, 0, false
 	}
-	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+	slices.Sort(vals)
 	max = vals[len(vals)-1]
 	mid := len(vals) / 2
 	if len(vals)%2 == 1 {

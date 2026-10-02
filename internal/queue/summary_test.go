@@ -10,6 +10,7 @@ package queue
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -182,12 +183,7 @@ func TestBatchRun_PrecomputedBodiesLandInOwnMergeMessages(t *testing.T) {
 }
 
 func containsLine(haystack, want string) bool {
-	for _, line := range splitLines(haystack) {
-		if line == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(splitLines(haystack), want)
 }
 
 func splitLines(s string) []string {

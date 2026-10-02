@@ -36,7 +36,7 @@ func parallelSpecFile(maxParallel int, entries ...string) map[string]string {
 		fmt.Fprintf(&b, "check %q {\n    command \"true\"\n", name)
 		if deps != "" {
 			fmt.Fprintf(&b, "    after")
-			for _, d := range strings.Split(deps, "+") {
+			for d := range strings.SplitSeq(deps, "+") {
 				fmt.Fprintf(&b, " %q", d)
 			}
 			fmt.Fprintf(&b, "\n")

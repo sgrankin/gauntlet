@@ -502,9 +502,7 @@ func run() error {
 	// racing boot adoption. Joined by wg like every other background
 	// goroutine here.
 	if pool != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
@@ -515,7 +513,7 @@ func run() error {
 					pool.Reap(ctx)
 				}
 			}
-		}()
+		})
 	}
 
 	sc, err := buildSlackChannel(cfg)
@@ -524,13 +522,11 @@ func run() error {
 	}
 	if sc != nil {
 		chans = append(chans, sc)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := sc.Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "gauntlet: slack: %v\n", err)
 			}
-		}()
+		})
 	}
 
 	// Post-land hooks (internal/hooks, DESIGN.md's decision ledger
@@ -567,13 +563,11 @@ func run() error {
 		// hr must be appended after store above, never before — see the
 		// LOAD-BEARING ORDER comment at store's own append site (S1).
 		chans = append(chans, hr)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := hr.Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "gauntlet: hooks: %v\n", err)
 			}
-		}()
+		})
 	}
 
 	// KnownExecutorProfile/ImageCapableProfile: the queue (and the deploy
@@ -640,9 +634,7 @@ func run() error {
 		if err := sweepAndRecreate(deploysDir); err != nil {
 			return fmt.Errorf("sweep deploys dir: %w", err)
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ticker := time.NewTicker(cfg.Poll)
 			defer ticker.Stop()
 			for {
@@ -659,7 +651,7 @@ func run() error {
 					}
 				}
 			}
-		}()
+		})
 	}
 
 	// hookSnapshot threads hr's live-hook-state accessor into the

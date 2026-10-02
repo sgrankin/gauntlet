@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -376,12 +377,7 @@ func TestBuildProbes_AppModeVsStaticMode(t *testing.T) {
 		return names
 	}
 	contains := func(names []string, want string) bool {
-		for _, n := range names {
-			if n == want {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(names, want)
 	}
 
 	t.Run("app mode", func(t *testing.T) {

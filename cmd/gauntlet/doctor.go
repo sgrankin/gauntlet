@@ -249,13 +249,11 @@ func buildProbes(env *doctorEnv) []probe {
 		runtimeProfiles = append(runtimeProfiles, containerProfile{label: "services", runtime: servicesRuntime(env.cfg)})
 	}
 	for _, u := range runtimeUsages(runtimeProfiles) {
-		u := u
 		probes = append(probes, probe{"executor-runtime:" + u.runtime, func(ctx context.Context) probeResult {
 			return probeExecutorRuntime(ctx, u)
 		}})
 	}
 	for _, p := range profiles {
-		p := p
 		probes = append(probes, probe{"executor-image:" + p.label, func(ctx context.Context) probeResult {
 			return probeImagePresent(ctx, p.runtime, p.image)
 		}})

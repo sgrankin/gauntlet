@@ -228,7 +228,7 @@ func buildPrompt(cand core.Candidate, commits []gitx.CommitInfo, diffstat string
 	for _, c := range commits {
 		fmt.Fprintf(&b, "- %s\n", c.Subject)
 		if c.Body != "" {
-			for _, line := range strings.Split(c.Body, "\n") {
+			for line := range strings.SplitSeq(c.Body, "\n") {
 				fmt.Fprintf(&b, "  %s\n", line)
 			}
 		}

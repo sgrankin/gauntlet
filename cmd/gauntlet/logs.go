@@ -83,9 +83,7 @@ func pruneLogFiles(logDir string, cutoff time.Time) error {
 // run() starts, even though nothing else needs to wait on this one
 // specifically (it touches no shared store).
 func startLogPruner(ctx context.Context, logDir string, retention time.Duration, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ticker := time.NewTicker(logPruneInterval)
 		defer ticker.Stop()
 		for {
@@ -98,5 +96,5 @@ func startLogPruner(ctx context.Context, logDir string, retention time.Duration,
 				}
 			}
 		}
-	}()
+	})
 }

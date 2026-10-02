@@ -141,6 +141,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1017,13 +1018,13 @@ func cmdAssertTargetChain(ts *testscript.TestScript, neg bool, args []string) {
 	}
 
 	oid := tip
-	for i := len(topics) - 1; i >= 0; i-- {
+	for i, topic := range slices.Backward(topics) {
 		parents := h.commitParents(oid)
 		if len(parents) != 2 {
-			ts.Fatalf("assert-target-chain: commit %s (topic %q) has %d parents, want 2 (a --no-ff chain link)", oid, topics[i], len(parents))
+			ts.Fatalf("assert-target-chain: commit %s (topic %q) has %d parents, want 2 (a --no-ff chain link)", oid, topic, len(parents))
 		}
 		if parents[1] != wantSHAs[i] {
-			ts.Fatalf("assert-target-chain: commit %s parent[1] = %s, want topic %q's candidate SHA %s verbatim", oid, parents[1], topics[i], wantSHAs[i])
+			ts.Fatalf("assert-target-chain: commit %s parent[1] = %s, want topic %q's candidate SHA %s verbatim", oid, parents[1], topic, wantSHAs[i])
 		}
 		oid = parents[0]
 	}

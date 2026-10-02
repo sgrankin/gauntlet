@@ -22,7 +22,9 @@ package queue
 import (
 	"context"
 	"fmt"
+	"maps"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -100,9 +102,9 @@ func (h *integrationHarness) reconcile() {
 func (h *integrationHarness) currentRunID() string {
 	h.t.Helper()
 	evs := h.ch.Events()
-	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].RunID != "" {
-			return evs[i].RunID
+	for _, ev := range slices.Backward(evs) {
+		if ev.RunID != "" {
+			return ev.RunID
 		}
 	}
 	h.t.Fatal("no event with a RunID found")
@@ -201,9 +203,7 @@ var distinctMarkerCounter int64
 // exactly that conflict instead of the clean trial the test wants.
 func distinctFiles(files map[string]string) map[string]string {
 	out := make(map[string]string, len(files)+1)
-	for k, v := range files {
-		out[k] = v
-	}
+	maps.Copy(out, files)
 	distinctMarkerCounter++
 	marker := fmt.Sprintf(".gauntlet-marker-%d-%d", time.Now().UnixNano(), distinctMarkerCounter)
 	out[marker] = "distinct\n"

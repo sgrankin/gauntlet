@@ -40,7 +40,7 @@ type Issuer struct {
 
 	mu    sync.Mutex
 	fail  bool // respond 401 instead of minting
-	mints int32
+	mints atomic.Int32
 }
 
 // New starts a fake issuer scoped to appID/installationID, generating its
@@ -74,7 +74,7 @@ func (i *Issuer) SetFail(fail bool) {
 }
 
 // Mints returns how many tokens this issuer has minted so far.
-func (i *Issuer) Mints() int32 { return atomic.LoadInt32(&i.mints) }
+func (i *Issuer) Mints() int32 { return i.mints.Load() }
 
 func (i *Issuer) handle(w http.ResponseWriter, r *http.Request) {
 	i.mu.Lock()
@@ -92,7 +92,7 @@ func (i *Issuer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"ghauthtest: issuer scripted to fail"}`, http.StatusUnauthorized)
 		return
 	}
-	n := atomic.AddInt32(&i.mints, 1)
+	n := i.mints.Add(1)
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprintf(w, `{"token":"ghs_FAKEMINT%d","expires_at":%q}`, n, time.Now().Add(time.Hour).Format(time.RFC3339))
 }

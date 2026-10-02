@@ -218,7 +218,7 @@ func TestEmit_DeployFinished_ReEmitIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	rec := deployRecord("deploy-dup", "dev", "sha1", time.Now().Add(-10*time.Minute))
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := s.Emit(ctx, deployFinished(rec)); err != nil {
 			t.Fatalf("Emit #%d: %v", i+1, err)
 		}

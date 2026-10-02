@@ -578,7 +578,7 @@ func TestContainerExecutor_ScratchDirRootsResultDirMount(t *testing.T) {
 		t.Fatalf("read captured args: %v", err)
 	}
 	var runLine string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		if strings.HasPrefix(line, "run ") {
 			runLine = line
 		}

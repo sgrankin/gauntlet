@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +180,7 @@ func (h *testHarness) release(runID, name string, result core.CheckResult) {
 	h.t.Helper()
 	before := len(h.ch.Events())
 	h.exec.Release(runID, name, result)
-	for i := 0; i < 100000; i++ {
+	for range 100000 {
 		h.reconcile()
 		if checkFinishedObserved(h.ch.Events()[before:], runID, name) {
 			return
@@ -249,9 +250,9 @@ func (h *testHarness) awaitStarted(runID, name string) {
 func (h *testHarness) currentRunID() string {
 	h.t.Helper()
 	evs := h.ch.Events()
-	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].RunID != "" {
-			return evs[i].RunID
+	for _, ev := range slices.Backward(evs) {
+		if ev.RunID != "" {
+			return ev.RunID
 		}
 	}
 	h.t.Fatal("no event with a RunID found")

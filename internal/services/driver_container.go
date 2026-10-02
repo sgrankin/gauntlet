@@ -209,7 +209,7 @@ func (d *containerDriver) probeListeningInContainer(ctx context.Context, in Inst
 	}
 	// Each /proc/net/tcp line is "sl local_address rem_address st ...";
 	// local_address is "HEXIP:HEXPORT" and st==0A means LISTEN.
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue

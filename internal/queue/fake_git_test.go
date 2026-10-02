@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha1"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -165,9 +167,7 @@ func (f *fakeGitRepo) ListRefs(ctx context.Context) (map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make(map[string]string, len(f.refs))
-	for k, v := range f.refs {
-		out[k] = v
-	}
+	maps.Copy(out, f.refs)
 	return out, nil
 }
 
@@ -184,12 +184,9 @@ func (f *fakeGitRepo) MergeTree(ctx context.Context, base, candidate string) (co
 	}
 
 	merged := make(map[string]string)
-	for k, v := range f.trees[f.commits[base].tree] {
-		merged[k] = v
-	}
-	for k, v := range f.trees[f.commits[candidate].tree] {
-		merged[k] = v // candidate wins on overlap
-	}
+	maps.Copy(merged, f.trees[f.commits[base].tree])
+	// candidate wins on overlap
+	maps.Copy(merged, f.trees[f.commits[candidate].tree])
 	return core.TrialMerge{Clean: true, TreeOID: f.internTree(merged)}, nil
 }
 
@@ -252,12 +249,7 @@ func (f *fakeGitRepo) IsAncestor(ctx context.Context, maybeAncestor, ref string)
 		if !ok {
 			return false
 		}
-		for _, p := range c.parents {
-			if walk(p) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(c.parents, walk)
 	}
 	return walk(ref), nil
 }
@@ -312,9 +304,7 @@ func (f *fakeGitRepo) ExportTree(ctx context.Context, tree, dir string) error {
 	}
 	hook := f.exportHook
 	files := make(map[string]string, len(f.trees[tree]))
-	for k, v := range f.trees[tree] {
-		files[k] = v
-	}
+	maps.Copy(files, f.trees[tree])
 	f.mu.Unlock()
 
 	// Runs outside the lock so it may block (cap/cancellation test); a
@@ -515,13 +505,9 @@ func (f *fakeGitRepo) directPush(branch string, files map[string]string) string 
 	parent := f.refs["refs/heads/"+branch]
 	merged := make(map[string]string)
 	if parent != "" {
-		for k, v := range f.trees[f.commits[parent].tree] {
-			merged[k] = v
-		}
+		maps.Copy(merged, f.trees[f.commits[parent].tree])
 	}
-	for k, v := range files {
-		merged[k] = v
-	}
+	maps.Copy(merged, files)
 	tree := f.internTree(merged)
 	var parents []string
 	if parent != "" {
@@ -614,9 +600,7 @@ func (f *fakeGitRepo) internTree(files map[string]string) string {
 	oid := fmt.Sprintf("%x", h.Sum(nil))
 	if _, ok := f.trees[oid]; !ok {
 		cp := make(map[string]string, len(files))
-		for k, v := range files {
-			cp[k] = v
-		}
+		maps.Copy(cp, files)
 		f.trees[oid] = cp
 	}
 	return oid

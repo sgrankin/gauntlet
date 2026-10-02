@@ -119,7 +119,7 @@ func TestPublishNoteContentionExhaustion(t *testing.T) {
 	const ref = "refs/notes/gauntlet-receipts"
 
 	otherSHAs := make([]string, 0, publishNoteMaxAttempts)
-	for i := 0; i < publishNoteMaxAttempts; i++ {
+	for i := range publishNoteMaxAttempts {
 		r := remote.PushCandidate("main", "bob", "filler"+string(rune('a'+i)), map[string]string{
 			"filler.txt": string(rune('a' + i)),
 		})
