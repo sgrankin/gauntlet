@@ -356,7 +356,7 @@ func TestStartDashboard_NoDeployTracker(t *testing.T) {
 	// exit once ctx is done, so waiting before cancelling deadlocks.
 	t.Cleanup(func() { cancel(); wg.Wait() })
 	startDashboard(ctx, cfg, func() *queue.Snapshot { return nil }, nil, nil, t.TempDir(),
-		nil, nil, nil, deployWiring{}, nil, &wg)
+		nil, nil, nil, deployWiring{}, nil, &wg, nil)
 
 	base := "http://" + addr
 	waitForServer(t, base+"/deploys")

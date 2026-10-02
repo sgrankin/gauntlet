@@ -8,15 +8,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type reviewGit struct {
-	fetched []string
-	landed  bool
+	fetched    []string
+	remoteRefs []string
+	landed     bool
 }
 
 func (g *reviewGit) FetchReview(_ context.Context, remote, local, sha string) error {
 	g.fetched = append(g.fetched, sha)
+	g.remoteRefs = append(g.remoteRefs, remote)
 	return nil
 }
 func (g *reviewGit) ReviewLanded(context.Context, string, string, string) (bool, error) {
@@ -27,6 +30,7 @@ func (g *reviewGit) ReviewBaseLanded(context.Context, string, string) (bool, err
 }
 
 type githubFixture struct {
+	failed     bool
 	pulls      []pull
 	commands   map[int][]comment
 	approvals  map[int]bool
@@ -59,6 +63,10 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 			return
 		}
 		if path == "/pulls" {
+			if f.failed {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			write(f.pulls)
 			return
 		}
@@ -331,5 +339,178 @@ func TestGitHubApprovalCurrency(t *testing.T) {
 				t.Fatalf("admitted=%v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGitHubPollingStillValidatesFreshState(t *testing.T) {
+	f := newGitHubFixture(t)
+	f.pulls[0].Stack = nil
+	f.request(1, "@gauntlet merge")
+	now := time.Now()
+	f.g.now = func() time.Time { return now }
+	f.g.p.PollInterval = time.Minute
+	first, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first candidates: %+v", first)
+	}
+	f.pulls[0].Body = "edited while cached"
+	cached, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cached) != 1 || cached[0].Version != first[0].Version {
+		t.Fatal("poll interval did not retain snapshot")
+	}
+	cached[0].Message = "caller mutation"
+	cached, err = f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached[0].Message != first[0].Message {
+		t.Fatal("caller mutated cached admission")
+	}
+	if err := f.g.Validate(context.Background(), first[0]); err == nil {
+		t.Fatal("landing trusted cached metadata")
+	}
+	fresh, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 || fresh[0].Version == first[0].Version {
+		t.Fatal("validation failure did not refresh admission")
+	}
+	now = now.Add(time.Minute)
+	f.failed = true
+	if _, err := f.g.Candidates(context.Background()); err == nil {
+		t.Fatal("expired snapshot hid API failure")
+	}
+	f.failed = false
+	f.request(1, "@gauntlet cancel")
+	empty, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatal("refresh did not recover with current cancellation")
+	}
+	f.request(1, "@gauntlet merge")
+	f.g.Invalidate()
+	fresh, err = f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 {
+		t.Fatal("invalidation did not bypass interval")
+	}
+}
+
+type refreshingTokens struct{ token, invalidated string }
+
+func (t *refreshingTokens) Token(context.Context) (string, error) { return t.token, nil }
+func (t *refreshingTokens) Invalidate(token string)               { t.invalidated = token; t.token = "fresh" }
+
+func TestGitHubUnauthorizedRefreshAndFailure(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			tokens := &refreshingTokens{token: "expired"}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if fail || r.Header.Get("Authorization") == "Bearer expired" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer fresh" {
+					t.Error("refresh token not used")
+				}
+				json.NewEncoder(w).Encode([]pull{})
+			}))
+			defer srv.Close()
+			g := NewGitHub(GitHubParams{Repo: "acme/repo", APIURL: srv.URL, Tokens: tokens})
+			_, err := g.Candidates(context.Background())
+			if (err != nil) != fail {
+				t.Fatalf("err=%v, fail=%v", err, fail)
+			}
+			if tokens.invalidated != "expired" {
+				t.Fatal("expired token not invalidated")
+			}
+		})
+	}
+}
+
+func TestGitHubSkipsUnrelatedClosedHistory(t *testing.T) {
+	f := newGitHubFixture(t)
+	f.pulls = append(f.pulls, pull{Number: 4, State: "closed", Head: ref{Ref: "old-feature"}, Base: ref{Ref: "main"}})
+	f.request(2, "@gauntlet merge")
+	cs, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 2 {
+		t.Fatal(cs)
+	}
+	// The fixture has no comments endpoint for #4: consulting it fails the test.
+}
+
+func TestGitHubClosedRootRequestWithoutStackField(t *testing.T) {
+	f := newGitHubFixture(t)
+	f.approvals[3] = true
+	f.request(1, "@gauntlet merge-stack")
+	f.pulls[0].State = "closed"
+	f.pulls[0].Stack = nil
+	f.git.landed = true
+	cs, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 2 || cs[0].SourceBase != f.pulls[0].Head.SHA {
+		t.Fatalf("closed native root request lost: %+v", cs)
+	}
+}
+
+func TestGitHubBranchStackRetainsClosedRoot(t *testing.T) {
+	f := newGitHubFixture(t)
+	for i := range f.pulls {
+		f.pulls[i].Stack = nil
+		if err := json.Unmarshal([]byte(`{"full_name":"ACME/repo"}`), &f.pulls[i].Head.Repo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.pulls[1].Base.Ref = f.pulls[0].Head.Ref
+	f.pulls[2].Base.Ref = f.pulls[1].Head.Ref
+	f.pulls[0].State = "closed"
+	f.git.landed = true
+	f.approvals[3] = true
+	f.request(1, "@gauntlet merge-stack")
+	cs, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 2 || cs[0].SourceBase != f.pulls[0].Head.SHA || cs[1].DependsOn != cs[0].Ref {
+		t.Fatalf("branch stack lost: %+v", cs)
+	}
+}
+
+func TestGitHubForkHeadUsesBaseRepositoryPullRef(t *testing.T) {
+	f := newGitHubFixture(t)
+	for i := range f.pulls {
+		f.pulls[i].Stack = nil
+	}
+	if err := json.Unmarshal([]byte(`{"full_name":"contributor/fork"}`), &f.pulls[0].Head.Repo); err != nil {
+		t.Fatal(err)
+	}
+	f.request(1, "@gauntlet merge")
+	cs, err := f.g.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 1 || len(f.git.remoteRefs) != 1 || f.git.remoteRefs[0] != "refs/pull/1/head" {
+		t.Fatalf("fork not fetched via base repo: %+v %v", cs, f.git.remoteRefs)
+	}
+	f.pulls[1].Base.Ref = f.pulls[0].Head.Ref
+	f.request(2, "@gauntlet merge")
+	if _, err := f.g.Candidates(context.Background()); err == nil {
+		t.Fatal("fork branch mistaken for a base-repository prerequisite")
 	}
 }

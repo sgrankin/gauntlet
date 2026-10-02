@@ -87,7 +87,7 @@ type deployWiring struct {
 // three fields nil when no environment is configured, in which case the
 // deploys nav entry is hidden, /deploys says so, and every deploy route on
 // both surfaces answers "deploy not configured".
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep deployWiring, drain func(time.Time), wg *sync.WaitGroup) {
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep deployWiring, drain func(time.Time), wg *sync.WaitGroup, webhook http.Handler) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
@@ -192,12 +192,16 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	}
 	mcpParams.DeployRetry, mcpParams.DeployCancel = dep.Retry, dep.Cancel
 	mux := http.NewServeMux()
+	if webhook != nil {
+		mux.Handle("/hooks/github", webhook)
+	}
 	mux.Handle("/mcp", gauntletmcp.New(mcpParams))
 	mux.Handle("/", dashboard.New(snapshot, store, opts...))
 
 	srv := &http.Server{
-		Addr:    cfg.Dashboard.Bind,
-		Handler: mux,
+		Addr:              cfg.Dashboard.Bind,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	wg.Add(2)

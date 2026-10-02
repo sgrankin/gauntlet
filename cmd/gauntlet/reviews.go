@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -15,7 +17,7 @@ import (
 
 func githubReviewParams(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) review.GitHubParams {
 	p := cfg.GitHub.PullRequests
-	params := review.GitHubParams{Repo: cfg.GitHub.Repo, APIURL: cfg.GitHub.APIURL, Git: repo, Targets: map[string]string{}, Bot: p.Bot, Approvals: *p.Approvals, RequiredChecks: p.RequiredChecks}
+	params := review.GitHubParams{Repo: cfg.GitHub.Repo, APIURL: cfg.GitHub.APIURL, Git: repo, Targets: map[string]string{}, Bot: p.Bot, Approvals: *p.Approvals, RequiredChecks: p.RequiredChecks, PollInterval: p.PollInterval}
 	if app != nil {
 		params.Tokens = app
 	} else {
@@ -103,4 +105,57 @@ func runLandPR(args []string) error {
 	}
 	fmt.Printf("Requested %s for PR #%d; the daemon will check permissions and readiness.\n", action, *number)
 	return nil
+}
+
+func buildGitHubWebhook(cfg *config.Daemon, source core.ReviewSource, ticks chan<- time.Time) (http.Handler, error) {
+	p := cfg.GitHub.PullRequests
+	if p == nil || p.WebhookSecretEnv == "" {
+		return nil, nil
+	}
+	secret := os.Getenv(p.WebhookSecretEnv)
+	if secret == "" {
+		return nil, fmt.Errorf("GitHub webhook secret environment variable is unset")
+	}
+	g, ok := source.(*review.GitHub)
+	if !ok {
+		return nil, fmt.Errorf("GitHub webhook requires GitHub review admission")
+	}
+	return g.Webhook(secret, func() {
+		select {
+		case ticks <- time.Now():
+		default:
+		}
+	}), nil
+}
+
+// reviewTicks coalesces webhook hints with the normal recovery heartbeat.
+func reviewTicks(ctx context.Context, periodic <-chan time.Time, hints <-chan time.Time) <-chan time.Time {
+	ticks := make(chan time.Time)
+	go func() {
+		defer close(ticks)
+		for {
+			var at time.Time
+			select {
+			case <-ctx.Done():
+				return
+			case value, ok := <-hints:
+				if !ok {
+					hints = nil
+					continue
+				}
+				at = value
+			case value, ok := <-periodic:
+				if !ok {
+					return
+				}
+				at = value
+			}
+			select {
+			case ticks <- at:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ticks
 }

@@ -1,5 +1,5 @@
 // Package review adapts forge review identities to immutable queue inputs.
-// Admission is polled, so it needs neither webhook ingress nor a database.
+// Polling reconstructs admission; optional webhooks request an early refresh.
 package review
 
 import (
@@ -12,9 +12,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -43,11 +45,17 @@ type GitHubParams struct {
 	Targets        map[string]string
 	Approvals      int
 	RequiredChecks []string
+	PollInterval   time.Duration
 }
 
 type GitHub struct {
-	p      GitHubParams
-	client *http.Client
+	p              GitHubParams
+	client         *http.Client
+	pollMu         sync.Mutex
+	pollGeneration uint64
+	cached         []core.Candidate
+	nextPoll       time.Time
+	now            func() time.Time
 }
 
 func NewGitHub(p GitHubParams) *GitHub {
@@ -57,7 +65,7 @@ func NewGitHub(p GitHubParams) *GitHub {
 	if p.Bot == "" {
 		p.Bot = "gauntlet"
 	}
-	return &GitHub{p: p, client: &http.Client{Timeout: 10 * time.Second}}
+	return &GitHub{p: p, client: &http.Client{Timeout: 10 * time.Second}, now: time.Now}
 }
 
 type ref struct {
@@ -358,7 +366,7 @@ func (g *GitHub) stack(ctx context.Context, p pull, open []pull, whole bool) ([]
 		}
 		var parents []pull
 		for _, other := range open {
-			if other.Head.Ref == bottom.Base.Ref && (other.Head.Repo == nil || other.Head.Repo.FullName == g.p.Repo) {
+			if other.Head.Ref == bottom.Base.Ref && (other.Head.Repo == nil || strings.EqualFold(other.Head.Repo.FullName, g.p.Repo)) {
 				parents = append(parents, other)
 			}
 		}
@@ -402,9 +410,57 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 	if err != nil {
 		return nil, err
 	}
+	// Only closed PRs that still bound an open stack can affect admission.
+	// Reconstruct native membership from the stack API: GitHub may omit a
+	// closed member's stack field while its root request is still operative.
+	active := map[int]bool{}
+	type nativeStack struct {
+		members []pull
+		branch  string
+	}
+	nativeByMember := map[int]nativeStack{}
+	seenStacks := map[int]bool{}
+	for _, p := range open {
+		if p.State != "open" {
+			continue
+		}
+		active[p.Number] = true
+		if p.Stack == nil || seenStacks[p.Stack.Number] {
+			continue
+		}
+		seenStacks[p.Stack.Number] = true
+		members, branch, err := g.stack(ctx, p, open, true)
+		if err != nil {
+			return nil, err
+		}
+		for _, member := range members {
+			active[member.Number] = true
+			nativeByMember[member.Number] = nativeStack{members, branch}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range open {
+			if !active[p.Number] {
+				continue
+			}
+			if _, configured := g.p.Targets[p.Base.Ref]; configured {
+				continue
+			}
+			for _, parent := range open {
+				if !active[parent.Number] && parent.Head.Ref == p.Base.Ref && (parent.Head.Repo == nil || strings.EqualFold(parent.Head.Repo.FullName, g.p.Repo)) {
+					active[parent.Number] = true
+					changed = true
+				}
+			}
+		}
+	}
 	var requests []request
 	permissions := map[string]bool{}
 	for _, p := range open {
+		if !active[p.Number] {
+			continue
+		}
 		r, err := g.latestRequest(ctx, p, permissions)
 		if err != nil {
 			return nil, err
@@ -416,9 +472,16 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 	sort.Slice(requests, func(i, j int) bool { return requests[i].ID < requests[j].ID })
 	selected := map[string]core.Candidate{}
 	for _, r := range requests {
-		members, branch, err := g.stack(ctx, r.PR, open, r.Action != "merge" && r.Action != "cancel")
-		if err != nil {
-			return nil, err
+		var members []pull
+		var branch string
+		if native, ok := nativeByMember[r.PR.Number]; ok {
+			members, branch = native.members, native.branch
+		} else {
+			var err error
+			members, branch, err = g.stack(ctx, r.PR, open, r.Action != "merge" && r.Action != "cancel")
+			if err != nil {
+				return nil, err
+			}
 		}
 		target, configured := g.p.Targets[branch]
 		if !configured {
@@ -501,11 +564,45 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 	return out, nil
 }
 
+// Invalidate requests a fresh admission snapshot on the next queue tick.
+// Local request/completion writes invalidate immediately; webhook intake can
+// use the same operation without treating a delivery as landing authority.
+func (g *GitHub) Invalidate() {
+	g.pollMu.Lock()
+	defer g.pollMu.Unlock()
+	g.nextPoll = time.Time{}
+	g.cached = nil
+	g.pollGeneration++
+}
+
 func (g *GitHub) Candidates(ctx context.Context) ([]core.Candidate, error) {
-	return g.candidates(ctx, true)
+	g.pollMu.Lock()
+	if g.now().Before(g.nextPoll) {
+		current := slices.Clone(g.cached)
+		g.pollMu.Unlock()
+		return current, nil
+	}
+	generation := g.pollGeneration
+	g.pollMu.Unlock()
+	current, err := g.candidates(ctx, true)
+	g.pollMu.Lock()
+	defer g.pollMu.Unlock()
+	if err != nil {
+		g.nextPoll = time.Time{}
+		g.cached = nil
+		return nil, err
+	}
+	// A delivery arriving during the poll requests another refresh. Do not
+	// overwrite it with a snapshot assembled before the delivery.
+	if generation == g.pollGeneration {
+		g.cached = slices.Clone(current)
+		g.nextPoll = g.now().Add(g.p.PollInterval)
+	}
+	return current, nil
 }
 
 func (g *GitHub) Validate(ctx context.Context, c core.Candidate) error {
+	defer g.Invalidate()
 	current, err := g.candidates(ctx, false)
 	if err != nil {
 		return err
@@ -528,6 +625,7 @@ func pullNumber(ref string) (int, error) {
 }
 
 func (g *GitHub) Landed(ctx context.Context, c core.Candidate, commit string) error {
+	defer g.Invalidate()
 	n, err := pullNumber(c.Ref)
 	if err != nil {
 		return err
@@ -566,6 +664,7 @@ func (g *GitHub) Landed(ctx context.Context, c core.Candidate, commit string) er
 
 // Request is also used by the CLI; no shell or installed gh binary needed.
 func (g *GitHub) Request(ctx context.Context, number int, action string, count int) error {
+	defer g.Invalidate()
 	body := "@" + g.p.Bot + " " + action
 	if action == "merge-prefix" {
 		body += " " + strconv.Itoa(count)

@@ -683,6 +683,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	reviewHints := make(chan time.Time, 1)
+	webhook, err := buildGitHubWebhook(cfg, qcfg.Reviews, reviewHints)
+	if err != nil {
+		return err
+	}
 	d, err := queue.New(repo, ex, chans, qcfg, nil)
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
@@ -812,7 +817,7 @@ func run() error {
 	if dt != nil {
 		deployWire = deployWiring{Snapshot: dt.Snapshot, Retry: dt.Retry, Cancel: dt.CancelCurrent}
 	}
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, deployWire, beginDrain, &wg)
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, deployWire, beginDrain, &wg, webhook)
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}
@@ -821,7 +826,11 @@ func run() error {
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()
 
-	runErr := d.Run(ctx, ticker.C)
+	ticks := ticker.C
+	if webhook != nil {
+		ticks = reviewTicks(ctx, ticker.C, reviewHints)
+	}
+	runErr := d.Run(ctx, ticks)
 
 	// A graceful drain (Run returned cleanly, not forced) finishes the
 	// hook backlog before teardown: the queue has stopped landing, so the

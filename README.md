@@ -9,7 +9,8 @@ Serial, batch, and speculative verification all support prerequisite order.
 
 Requires git 2.40 or newer (`git merge-tree --write-tree --merge-base`).
 See [review integration](docs/design/reviews.md) for stack commands,
-configuration, GitHub's closed-versus-merged limitation, and Gerrit setup.
+configuration, optional signed webhooks, GitHub's closed-versus-merged
+limitation, and Gerrit setup.
 
 ## Documentation
 

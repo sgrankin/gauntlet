@@ -1072,3 +1072,14 @@ GitHub completion behavior, and experimental validation.
 
 `merge-message` and generated commit-message summaries apply to legacy
 merge targets. Squash targets use their source or review message.
+
+## Review intake
+
+A `github` block enables status reporting. Its optional `pull-requests` block
+also enables review admission and `@gauntlet` commands. `poll-interval` within
+that block controls GitHub admission refreshes independently of the daemon
+queue interval: default 30 seconds, or five minutes when `webhook-secret-env`
+is set. `webhook-secret-env` enables signed deliveries at `/hooks/github` on
+the dashboard listener and requires a dashboard bind address and a populated
+secret environment variable. [Review integration](design/reviews.md#polling-and-optional-webhooks)
+includes configuration, webhook registration, ingress, freshness, and recovery.

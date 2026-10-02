@@ -37,7 +37,10 @@ invalidate the trial.
 
 Original objects are also retained locally under
 `refs/gauntlet/source/<sha>` for audit and delayed hook access. These refs
-are never pushed and currently have no automatic retention limit. The
+are never pushed. The offline `gauntlet prune-sources` command expires local
+source archives and review-cache refs by last use; see
+[source retention](../runbooks/source-retention.md). Automatic pruning while
+checks or delayed hooks run remains intentionally disabled. The
 linear target itself does not reach the original junk history.
 
 ## GitHub admission and stacks
@@ -114,17 +117,76 @@ collaborator permissions; existing status/trial/receipt features may need
 additional write permissions. Git transport must also be authenticated
 (the existing App token transport works, as do configured Git credentials).
 
-Polling requires no webhook ingress. This first adapter scans PR/comment
-history so stack-wide requests survive root closure and daemon restarts;
-that can consume substantial API quota in repositories with long histories.
-With history enabled, review parks survive restart for the same source SHA
-and metadata/request version. A new revision, edited landing message, or new
-request invalidates the park. Pre-v15 records have no version and are safely
-re-evaluated once after upgrading. In-flight trials are rebuilt after restart;
-Git target history remains the authority for completed landings. Commands waiting on admission
-have no separate acknowledgement comment;
-trial/status events start once admitted. Webhook-backed intake and detailed
-blocked-request feedback remain follow-up work.
+## Polling and optional webhooks
+
+Queue ticks and GitHub admission refreshes have separate cadences. Without
+webhooks, `pull-requests { poll-interval "30s" }` is the default. Successful
+admission snapshots are reused between refreshes; an expired snapshot never
+hides an API error. Validation immediately before landing always reads fresh
+GitHub state. Requests and landing acknowledgements also invalidate the cache.
+
+Refreshes list PR metadata but only read comments on open PRs and closed stack
+prerequisites. Native stack membership is fetched once per stack per refresh;
+a closed root's request survives even when its PR no longer reports a stack
+field. Unrelated closed PR comment histories are not scanned. Large repositories
+may still need incremental metadata intake or conditional API requests.
+
+Webhooks are optional refresh hints, with periodic polling as recovery:
+
+```kdl
+dashboard "127.0.0.1:8080"
+github "acme/widgets" {
+    token-env "GITHUB_TOKEN"
+    pull-requests {
+        bot "gauntlet"
+        webhook-secret-env "GITHUB_WEBHOOK_SECRET"
+        poll-interval "5m"
+    }
+}
+```
+
+With `webhook-secret-env` set, the default fallback interval is five minutes;
+an explicit `poll-interval` overrides either default (minimum one second).
+The configured environment variable must be set at daemon startup and is
+removed from candidate check environments.
+
+Set a GitHub App's webhook URL, or a repository webhook URL, to
+`https://<your-ingress>/hooks/github`, choose JSON, and configure the same random
+secret on GitHub and in the daemon environment. Subscribe to pull requests,
+issue comments, pull request reviews, check runs/suites, statuses, and pushes.
+Reverse-proxy that endpoint to the dashboard listener; expose only that route
+publicly, keeping the existing dashboard, admin API, and MCP access private.
+The daemon listener remains HTTP behind the HTTPS ingress.
+
+Deliveries require a valid SHA-256 HMAC and the configured repository. Bodies
+are bounded to 2 MiB. A valid delivery invalidates admission and coalesces an
+early queue tick; it does not execute commands from the payload, authorize a
+landing, or call GitHub before acknowledging. Duplicate and reordered deliveries
+are harmless because the next poll reads current state. Missed deliveries and
+restarts are recovered by polling, so delivery IDs need no persistent ledger.
+Configure the webhook on GitHub separately; enabling the KDL setting does not
+register one with GitHub.
+
+## Local persistence
+
+Enable `history "/var/lib/gauntlet/history.db"` to preserve failed review parks.
+A park applies to the same source SHA and metadata/request version. New heads,
+edited landing messages, and new requests invalidate it. Temporary loss of
+readiness hides the inactive review but keeps its failure verdict, including
+when the daemon restarts before readiness returns. Pre-v15 records have
+no version and are safely re-evaluated once after upgrading. Retry intents name
+the exact superseded terminal run (v16+), avoiding a lost retry when failure and
+retry share a millisecond. Schema upgrades run in one transaction.
+
+Git is the authority for target contents and landing provenance. SQLite stores
+completed run/check records, parks, and retry intent; GitHub comments hold queue
+requests. In-flight trials are rebuilt after restart, and interrupted forge
+acknowledgements are retried from target history. This does not serialize live
+processes or automatically resume post-land hooks.
+
+Commands waiting on admission have no separate acknowledgement comment;
+trial/status events start once admitted. Detailed blocked-request feedback
+remains follow-up work.
 
 ## GitHub completion: experimental evidence
 

@@ -319,9 +319,11 @@ type GitHub struct {
 // policy is explicit because direct target pushes do not run the forge's
 // merge-button gate. The default requires one approval of the current head.
 type GitHubPullRequests struct {
-	Bot            string   `kdl:"bot"`
-	Approvals      *int     `kdl:"approvals"`
-	RequiredChecks []string `kdl:"require-check"`
+	WebhookSecretEnv string        `kdl:"webhook-secret-env"`
+	PollInterval     time.Duration `kdl:"poll-interval,format:units"`
+	Bot              string        `kdl:"bot"`
+	Approvals        *int          `kdl:"approvals"`
+	RequiredChecks   []string      `kdl:"require-check"`
 }
 
 type Gerrit struct {
@@ -819,6 +821,12 @@ func applyExecutorDefaults(e *Executor) {
 
 func (d *Daemon) applyDefaults() {
 	if p := d.GitHub.PullRequests; p != nil {
+		if p.PollInterval == 0 {
+			p.PollInterval = 30 * time.Second
+			if p.WebhookSecretEnv != "" {
+				p.PollInterval = 5 * time.Minute
+			}
+		}
 		if p.Bot == "" {
 			p.Bot = "gauntlet"
 		}
@@ -1332,6 +1340,9 @@ func (d *Daemon) SecretEnvNames() []string {
 	if d.GitHub.Repo != "" && d.GitHub.Auth == nil && d.GitHub.TokenEnv != "" {
 		names = append(names, d.GitHub.TokenEnv)
 	}
+	if p := d.GitHub.PullRequests; p != nil && p.WebhookSecretEnv != "" {
+		names = append(names, p.WebhookSecretEnv)
+	}
 	if d.Slack.Channel != "" {
 		if d.Slack.AppTokenEnv != "" {
 			names = append(names, d.Slack.AppTokenEnv)
@@ -1494,6 +1505,12 @@ func (d *Daemon) validate() error {
 		}
 	}
 	if p := d.GitHub.PullRequests; p != nil {
+		if p.WebhookSecretEnv != "" && d.Dashboard.Bind == "" {
+			return fmt.Errorf("github: webhook-secret-env requires dashboard bind")
+		}
+		if p.PollInterval < time.Second {
+			return fmt.Errorf("github: pull-requests poll-interval must be at least 1s")
+		}
 		if d.GitHub.Repo == "" {
 			return fmt.Errorf("github: pull-requests requires a repo")
 		}
