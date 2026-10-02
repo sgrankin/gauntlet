@@ -1,0 +1,3 @@
+check "probe" {
+    command "true"
+}
