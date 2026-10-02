@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/sgrankin/gauntlet/internal/core"
 )
@@ -22,6 +23,9 @@ import (
 // Repo implements core.GitRepo against a local bare repository whose
 // "origin" remote is the configured remote URL.
 type Repo struct {
+	sourceMu    sync.Mutex
+	sourceUsers map[string]int
+
 	dir string // bare repo path (--git-dir)
 
 	// tokens/authHost, when set (WithTokenSource), authenticate every

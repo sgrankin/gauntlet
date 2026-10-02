@@ -195,6 +195,8 @@ type runMember struct {
 // without rerunning checks — exactly why losing it (a crash) costs at most
 // a rerun, never correctness.
 type run struct {
+	releaseSources func()
+
 	target    string
 	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
 	baseOID   string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto

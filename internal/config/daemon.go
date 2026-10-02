@@ -166,6 +166,9 @@ type Daemon struct {
 	// (30 days) rather than only defaulting when some section is "enabled".
 	LogRetention time.Duration `kdl:"log-retention,format:units"`
 
+	// SourceRetention expires unused local source archives and review-cache refs.
+	SourceRetention time.Duration `kdl:"source-retention,format:units"`
+
 	// AutoRetryErrors gates the auto-retry-once behavior (DESIGN.md decision
 	// ledger, "Auto-retry once on infra-error parks"): an OutcomeError
 	// park — executor unreachable, service-ensure failure, a service dying
@@ -862,6 +865,9 @@ func (d *Daemon) applyDefaults() {
 	// LogRetention defaults unconditionally (see its doc): there is no
 	// "log-retention section absent -> disabled" state to preserve, unlike
 	// every optional section below.
+	if d.SourceRetention == 0 {
+		d.SourceRetention = 30 * 24 * time.Hour
+	}
 	if d.LogRetention == 0 {
 		d.LogRetention = defaultLogRetention
 	}
@@ -1363,6 +1369,9 @@ func (d *Daemon) validate() error {
 	}
 	if d.Poll <= 0 {
 		return fmt.Errorf("poll-interval: must be positive, got %s", d.Poll)
+	}
+	if d.SourceRetention <= 0 {
+		return fmt.Errorf("source-retention: must be positive")
 	}
 	if d.LogRetention <= 0 {
 		return fmt.Errorf("log-retention: must be positive, got %s", d.LogRetention)

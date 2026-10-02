@@ -185,6 +185,9 @@ target "main" branch="main"
 	// LogRetention defaults unconditionally (no "section absent" state to
 	// preserve, unlike the optional sections below) — 30 days even though
 	// the "log-retention" node is absent from this config.
+	if d.SourceRetention != 30*24*time.Hour {
+		t.Errorf("SourceRetention = %v, want 30 days", d.SourceRetention)
+	}
 	if d.LogRetention != defaultLogRetention {
 		t.Errorf("LogRetention = %v, want default %v", d.LogRetention, defaultLogRetention)
 	}
@@ -689,6 +692,7 @@ func TestLoadDaemon_DurationParsing(t *testing.T) {
 remote "https://example.com/repo.git"
 poll-interval "1h30m"
 log-retention "48h"
+source-retention "72h"
 committer {
     name "Gauntlet"
     email "gauntlet@example.com"
@@ -705,6 +709,9 @@ target "main" branch="main"
 	want := 90 * time.Minute
 	if d.Poll != want {
 		t.Errorf("Poll = %v, want %v", d.Poll, want)
+	}
+	if d.SourceRetention != 72*time.Hour {
+		t.Errorf("SourceRetention = %v, want 72h", d.SourceRetention)
 	}
 	if d.LogRetention != 48*time.Hour {
 		t.Errorf("LogRetention = %v, want 48h", d.LogRetention)
@@ -740,6 +747,14 @@ committer {
 target "main" branch="main"
 `,
 			wantErr: "poll-interval",
+		},
+		{
+			name: "negative source retention",
+			kdl: `remote "x"
+source-retention "-1h"
+committer { name "Queue"; email "queue@example.com"; }
+target "main" branch="main"`,
+			wantErr: "source-retention",
 		},
 		{
 			name: "log-retention<=0 given explicitly",

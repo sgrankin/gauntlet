@@ -12,6 +12,7 @@ minimal `gauntlet.kdl` keeps working unchanged as features are added.
 
 ```kdl
 log-retention "720h"   // optional; default 30 days ("720h")
+source-retention "720h" // optional; default 30 days; unused local source refs
 auto-retry-errors true // optional; default true — set false to disable (see README's "Retry semantics")
 
 history "/var/lib/gauntlet/history.db" {
@@ -69,6 +70,11 @@ summarize {
   node below, this one has no "absent ⇒ disabled" state: full logging is
   always wired up, so absence just means the default (30 days, `"720h"`)
   applies. Every value must be positive.
+- **`source-retention <duration>`** — automatic retention for original source
+  archives and review-cache refs, default thirty days (`"720h"`). Sweeps run at
+  startup and hourly. Live trials, workers, and queued/running hooks protect
+  their sources until finished. Values must be positive. Expiration releases
+  local refs for normal Git garbage collection; target history is preserved.
 - **`merge-message <template>`** — used only by `landing "merge"`, a Go
   `text/template` string for the merge
   commit's subject line (`internal/queue`). Available fields: `.Topic`,

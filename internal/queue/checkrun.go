@@ -365,12 +365,23 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	isolated := r.isolated
 	chainTip := r.chainTip   // captured by value; the goroutine never touches r
 	chainTree := r.chainTree // the exact tree to materialize (not the commit — export-subst)
+	sources := make([]string, len(r.members))
+	for i, member := range r.members {
+		sources[i] = member.cand.SHA
+	}
+	releaseSources, sourceErr := core.RetainSources(ctx, d.git, sources...)
+
 	go func() {
 		// The execution slot advanceChecks acquired for this check is
 		// released only when this goroutine exits — RunCheck has returned
 		// and the executor's child cleanup is complete by then, so the
 		// freed slot never represents a live process/container.
 		defer d.cfg.Slots.Release()
+		if sourceErr != nil {
+			result <- core.CheckResult{Name: check.Name, Err: fmt.Errorf("retain check sources: %w", sourceErr)}
+			return
+		}
+		defer releaseSources()
 
 		// Isolated mode (issue #9): materialize this node's own private
 		// copy of the chain-tip tree now that the slot is held, so the

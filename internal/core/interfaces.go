@@ -11,6 +11,20 @@ import (
 // treat it as a signal to re-derive state and retry, never as corruption.
 var ErrCASStale = errors.New("gitx: CAS failed, ref moved")
 
+// SourceRetainer protects original commits that normalized history cannot reach.
+// Releases are idempotent. Implementations without source pruning do not
+// need this optional capability.
+type SourceRetainer interface {
+	RetainSources(context.Context, ...string) (release func(), err error)
+}
+
+func RetainSources(ctx context.Context, git GitRepo, sources ...string) (func(), error) {
+	if keeper, ok := git.(SourceRetainer); ok {
+		return keeper.RetainSources(ctx, sources...)
+	}
+	return func() {}, nil
+}
+
 // LinearGitRepo supplies the additional plumbing needed for linear landings.
 // SourceBase is empty for ordinary queue branches; review adapters specify
 // it explicitly so a stacked change contributes only its own delta.

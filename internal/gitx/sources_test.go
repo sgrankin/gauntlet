@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/testutil"
 )
 
 func TestSourcePrunePreviewAndGC(t *testing.T) {
@@ -150,4 +151,68 @@ func TestSourcePruneRefreshAndLegacyAge(t *testing.T) {
 		t.Fatal("orphan clock remains")
 	}
 
+}
+
+func TestSourceLeasesProtectAgainstLivePruningAndGC(t *testing.T) {
+	ctx := t.Context()
+	repo, remote, dir := newRepo(t)
+	remote.Seed("main", map[string]string{"a": "base"})
+	ref := remote.PushCandidate("main", "author", "change", map[string]string{"a": "change"})
+	source := remote.Ref(ref)
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first, err := repo.RetainSources(ctx, source, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repo.RetainSources(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.DeleteCandidate(ref)
+	if err := repo.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, "source-retention", source), old, old); err != nil {
+		t.Fatal(err)
+	}
+	prune := func(want int) {
+		t.Helper()
+		result, err := repo.PruneSources(ctx, time.Now().Add(-time.Hour), true)
+		if err != nil || len(result.Expired) != want {
+			t.Fatalf("prune=%+v, %v; want %d expired", result, err, want)
+		}
+		testutil.GCPruneNow(t, dir)
+	}
+	prune(0)
+	first()
+	first() // duplicate release must not consume the other lease
+	prune(0)
+	if err := exec.Command("git", "--git-dir", dir, "cat-file", "-e", source).Run(); err != nil {
+		t.Fatal("live source collected", err)
+	}
+	second()
+	prune(1)
+	if err := exec.Command("git", "--git-dir", dir, "cat-file", "-e", source).Run(); err == nil {
+		t.Fatal("released source still retained")
+	}
+}
+
+func TestSourceLeaseFailureDoesNotLeakProtection(t *testing.T) {
+	repo, remote, _ := newRepo(t)
+	remote.Seed("main", map[string]string{"a": "base"})
+	ref := remote.PushCandidate("main", "author", "change", map[string]string{"a": "change"})
+	source := remote.Ref(ref)
+	if err := repo.Fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RetainSources(t.Context(), source, strings.Repeat("f", 40)); err == nil {
+		t.Fatal("retained missing object")
+	}
+	result, err := repo.PruneSources(t.Context(), time.Now().Add(time.Hour), true)
+	if err != nil || len(result.Expired) != 1 {
+		t.Fatalf("partial acquisition leaked: %+v %v", result, err)
+	}
 }

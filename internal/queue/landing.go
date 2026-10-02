@@ -290,6 +290,9 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 // rather than leaking it, and a path that registers the handoff never
 // double-releases.
 func (d *Daemon) finalizeRun(ctx context.Context, r *run) {
+	if r.releaseSources != nil {
+		r.releaseSources()
+	}
 	obs.EndRun(r.rootSpan, r.members[0].rec)
 
 	if _, deferred := d.landedPins[r.chainTip]; !deferred {

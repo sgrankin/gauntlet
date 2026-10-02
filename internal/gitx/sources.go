@@ -8,21 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
-
-// Open opens an existing bare repository without changing its configuration.
-func Open(ctx context.Context, dir string) (*Repo, error) {
-	r := &Repo{dir: dir}
-	bare, err := r.run(ctx, "rev-parse", "--is-bare-repository")
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(bare) != "true" {
-		return nil, fmt.Errorf("maintenance requires a bare repository")
-	}
-	return r, nil
-}
 
 const sourcePrefix = "refs/gauntlet/source/"
 
@@ -42,15 +30,58 @@ func (r *Repo) retainSource(ctx context.Context, source string) error {
 	return r.touchSource(source)
 }
 
+// RetainSources anchors inputs before their last other ref can move, and
+// excludes them from pruning until every consumer releases its lease.
+func (r *Repo) RetainSources(ctx context.Context, sources ...string) (func(), error) {
+	r.sourceMu.Lock()
+	defer r.sourceMu.Unlock()
+	unique := make(map[string]bool)
+	for _, source := range sources {
+		if source == "" || unique[source] {
+			continue
+		}
+		if len(source) != 40 && len(source) != 64 {
+			return nil, fmt.Errorf("invalid source OID %q", source)
+		}
+		if _, err := hex.DecodeString(source); err != nil {
+			return nil, fmt.Errorf("invalid source OID %q", source)
+		}
+		if err := r.retainSource(ctx, source); err != nil {
+			return nil, err
+		}
+		unique[source] = true
+	}
+	if r.sourceUsers == nil {
+		r.sourceUsers = make(map[string]int)
+	}
+	for source := range unique {
+		r.sourceUsers[source]++
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.sourceMu.Lock()
+			defer r.sourceMu.Unlock()
+			for source := range unique {
+				r.sourceUsers[source]--
+				if r.sourceUsers[source] == 0 {
+					delete(r.sourceUsers, source)
+				}
+			}
+		})
+	}, nil
+}
+
 type SourcePruneResult struct {
 	Expired []string
 	Unaged  []string
 }
 
-// PruneSources releases old audit refs. The caller must hold the daemon's
-// state lock while it is stopped: checks and delayed hooks may need inputs
-// that the normalized target cannot reach. This does not run Git GC.
+// PruneSources releases expired audit and review-cache refs. Live leases,
+// fetches, and source normalization share the lock; Git GC runs separately.
 func (r *Repo) PruneSources(ctx context.Context, cutoff time.Time, apply bool) (SourcePruneResult, error) {
+	r.sourceMu.Lock()
+	defer r.sourceMu.Unlock()
 	var result SourcePruneResult
 	out, err := r.run(ctx, "for-each-ref", "--format=%(refname) %(objectname)", sourcePrefix, "refs/gauntlet/reviews/")
 	if err != nil {
@@ -91,6 +122,9 @@ func (r *Repo) PruneSources(ctx context.Context, cutoff time.Time, apply bool) (
 	}
 	sort.Strings(sources)
 	for _, source := range sources {
+		if r.sourceUsers[source] > 0 {
+			continue
+		}
 		stamp := filepath.Join(r.dir, "source-retention", source)
 		info, err := os.Stat(stamp)
 		if os.IsNotExist(err) {

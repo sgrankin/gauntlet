@@ -1,46 +1,46 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/sgrankin/gauntlet/internal/gitx"
 	"github.com/sgrankin/gauntlet/internal/testutil"
 )
 
-func TestPruneSourcesRequiresStoppedDaemon(t *testing.T) {
-	state := t.TempDir()
+func TestAutomaticSourcePrunerPreservesLiveLeaseThenExpires(t *testing.T) {
 	remote := testutil.NewRemote(t)
-	cfg := filepath.Join(t.TempDir(), "daemon.kdl")
-	body := `remote "` + remote.Dir + `"
- committer { name "Queue"; email "queue@example.com"; }
- target "main" { branch "main"; }
- `
-	if err := os.WriteFile(cfg, []byte(body), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := gitx.New(context.Background(), filepath.Join(state, "repos", remoteKey(remote.Dir)), remote.Dir); err != nil {
-		t.Fatal(err)
-	}
-	lock, err := AcquireLock(state)
+	remote.Seed("main", map[string]string{"a": "base"})
+	ref := remote.PushCandidate("main", "author", "change", map[string]string{"a": "change"})
+	source := remote.Ref(ref)
+	dir := remote.BareClone()
+	repo, err := gitx.New(t.Context(), dir, remote.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"-config", cfg, "-state", state, "-apply"}
-	var output bytes.Buffer
-	err = pruneSourcesTo(args, &output)
-	lock.Close()
-	if err == nil || !strings.Contains(err.Error(), "another gauntlet daemon") {
-		t.Fatalf("live daemon was not protected: %v", err)
-	}
-	if err := pruneSourcesTo(args, &output); err != nil {
+	if err := repo.Fetch(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "0 expired") {
-		t.Fatal(output.String())
+	release, err := repo.RetainSources(t.Context(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	stamp := filepath.Join(dir, "source-retention", source)
+	if err := os.Chtimes(stamp, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ticks := make(chan time.Time)
+	close(ticks)
+	runSourcePruner(t.Context(), repo, time.Hour, ticks)
+	if _, err := os.Stat(stamp); err != nil {
+		t.Fatal("automatic prune removed live source", err)
+	}
+	release()
+	runSourcePruner(t.Context(), repo, time.Hour, ticks)
+	if _, err := os.Stat(stamp); !os.IsNotExist(err) {
+		t.Fatalf("automatic prune did not expire released source: %v", err)
 	}
 }

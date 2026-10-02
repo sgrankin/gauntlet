@@ -54,11 +54,12 @@ than combining the state machines.
   and closed-comment-history filtering. Native stack roots retain requests
   after losing their stack field. Real `full_name` JSON decoding and fork
   boundaries are now covered. Final landing validation still reads fresh state.
-- `gauntlet prune-sources` previews offline expiration of local audit and
-  review-cache refs. It requires the stopped daemon's state lock, uses last-use
-  clocks, preserves unaged archives, and leaves target/remote/history intact.
-  A real-Git test proves expired source objects can be collected while the
-  normalized target survives.
+- Source expiration now runs automatically at startup and hourly. Trials,
+  workers through cancellation cleanup, and running/backlogged hooks hold
+  source leases. Shared locking protects fetch and normalization races.
+  Real-Git tests prove live sources survive pruning and GC, then become
+  collectable after the last consumer releases them. Removed the offline
+  maintenance command and runbook.
 - Added GitHub auth-refresh, webhook, cache-expiry, and concurrency tests;
   Gerrit post-vote race and merged-state acknowledgement tests. Removed the
   redundant second fetch for Gerrit root patch sets.
@@ -75,14 +76,12 @@ than combining the state machines.
    final validation can repeat scans for batch members. Conditional requests,
    incremental intake, and shared fresh batch validation are next optimizations.
    Blocked requests still need clearer acknowledgement and reasons.
-2. **Automatic source pruning.** Offline maintenance is available. Live pruning
-   needs explicit source lifetime pins for checks and running/backlogged hooks.
-3. **Live Gerrit.** API fixtures cover important gates, but cannot prove the
+2. **Live Gerrit.** API fixtures cover important gates, but cannot prove the
    server's Change-Id association or restricted-submit setup.
-4. **Landing defaults.** Loaded configuration defaults to squash; hand-built
+3. **Landing defaults.** Loaded configuration defaults to squash; hand-built
    zero-valued queue targets retain legacy merge behavior. Make landing mode
    explicit in new tests and converge the defaults when retiring compatibility.
-5. **Documentation history.** Older decision-ledger entries describe superseded
+4. **Documentation history.** Older decision-ledger entries describe superseded
    behavior. Prefer current feature documents for operational guidance.
 
 ## Tests

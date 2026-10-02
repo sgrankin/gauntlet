@@ -625,6 +625,23 @@ func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip s
 	// serial's startRun — one shared span for the batch's single run.
 	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, picked[0], "")
 
+	sources := make([]string, len(picked))
+	for i, cand := range picked {
+		sources[i] = cand.SHA
+	}
+	release, err := core.RetainSources(ctx, d.git, sources...)
+	if err != nil {
+		for i, cand := range picked {
+			var span trace.Span
+			if i == 0 {
+				span = rootSpan
+			}
+			d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "retain sources: "+err.Error(), span)
+		}
+		return
+	}
+	defer release()
+
 	// Precompute every picked member's merge-commit body concurrently,
 	// before the chain loop below runs any trial merge, so the reconcile
 	// loop's wall clock for minting an N-member batch drops from
@@ -715,10 +732,24 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 	tipTree := trials[len(trials)-1].TreeOID
 	rootSpan.SetAttributes(attribute.String(obs.AttrMergeSHA, chainTip))
 
-	// Pin the chain tip before anything reads through it (startRun's pin
-	// site has the full rationale). One pin covers the whole chain: the tip
-	// reaches every link, every member SHA, and the base through commit
-	// parenthood.
+	sources := make([]string, len(links))
+	for i, link := range links {
+		sources[i] = link.cand.SHA
+	}
+	release, err := core.RetainSources(ctx, d.git, sources...)
+	if err != nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "retain sources: "+err.Error(), rootSpan)
+		return
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+
+	// Pin the normalized chain and base before reading them. Source leases
+	// separately protect the original members, which squash history cannot reach.
 	if err := d.git.Pin(ctx, chainTip); err != nil {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeError, "pin trial chain: "+err.Error(), rootSpan)
 		return
@@ -801,27 +832,29 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		prevBase = link.mergeOID
 	}
 
+	transferred = true
 	r := &run{
-		target:      t.Name,
-		members:     members,
-		baseOID:     base,
-		chainTip:    chainTip,
-		chainTree:   tipTree,
-		batchID:     runID,
-		runID:       runID,
-		dir:         dir,
-		checks:      buildRunNodes(spec),
-		maxParallel: effectiveMaxParallel(spec),
-		inflight:    make(map[string]*checkInFlight),
-		results:     make(map[string]core.CheckResult),
-		readyAt:     make(map[string]time.Time),
-		imageRefs:   make(map[string]string, len(spec.Images)),
-		services:    spec.Services,
-		verdict:     verdictNone,
-		isolated:    spec.Isolated(),
-		trialRef:    trialRef,
-		rootCtx:     rootCtx,
-		rootSpan:    rootSpan,
+		releaseSources: release,
+		target:         t.Name,
+		members:        members,
+		baseOID:        base,
+		chainTip:       chainTip,
+		chainTree:      tipTree,
+		batchID:        runID,
+		runID:          runID,
+		dir:            dir,
+		checks:         buildRunNodes(spec),
+		maxParallel:    effectiveMaxParallel(spec),
+		inflight:       make(map[string]*checkInFlight),
+		results:        make(map[string]core.CheckResult),
+		readyAt:        make(map[string]time.Time),
+		imageRefs:      make(map[string]string, len(spec.Images)),
+		services:       spec.Services,
+		verdict:        verdictNone,
+		isolated:       spec.Isolated(),
+		trialRef:       trialRef,
+		rootCtx:        rootCtx,
+		rootSpan:       rootSpan,
 	}
 	// One pending verification status at the chain tip, carrying the head
 	// member's record (Position 0), before checks start.
@@ -1009,6 +1042,18 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// standard OTel behavior, so no obs API change is needed for this.
 	rootCtx, rootSpan := obs.StartRun(ctx, d.tr, "", t.Name, cand, "")
 
+	release, err := core.RetainSources(ctx, d.git, cand.SHA)
+	if err != nil {
+		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "retain source: "+err.Error(), rootSpan)
+		return nil, false
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+
 	var runID string
 	link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
 		// Run ID from the trial *tree* OID, not the merge commit OID — a
@@ -1158,28 +1203,30 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		StartedAt:  d.now(),
 		Speculated: predicted,
 	}
+	transferred = true
 	r := &run{
-		target:      t.Name,
-		members:     []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
-		baseOID:     base,
-		chainTip:    link.mergeOID,
-		chainTree:   trial.TreeOID,
-		predicted:   predicted,
-		batchID:     "",
-		runID:       runID,
-		dir:         dir,
-		checks:      buildRunNodes(spec),
-		maxParallel: effectiveMaxParallel(spec),
-		inflight:    make(map[string]*checkInFlight),
-		results:     make(map[string]core.CheckResult),
-		readyAt:     make(map[string]time.Time),
-		imageRefs:   make(map[string]string, len(spec.Images)),
-		services:    spec.Services,
-		verdict:     verdictNone,
-		isolated:    spec.Isolated(),
-		trialRef:    trialRef,
-		rootCtx:     rootCtx,
-		rootSpan:    rootSpan,
+		releaseSources: release,
+		target:         t.Name,
+		members:        []runMember{{cand: cand, mergeOID: link.mergeOID, rec: rec}},
+		baseOID:        base,
+		chainTip:       link.mergeOID,
+		chainTree:      trial.TreeOID,
+		predicted:      predicted,
+		batchID:        "",
+		runID:          runID,
+		dir:            dir,
+		checks:         buildRunNodes(spec),
+		maxParallel:    effectiveMaxParallel(spec),
+		inflight:       make(map[string]*checkInFlight),
+		results:        make(map[string]core.CheckResult),
+		readyAt:        make(map[string]time.Time),
+		imageRefs:      make(map[string]string, len(spec.Images)),
+		services:       spec.Services,
+		verdict:        verdictNone,
+		isolated:       spec.Isolated(),
+		trialRef:       trialRef,
+		rootCtx:        rootCtx,
+		rootSpan:       rootSpan,
 	}
 	// The merge is published (when enabled): its MergeSHA now carries the
 	// pending verification status. Emitted before checks start, after

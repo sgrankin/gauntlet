@@ -32,8 +32,6 @@ func main() {
 	if len(os.Args) > 1 {
 		var command func([]string) error
 		switch os.Args[1] {
-		case "prune-sources":
-			command = runPruneSources
 		case "land-pr":
 			command = runLandPR
 		case "land":
@@ -822,6 +820,7 @@ func run() error {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}
 	startLogPruner(ctx, logsDir, cfg.LogRetention, &wg)
+	startSourcePruner(ctx, repo, cfg.SourceRetention, &wg)
 
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()

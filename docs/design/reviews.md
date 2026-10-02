@@ -37,11 +37,15 @@ invalidate the trial.
 
 Original objects are also retained locally under
 `refs/gauntlet/source/<sha>` for audit and delayed hook access. These refs
-are never pushed. The offline `gauntlet prune-sources` command expires local
-source archives and review-cache refs by last use; see
-[source retention](../runbooks/source-retention.md). Automatic pruning while
-checks or delayed hooks run remains intentionally disabled. The
-linear target itself does not reach the original junk history.
+are never pushed. The daemon automatically expires unused source archives
+and review-cache refs at startup and hourly. `source-retention` defaults to
+thirty days. Trials, check workers (including cancellation cleanup), and
+running/backlogged hooks hold leases that exclude their inputs from pruning.
+Fetches, normalization, lease acquisition, and pruning share a lock. Legacy
+archives without age metadata receive a full retention window on first sweep.
+Expired objects become eligible for Git's normal garbage collection; pruning
+never changes remote refs, normalized target history, or SQLite records.
+The linear target itself does not reach the original junk history.
 
 ## GitHub admission and stacks
 

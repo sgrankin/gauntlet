@@ -1054,14 +1054,14 @@ func TestApplyBacklogPolicy_PerTargetIndependence(t *testing.T) {
 		Log:     &logBuf,
 	})
 
-	ev := func(target, run, sha string) core.Event {
-		return landedEvent(target, &core.RunRecord{
+	ev := func(target, run, sha string) queuedLanding {
+		return queuedLanding{Event: landedEvent(target, &core.RunRecord{
 			RunID: run, Target: target, MergeSHA: "merge-" + run,
 			Candidate: core.Candidate{Target: target, Topic: "t", SHA: sha},
-		})
+		})}
 	}
 
-	batch := []core.Event{
+	batch := []queuedLanding{
 		ev("main", "main-1", "sha-m1"),
 		ev("other", "other-1", "sha-o1"),
 		ev("main", "main-2", "sha-m2"),

@@ -14,6 +14,8 @@ var _ core.LinearGitRepo = (*Repo)(nil)
 // FetchReview imports and anchors a forge's review ref, including fork PRs.
 // It never changes a remote ref or the ordinary queue's fetched namespace.
 func (r *Repo) FetchReview(ctx context.Context, remoteRef, localRef, expected string) error {
+	r.sourceMu.Lock()
+	defer r.sourceMu.Unlock()
 	if _, err := r.runRemote(ctx, "fetch", "--no-tags", "origin", "+"+remoteRef+":"+localRef); err != nil {
 		return fmt.Errorf("fetch review: %w", err)
 	}
@@ -52,6 +54,8 @@ func (r *Repo) ReplayTree(ctx context.Context, base, candidate, sourceBase strin
 // deliberately drops signatures, which are invalid after changing parents
 // or the message. Gerrit's Change-Id is part of the message, not this header.
 func (r *Repo) LinearCommit(ctx context.Context, tree, base, source, message string, who core.Identity) (string, error) {
+	r.sourceMu.Lock()
+	defer r.sourceMu.Unlock()
 	// Single-parent landing commits do not reach their original inputs.
 	// Retain those objects locally for audit and delayed post-land hooks,
 	// even after contributor refs move. This namespace is never pushed.

@@ -399,12 +399,3 @@ normal queue snapshots, history, and events, but are not remote branches.
 Use PR comments to withdraw GitHub requests, or change Gerrit readiness;
 do not push or delete these reserved slot names. See
 [review integration](design/reviews.md) for details.
-
-## Offline source maintenance
-
-`gauntlet prune-sources -config gauntlet.kdl -state /var/lib/gauntlet`
-previews local audit and review-cache inputs unused for thirty days. Use
-`-retention 720h` to select the window and `-apply` to remove expired refs.
-Drain and stop the daemon first: the command requires its exclusive state lock.
-It never changes remote refs, the tested target, or history. See
-[source retention](runbooks/source-retention.md) for legacy archives and GC.

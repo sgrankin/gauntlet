@@ -151,6 +151,17 @@ const queueBuffer = 64
 
 var _ core.Channel = (*Runner)(nil)
 
+type queuedLanding struct {
+	core.Event
+	release func()
+}
+
+func (e queuedLanding) releaseSources() {
+	if e.release != nil {
+		e.release()
+	}
+}
+
 // Runner is a core.Channel that runs post-land hooks. Its Emit only ever
 // enqueues EventLanded events carrying a non-nil Record — every other event
 // kind is ignored, per core.Channel's "channels ignore unknown kinds"
@@ -180,7 +191,7 @@ type Runner struct {
 	// span is a no-op, so this costs nothing when OTel isn't configured.
 	tr trace.Tracer
 
-	queue chan core.Event
+	queue chan queuedLanding
 	cmds  chan core.Command
 
 	// drain is closed by Drain to begin a graceful hook-backlog drain
@@ -204,6 +215,7 @@ type Runner struct {
 	// while this one was running", never a leftover from some earlier,
 	// already-finished landing (see execLanding).
 	mu       sync.Mutex
+	stopped  bool
 	monitors map[string]chan core.Event
 
 	// live is the in-memory state Snapshot/SnapshotAll read: zero-valued
@@ -265,7 +277,7 @@ func New(p Params) *Runner {
 		logDir:   p.LogDir,
 		log:      logw,
 		tr:       obs.Tracer(),
-		queue:    make(chan core.Event, queueBuffer),
+		queue:    make(chan queuedLanding, queueBuffer),
 		cmds:     make(chan core.Command),
 		monitors: make(map[string]chan core.Event),
 		drain:    make(chan struct{}),
@@ -285,22 +297,38 @@ func (r *Runner) policy(target string) Policy {
 	return PolicyQueue
 }
 
-// Emit enqueues ev for Run's drainer if it is a landing carrying a Record —
-// the only shape Runner acts on — and ignores every other event kind. It
-// never blocks the reconcile loop: Emit is called synchronously from
-// queue.Daemon's own emit fan-out, so once queueBuffer is full (Run is stuck
-// on a slow hook, or has fallen behind), further events are logged and
-// dropped rather than waited on.
+// Emit leases the source before enqueueing a landing. It never waits for
+// hook execution or space in a full inbox; overflow is logged and dropped.
 func (r *Runner) Emit(ctx context.Context, ev core.Event) error {
 	if ev.Kind != core.EventLanded || ev.Record == nil {
 		return nil
 	}
+	release := func() {}
+	if !ev.Record.Recovered {
+		var err error
+		release, err = core.RetainSources(ctx, r.git, ev.Record.Candidate.SHA)
+		if err != nil {
+			return fmt.Errorf("hooks: retain source: %w", err)
+		}
+	}
+	release = sync.OnceFunc(release)
+	queued := queuedLanding{Event: ev, release: release}
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		release()
+		return nil
+	}
 	select {
-	case r.queue <- ev:
+	case r.queue <- queued:
+		r.mu.Unlock()
 	default:
+		r.mu.Unlock()
+		release()
 		fmt.Fprintf(r.log, "hooks: queue full (%d), dropping landing target=%s run=%s\n", queueBuffer, ev.Target, ev.RunID)
 		return nil
 	}
+
 	// PolicyCancel additionally wakes up execLanding's monitor goroutine,
 	// if one is currently watching this target (i.e. a PolicyCancel
 	// landing for it is running right now), so it can cancel that
@@ -354,6 +382,16 @@ func (r *Runner) Commands() <-chan core.Command {
 // goroutine per target, or execLanding calls fanned out concurrently),
 // that seq-by-COUNT approach must be revisited first.
 func (r *Runner) Run(ctx context.Context) error {
+	defer func() {
+		r.mu.Lock()
+		r.stopped = true
+		remaining := r.drainAvailable()
+		r.mu.Unlock()
+		for _, e := range remaining {
+			e.releaseSources()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -371,13 +409,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.closeDrainedOnce.Do(func() { close(r.drained) })
 			return nil
 		case ev := <-r.queue:
-			batch := append([]core.Event{ev}, r.drainAvailable()...)
-			for _, e := range r.applyBacklogPolicy(batch) {
-				if ctx.Err() != nil {
-					return nil
-				}
-				r.execLanding(ctx, e)
-			}
+			r.executeBatch(ctx, append([]queuedLanding{ev}, r.drainAvailable()...))
 		}
 	}
 }
@@ -386,10 +418,15 @@ func (r *Runner) Run(ctx context.Context) error {
 // target's backlog Policy once over the whole set — the drain-time
 // counterpart of the Run loop's per-burst processing.
 func (r *Runner) runBacklog(ctx context.Context) {
-	batch := r.drainAvailable()
-	if len(batch) == 0 {
-		return
-	}
+	r.executeBatch(ctx, r.drainAvailable())
+}
+
+func (r *Runner) executeBatch(ctx context.Context, batch []queuedLanding) {
+	defer func() {
+		for _, e := range batch {
+			e.releaseSources()
+		}
+	}()
 	for _, e := range r.applyBacklogPolicy(batch) {
 		if ctx.Err() != nil {
 			return
@@ -414,8 +451,8 @@ func (r *Runner) Drain(ctx context.Context) {
 // drainAvailable returns every event currently sitting in r.queue without
 // blocking — the rest of a burst that arrived alongside the one Run's
 // select already received.
-func (r *Runner) drainAvailable() []core.Event {
-	var out []core.Event
+func (r *Runner) drainAvailable() []queuedLanding {
+	var out []queuedLanding
 	for {
 		select {
 		case ev := <-r.queue:
@@ -439,7 +476,7 @@ func (r *Runner) drainAvailable() []core.Event {
 // as of this batch. PolicyCancel's additional behavior — cancelling a
 // landing that is already *running* — happens in execLanding, not here;
 // applyBacklogPolicy has no notion of "currently running".
-func (r *Runner) applyBacklogPolicy(batch []core.Event) []core.Event {
+func (r *Runner) applyBacklogPolicy(batch []queuedLanding) []queuedLanding {
 	lastIdx := make(map[string]int, len(batch))
 	for i, ev := range batch {
 		switch r.policy(ev.Target) {
@@ -448,14 +485,15 @@ func (r *Runner) applyBacklogPolicy(batch []core.Event) []core.Event {
 		}
 	}
 
-	out := make([]core.Event, 0, len(batch))
+	out := make([]queuedLanding, 0, len(batch))
 	for i, ev := range batch {
 		switch r.policy(ev.Target) {
 		case PolicyCoalesce, PolicyCancel:
 			if i != lastIdx[ev.Target] {
 				newer := batch[lastIdx[ev.Target]]
 				fmt.Fprintf(r.log, "hooks: coalesced landing %s, superseded by %s\n",
-					landingRef(ev), landingRef(newer))
+					landingRef(ev.Event), landingRef(newer.Event))
+				ev.releaseSources()
 				continue
 			}
 		}
@@ -491,7 +529,9 @@ func (r *Runner) applyBacklogPolicy(batch []core.Event) []core.Event {
 // (which ran, and completed, well before this registration — the whole
 // reason ev is running now is that it was dequeued from r.queue after
 // that).
-func (r *Runner) execLanding(parent context.Context, ev core.Event) {
+func (r *Runner) execLanding(parent context.Context, queued queuedLanding) {
+	defer queued.releaseSources()
+	ev := queued.Event
 	if r.policy(ev.Target) != PolicyCancel {
 		r.runLanding(parent, ev, nil)
 		return
