@@ -39,7 +39,7 @@ func (d *dash) handleDeploys(w http.ResponseWriter, r *http.Request) {
 	// error. The nav entry is already hidden (baseData.HasDeploys), so the
 	// only way here is a typed URL or an old bookmark.
 	if d.deploySnapshot == nil {
-		render(w, deploysTmpl, deploysData{baseData: d.newBase("deploys", nil, false)})
+		render(w, deploysTmpl, deploysData{baseData: d.newBase("Deployments", nil, false, "deploys")})
 		return
 	}
 
@@ -48,18 +48,19 @@ func (d *dash) handleDeploys(w http.ResponseWriter, r *http.Request) {
 		// Configured, but no reconcile pass has published yet: the same
 		// Starting treatment the index page gives a nil queue snapshot,
 		// refreshing so the page fills itself in when the first pass lands.
-		b := d.newBase("deploys", nil, true)
+		b := d.newBase("Deployments", nil, true, "deploys")
 		b.Starting = true
 		render(w, deploysTmpl, deploysData{baseData: b, Configured: true})
 		return
 	}
 
 	data := deploysData{
-		baseData:    d.newBase("deploys", nil, true),
+		baseData:    d.newBase("Deployments", nil, true, "deploys"),
 		Configured:  true,
 		SnapshotAt:  formatTime(snap.At),
 		SourceChain: buildSourceChainSVG(snap.Lanes),
 	}
+	data.GeneratedAt = formatTime(snap.At)
 	data.StoreEnabled = d.store != nil
 	for _, lane := range snap.Lanes {
 		data.Lanes = append(data.Lanes, d.buildDeployCard(lane, snap.At))
@@ -536,7 +537,7 @@ func (d *dash) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if d.store == nil {
 		// Same treatment /run/{id} gives: the page renders, saying history
 		// is off, rather than 404ing an ID that may well be real.
-		render(w, deployTmpl, deployData{baseData: d.newBase(runID, nil, false)})
+		render(w, deployTmpl, deployData{baseData: d.newBase("Deployment", nil, false, "deploys")})
 		return
 	}
 
@@ -560,7 +561,7 @@ func (d *dash) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := deployData{
-		baseData:     d.newBase("deploy "+row.RunID, nil, false),
+		baseData:     d.newBase("deploy · "+row.Env, nil, false, "deploys"),
 		StoreEnabled: true,
 		HasRecord:    true,
 		Deploy: deploySummaryFull{
@@ -574,7 +575,8 @@ func (d *dash) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, n := range nodes {
 		data.Nodes = append(data.Nodes, checkView{
-			Seq: n.Seq, Name: n.Name, Status: deployNodeTag(n.Status),
+			RowID: fmt.Sprintf("node-%d-%s", n.Seq, url.PathEscape(n.Name)),
+			Seq:   n.Seq, Name: n.Name, Status: deployNodeTag(n.Status),
 			Duration: formatDuration(n.Duration), Err: n.Err,
 			Detail: checkRowDetail(n),
 			Output: n.Output,
@@ -632,7 +634,7 @@ func (d *dash) inFlightDeploy(runID string) (deployData, bool) {
 			continue
 		}
 		data := deployData{
-			baseData:     d.newBase("deploy "+runID, nil, true),
+			baseData:     d.newBase("deploy · "+lane.Env, nil, true, "deploys"),
 			StoreEnabled: true,
 			InFlight:     true,
 			Source:       lane.Source,
@@ -646,6 +648,7 @@ func (d *dash) inFlightDeploy(runID string) (deployData, bool) {
 			},
 			RunningNodes: append([]string(nil), lane.Running.Nodes...),
 		}
+		data.GeneratedAt = formatTime(snap.At)
 		return data, true
 	}
 	return deployData{}, false

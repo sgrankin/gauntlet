@@ -18,10 +18,11 @@
 {{end}}
 <div class="table-scroll">
 <table>
+<tr><th>run</th><td class="mono">{{.Run.RunID}}</td></tr>
 <tr><th>ref</th><td class="mono" title="{{.Run.Ref}}">{{compactRef .Run.Ref}}</td></tr>
 <tr><th>candidate sha</th><td><code class="nowrap" title="{{.Run.SHA}}">{{shortSHA .Run.SHA}}</code></td></tr>
 <tr><th>base</th><td><code class="nowrap" title="{{.Run.BaseOID}}">{{shortSHA .Run.BaseOID}}</code></td></tr>
-<tr><th>merge sha</th><td><code class="nowrap" title="{{.Run.MergeSHA}}">{{shortSHA .Run.MergeSHA}}</code></td></tr>
+<tr><th>landing sha</th><td><code class="nowrap" title="{{.Run.MergeSHA}}">{{shortSHA .Run.MergeSHA}}</code></td></tr>
 <tr><th>trial merge</th><td>{{if .Run.TrialClean}}clean{{else}}conflict{{end}}</td></tr>
 {{if .Run.ReceiptRef}}
 <!-- Receipt-notes provenance (issue #13): present on any run whose note was

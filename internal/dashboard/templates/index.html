@@ -4,6 +4,7 @@
 {{else if not .Targets}}
 <p class="muted">No targets configured.</p>
 {{else}}
+<p class="muted">{{.RunningCount}} in flight &middot; {{.WaitingCount}} waiting &middot; {{.ParkedCount}} parked across {{len .Targets}} targets</p>
 <div class="grid">
 {{range .Targets}}
 <div class="card">
@@ -19,11 +20,11 @@
 {{else}}
 <p class="muted">idle</p>
 {{end}}
-<p>{{.WaitingCount}} waiting &middot; {{.ParkedCount}} parked</p>
+<p><a href="/t/{{.Name}}#waiting">{{.WaitingCount}} waiting</a> &middot; <a href="/t/{{.Name}}#parked">{{.ParkedCount}} parked</a></p>
 {{if .StoreEnabled}}
 <p class="muted">recent:</p>
 <p class="chips">
-{{range .RecentRuns}}<a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a>{{else}}<span class="muted">none</span>{{end}}
+{{range .RecentRuns}}<a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}" aria-label="{{.Title}}"></a>{{else}}<span class="muted">none</span>{{end}}
 </p>
 {{else}}
 <p class="muted">history disabled</p>

@@ -660,7 +660,7 @@ func TestRun_ChecksExpandWithOutput(t *testing.T) {
 	if n := strings.Count(body, "<details"); n != 1 {
 		t.Errorf("expected exactly one <details> (lint has no output, test does), got %d:\n%s", n, body)
 	}
-	if !strings.Contains(body, `<details class="check-row" open>`) {
+	if !strings.Contains(body, `<details class="check-row" open id="check-`) {
 		t.Errorf("expected the failed check's <details> to start open:\n%s", body)
 	}
 	const escaped = "&lt;script&gt;alert(2)&lt;/script&gt;"
@@ -1140,11 +1140,12 @@ func TestRefreshPages_CarryFetchMorphPolling(t *testing.T) {
 		for _, want := range []string{
 			`<noscript><meta http-equiv="refresh" content="5"></noscript>`,
 			`<script src="` + idiomorphTestPath + `"></script>`,
-			"Idiomorph.morph(document.body, doc.body)",
+			"Idiomorph.morph(document.body, doc.body,",
 			"setInterval(function ()",
 			"var busy = false;",
 			"if (document.hidden || busy) return;",
-			".finally(function () { busy = false; });",
+			"id=\"live-controls\"",
+			"id=\"pause-updates\"",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: missing %q\nbody:\n%s", path, want, body)
@@ -1230,5 +1231,27 @@ func TestIndex_OmitsIdleSinceLineWhenHookRunning(t *testing.T) {
 	_, body := get(t, h, "/")
 	if strings.Contains(body, "idle since") {
 		t.Errorf("index body has an idle-since line while a target's hook is running:\n%s", body)
+	}
+}
+
+func TestTargetRetryControlsUseExactRefAndRequireChannel(t *testing.T) {
+	snap := testSnapshot()
+	for _, enabled := range []bool{false, true} {
+		var opts []dashboard.Option
+		if enabled {
+			opts = append(opts, dashboard.WithChannel(dashboard.NewChannel()))
+		}
+		h := dashboard.New(func() *queue.Snapshot { return snap }, nil, opts...)
+		_, body := get(t, h, "/t/main")
+		present := strings.Contains(body, `data-queue-action="retry"`)
+		if present != enabled {
+			t.Fatalf("retry control=%v enabled=%v", present, enabled)
+		}
+		if enabled && !strings.Contains(body, `data-ref="refs/heads/for/main/mallory/evil"`) {
+			t.Fatal("retry did not address the parked ref")
+		}
+		if strings.Contains(body, `data-label="mallory/<script>`) {
+			t.Fatal("unescaped candidate label")
+		}
 	}
 }

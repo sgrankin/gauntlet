@@ -747,15 +747,11 @@ func TestAPIRetry_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestAPIRetry_NoChannelStillAccepted(t *testing.T) {
-	// Without WithChannel, /retry has nowhere to send the command but the
-	// request itself is still well-formed, so it's still accepted (the
-	// command is silently dropped, same as a full buffer would be).
+func TestAPIRetry_NoChannelUnavailable(t *testing.T) {
 	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
-
 	resp, body := postJSON(t, h, "/api/v1/retry", `{"target":"main","ref":"refs/heads/for/main/alice/feat-a"}`)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
 	}
 }
 
@@ -832,12 +828,11 @@ func TestAPICancel_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestAPICancel_NoChannelStillAccepted(t *testing.T) {
+func TestAPICancel_NoChannelUnavailable(t *testing.T) {
 	h := dashboard.New(func() *queue.Snapshot { return nil }, nil)
-
 	resp, body := postJSON(t, h, "/api/v1/cancel", `{"target":"main","ref":"refs/heads/for/main/alice/feat-a"}`)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, body:\n%s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
 	}
 }
 
@@ -1621,5 +1616,34 @@ func TestAPIStatus_IdleSincePresentWithHooksConfiguredButQuiet(t *testing.T) {
 	m := decodeJSON(t, body)
 	if _, ok := m["idleSince"]; !ok {
 		t.Error("idleSince absent, want present: hooks configured but none running/backlogged anywhere")
+	}
+}
+
+func TestQueueControlsRejectFullBuffer(t *testing.T) {
+	ch := dashboard.NewChannel()
+	for i := 0; ; i++ {
+		if i > 1000 {
+			t.Fatal("command queue is unbounded")
+		}
+		if !ch.TrySend(core.Command{Kind: core.CommandRetry, Target: "main", Ref: "occupied"}) {
+			break
+		}
+	}
+	h := dashboard.New(func() *queue.Snapshot { return nil }, nil, dashboard.WithChannel(ch))
+	for _, endpoint := range []string{"/api/v1/retry", "/api/v1/cancel"} {
+		resp, body := postJSON(t, h, endpoint, `{"target":"main","ref":"new"}`)
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("%s status=%d body=%s", endpoint, resp.StatusCode, body)
+		}
+	}
+	for {
+		select {
+		case cmd := <-ch.Commands():
+			if cmd.Ref != "occupied" {
+				t.Fatal("full queue accepted a new command")
+			}
+		default:
+			return
+		}
 	}
 }

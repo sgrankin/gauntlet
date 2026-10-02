@@ -58,7 +58,7 @@
 </div>
 
 <div class="section">
-<h2>Waiting ({{len .Waiting}})</h2>
+<h2 id="waiting">Waiting ({{len .Waiting}})</h2>
 {{if .Waiting}}
 <div class="table-scroll">
 <table>
@@ -74,13 +74,13 @@
 </div>
 
 <div class="section">
-<h2>Parked ({{len .Parked}})</h2>
+<h2 id="parked">Parked ({{len .Parked}})</h2>
 {{if .Parked}}
 <div class="table-scroll">
 <table>
-<tr><th>user/topic</th><th>sha</th><th>outcome</th><th>reason</th><th>at</th></tr>
+<tr><th>user/topic</th><th>sha</th><th>outcome</th><th>reason</th><th>at</th>{{if .CanRetry}}<th>action</th>{{end}}</tr>
 {{range .Parked}}
-<tr><td>{{.User}}/{{.Topic}}</td><td><code class="nowrap" title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td>{{if and .RunID $.StoreEnabled}}<a href="/run/{{.RunID}}" class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</a>{{else}}<span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span>{{end}}</td><td>{{.Reason}}</td><td class="muted nowrap">{{.At}}</td></tr>
+<tr><td>{{.User}}/{{.Topic}}</td><td><code class="nowrap" title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td>{{if and .RunID $.StoreEnabled}}<a href="/run/{{.RunID}}" class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</a>{{else}}<span class="tag {{.Outcome.Class}}">{{.Outcome.Word}}</span>{{end}}</td><td>{{.Reason}}</td><td class="muted nowrap">{{.At}}</td>{{if $.CanRetry}}<td><button class="btn js-action" type="button" data-queue-action="retry" data-target="{{$.Name}}" data-ref="{{.Ref}}" data-label="{{.User}}/{{.Topic}}" aria-label="Retry {{.User}}/{{.Topic}}">retry</button></td>{{end}}</tr>
 {{end}}
 </table>
 </div>
@@ -90,7 +90,7 @@
 </div>
 
 <div class="section">
-<h2>Post-land hooks</h2>
+<div class="headrow"><h2>Post-land hooks</h2>{{if and .CanCancelHooks .LiveHook}}{{if .LiveHook.Running}}<button class="btn danger js-action" type="button" data-hook-action="cancel" data-target="{{.Name}}">cancel running hook</button>{{end}}{{end}}</div>
 {{if .LiveHook}}
 <p>{{if .LiveHook.Running}}running <strong>{{.LiveHook.CurrentHook}}</strong> ({{.LiveHook.HookIndex}}/{{.LiveHook.HookCount}}) &middot; {{.LiveHook.Elapsed}}{{else}}<span class="muted">idle</span>{{end}}{{if gt .LiveHook.BacklogDepth 0}} &middot; backlog {{.LiveHook.BacklogDepth}}{{end}}</p>
 {{end}}
@@ -116,7 +116,7 @@
 <table>
 <tr><th>run</th><th>user/topic</th><th>outcome</th><th>detail</th><th>started</th><th>duration</th></tr>
 {{range .RecentRuns}}
-<tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}"></a>{{if .CheckRatio}} <span class="muted check-ratio">{{.CheckRatio}}</span>{{end}}</td><td>{{.Detail}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
+<tr><td class="nowrap"><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{.User}}/{{.Topic}}</td><td><a href="/run/{{.RunID}}" class="chip chip-{{.ChipClass}}{{if .Batched}} chip-batched{{end}}" title="{{.Title}}" aria-label="{{.Title}}"></a>{{if .CheckRatio}} <span class="muted check-ratio">{{.CheckRatio}}</span>{{end}}</td><td>{{.Detail}}</td><td class="muted nowrap">{{.StartedAt}}</td><td>{{.Duration}}</td></tr>
 {{end}}
 </table>
 </div>

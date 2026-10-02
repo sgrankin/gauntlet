@@ -192,12 +192,7 @@ footer { margin-top: 2rem; }
 .checklist .check-row:last-child { border-bottom: none; }
 details.check-row summary { display: block; cursor: pointer; }
 details.check-row summary::marker { color: var(--muted); }
-/* .check-summary-line is an inner wrapper INSIDE <summary>, not a rule on
-   summary itself: setting display:flex directly on <summary> drops its
-   native disclosure-triangle marker in some browsers, since the marker box
-   is tied to summary's own (list-item-flavored) display rather than being a
-   plain generated-content overlay. Wrapping the actual content in a child
-   flex container gets the same left/right layout without touching that. */
+/* The inner wrapper aligns the check name and metadata; summary owns the disclosure. */
 .check-summary-line { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
 .check-summary-name { min-width: 0; overflow-wrap: anywhere; }
 .check-summary-meta { white-space: nowrap; flex: none; }
@@ -276,152 +271,186 @@ pre.output { background: var(--bg); border: 1px solid var(--border); border-radi
 .legend-dot.waiting { background: var(--accent); }
 .legend-dot.inflight { background: var(--ok); }
 .legend-dot.parked { background: var(--muted); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+nav a[aria-current="page"] { font-weight: 700; text-decoration: underline; }
+.skip-link { position: absolute; top: -5rem; padding: .5rem; background: var(--card); z-index: 10; }
+.skip-link:focus { top: .5rem; }
+.js-only { display: none; } .js .js-only { display: flex; }
+.js-action { display: none; } .js .js-action { display: inline-block; }
+.live-controls { align-items: center; flex-wrap: wrap; gap: .5rem; font-size: .8rem; }
+.live-status { color: var(--muted); }
+.live-status[data-state="error"] { color: var(--bad); }
+.feedback { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); max-width: calc(100% - 2rem); width: max-content; border: 1px solid var(--border); border-left: 4px solid var(--ok); border-radius: 6px; background: var(--card); padding: .7rem 1rem; z-index: 5; box-shadow: 0 2px 12px #0002; }
+.feedback[data-state="error"] { border-left-color: var(--bad); }
+.feedback[hidden] { display: none; }
+.feedback button { margin-left: .6rem; }
+.check-summary-line { flex-wrap: wrap; }
+.check-summary-meta { white-space: normal; }
+.actions { flex-wrap: wrap; }
+h1 { overflow-wrap: anywhere; }
+details.check-row summary .check-summary-name::before { content: "›"; display: inline-block; width: .8rem; color: var(--muted); }
+details.check-row[open] summary .check-summary-name::before { content: "⌄"; }
+@media (max-width: 600px) { body { padding: 1rem; } .grid { grid-template-columns: minmax(0, 1fr); } .btn { min-height: 36px; } }
 </style>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 <header>
-<nav><a href="/">targets</a><a href="/checks">checks</a>{{if .HasDeploys}}<a href="/deploys">deploys</a>{{end}}</nav>
+<nav aria-label="Main navigation"><a href="/"{{if eq .Nav "targets"}} aria-current="page"{{end}}>targets</a><a href="/checks"{{if eq .Nav "checks"}} aria-current="page"{{end}}>checks</a>{{if .HasDeploys}}<a href="/deploys"{{if eq .Nav "deploys"}} aria-current="page"{{end}}>deploys</a>{{end}}</nav>
+<div class="headrow">
 <h1>{{.Title}}</h1>
+{{if .Refresh}}<div id="live-controls" class="live-controls js-only">
+<span id="live-status" class="live-status" role="status">Live · every 5s</span>
+<button class="btn" type="button" id="pause-updates" aria-pressed="false">Pause updates</button>
+<button class="btn" type="button" id="refresh-now">Refresh now</button>
+</div>{{end}}
+</div>
 </header>
-<main>{{block "content" .}}{{end}}</main>
-<footer class="muted"><small>generated {{.GeneratedAt}}{{if .Version}} · gauntlet {{.Version}}{{end}}</small></footer>
+<main id="main" tabindex="-1">{{block "content" .}}{{end}}</main>
+<footer class="muted"><small>{{if .Refresh}}Snapshot{{else}}Rendered{{end}} {{.GeneratedAt}}{{if .Version}} · gauntlet {{.Version}}{{end}}</small></footer>
+<div id="action-feedback" class="feedback" role="status" aria-live="polite" hidden><span id="action-message"></span><button class="btn" id="dismiss-feedback" type="button">Dismiss</button></div>
 {{if .Refresh}}<script src="{{.IdiomorphURL}}"></script>{{end}}
 <script>
-// Every server-rendered timestamp is a <time datetime="..."> element holding
-// a UTC string (dashboard/server.go's formatTime) — deliberately unchanged
-// visible text, since a mixed-timezone table is more confusing than a
-// consistent one. applyTimeTooltips adds a title tooltip, computed
-// client-side, giving the viewer's local zone and a friendly relative age
-// without touching what's actually printed. It's a named, idempotent
-// function (not an inline DOMContentLoaded closure) because a .Refresh page
-// needs to re-run it after every DOM morph below, not just once at load —
-// idiomorph syncs attributes from the fetched HTML onto matching live
-// elements, and a client-set title isn't in that fetched HTML, so it gets
-// stripped on each morph if nothing puts it back.
+document.documentElement.classList.add('js');
 function applyTimeTooltips() {
-  var units = [
-    ['year', 365 * 24 * 3600], ['month', 30 * 24 * 3600], ['day', 24 * 3600],
-    ['hour', 3600], ['minute', 60], ['second', 1],
-  ];
-  // Built once per call, not once per <time> element (constructing an Intl
-  // formatter isn't free) — and defensively: an engine without
-  // Intl.RelativeTimeFormat (pre-2020 Safari/older) throws a TypeError
-  // constructing it, which would otherwise take the toLocaleString() half of
-  // the tooltip down with it for every remaining element. rtf stays null in
-  // that case and relative() degrades to "", so the tooltip is just local
-  // time with no relative line.
-  var rtf = null;
-  try {
-    rtf = new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'});
-  } catch (e) {}
-  function relative(d) {
-    if (!rtf) return '';
-    var secs = (d.getTime() - Date.now()) / 1000;
+  var relative = null;
+  try { relative = new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'}); } catch (e) {}
+  var units = [['day', 86400], ['hour', 3600], ['minute', 60], ['second', 1]];
+  document.querySelectorAll('time[datetime]').forEach(function (el) {
+    var date = new Date(el.dateTime);
+    if (isNaN(date.getTime())) return;
+    el.title = date.toLocaleString();
+    if (!relative) return;
+    var seconds = (date.getTime() - Date.now()) / 1000;
     for (var i = 0; i < units.length; i++) {
-      var unit = units[i][0], secondsInUnit = units[i][1];
-      if (Math.abs(secs) >= secondsInUnit || unit === 'second') {
-        return rtf.format(Math.round(secs / secondsInUnit), unit);
+      if (Math.abs(seconds) >= units[i][1] || units[i][0] === 'second') {
+        el.title += '\n' + relative.format(Math.round(seconds / units[i][1]), units[i][0]);
+        break;
       }
     }
-    return '';
-  }
-  document.querySelectorAll('time[datetime]').forEach(function (el) {
-    var d = new Date(el.getAttribute('datetime'));
-    if (isNaN(d.getTime())) return;
-    var title = d.toLocaleString();
-    var rel = relative(d);
-    if (rel) title += '\n' + rel;
-    el.title = title;
   });
 }
-document.addEventListener('DOMContentLoaded', applyTimeTooltips);
-
-// Deploy actions (retry/cancel). These POST to the JSON API rather than
-// being a <form method="post">, deliberately: a form POST is a
-// cross-site-forgeable request and this dashboard has no session to mint a
-// CSRF token against (auth is out of scope — bind to a trusted interface),
-// whereas a fetch() carrying Content-Type: application/json is not a CORS
-// "simple request", so a cross-origin page cannot make the browser send it
-// without a preflight this server never answers. With JS disabled the
-// buttons are inert by design — every action here also exists on the API,
-// on the MCP tools, and (for retry) as a plain new push of the desired ref,
-// so nothing is lost but a convenience.
-//
-// The listener is delegated from <body>, which idiomorph morphs the
-// CHILDREN of rather than replacing, so it survives every auto-refresh tick;
-// a listener bound to the buttons themselves would not.
 var gauntletAutoRefresh = {{if .Refresh}}true{{else}}false{{end}};
+var gauntletActionPending = false;
+function showFeedback(message, failed) {
+  var feedback = document.getElementById('action-feedback');
+  feedback.hidden = false;
+  feedback.setAttribute('data-state', failed ? 'error' : 'ok');
+  document.getElementById('action-message').textContent = message;
+}
 document.addEventListener('DOMContentLoaded', function () {
+  applyTimeTooltips();
   document.body.addEventListener('click', function (ev) {
-    var btn = ev.target.closest ? ev.target.closest('button[data-deploy-action]') : null;
-    if (!btn) return;
-    var action = btn.getAttribute('data-deploy-action');
-    var env = btn.getAttribute('data-deploy-env');
-    if (!action || !env) return;
-    btn.disabled = true;
-    fetch('/api/v1/deploy/' + action, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({env: env})
-    }).then(function () {
-      // A refreshing page (the overview) repaints itself on its next morph
-      // tick; a static one (the detail page) has to be told.
-      if (!gauntletAutoRefresh) location.reload();
-    }).catch(function () {}).finally(function () { btn.disabled = false; });
-  });
-});
-
-{{if .Refresh}}
-// Auto-refresh (DESIGN.md decision ledger): a plain <meta http-equiv=
-// "refresh"> full-reloads the page every 5s, which blows away scroll
-// position and any in-progress text selection, and flashes the whole page
-// blank on every tick — jarring on a page that's live-updating exactly
-// because someone is watching it. Instead: poll this same page's own URL,
-// and morph the fetched body onto the live DOM with idiomorph (id-based
-// diffing — an element carrying a stable id is patched in place rather than
-// replaced), so scroll position and selection outside the regions that
-// actually changed survive a tick, and there's no navigation flash. The
-// <noscript> meta-refresh above is the no-JS fallback; if idiomorph itself
-// failed to load (network hiccup on that one extra request), fall back to a
-// real reload so the page still keeps refreshing either way.
-//
-// NOTE for whoever adds a <details> to a page that sets Refresh (today only
-// run.html's captured-check-output rows use <details>, and that page never
-// refreshes): idiomorph syncs attributes from the fetched HTML onto the live
-// DOM, so a viewer-toggled `open` attribute is NOT preserved by itself — the
-// server always renders these collapsed, the next morph diffs against that,
-// and idiomorph's attribute sync removes `open` right back off (same
-// mechanism applyTimeTooltips works around for `title`, just with nothing
-// currently restoring `open`). If that ever matters, either render
-// authoritative server-side open state or add an idiomorph
-// beforeAttributeUpdated callback that refuses to touch `open`.
-document.addEventListener('DOMContentLoaded', function () {
-  // busy: sets before a fetch starts, clears in .finally() once it settles.
-  // setInterval fires on a fixed 5s cadence regardless of whether the
-  // previous tick's request has resolved yet; without this guard a slow
-  // response (backend GC pause, a lossy link) can resolve AFTER a later,
-  // faster tick's response and morph stale state onto the fresher DOM, and
-  // a wedged backend piles up one concurrent fetch per missed tick. Skipping
-  // the tick outright while one is outstanding avoids both.
-  var busy = false;
-  setInterval(function () {
-    if (document.hidden || busy) return; // backgrounded tab, or previous tick still in flight
-    if (!window.Idiomorph) {
-      location.reload();
+    if (ev.target.closest('#dismiss-feedback')) {
+      document.getElementById('action-feedback').hidden = true;
       return;
     }
+    var btn = ev.target.closest('button[data-deploy-action], button[data-queue-action], button[data-hook-action]');
+    if (!btn || btn.disabled || gauntletActionPending) return;
+    var action, subject, endpoint, payload, confirmation;
+    if (btn.hasAttribute('data-deploy-action')) {
+      action = btn.getAttribute('data-deploy-action');
+      subject = btn.getAttribute('data-deploy-env');
+      endpoint = '/api/v1/deploy/' + action;
+      payload = {env: subject};
+      if (action === 'cancel') confirmation = 'Cancel the current deployment for ' + subject + '? This stops one attempt; automatic deployment may start again.';
+    } else if (btn.hasAttribute('data-hook-action')) {
+      action = 'cancel';
+      subject = btn.getAttribute('data-target');
+      endpoint = '/api/v1/hooks/cancel';
+      payload = {target: subject};
+      confirmation = 'Cancel the running hook on ' + subject + '? Remaining hooks for this landing will be skipped.';
+    } else {
+      action = 'retry';
+      subject = btn.getAttribute('data-label');
+      endpoint = '/api/v1/retry';
+      payload = {target: btn.getAttribute('data-target'), ref: btn.getAttribute('data-ref')};
+    }
+    if (confirmation && !window.confirm(confirmation)) return;
+    btn.disabled = true;
+    gauntletActionPending = true;
+    var original = btn.textContent;
+    btn.textContent = 'Sending…';
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 15000);
+    fetch(endpoint, {
+      method: 'POST', credentials: 'same-origin', signal: controller.signal,
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok) throw new Error(data.error || 'Request failed (HTTP ' + res.status + ').');
+        showFeedback(data.status === 'no-op' ? 'Nothing to change for ' + subject + '.' : (action === 'cancel' ? 'Cancellation' : 'Retry') + ' requested for ' + subject + '.', false);
+      });
+    }).catch(function (error) {
+      var uncertain = error.name === 'AbortError' || error instanceof TypeError;
+      showFeedback(uncertain ? 'No response. The request may have been accepted; refresh before trying again.' : error.message, true);
+    }).finally(function () {
+      clearTimeout(timer);
+      btn.textContent = original;
+      btn.disabled = false;
+      gauntletActionPending = false;
+      if (gauntletAutoRefresh && window.gauntletRefreshPage) window.gauntletRefreshPage();
+    });
+  });
+});
+{{if .Refresh}}
+document.addEventListener('DOMContentLoaded', function () {
+  var busy = false;
+  var paused = false;
+  try { paused = sessionStorage.getItem('gauntlet:paused:' + location.pathname) === 'true'; } catch (e) {}
+  function setLiveState(message, failed) {
+    var el = document.getElementById('live-status');
+    el.textContent = message;
+    el.setAttribute('data-state', failed ? 'error' : 'ok');
+  }
+  function updatePause() {
+    var btn = document.getElementById('pause-updates');
+    btn.textContent = paused ? 'Resume updates' : 'Pause updates';
+    btn.setAttribute('aria-pressed', String(paused));
+    setLiveState(paused ? 'Updates paused' : 'Live · every 5s', false);
+  }
+  function refreshPage() {
+    if (busy || gauntletActionPending) return;
+    if (!window.Idiomorph) { location.reload(); return; }
     busy = true;
-    fetch(location.href, {credentials: 'same-origin'})
-      .then(function (res) { return res.ok ? res.text() : null; })
-      .then(function (html) {
-        if (!html) return; // non-2xx (e.g. daemon mid-restart): skip this tick, retry next
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 10000);
+    fetch(location.href, {credentials: 'same-origin', cache: 'no-store', signal: controller.signal})
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.text();
+      }).then(function (html) {
+        if (gauntletActionPending) return;
         var doc = new DOMParser().parseFromString(html, 'text/html');
-        Idiomorph.morph(document.body, doc.body);
+        if (!doc.getElementById('main')) throw new Error('Invalid dashboard response');
+        Idiomorph.morph(document.body, doc.body, {callbacks: {
+          beforeNodeMorphed: function (oldNode) {
+            return oldNode.id !== 'action-feedback' && oldNode.id !== 'live-controls';
+          },
+          beforeAttributeUpdated: function (name, node) {
+            return !(name === 'open' && node.tagName === 'DETAILS');
+          }
+        }});
         applyTimeTooltips();
-      })
-      .catch(function () {}) // network error: skip this tick, retry next
-      .finally(function () { busy = false; });
+        setLiveState(paused ? 'Updates paused · refreshed' : 'Live · every 5s', false);
+      }).catch(function () {
+        setLiveState(paused ? 'Refresh failed · updates paused' : 'Updates unavailable · retrying', true);
+      }).finally(function () { clearTimeout(timer); busy = false; });
+  }
+  window.gauntletRefreshPage = refreshPage;
+  document.body.addEventListener('click', function (ev) {
+    if (ev.target.closest('#pause-updates')) {
+      paused = !paused;
+      try { sessionStorage.setItem('gauntlet:paused:' + location.pathname, String(paused)); } catch (e) {}
+      updatePause();
+      if (!paused) refreshPage();
+    } else if (ev.target.closest('#refresh-now')) { refreshPage(); }
+  });
+  updatePause();
+  setInterval(function () {
+    if (document.hidden || busy) return;
+    if (!paused && !gauntletActionPending) refreshPage();
   }, 5000);
 });
 {{end}}

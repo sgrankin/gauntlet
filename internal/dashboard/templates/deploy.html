@@ -18,12 +18,13 @@
      cancel also live on the API, the MCP tools, and (for retry) a new
      desired push, so no capability is lost, only a convenience. */}}
 <span class="actions">
-{{if .ShowRetry}}<button class="btn" type="button" data-deploy-action="retry" data-deploy-env="{{.Deploy.Env}}">retry</button>{{end}}
-{{if .ShowCancel}}<button class="btn danger" type="button" data-deploy-action="cancel" data-deploy-env="{{.Deploy.Env}}">cancel</button>{{end}}
+{{if .ShowRetry}}<button class="btn js-action" type="button" data-deploy-action="retry" data-deploy-env="{{.Deploy.Env}}">retry</button>{{end}}
+{{if .ShowCancel}}<button class="btn danger js-action" type="button" data-deploy-action="cancel" data-deploy-env="{{.Deploy.Env}}">cancel</button>{{end}}
 </span>
 </div>
 
 <dl class="kv">
+<dt>run</dt><dd class="mono">{{.Deploy.RunID}}</dd>
 <dt>environment</dt><dd>{{.Deploy.Env}}{{if .Source}} <span class="muted">(tracks {{.Source}})</span>{{end}}</dd>
 <dt>revision</dt><dd>
 {{if .Deploy.DeployedSHA}}<code class="nowrap" title="{{.Deploy.DeployedSHA}}">{{shortSHA .Deploy.DeployedSHA}}</code> <span class="arrow">&rarr;</span> {{end}}

@@ -91,22 +91,11 @@ func (c *Channel) TrySend(cmd core.Command) bool {
 	}
 }
 
-// enqueue sends cmd, dropping (and logging) rather than blocking if the
-// buffer is full — never let a slow/stalled queue block an HTTP handler,
-// mirroring slack.Slack.Emit's full-outbox handling.
-func (c *Channel) enqueue(cmd core.Command) {
-	if !c.TrySend(cmd) {
-		log.Printf("dashboard: retry: cmds buffer full (%d), dropping target=%s ref=%s", cmdsBuffer, cmd.Target, cmd.Ref)
-	}
-}
-
 // Option configures New.
 type Option func(*dash)
 
-// WithChannel wires ch so POST /api/v1/retry enqueues onto it. Without this
-// option the route still validates the request and responds 202, but the
-// resulting Command has nowhere to go and is dropped exactly like a full
-// buffer — useful for exercising the request-validation path in isolation.
+// WithChannel enables queue commands. Disabled controls and a full command
+// buffer return an error rather than acknowledging a command that was dropped.
 func WithChannel(ch *Channel) Option {
 	return func(d *dash) { d.ch = ch }
 }
@@ -1213,8 +1202,13 @@ func (d *dash) handleAPIRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.ch != nil {
-		d.ch.enqueue(core.Command{Kind: core.CommandRetry, Target: req.Target, Ref: req.Ref})
+	if d.ch == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "queue controls unavailable")
+		return
+	}
+	if !d.ch.TrySend(core.Command{Kind: core.CommandRetry, Target: req.Target, Ref: req.Ref}) {
+		writeJSONError(w, http.StatusTooManyRequests, "command buffer full; try again shortly")
+		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
@@ -1249,8 +1243,13 @@ func (d *dash) handleAPICancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.ch != nil {
-		d.ch.enqueue(core.Command{Kind: core.CommandCancel, Target: req.Target, Ref: req.Ref})
+	if d.ch == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "queue controls unavailable")
+		return
+	}
+	if !d.ch.TrySend(core.Command{Kind: core.CommandCancel, Target: req.Target, Ref: req.Ref}) {
+		writeJSONError(w, http.StatusTooManyRequests, "command buffer full; try again shortly")
+		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }

@@ -80,7 +80,8 @@ errors are always `{"error": "..."}`.
   README's ["Retry semantics"](../README.md#landing-changes)). Body:
   `{"target": "main", "ref": "refs/heads/for/main/alice/my-feature"}`.
   `202 {"status":"queued"}` on success; `400` if `target` or `ref` is
-  missing or the body isn't valid JSON; `405` for any method but `POST`.
+  missing or the body isn't valid JSON; `503` when queue controls are disabled;
+  `429` when the command buffer is full; `405` for any method but `POST`.
 
   ```sh
   curl -s -X POST http://localhost:8080/api/v1/retry \
@@ -94,7 +95,8 @@ errors are always `{"error": "..."}`.
   `:x:` in Slack. Body: `{"target": "main", "ref":
   "refs/heads/for/main/alice/my-feature"}`. `202 {"status":"queued"}` on
   success; `400` if `target` or `ref` is missing or the body isn't valid
-  JSON; `405` for any method but `POST`.
+  JSON; `503` when queue controls are disabled; `429` when the command buffer
+  is full; `405` for any method but `POST`.
 
   ```sh
   curl -s -X POST http://localhost:8080/api/v1/cancel \

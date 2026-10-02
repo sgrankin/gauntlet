@@ -57,17 +57,17 @@
 <p>
 <span class="muted">last deploy</span> <a href="/deploy/{{.LastRunID}}">{{.LastAgo}}</a>
 <span class="muted">· {{.LastOutcome.Word}} · {{.LastDuration}}</span>
-{{if .ShowRetry}}<button class="btn" type="button" data-deploy-action="retry" data-deploy-env="{{.Env}}">retry</button>{{end}}
+{{if .ShowRetry}}<button class="btn js-action" type="button" data-deploy-action="retry" data-deploy-env="{{.Env}}">retry</button>{{end}}
 </p>
 {{else if .ShowRetry}}
-<p><button class="btn" type="button" data-deploy-action="retry" data-deploy-env="{{.Env}}">retry</button></p>
+<p><button class="btn js-action" type="button" data-deploy-action="retry" data-deploy-env="{{.Env}}">retry</button></p>
 {{end}}
 {{if .ParkDetail}}<p class="muted"><small>{{.ParkDetail}}</small></p>{{end}}
 {{if .LastError}}<p class="muted"><small>last ref push: {{.LastError}}</small></p>{{end}}
 
 {{if .Recent}}
 <p class="chips"><span class="muted" style="font-size:.8rem">recent:</span>
-{{range .Recent}}<a href="/deploy/{{.RunID}}" class="chip chip-{{.ChipClass}}" title="{{.Title}}"></a>{{end}}
+{{range .Recent}}<a href="/deploy/{{.RunID}}" class="chip chip-{{.ChipClass}}" title="{{.Title}}" aria-label="{{.Title}}"></a>{{end}}
 </p>
 {{end}}
 </div>

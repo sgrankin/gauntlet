@@ -169,7 +169,7 @@ type dash struct {
 
 func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 	snap := d.snapshot()
-	data := indexData{baseData: d.newBase("gauntlet", snap, true)}
+	data := indexData{baseData: d.newBase("Targets", snap, true, "targets")}
 	if snap == nil {
 		data.Starting = true
 		render(w, indexTmpl, data)
@@ -188,6 +188,13 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 		if ts.InFlight != nil {
 			card.InFlight = buildInFlight(ts.InFlight, snap.At)
 		}
+		data.WaitingCount += card.WaitingCount
+		data.ParkedCount += card.ParkedCount
+		depth := card.PipelineDepth
+		if depth == 0 && card.InFlight != nil {
+			depth = 1
+		}
+		data.RunningCount += depth
 		card.RecentRuns, card.StoreEnabled = d.recentRuns(ts.Name, 6, snap.At)
 		data.Targets = append(data.Targets, card)
 	}
@@ -235,7 +242,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	if snap == nil {
 		// No pass has completed, so we can't tell a real target name from a
 		// typo yet — show the friendly starting-up state rather than 404.
-		b := d.newBase(name, snap, true)
+		b := d.newBase(name, snap, true, "targets")
 		b.Starting = true
 		render(w, targetTmpl, targetData{baseData: b, Name: name})
 		return
@@ -248,7 +255,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := targetData{
-		baseData:  d.newBase(ts.Name, snap, true),
+		baseData:  d.newBase(ts.Name, snap, true, "targets"),
 		Name:      ts.Name,
 		Branch:    ts.Branch,
 		TargetTip: orDash(ts.TargetTip),
@@ -280,7 +287,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 
 	for _, pe := range ts.Parked {
 		data.Parked = append(data.Parked, parkedView{
-			User: pe.Candidate.User, Topic: pe.Candidate.Topic, SHA: pe.Candidate.SHA,
+			Ref: pe.Candidate.Ref, User: pe.Candidate.User, Topic: pe.Candidate.Topic, SHA: pe.Candidate.SHA,
 			Outcome: wordTag(outcomeWord(pe.Outcome)), Reason: pe.Reason, At: formatTime(pe.At),
 			RunID: pe.RunID,
 		})
@@ -327,7 +334,7 @@ func findTarget(snap *queue.Snapshot, name string) (queue.TargetSnapshot, bool) 
 func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 	if d.store == nil {
-		render(w, runTmpl, runData{baseData: d.newBase(runID, nil, false)})
+		render(w, runTmpl, runData{baseData: d.newBase("Run", nil, false, "targets")})
 		return
 	}
 
@@ -343,7 +350,7 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := runData{
-		baseData:     d.newBase(row.RunID, nil, false),
+		baseData:     d.newBase("Run", nil, false, "targets"),
 		StoreEnabled: true,
 		Run: runSummaryFull{
 			RunID: row.RunID, Target: row.Target,
@@ -366,7 +373,8 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range checks {
 		data.Checks = append(data.Checks, checkView{
-			Seq: c.Seq, Name: c.Name, Status: wordTag(c.Status), Duration: formatDuration(c.Duration), Err: c.Err,
+			RowID: fmt.Sprintf("check-%d-%s", c.Seq, url.PathEscape(c.Name)),
+			Seq:   c.Seq, Name: c.Name, Status: wordTag(c.Status), Duration: formatDuration(c.Duration), Err: c.Err,
 			Detail: checkRowDetail(c),
 			Output: c.Output,
 			// Open the failed/errored check's output by default — this page
@@ -395,7 +403,8 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, h := range hooks {
 		data.Hooks = append(data.Hooks, checkView{
-			Seq: h.Seq, Name: h.Name, Status: wordTag(h.Status), Duration: formatDuration(h.Duration), Err: h.Err,
+			RowID: fmt.Sprintf("hook-%d-%s", h.Seq, url.PathEscape(h.Name)),
+			Seq:   h.Seq, Name: h.Name, Status: wordTag(h.Status), Duration: formatDuration(h.Duration), Err: h.Err,
 			Output: h.Output,
 			Open:   h.Status == "failed" || h.Err != "",
 			// runLogURL is name-agnostic (checks vs. hooks): handleRunLog
@@ -669,7 +678,7 @@ func pathUnder(root, path string) bool {
 func (d *dash) handleBatch(w http.ResponseWriter, r *http.Request) {
 	batchID := r.PathValue("batchID")
 	if d.store == nil {
-		render(w, batchTmpl, batchData{baseData: d.newBase("batch", nil, false), BatchID: batchID})
+		render(w, batchTmpl, batchData{baseData: d.newBase("Batch", nil, false, "targets"), BatchID: batchID})
 		return
 	}
 
@@ -685,7 +694,7 @@ func (d *dash) handleBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := batchData{
-		baseData:     d.newBase("batch "+batchID, nil, false),
+		baseData:     d.newBase("Batch", nil, false, "targets"),
 		BatchID:      batchID,
 		StoreEnabled: true,
 	}
@@ -714,7 +723,7 @@ func (d *dash) handleChecks(w http.ResponseWriter, r *http.Request) {
 	since := parseSince(r.URL.Query().Get("since"), now)
 
 	data := checksData{
-		baseData: d.newBase("checks", nil, false),
+		baseData: d.newBase("Checks", nil, false, "checks"),
 		Target:   target,
 		Since:    formatTime(since),
 	}
@@ -1241,11 +1250,14 @@ func compactRef(ref string) string {
 
 // baseData holds the fields every page template's "base" wrapper needs.
 type baseData struct {
-	Title       string
-	Refresh     bool
-	GeneratedAt template.HTML
-	Starting    bool
-	Version     string
+	Nav            string
+	CanRetry       bool
+	CanCancelHooks bool
+	Title          string
+	Refresh        bool
+	GeneratedAt    template.HTML
+	Starting       bool
+	Version        string
 
 	// IdiomorphURL is idiomorphURL (handleStatic's doc) — base.html's
 	// <script src> for the vendored DOM-morphing library, only rendered
@@ -1263,15 +1275,14 @@ type baseData struct {
 	HasDeploys bool
 }
 
-// newBase is a method (rather than a free function) only so it can reach
-// d.version — the gauntlet version string set via WithVersion (api.go),
-// shown in every page's footer. Empty unless the option was used.
-func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool) baseData {
+// newBase adds navigation, available controls, and snapshot metadata to a page.
+func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool, nav string) baseData {
 	at := time.Now()
 	if snap != nil {
 		at = snap.At
 	}
 	return baseData{
+		Nav: nav, CanRetry: d.ch != nil, CanCancelHooks: d.hookCancel != nil,
 		Title: title, Refresh: refresh, GeneratedAt: formatTime(at),
 		Version: d.version, IdiomorphURL: idiomorphURL,
 		HasDeploys: d.deploySnapshot != nil,
@@ -1280,7 +1291,8 @@ func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool) baseDat
 
 type indexData struct {
 	baseData
-	Targets []targetCard
+	Targets                                 []targetCard
+	WaitingCount, ParkedCount, RunningCount int
 
 	// IgnoredRefs is recently pushed refs naming no configured target
 	// (history.Store.IgnoredRefs), newest first, daemon-wide — a
@@ -1458,6 +1470,7 @@ func shortImageRef(ref string) string {
 }
 
 type checkView struct {
+	RowID         string
 	Seq           int
 	Name          string
 	Status        tag
@@ -1599,11 +1612,11 @@ type waitingView struct {
 // in), so target.html's link must also check targetData.StoreEnabled, not
 // RunID alone.
 type parkedView struct {
-	User, Topic, SHA string
-	Outcome          tag
-	Reason           string
-	At               template.HTML
-	RunID            string
+	Ref, User, Topic, SHA string
+	Outcome               tag
+	Reason                string
+	At                    template.HTML
+	RunID                 string
 }
 
 type runData struct {
