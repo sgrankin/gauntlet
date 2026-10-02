@@ -43,7 +43,7 @@ containerize (topology (b), below).
 
 ### Setup
 
-1. **Install git ≥ 2.38** (see "Required git version" below) and whatever
+1. **Install git ≥ 2.40** (see "Required git version" below) and whatever
    toolchains your check spec's commands need (Go, Node, a JDK, ... —
    gauntlet itself only needs `git` on `$PATH`; it provisions nothing).
 2. **Build a static binary** and copy it to the box:
@@ -297,7 +297,7 @@ installation token to prove the credential actually works end to end.
 
 ## Required git version
 
-Gauntlet needs **git ≥ 2.38** on `$PATH` for `git merge-tree --write-tree`,
+Gauntlet needs **git ≥ 2.40** on `$PATH` for `git merge-tree --write-tree --merge-base`,
 the primitive its ephemeral trial-merge is built on (DESIGN.md's decision
 ledger). The daemon checks this itself at startup and refuses to run with a
 clear error naming the requirement, rather than failing confusingly on the
@@ -308,7 +308,7 @@ git --version
 ```
 
 Alpine's packaged `git` (used by the Dockerfile) and any current Debian/RHEL
-point release are well past 2.38; only very old LTS bases (e.g.
+point release are well past 2.40; only very old LTS bases (e.g.
 Ubuntu 20.04's default git) need a backport/PPA or a locally-built git.
 
 ## SSH key vs HTTPS-PAT remote auth

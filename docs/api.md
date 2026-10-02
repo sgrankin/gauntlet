@@ -382,3 +382,20 @@ tools that mutate anything, and each is non-destructive in the same way its
 **no tool here can deploy**: `deploy_retry` re-runs the graph for the
 revision an environment is *already* pointed at, and changing that revision
 is a push of the environment's desired ref.
+
+## Requesting a GitHub PR landing
+
+`gauntlet land-pr -config gauntlet.kdl -pr 123` posts a permission-checked
+`@gauntlet merge` comment. Optional mutually exclusive `-stack`, `-ready`,
+`-prefix N`, and `-cancel` flags request the whole stack, ready prefix,
+bottom N unlanded PRs, or cancellation. Enable `github pull-requests`
+in the daemon config first. The command acknowledges posting; landing
+remains asynchronous.
+
+Imported reviews have virtual queue slots named
+`refs/heads/for/<target>/github/pr-<10-digit-number>` or
+`refs/heads/for/<target>/gerrit/change-<10-digit-number>`. They appear in
+normal queue snapshots, history, and events, but are not remote branches.
+Use PR comments to withdraw GitHub requests, or change Gerrit readiness;
+do not push or delete these reserved slot names. See
+[review integration](design/reviews.md) for details.

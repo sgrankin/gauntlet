@@ -69,7 +69,8 @@ summarize {
   node below, this one has no "absent ⇒ disabled" state: full logging is
   always wired up, so absence just means the default (30 days, `"720h"`)
   applies. Every value must be positive.
-- **`merge-message <template>`** — a Go `text/template` string for the merge
+- **`merge-message <template>`** — used only by `landing "merge"`, a Go
+  `text/template` string for the merge
   commit's subject line (`internal/queue`). Available fields: `.Topic`,
   `.User`, `.Ref`, `.RunID`, `.Target`. **Absent ⇒ the built-in default**,
   the one place the daemon does its own variant switching: `"Merge {{.Topic}}
@@ -1049,3 +1050,25 @@ repo's `.gauntlet.kdl`) so a config drifts out of canonical form loudly,
 not silently; `-d` prints a unified diff per differing file. `fmt` refuses
 (errors, writes nothing) rather than guessing on invalid KDL or malformed
 input it can't safely reindent.
+
+## Linear landings and review admission
+
+`target` accepts `landing "squash"` (the default) or `landing "merge"`
+(the previous behavior). Squash produces one single-parent commit per
+submission in all three queue modes. Review admission requires squash.
+
+The optional `github` child `pull-requests` accepts `bot "gauntlet"`,
+`approvals 1` (0–10), and `require-check "name" "another-name"`.
+An absent block disables PR admission while retaining existing GitHub
+reporting. The optional top-level `gerrit "https://review.example.com"`
+requires `project "name"`; its credential variable defaults are
+`GERRIT_USERNAME` and `GERRIT_TOKEN`, and its
+`verification-requirement` defaults to `"Verified"`. These credentials
+are stripped from candidate check environments.
+
+See [reviews.md](design/reviews.md) for complete examples, stack and bot
+commands, admission policy, permissions, direct-push prerequisites,
+GitHub completion behavior, and experimental validation.
+
+`merge-message` and generated commit-message summaries apply to legacy
+merge targets. Squash targets use their source or review message.

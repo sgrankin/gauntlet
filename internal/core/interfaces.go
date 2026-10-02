@@ -11,6 +11,25 @@ import (
 // treat it as a signal to re-derive state and retry, never as corruption.
 var ErrCASStale = errors.New("gitx: CAS failed, ref moved")
 
+// LinearGitRepo supplies the additional plumbing needed for linear landings.
+// SourceBase is empty for ordinary queue branches; review adapters specify
+// it explicitly so a stacked change contributes only its own delta.
+type LinearGitRepo interface {
+	ReplayTree(ctx context.Context, base, candidate, sourceBase string) (TrialMerge, error)
+	LinearCommit(ctx context.Context, tree, base, source, message string, who Identity) (string, error)
+	FindLanding(ctx context.Context, tip, ref, sha, version string) (string, error)
+}
+
+// ReviewSource admits immutable review snapshots. A missing candidate cancels
+// its trial. Validate is called again immediately before the target CAS.
+// Landed must be idempotent: it is retried from target history after crashes
+// or failures recording the landing at the forge.
+type ReviewSource interface {
+	Candidates(ctx context.Context) ([]Candidate, error)
+	Validate(ctx context.Context, candidate Candidate) error
+	Landed(ctx context.Context, candidate Candidate, commit string) error
+}
+
 // NotePublishResult reports what GitRepo.PublishNote did (issue #13's
 // publication protocol). The canonical shape lives here, in core, rather
 // than in gitx (its sole implementer) or duplicated in queue: gitx adapts
@@ -56,8 +75,8 @@ type GitRepo interface {
 	MergeTree(ctx context.Context, base, candidate string) (TrialMerge, error)
 
 	// CommitTree creates a commit object from tree and parents with the
-	// given message and identity. This is the only object gauntlet ever
-	// creates (Invariant 6): candidate commits are never rewritten.
+	// given message and identity. Legacy landings use two parents;
+	// LinearGitRepo constructs single-parent normalized landings.
 	CommitTree(ctx context.Context, tree string, parents []string, message string, who Identity) (string, error)
 
 	// ReadFileFromTree reads path out of tree without a checkout. Used to
@@ -73,7 +92,7 @@ type GitRepo interface {
 	// FindLandingMerge identifies the merge commit that landed candidateSHA
 	// onto the target branch, for a candidate crash-recovery already found
 	// to be an ancestor of branchTip (Invariant 4's recoverLanded). Every
-	// gauntlet land is a --no-ff merge whose second parent is the landed
+	// legacy gauntlet land is a --no-ff merge whose second parent is the landed
 	// candidate's own SHA verbatim (Invariant 6: candidate commits are
 	// never rewritten), so this walks branchTip's first-parent chain,
 	// newest first, and returns the first merge commit whose second parent

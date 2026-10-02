@@ -11,7 +11,7 @@ deploy — see [deploy-linux.md](deploy-linux.md) for that.
   (`brew install colima docker`) — Docker Desktop works too, but the mount
   footgun below is colima-specific; if using Docker Desktop, use its own
   file-sharing settings instead of step 2.
-- `git` ≥ 2.38 (`git --version` — recent macOS ships new enough git via
+- `git` ≥ 2.40 (`git --version` — recent macOS ships new enough git via
   Xcode CLT or Homebrew).
 - Go toolchain, if building from source (`go build -o gauntlet ./cmd/gauntlet`).
 

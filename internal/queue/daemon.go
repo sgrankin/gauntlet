@@ -37,6 +37,9 @@ import (
 // cmd-level concerns — dialing the core.GitRepo and driving Run's tick
 // channel — the queue is agnostic to both.
 type Config struct {
+	// Reviews is an optional forge admission adapter. Its snapshots augment
+	// ordinary queue refs; the core retains the same scheduler and CAS land.
+	Reviews core.ReviewSource
 	// Targets are the target branches to reconcile, keyed by name in the
 	// candidate ref grammar (see docs/design/core.md, "Candidate ref grammar").
 	Targets []config.Target
@@ -451,12 +454,13 @@ type lane struct {
 // Daemon is the reconcile loop over N target branches on one core.GitRepo.
 // The zero value is not usable; construct with New.
 type Daemon struct {
-	git   core.GitRepo
-	exec  core.Executor
-	chans []core.Channel
-	tr    trace.Tracer
-	cfg   Config
-	now   func() time.Time
+	external map[string]core.Candidate
+	git      core.GitRepo
+	exec     core.Executor
+	chans    []core.Channel
+	tr       trace.Tracer
+	cfg      Config
+	now      func() time.Time
 
 	// order assigns each candidate ref (per target) a monotonically
 	// increasing sequence number the first time it's observed — the FIFO
@@ -622,6 +626,14 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 	}
 	seen := make(map[string]bool, len(cfg.Targets))
 	for _, t := range cfg.Targets {
+		if t.Landing == "squash" {
+			if _, ok := git.(core.LinearGitRepo); !ok {
+				return nil, fmt.Errorf("queue: linear git backend required for target %q", t.Name)
+			}
+		}
+		if cfg.Reviews != nil && t.Landing != "squash" {
+			return nil, fmt.Errorf("queue: review sources require squash landings")
+		}
 		if t.Name == "" || t.Branch == "" {
 			return nil, fmt.Errorf("queue: target must have both name and branch")
 		}
@@ -751,9 +763,28 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	if err := d.git.Fetch(ctx); err != nil {
 		return fmt.Errorf("queue: fetch: %w", err)
 	}
+	d.external = make(map[string]core.Candidate)
+	if d.cfg.Reviews != nil {
+		candidates, err := d.cfg.Reviews.Candidates(ctx)
+		if err != nil {
+			return fmt.Errorf("queue: review admission: %w", err)
+		}
+		for _, c := range candidates {
+			if c.Source == "" || c.Ref == "" || c.SHA == "" {
+				return fmt.Errorf("queue: incomplete review candidate")
+			}
+			d.external[c.Ref] = c
+		}
+	}
 	refs, err := d.git.ListRefs(ctx)
 	if err != nil {
 		return fmt.Errorf("queue: list refs: %w", err)
+	}
+	for ref, c := range d.external {
+		if _, exists := refs[ref]; exists {
+			return fmt.Errorf("queue: review slot collides with remote ref %s", ref)
+		}
+		refs[ref] = c.SHA
 	}
 
 	// Release each deferred pin (landedPins) whose landing this tick's

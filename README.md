@@ -1,12 +1,15 @@
 # gauntlet
 
-Gauntlet is a merge queue. Push your branch to `for/<target>/<user>/<topic>`
-and the daemon trial-merges it onto the live tip of `<target>`, runs the
-named checks defined by your repo's own `.gauntlet.kdl`, and — if everything
-comes back green — lands it as a `--no-ff` merge that preserves your commits
-exactly as you wrote them. Red pings you; fix and re-push the same ref.
+Gauntlet is a merge queue. Push a branch to `for/<target>/<user>/<topic>`,
+request a GitHub PR through `@gauntlet merge`, or admit a Gerrit change.
+The daemon constructs linear target history, runs your repo's `.gauntlet.kdl`
+checks, and lands the exact tested tip with a compare-and-swap push.
+Each submission becomes one commit; GitHub PRs use their title and description.
+Serial, batch, and speculative verification all support prerequisite order.
 
-Requires git 2.38 or newer (`git merge-tree --write-tree`).
+Requires git 2.40 or newer (`git merge-tree --write-tree --merge-base`).
+See [review integration](docs/design/reviews.md) for stack commands,
+configuration, GitHub's closed-versus-merged limitation, and Gerrit setup.
 
 ## Documentation
 
@@ -60,7 +63,7 @@ gauntlet -config gauntlet.kdl -state ~/.cache/gauntlet
   `gauntlet` under `os.UserCacheDir()`.
 
 At startup the daemon probes `git --version` and refuses to run below git
-2.38 (the `git merge-tree --write-tree` requirement above) — a clear error
+2.40 (the `git merge-tree --write-tree --merge-base` requirement above) — a clear error
 naming the requirement, rather than a confusing failure the first time a
 trial merge runs. It also removes and recreates `<state>/trials`, the
 scratch directory each candidate's trial tree is exported into: it only ever
@@ -71,8 +74,9 @@ always safe and cleans up anything an earlier crash left behind.
 **The land flow:** push your branch to `refs/heads/for/<target>/<user>/<topic>`.
 Each poll tick the daemon trial-merges the candidate onto the live tip of
 `<target>` and runs the checks from your repo's own `.gauntlet.kdl` against
-that trial tree. All green lands it as a `--no-ff` merge onto `<target>`,
-preserving your commits exactly as written, and deletes the `for/...` ref.
+that trial tree. All green lands it as one single-parent commit onto
+`<target>` and deletes the `for/...` ref. Set `landing "merge"` explicitly to retain legacy merge
+commits during migration.
 Red (or a conflict) parks the ref alone — nothing re-runs until you push a
 new SHA to it.
 

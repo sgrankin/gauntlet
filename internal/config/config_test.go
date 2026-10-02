@@ -40,8 +40,8 @@ func TestLoadDaemon_Example(t *testing.T) {
 		t.Errorf("LogRetention = %v, want 720h", d.LogRetention)
 	}
 	wantTargets := []Target{
-		{Name: "main", Branch: "main"},
-		{Name: "release", Branch: "release/v2"},
+		{Name: "main", Branch: "main", Landing: "squash"},
+		{Name: "release", Branch: "release/v2", Landing: "squash"},
 	}
 	if len(d.Targets) != len(wantTargets) {
 		t.Fatalf("Targets = %+v, want %+v", d.Targets, wantTargets)

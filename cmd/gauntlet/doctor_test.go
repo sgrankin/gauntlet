@@ -57,7 +57,7 @@ func TestProbeGit_PassAndFail(t *testing.T) {
 		if res.remedy == "" {
 			t.Error("FAIL with no remedy")
 		}
-		if !strings.Contains(res.remedy, "2.38") {
+		if !strings.Contains(res.remedy, "2.40") {
 			t.Errorf("remedy = %q, want it to name the required version", res.remedy)
 		}
 	})

@@ -226,10 +226,11 @@ type Daemon struct {
 	History   History   `kdl:"history"`   // Path=="" ⇒ disabled
 	Dashboard Dashboard `kdl:"dashboard"` // Bind=="" ⇒ disabled
 	GitHub    GitHub    `kdl:"github"`    // Repo=="" ⇒ disabled
-	Slack     Slack     `kdl:"slack"`     // Channel=="" ⇒ disabled
-	OTLP      OTLP      `kdl:"otlp"`      // Endpoint=="" ⇒ no-op (the default)
-	Services  Services  `kdl:"services"`  // len(Allow)==0 ⇒ disabled
-	Deploy    Deploy    `kdl:"deploy"`    // len(Environments)==0 ⇒ disabled
+	Gerrit    *Gerrit   `kdl:"gerrit"`
+	Slack     Slack     `kdl:"slack"`    // Channel=="" ⇒ disabled
+	OTLP      OTLP      `kdl:"otlp"`     // Endpoint=="" ⇒ no-op (the default)
+	Services  Services  `kdl:"services"` // len(Allow)==0 ⇒ disabled
+	Deploy    Deploy    `kdl:"deploy"`   // len(Environments)==0 ⇒ disabled
 
 	// Executors is the raw parse target for every `executor` node —
 	// applyDefaults splits it into Executor (the default profile: the one
@@ -309,10 +310,11 @@ type Dashboard struct {
 //     a mismatch is a startup error, never a silent fallback to ambient
 //     auth.
 type GitHub struct {
-	Repo     string      `kdl:",arg"`      // "owner/name"
-	TokenEnv string      `kdl:"token-env"` // default "GITHUB_TOKEN" (unless Auth set)
-	APIURL   string      `kdl:"api-url"`   // default "https://api.github.com"
-	Auth     *GitHubAuth `kdl:"auth"`      // nil ⇒ static-token mode
+	PullRequests *GitHubPullRequests `kdl:"pull-requests"`
+	Repo         string              `kdl:",arg"`      // "owner/name"
+	TokenEnv     string              `kdl:"token-env"` // default "GITHUB_TOKEN" (unless Auth set)
+	APIURL       string              `kdl:"api-url"`   // default "https://api.github.com"
+	Auth         *GitHubAuth         `kdl:"auth"`      // nil ⇒ static-token mode
 
 	// TrialRefPrefix, when non-empty, enables trial-ref publication
 	// (issue #7): each run's tested synthetic merge is published under an
@@ -357,6 +359,24 @@ type GitHub struct {
 	// declaring one is rejected when this is nil (see that function's
 	// doc).
 	ReceiptNotes *ReceiptNotes `kdl:"receipt-notes"`
+}
+
+// PullRequests enables permission-checked bot admission. Approval and status
+// policy is explicit because direct target pushes do not run the forge's
+// merge-button gate. The default requires one approval of the current head.
+type GitHubPullRequests struct {
+	Bot            string   `kdl:"bot"`
+	Approvals      *int     `kdl:"approvals"`
+	RequiredChecks []string `kdl:"require-check"`
+}
+
+type Gerrit struct {
+	APIURL      string `kdl:",arg"`
+	Project     string `kdl:"project"`
+	UsernameEnv string `kdl:"username-env"`
+	TokenEnv    string `kdl:"token-env"`
+	// This requirement is fulfilled by gauntlet's Verified vote at land.
+	VerificationRequirement string `kdl:"verification-requirement"`
 }
 
 // GitHubTrialRefs is the `trial-refs { prefix ...; retention ... }` block.
@@ -700,6 +720,9 @@ type Summarize struct {
 type Target struct {
 	Name   string `kdl:",arg"`
 	Branch string `kdl:"branch"`
+	// Squash is the default for loaded configs. Merge is a migration escape
+	// hatch for existing deployments; hand-built queue fixtures retain it.
+	Landing string `kdl:"landing"`
 
 	// Hooks are this target's post-land hooks (DESIGN.md's decision
 	// ledger, "Deployments as post-land hooks"; internal/hooks), run in
@@ -892,6 +915,26 @@ func applyExecutorDefaults(e *Executor) {
 }
 
 func (d *Daemon) applyDefaults() {
+	if p := d.GitHub.PullRequests; p != nil {
+		if p.Bot == "" {
+			p.Bot = "gauntlet"
+		}
+		if p.Approvals == nil {
+			n := 1
+			p.Approvals = &n
+		}
+	}
+	if g := d.Gerrit; g != nil {
+		if g.UsernameEnv == "" {
+			g.UsernameEnv = "GERRIT_USERNAME"
+		}
+		if g.TokenEnv == "" {
+			g.TokenEnv = "GERRIT_TOKEN"
+		}
+		if g.VerificationRequirement == "" {
+			g.VerificationRequirement = "Verified"
+		}
+	}
 	// Poll's zero value is indistinguishable from "node absent" (kdl-go
 	// unmarshals a missing node into the field's zero value); an explicit
 	// negative poll-interval is not, so validate() still rejects it after
@@ -1023,6 +1066,9 @@ func (d *Daemon) applyDefaults() {
 	// still tell "the node was never written" from "queue was written
 	// explicitly" and reject the former when hooks are also absent.
 	for i := range d.Targets {
+		if d.Targets[i].Landing == "" {
+			d.Targets[i].Landing = "squash"
+		}
 		if len(d.Targets[i].Hooks) > 0 && d.Targets[i].HooksPolicy == "" {
 			d.Targets[i].HooksPolicy = defaultHooksPolicy
 		}
@@ -1412,6 +1458,9 @@ func pathAtOrUnder(path, reserved string) bool {
 // empty, Summarize nil) contributes nothing.
 func (d *Daemon) SecretEnvNames() []string {
 	var names []string
+	if g := d.Gerrit; g != nil {
+		names = append(names, g.UsernameEnv, g.TokenEnv)
+	}
 	if d.GitHub.Repo != "" && d.GitHub.Auth == nil && d.GitHub.TokenEnv != "" {
 		names = append(names, d.GitHub.TokenEnv)
 	}
@@ -1454,6 +1503,9 @@ func (d *Daemon) validate() error {
 	seen := make(map[string]bool, len(d.Targets))
 	seenBranch := make(map[string]string, len(d.Targets)) // branch -> owning target name
 	for _, t := range d.Targets {
+		if t.Landing != "squash" && t.Landing != "merge" {
+			return fmt.Errorf("target %q: landing must be squash or merge", t.Name)
+		}
 		if t.Name == "" {
 			return fmt.Errorf("target: name must not be empty")
 		}
@@ -1573,6 +1625,34 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("github: repo must be in \"owner/name\" form, got %q", d.GitHub.Repo)
 		}
 	}
+	if p := d.GitHub.PullRequests; p != nil {
+		if d.GitHub.Repo == "" {
+			return fmt.Errorf("github: pull-requests requires a repo")
+		}
+		if p.Approvals == nil || *p.Approvals < 0 || *p.Approvals > 10 {
+			return fmt.Errorf("github: approvals must be between 0 and 10")
+		}
+		if strings.ContainsAny(p.Bot, " \t\r\n@") || p.Bot == "" {
+			return fmt.Errorf("github: invalid bot name")
+		}
+	}
+	if g := d.Gerrit; g != nil {
+		if d.GitHub.PullRequests != nil {
+			return fmt.Errorf("configure one review source per remote")
+		}
+		u, err := url.Parse(g.APIURL)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || g.Project == "" {
+			return fmt.Errorf("gerrit: API URL and project required")
+		}
+	}
+	if d.GitHub.PullRequests != nil || d.Gerrit != nil {
+		for _, t := range d.Targets {
+			if t.Landing != "squash" {
+				return fmt.Errorf("review sources require squash landings")
+			}
+		}
+	}
+
 	if tr := d.GitHub.TrialRefs; tr != nil {
 		if d.GitHub.Repo == "" {
 			return fmt.Errorf("github: trial-refs requires the github block to name a repo")

@@ -20,6 +20,17 @@ type Candidate struct {
 	User   string
 	Topic  string
 	SHA    string
+
+	// Review candidates are supplied by a forge adapter rather than a queue
+	// branch. SourceBase bounds this change's delta (especially in a stack),
+	// Message is the title/description to land, and Version pins all review
+	// inputs, including dependencies and admission intent, beyond the head SHA.
+	Source     string
+	SourceBase string
+	Message    string
+	ReviewURL  string
+	Version    string
+	DependsOn  string
 }
 
 // TrialMerge is the result of trial-merging a Candidate onto the target tip.

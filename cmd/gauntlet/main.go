@@ -52,6 +52,12 @@ func main() {
 	// itself. Everything else is the daemon itself.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "land-pr":
+			if err := runLandPR(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "gauntlet land-pr:", err)
+				os.Exit(1)
+			}
+			return
 		case "land":
 			if err := runLand(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "gauntlet land:", err)
@@ -739,6 +745,10 @@ func run() error {
 	// interface in that case, so this only assigns when pool is real.
 	if pool != nil {
 		qcfg.Services = pool
+	}
+	qcfg.Reviews, err = buildReviewSource(cfg, appTokens, repo)
+	if err != nil {
+		return err
 	}
 	d, err := queue.New(repo, ex, chans, qcfg, nil)
 	if err != nil {

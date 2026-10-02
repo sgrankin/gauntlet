@@ -8,15 +8,14 @@ modes, local+container executors, a shared-services pool, dashboard/API/MCP,
 Slack duplex with reaction commands, GitHub statuses, post-land hooks,
 Claude merge summaries, full log capture, auto-retry, park persistence, and
 desired-state deployment dispatch are all shipped; post-completion
-consistency audit done · **Date:** 2026-08-09
+consistency audit done; linear landings, GitHub PR/stack admission, and
+Gerrit change admission added · **Date:** 2026-10-02
 
-A merge queue for teams that merge often and want their branch history intact.
-Your branch runs the gauntlet: push it to a magic ref, the daemon trial-merges it
-against the live target tip, runs the suite, and lands it — commits preserved,
-one `--no-ff` merge per landing. Red pings you; fix and re-push the same ref.
-
-Open source, git-native (jj-friendly), built for a world where much of the code
-is agent-written and *how the branch got there* is data worth keeping.
+A merge queue that owns linear target history: one normalized commit per
+submission or review, checked on its predicted target and landed with CAS.
+Git refs, GitHub PRs (including stacks), and Gerrit changes supply the inputs.
+See [the review design](docs/design/reviews.md) for the October 2026 change
+in policy, forge behavior experiments, and integration limits.
 
 ---
 
@@ -34,12 +33,16 @@ is agent-written and *how the branch got there* is data worth keeping.
   against the current tip can still break together; testing against
   tip-as-it-will-be is the point. *(The growth path was built 2026-07-05 —
   per-target `mode "serial"|"batch"|"speculate"`; serial remains the default.)*
-- **Preserve history: merge `--no-ff`, candidate as-is.** Never rebase, never
-  squash — rewriting SHAs/messages destroys the record of how the work
-  happened. `log --first-parent` reads as the ledger of landings; full branch
-  history hangs off each merge commit.
+- **Linear target history.** Squash each submission into one single-parent
+  commit before verification; push that exact tested tip. Preserve source
+  author, head jj identity, review message, and provenance. Contributor refs
+  are never rewritten. `landing "merge"` is an explicit migration option.
 
 ## Decision ledger
+
+The October 2026 linear-history policy supersedes earlier merge-preservation
+entries below; they remain as the historical record of the earlier design.
+
 
 | Verdict | Position | Why |
 |---|---|---|
@@ -108,10 +111,10 @@ The review checklist. Every plan and every implementation gets graded against th
    is rescan refs → reattach by run-id or rerun (trial merges are cheap).
 5. **Ref moves mid-test are detected**, the running suite is aborted (or its
    verdict discarded), and the slot re-queues at the new SHA.
-6. **Never rewrite candidate commits.** No rebase, no squash, no message
-   mutation. Gauntlet creates exactly two kinds of object: the trial merge
-   commit (`CommitTree`) and, per issue #13, a receipt note's blob/tree/commit
-   (the notes publisher in `internal/gitx`) — nothing else.
+6. **Normalize before verification; never rewrite contributor refs.** A
+   squash target creates one single-parent commit per submission. Its
+   message and source identity are fixed before checks. Originals remain
+   intact; provenance trailers support recovery when they are not ancestors.
 7. **Cache escape hatch exists.** A clean-build command (config + channel
    command) for suspected cache poisoning on the warm builder.
 8. **The queue core is executor- and channel-agnostic.** It sees interfaces;

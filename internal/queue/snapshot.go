@@ -197,6 +197,11 @@ func queueIdle(targets []TargetSnapshot) bool {
 // buildTargetSnapshot builds one target's TargetSnapshot.
 func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) TargetSnapshot {
 	cands := discoverCandidates(t.Name, refs)
+	for ref, c := range d.external {
+		if c.Target == t.Name {
+			cands[ref] = c
+		}
+	}
 	ts := TargetSnapshot{
 		Name:      t.Name,
 		Branch:    t.Branch,

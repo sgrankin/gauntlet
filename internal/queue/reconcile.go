@@ -146,6 +146,11 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 	// silently overwritten by a same-tick seed for the same ref.
 	targetTip := refs[targetRefName(t)]
 	cands := discoverCandidates(t.Name, refs)
+	for ref, c := range d.external {
+		if c.Target == t.Name {
+			cands[ref] = c
+		}
+	}
 	d.syncBookkeeping(ctx, t, cands)
 
 	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
@@ -185,7 +190,7 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 		}
 	}
 	for ref, entry := range done {
-		if c, ok := cands[ref]; !ok || c.SHA != entry.SHA {
+		if c, ok := cands[ref]; !ok || c.SHA != entry.SHA || c.Version != entry.Version {
 			delete(done, ref)
 		}
 	}
@@ -267,26 +272,11 @@ func isRedOutcome(o core.Outcome) bool {
 // (tie-broken lexically by ref) whose current SHA is not parked in done.
 // ok is false if every candidate is parked or none exist.
 func (d *Daemon) pickHead(target string, cands map[string]core.Candidate) (core.Candidate, bool) {
-	order := d.order[target]
-	done := d.done[target]
-
-	var refs []string
-	for ref, c := range cands {
-		if parked, ok := done[ref]; ok && parked.SHA == c.SHA {
-			continue
-		}
-		refs = append(refs, ref)
-	}
-	if len(refs) == 0 {
+	picked := d.pickUpTo(target, cands, 1, nil)
+	if len(picked) == 0 {
 		return core.Candidate{}, false
 	}
-	sort.Slice(refs, func(i, j int) bool {
-		if order[refs[i]] != order[refs[j]] {
-			return order[refs[i]] < order[refs[j]]
-		}
-		return refs[i] < refs[j]
-	})
-	return cands[refs[0]], true
+	return picked[0], true
 }
 
 // pickUpTo returns up to n candidates in the same FIFO order as pickHead
@@ -320,12 +310,27 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 		}
 		return refs[i] < refs[j]
 	})
-	if n >= 0 && len(refs) > n {
-		refs = refs[:n]
-	}
-	out := make([]core.Candidate, len(refs))
-	for i, ref := range refs {
-		out[i] = cands[ref]
+	selected := make(map[string]bool)
+	var out []core.Candidate
+	// Stable topological selection: a dependency may be older or newer in
+	// FIFO order, but its child can never leap over a parked prerequisite.
+	for len(out) < len(refs) && (n < 0 || len(out) < n) {
+		progress := false
+		for _, ref := range refs {
+			c := cands[ref]
+			if selected[ref] || (c.DependsOn != "" && !selected[c.DependsOn] && !inFlight[c.DependsOn]) {
+				continue
+			}
+			out = append(out, c)
+			selected[ref] = true
+			progress = true
+			if n >= 0 && len(out) == n {
+				break
+			}
+		}
+		if !progress {
+			break
+		}
 	}
 	return out
 }
@@ -357,7 +362,7 @@ func (d *Daemon) pickNext(target string, cands map[string]core.Candidate, inFlig
 // tested against targetTip here.
 func runInvalidated(r *run, laneIndex int, targetTip string, cands map[string]core.Candidate) (bool, string) {
 	for _, m := range r.members {
-		if cur, ok := cands[m.cand.Ref]; !ok || cur.SHA != m.cand.SHA {
+		if cur, ok := cands[m.cand.Ref]; !ok || cur.SHA != m.cand.SHA || cur.Version != m.cand.Version {
 			return true, fmt.Sprintf("candidate ref %s moved or vanished mid-run (Invariant 5)", m.cand.Ref)
 		}
 	}
@@ -1029,7 +1034,14 @@ func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base s
 // precomputed for this candidate.
 func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string), precomputed map[string]string) (chainLink, core.TrialMerge, error) {
 	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
-	trial, err := d.git.MergeTree(ctx, base, cand.SHA)
+	linear := d.linearTarget(targetName)
+	var trial core.TrialMerge
+	var err error
+	if linear {
+		trial, err = d.git.(core.LinearGitRepo).ReplayTree(ctx, base, cand.SHA, cand.SourceBase)
+	} else {
+		trial, err = d.git.MergeTree(ctx, base, cand.SHA)
+	}
 	if err != nil {
 		obs.EndSpan(trialSpan, err)
 		return chainLink{}, trial, fmt.Errorf("merge-tree: %w", err)
@@ -1055,7 +1067,7 @@ func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetN
 	var body string
 	if precomputed != nil {
 		body = precomputed[cand.SHA]
-	} else if d.cfg.MergeBody != nil {
+	} else if !linear && d.cfg.MergeBody != nil {
 		body = d.cfg.MergeBody(ctx, cand, base)
 	}
 
@@ -1063,7 +1075,36 @@ func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetN
 	if err != nil {
 		return chainLink{}, trial, fmt.Errorf("merge-message template: %w", err)
 	}
-	mergeOID, err := d.git.CommitTree(ctx, trial.TreeOID, []string{base, cand.SHA}, msg, d.cfg.Committer)
+	var mergeOID string
+	if linear {
+		if cand.Message != "" {
+			msg = strings.TrimRight(cand.Message, "\n") + "\n"
+			if cand.Source != "gerrit" {
+				msg += "\n"
+			}
+			// Gerrit's Change-Id must remain in the final footer block.
+			// Append provenance to that block, not a new paragraph.
+			if cand.ReviewURL != "" {
+				msg += "Reviewed-on: " + cand.ReviewURL + "\n"
+			}
+			msg += fmt.Sprintf("Gauntlet-Ref: %s\nGauntlet-Run: %s\n", cand.Ref, runID)
+		} else if reader, ok := d.git.(interface {
+			CommitMessage(context.Context, string) (string, error)
+		}); ok {
+			sourceMessage, readErr := reader.CommitMessage(ctx, cand.SHA)
+			if readErr != nil {
+				return chainLink{}, trial, readErr
+			}
+			msg = sourceMessage + "\n\n" + fmt.Sprintf("Gauntlet-Ref: %s\nGauntlet-Run: %s\n", cand.Ref, runID)
+		}
+		msg += fmt.Sprintf("Gauntlet-Source: %s\n", cand.SHA)
+		if cand.Version != "" {
+			msg += "Gauntlet-Version: " + cand.Version + "\n"
+		}
+		mergeOID, err = d.git.(core.LinearGitRepo).LinearCommit(ctx, trial.TreeOID, base, cand.SHA, msg, d.cfg.Committer)
+	} else {
+		mergeOID, err = d.git.CommitTree(ctx, trial.TreeOID, []string{base, cand.SHA}, msg, d.cfg.Committer)
+	}
 	if err != nil {
 		return chainLink{}, trial, fmt.Errorf("commit-tree: %w", err)
 	}
@@ -1169,7 +1210,7 @@ func (d *Daemon) refillSerialOne(ctx context.Context, t config.Target, targetTip
 		return
 	}
 
-	landed, err := d.git.IsAncestor(ctx, cand.SHA, targetTip)
+	landed, err := d.candidateLanded(ctx, t, cand, targetTip)
 	if err != nil {
 		d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "is-ancestor: "+err.Error(), nil)
 		return
@@ -1204,7 +1245,7 @@ func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip str
 	}
 
 	head := picked[0]
-	landed, err := d.git.IsAncestor(ctx, head.SHA, targetTip)
+	landed, err := d.candidateLanded(ctx, t, head, targetTip)
 	if err != nil {
 		d.rejectPreMerge(ctx, t, head, core.OutcomeError, "is-ancestor: "+err.Error(), nil)
 		return
@@ -1259,7 +1300,10 @@ func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip s
 	for i, cand := range picked {
 		reqs[i] = mergeBodyRequest{cand: cand, base: targetTip}
 	}
-	precomputedBodies := precomputeMergeBodies(ctx, d.cfg.MergeBody, reqs)
+	var precomputedBodies map[string]string
+	if t.Landing != "squash" {
+		precomputedBodies = precomputeMergeBodies(ctx, d.cfg.MergeBody, reqs)
+	}
 
 	var (
 		runID  string
@@ -1636,7 +1680,7 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 			// rule: a mid-window member that's somehow already landed is
 			// caught the same way once it becomes the head of a future
 			// empty-lane refill.
-			landed, err := d.git.IsAncestor(ctx, cand.SHA, targetTip)
+			landed, err := d.candidateLanded(ctx, t, cand, targetTip)
 			if err != nil {
 				d.rejectPreMerge(ctx, t, cand, core.OutcomeError, "is-ancestor: "+err.Error(), nil)
 				return
@@ -2208,6 +2252,17 @@ func (d *Daemon) stampReceiptRecords(r *run) {
 // (Invariant 3); the run is still a Landed outcome.
 func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	_, landSpan := obs.StartLand(r.rootCtx, d.tr)
+	if d.cfg.Reviews != nil {
+		for _, m := range r.members {
+			if m.cand.Source != "" {
+				if err := d.cfg.Reviews.Validate(ctx, m.cand); err != nil {
+					obs.EndSpan(landSpan, err)
+					d.finishRun(ctx, t, r, core.OutcomeSkipped, "review changed before land: "+err.Error(), false)
+					return
+				}
+			}
+		}
+	}
 
 	// Receipt-notes publication (issue #13) is a GATE on landing, not a
 	// parallel step: when policy is enabled, this run is structurally
@@ -2315,7 +2370,12 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 
 	for i := range r.members {
 		m := &r.members[i]
-		delErr := d.git.CASUpdate(ctx, m.cand.Ref, m.cand.SHA, "")
+		var delErr error
+		if m.cand.Source == "" {
+			delErr = d.git.CASUpdate(ctx, m.cand.Ref, m.cand.SHA, "")
+		} else {
+			delErr = d.cfg.Reviews.Landed(ctx, m.cand, m.mergeOID)
+		}
 		detail := ""
 		switch {
 		case errors.Is(delErr, core.ErrCASStale):
@@ -2521,13 +2581,29 @@ func (d *Daemon) unpin(ctx context.Context, oid string) {
 // (that's why we're here), so a failed or empty lookup just leaves MergeSHA
 // zero rather than aborting the recovery.
 func (d *Daemon) recoverLanded(ctx context.Context, t config.Target, cand core.Candidate, targetTip string) {
-	if delErr := d.git.CASUpdate(ctx, cand.Ref, cand.SHA, ""); delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
+	mergeSHA, _ := d.git.FindLandingMerge(ctx, targetTip, cand.SHA)
+	if t.Landing == "squash" {
+		version := cand.Version
+		if cand.Source != "" {
+			version = "*"
+		}
+		mergeSHA, _ = d.git.(core.LinearGitRepo).FindLanding(ctx, targetTip, cand.Ref, cand.SHA, version)
+	}
+	var delErr error
+	if cand.Source == "" {
+		delErr = d.git.CASUpdate(ctx, cand.Ref, cand.SHA, "")
+	} else {
+		delErr = d.cfg.Reviews.Landed(ctx, cand, mergeSHA)
+	}
+	if delErr != nil && !errors.Is(delErr, core.ErrCASStale) {
 		return // transient; retry next tick
 	}
 	now := d.now()
 	runID := newRunID(now, cand.SHA)
-	const detail = "candidate already ancestor of target; checks not re-run"
-	mergeSHA, _ := d.git.FindLandingMerge(ctx, targetTip, cand.SHA) // best-effort; "" (found or not) either way
+	detail := "candidate already ancestor of target; checks not re-run"
+	if t.Landing == "squash" {
+		detail = "candidate already recorded in target history; checks not re-run"
+	}
 	rec := &core.RunRecord{
 		RunID:     runID,
 		Target:    t.Name,
@@ -2644,6 +2720,7 @@ func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candi
 // changes, the ref vanishes, or a CommandRetry clears it explicitly
 // (command.go) — never when some other candidate lands.
 type parkEntry struct {
+	Version string
 	SHA     string
 	Outcome core.Outcome
 	Reason  string
@@ -2669,7 +2746,7 @@ func (d *Daemon) park(target string, cand core.Candidate, outcome core.Outcome, 
 		m = make(map[string]parkEntry)
 		d.done[target] = m
 	}
-	m[cand.Ref] = parkEntry{SHA: cand.SHA, Outcome: outcome, Reason: detail, At: d.now(), RunID: runID}
+	m[cand.Ref] = parkEntry{SHA: cand.SHA, Version: cand.Version, Outcome: outcome, Reason: detail, At: d.now(), RunID: runID}
 }
 
 func eventKindForOutcome(o core.Outcome) core.EventKind {

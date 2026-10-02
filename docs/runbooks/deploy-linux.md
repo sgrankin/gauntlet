@@ -8,7 +8,7 @@ to GitHub, dashboard/API bound to localhost.
 
 - A Linux box (Ubuntu/Debian-ish) you can `sudo` on, with `docker` installed
   and running (`docker version` succeeds).
-- `git` ≥ 2.38 on `$PATH` (`git --version`). Ubuntu 20.04's packaged git is
+- `git` ≥ 2.40 on `$PATH` (`git --version`). Ubuntu 20.04's packaged git is
   too old — use a PPA/backport if you're on it.
 - The repo's git remote URL, and either an SSH deploy key or an HTTPS PAT
   that can fetch/push it (see step 5).
@@ -39,7 +39,7 @@ read that doc for the *why*; this is the *how*, in order.
    ssh <TARGET_HOST> gauntlet -version
    # expect: "gauntlet <version>" then a go1.x line then a vcs commit hash
    ssh <TARGET_HOST> git --version
-   # expect: git version 2.38 or newer
+   # expect: git version 2.40 or newer
    ```
 
 ## Phase 2 — Lay out state and secrets

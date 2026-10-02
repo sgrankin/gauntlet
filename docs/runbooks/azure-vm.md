@@ -22,7 +22,7 @@ recovery philosophy, but the VM itself is replaced, never patched.
   (`az account set --subscription <SUBSCRIPTION_ID>`).
 - A resource group (`az group create -n <RESOURCE_GROUP> -l <REGION>`).
 - An SSH key pair (`~/.ssh/id_ed25519[.pub]` or equivalent) for VM access.
-- Everything deploy-linux.md's own prerequisites list (git ≥2.38 ships with
+- Everything deploy-linux.md's own prerequisites list (git ≥2.40 ships with
   Ubuntu LTS already; docker is installed by the first-boot script below,
   not assumed present).
 

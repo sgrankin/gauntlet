@@ -1,5 +1,11 @@
 # The queue core
 
+October 2026 update: loaded configurations default to one single-parent
+commit per submission. [Reviews and linear landings](reviews.md) describes
+normalization, prerequisite selection, and provenance-based recovery.
+The two-parent examples below describe `landing "merge"` compatibility;
+the scheduler and exact-tested-tip CAS rules apply to both policies.
+
 This is the mechanism-level record of the daemon's queue core — the
 per-target reconcile loop in `internal/queue` and the domain vocabulary in
 `internal/core` it drives. It assumes the top-level model, the decision

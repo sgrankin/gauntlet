@@ -1,5 +1,11 @@
 # Per-target queue modes: serial, batch, speculate
 
+October 2026 update: loaded configurations default to one single-parent
+commit per submission. [Reviews and linear landings](reviews.md) describes
+normalization, prerequisite selection, and provenance-based recovery.
+The two-parent examples below describe `landing "merge"` compatibility;
+the scheduler and exact-tested-tip CAS rules apply to both policies.
+
 Every target reconciles through the same per-target state machine, but each
 picks its own *queueing discipline* via `mode`. Serial is the baseline: one
 candidate tested and landed at a time. Batch and speculate are two independent
