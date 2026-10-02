@@ -29,96 +29,47 @@ import (
 )
 
 func main() {
-	// Dispatch administrative clients before constructing the daemon.
 	if len(os.Args) > 1 {
+		var command func([]string) error
 		switch os.Args[1] {
 		case "land-pr":
-			if err := runLandPR(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet land-pr:", err)
-				os.Exit(1)
-			}
-			return
+			command = runLandPR
 		case "land":
-			if err := runLand(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet land:", err)
-				os.Exit(1)
-			}
-			return
+			command = runLand
 		case "deploy":
-			if err := runDeploy(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet deploy:", err)
-				os.Exit(1)
-			}
-			return
+			command = runDeploy
 		case "promote":
-			if err := runPromote(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet promote:", err)
-				os.Exit(1)
-			}
-			return
+			command = runPromote
 		case "status":
-			if err := runStatus(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet status:", err)
-				os.Exit(1)
-			}
-			return
+			command = runStatus
 		case "retry":
-			if err := runRetry(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet retry:", err)
-				os.Exit(1)
-			}
-			return
+			command = runRetry
 		case "cancel":
-			if err := runCancel(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet cancel:", err)
-				os.Exit(1)
-			}
-			return
+			command = runCancel
 		case "hooks-cancel":
-			if err := runHooksCancel(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet hooks-cancel:", err)
-				os.Exit(1)
-			}
-			return
+			command = runHooksCancel
 		case "drain":
-			if err := runDrain(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet drain:", err)
-				os.Exit(1)
-			}
-			return
+			command = runDrain
 		case "validate":
-			if err := runValidate(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "gauntlet validate:", err)
-				os.Exit(1)
-			}
-			return
+			command = runValidate
 		case "fmt":
-			if err := runFmt(os.Args[2:]); err != nil {
-				// errFmtFailed means the per-file detail (a refuse-to-
-				// format error, an I/O error, or -l's listing) was
-				// already written by runFmtTo; nothing more to say beyond
-				// the exit code. Any other error (bad flags, no files
-				// given) gets the usual "gauntlet fmt: <err>" treatment.
-				if !errors.Is(err, errFmtFailed) {
-					fmt.Fprintln(os.Stderr, "gauntlet fmt:", err)
-				}
-				os.Exit(1)
-			}
-			return
+			command = runFmt
 		case "doctor":
-			if err := runDoctor(os.Args[2:]); err != nil {
-				// errDoctorFailed means one or more probes already printed
-				// their own FAIL line; nothing more to say beyond the exit
-				// code. Any other error (bad flags, missing -config) gets
-				// the usual "gauntlet doctor: <err>" treatment.
-				if !errors.Is(err, errDoctorFailed) {
-					fmt.Fprintln(os.Stderr, "gauntlet doctor:", err)
-				}
-				os.Exit(1)
-			}
-			return
+			command = runDoctor
 		case "version":
 			fmt.Println(versionString())
+			return
+		}
+		if command != nil {
+			if err := command(os.Args[2:]); err != nil {
+				// These commands have already printed their failure details.
+				reported := os.Args[1] == "fmt" && errors.Is(err, errFmtFailed) ||
+					os.Args[1] == "doctor" && errors.Is(err, errDoctorFailed)
+				if !reported {
+					fmt.Fprintf(os.Stderr, "gauntlet %s: %v\n", os.Args[1], err)
+				}
+				os.Exit(1)
+			}
 			return
 		}
 	}

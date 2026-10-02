@@ -183,7 +183,7 @@ The review checklist. Every plan and every implementation gets graded against th
   `INSERT OR REPLACE` PRIMARY KEY meant each member's terminal event
   clobbered the previous member's row (fresh-context review, 2026-07,
   confirmed empirically: 3 member events sharing one run_id left exactly 1
-  row). Fixed by `memberRunID` (`internal/queue/reconcile.go`): position 0
+  row). Fixed by `memberRunID` (`internal/queue/landing.go`): position 0
   keeps the bare `batchRunID`, position >0 gets `<batchRunID>-mN` — every
   member now carries a distinct RunID while BatchID stays the shared
   grouping key, so per-member history/dashboard rows and boot-time park

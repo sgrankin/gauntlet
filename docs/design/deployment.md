@@ -456,7 +456,7 @@ because the reconcile loop must never block, while a deploy lane is a
 goroutine (the hooks precedent) that simply blocks on `Acquire`, so a
 shared component carries both modes: more code than either caller has
 today. One piece IS shared now: `core.NodeGreen`, the
-skipped-counts-green predicate reconcile.go restates three times.
+skipped-counts-green predicate the queue scheduler restates three times.
 Divergence guard: the six `parallel_test.go` behaviors are ported into
 `internal/deploy`'s scheduler tests under the same names. Future
 unification path, in order, if a third tenant appears: build the event-
