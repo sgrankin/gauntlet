@@ -26,6 +26,8 @@ configuration, GitHub's closed-versus-merged limitation, and Gerrit setup.
   verification: GitHub PAT, Slack app, container executor, OTLP.
 - [docs/deploy.md](docs/deploy.md) — production deployment guide, plus
   step-by-step [runbooks](docs/runbooks/).
+- [docs/maintenance-review.md](docs/maintenance-review.md) — cleanup findings and
+  remaining maintenance priorities.
 - [docs/design/](docs/design/) — feature design docs: the queue core,
   queue modes (batch/speculate), shared services, scaling, and deployment.
 
@@ -40,7 +42,7 @@ go build -o gauntlet ./cmd/gauntlet
 There are two config files:
 
 - **Daemon config** (admin-written, one per daemon instance) — points at the
-  remote, the poll interval, the committer identity used for merge commits,
+  remote, the poll interval, the committer identity used for landing commits,
   and the target branches to reconcile. See [`gauntlet.kdl`](gauntlet.kdl)
   for a full example and [docs/config.md](docs/config.md) for the
   reference. Passed via `-config`.

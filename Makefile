@@ -6,8 +6,8 @@ BINARY  := gauntlet
 IMAGE   := gauntlet
 
 # Version derivation: `git describe --always --dirty` if a git checkout is
-# present and describable, else "devel". This is the ONLY git usage in this
-# Makefile, and it is read-only — never run a mutating git command here.
+# present and describable, else "devel". Build and image targets do not
+# mutate Git; only the explicit release target tags and pushes.
 VERSION := $(shell git describe --always --dirty 2>/dev/null || echo devel)
 
 LDFLAGS := -X main.version=$(VERSION)
@@ -56,7 +56,8 @@ release:
 		v[0-9]*) ;; \
 		*) echo "make release: VERSION must match ^v[0-9] (got '$(VERSION)')" >&2; exit 1 ;; \
 	esac
-	@git diff --quiet || { echo "make release: working copy has uncommitted changes" >&2; exit 1; }
+	@release_status=$$(git status --porcelain) || exit 1; \
+		[ -z "$$release_status" ] || { echo "make release: working copy has uncommitted changes" >&2; exit 1; }
 	@git fetch origin
 	@[ "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" ] || { \
 		echo "make release: HEAD does not match origin/main — push/pull first" >&2; \
