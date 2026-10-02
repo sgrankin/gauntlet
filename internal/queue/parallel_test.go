@@ -19,6 +19,7 @@ package queue
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -215,8 +216,17 @@ func TestParallel_ExecutionCapStarvesAndRecordsWaited(t *testing.T) {
 		t.Fatal("b started without a free slot")
 	}
 
-	h.release(runID, "a", core.CheckResult{Name: "a", Status: core.CheckPassed}) // frees the slot; b starts
-	h.awaitStarted(runID, "b")
+	h.release(runID, "a", core.CheckResult{Name: "a", Status: core.CheckPassed})
+	// Result delivery can precede the worker's deferred slot release. Keep
+	// ticking, as the daemon does, until the next check can claim the slot.
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.started(runID, "b") {
+		h.reconcile()
+		if time.Now().After(deadline) {
+			t.Fatal("b never started after a released its execution slot")
+		}
+		runtime.Gosched()
+	}
 	h.release(runID, "b", core.CheckResult{Name: "b", Status: core.CheckPassed})
 
 	recs := h.ch.Records()

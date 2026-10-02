@@ -42,33 +42,55 @@ and deployment reconciliation have different lifetimes; a universal runner
 would obscure them. Share small rules when duplication causes drift, rather
 than combining the state machines.
 
+## Follow-up passes
+
+- Review parks now persist their metadata/request version. The restart test
+  covers an initially ineligible review, readiness loss and return, and an
+  edited version becoming eligible for a new trial. Exact retry-run identity
+  resolves millisecond ties; migrations now commit or roll back together.
+  Randomly seeded run counters prevent deterministic same-second restart
+  collisions; tied verdicts follow insertion order rather than ID spelling.
+- GitHub has signed webhook wakeups, independent cached admission polling,
+  and closed-comment-history filtering. Native stack roots retain requests
+  after losing their stack field. Real `full_name` JSON decoding and fork
+  boundaries are now covered. Final landing validation still reads fresh state.
+- `gauntlet prune-sources` previews offline expiration of local audit and
+  review-cache refs. It requires the stopped daemon's state lock, uses last-use
+  clocks, preserves unaged archives, and leaves target/remote/history intact.
+  A real-Git test proves expired source objects can be collected while the
+  normalized target survives.
+- Added GitHub auth-refresh, webhook, cache-expiry, and concurrency tests;
+  Gerrit post-vote race and merged-state acknowledgement tests. Removed the
+  redundant second fetch for Gerrit root patch sets.
+- Fixed the execution-cap test to reconcile while waiting for a worker's
+  deferred slot release, rather than assuming result delivery releases it.
+- Live Docker service tests passed against Docker 28.4.0 and Redis 7: published
+  ports, ready-command probes, network-mode discovery, inspection, and cleanup.
+  Docker Hub rate-limited the pull; the official Redis image was obtained from
+  Google's public registry mirror. Live Gerrit is still unverified.
+
 ## Remaining priorities
 
-1. **Forge intake cost and feedback.** GitHub scans all PR/comment history and
-   repeats admission polling before landing. Persistent request intake and
-   bounded polling would reduce API use; blocked-request feedback would help
-   users. Preserve the final readiness check and crash-safe request replay.
-2. **Restart semantics.** History-backed parks omit review metadata versions,
-   so review parks re-evaluate after restart. Persist that identity with a
-   schema migration and restart test before promising durable review parks.
-3. **Source retention.** `refs/gauntlet/source/<sha>` has no retention limit.
-   Add an explicit policy that respects hook/audit reachability before pruning.
+1. **Intake scalability and feedback.** Refreshes still list all PR metadata;
+   final validation can repeat scans for batch members. Conditional requests,
+   incremental intake, and shared fresh batch validation are next optimizations.
+   Blocked requests still need clearer acknowledgement and reasons.
+2. **Automatic source pruning.** Offline maintenance is available. Live pruning
+   needs explicit source lifetime pins for checks and running/backlogged hooks.
+3. **Live Gerrit.** API fixtures cover important gates, but cannot prove the
+   server's Change-Id association or restricted-submit setup.
 4. **Landing defaults.** Loaded configuration defaults to squash; hand-built
    zero-valued queue targets retain legacy merge behavior. Make landing mode
    explicit in new tests and converge the defaults when retiring compatibility.
-5. **Documentation history.** The decision ledger remains useful, but older
-   entries describe superseded behavior. Prefer current feature documents for
-   operational guidance; future edits should retire stale claims rather than
-   append another explanation to code comments.
+5. **Documentation history.** Older decision-ledger entries describe superseded
+   behavior. Prefer current feature documents for operational guidance.
 
 ## Tests
 
 The suite's strongest coverage is in queue behavior, config parsing, and the
-older lifecycle features. The review adapter is newer and needs more boundary
-coverage. Priorities are GitHub authentication refresh and API failures,
-branch-stack ambiguity and forks, Gerrit dependencies and post-vote races,
-Gerrit's merged-state acknowledgement, daemon startup/shutdown, and real
-container-service lifecycle tests. Live forge tests need dedicated fixtures;
+older lifecycle features. Further useful tests include daemon startup/shutdown,
+Gerrit dependencies and live submission, GitHub API failure variants, and
+additional stack ambiguity cases. Live forge tests need dedicated fixtures;
 HTTP test servers cannot prove host-side merge association.
 
 Some happy paths were repeated through fake Git, real Git, and scripts. Keep
