@@ -1,7 +1,7 @@
 # Green multi-check land: the canonical happy path. Both checks pass, the
 # target advances to the merge commit that was actually tested, and the
-# candidate's slot is deleted. Ports TestReconcile_GreenMultiCheckLand /
-# TestIntegration_GreenMultiCheckLand.
+# candidate's slot is deleted. The Go test covers record fields and CAS
+# ordering; this scenario covers the remote refs and real commit objects.
 
 push-candidate main alice widget files/widget
 tick                          # trial merges clean; lint starts first

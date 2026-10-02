@@ -8,72 +8,6 @@ import (
 	"github.com/sgrankin/gauntlet/internal/executor"
 )
 
-// TestIntegration_GreenMultiCheckLand is §5's "Green multi-check land" row:
-// both checks pass, the target advances to the tested merge commit, the
-// slot is deleted — all asserted against the REMOTE's own ref state
-// (testutil.Ref), not just events. It pins Invariant 6 (the candidate SHA
-// appears verbatim as the merge commit's second parent) and Invariant 1
-// (the landed OID is exactly the RunRecord's MergeSHA — the tested commit,
-// never a re-merge) directly against real git objects.
-func TestIntegration_GreenMultiCheckLand(t *testing.T) {
-	gated := executor.NewGatedExecutor()
-	h := newIntegrationHarness(t, nil, gated)
-	remote := h.remote
-	remote.Seed("main", map[string]string{"README.md": "seed\n"})
-	base := remote.Ref("refs/heads/main")
-	ref := remote.PushCandidate("main", "alice", "widget", checkSpecFile("lint", "test"))
-	candSHA := remote.Ref(ref)
-
-	h.reconcile() // trial clean; lint started
-	runID := h.currentRunID()
-	if !runIDPattern.MatchString(runID) {
-		t.Fatalf("run ID %q does not match the §9.4 format", runID)
-	}
-
-	h.releaseGated(gated, runID, "lint", core.CheckResult{Name: "lint", Status: core.CheckPassed, Duration: time.Second})
-	h.releaseGated(gated, runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed, Duration: 2 * time.Second})
-
-	landedOID := remote.Ref("refs/heads/main")
-	if landedOID == "" || landedOID == base {
-		t.Fatalf("target ref = %q, want a new merge commit (base was %q)", landedOID, base)
-	}
-	if remote.Ref(ref) != "" {
-		t.Fatal("candidate slot still exists on the remote after land")
-	}
-
-	parents := remote.Parents(landedOID)
-	if len(parents) != 2 || parents[0] != base || parents[1] != candSHA {
-		t.Fatalf("landed commit parents = %v, want [%s %s] (Invariant 6: candidate SHA verbatim as parent[1])", parents, base, candSHA)
-	}
-
-	recs := h.ch.Records()
-	last := recs[len(recs)-1]
-	if last.Outcome != core.OutcomeLanded {
-		t.Fatalf("Outcome = %v, want Landed", last.Outcome)
-	}
-	if last.RunID != runID {
-		t.Fatalf("RunRecord.RunID = %q, want %q", last.RunID, runID)
-	}
-	if last.MergeSHA != landedOID {
-		t.Fatalf("RunRecord.MergeSHA = %q, want the landed OID %q (Invariant 1: land exactly the tested SHA)", last.MergeSHA, landedOID)
-	}
-	if last.BaseOID != base {
-		t.Errorf("BaseOID = %q, want %q", last.BaseOID, base)
-	}
-	if last.Candidate.SHA != candSHA {
-		t.Errorf("Candidate.SHA = %q, want %q", last.Candidate.SHA, candSHA)
-	}
-	if len(last.Checks) != 2 {
-		t.Fatalf("Checks = %+v, want 2 entries in run order", last.Checks)
-	}
-	if last.Checks[0].Name != "lint" || last.Checks[0].Status != core.CheckPassed || last.Checks[0].Duration != time.Second {
-		t.Errorf("Checks[0] = %+v", last.Checks[0])
-	}
-	if last.Checks[1].Name != "test" || last.Checks[1].Status != core.CheckPassed || last.Checks[1].Duration != 2*time.Second {
-		t.Errorf("Checks[1] = %+v", last.Checks[1])
-	}
-}
-
 // TestIntegration_CheckSpecFromTrialTree is §5's "Check spec from trial
 // tree" row: the target's own .gauntlet.kdl declares one check, but the
 // candidate's declares two — proving the daemon reads the check spec out of
@@ -108,7 +42,7 @@ func TestIntegration_CheckSpecFromTrialTree(t *testing.T) {
 // TestIntegration_RunRecordShape is §5's "Run record shape" row: a
 // terminal RunRecord's shape — stable RunID, per-check name/status/duration,
 // outcome, and a StartedAt/EndedAt ordering that makes sense — independent
-// of the land-specific assertions in TestIntegration_GreenMultiCheckLand.
+// of the landing assertions in green_multi_check_land.txtar.
 func TestIntegration_RunRecordShape(t *testing.T) {
 	gated := executor.NewGatedExecutor()
 	h := newIntegrationHarness(t, nil, gated)

@@ -834,8 +834,8 @@ func cmdAssertTargetIsMerge(ts *testscript.TestScript, neg bool, args []string) 
 		ts.Fatalf("assert-target-is-merge: target %s tip = %s, want the last record's MergeSHA %s", target, tip, last.MergeSHA)
 	}
 	parents := h.commitParents(tip)
-	if len(parents) != 2 || parents[1] != last.Candidate.SHA {
-		ts.Fatalf("assert-target-is-merge: parents of %s = %v, want [<base> %s] (Invariant 1/6: candidate SHA verbatim as parent[1])", tip, parents, last.Candidate.SHA)
+	if len(parents) != 2 || parents[0] != last.BaseOID || parents[1] != last.Candidate.SHA {
+		ts.Fatalf("assert-target-is-merge: parents of %s = %v, want [%s %s]", tip, parents, last.BaseOID, last.Candidate.SHA)
 	}
 }
 
