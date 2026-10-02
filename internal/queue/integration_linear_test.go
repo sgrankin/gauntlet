@@ -276,3 +276,28 @@ func TestIntegration_GerritChangeIDStaysInFinalFooter(t *testing.T) {
 	}
 	h.releaseGated(gated, r.runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
 }
+
+func TestIntegration_CancelWaitingReviewPreservesMetadata(t *testing.T) {
+	remote := testutil.NewRemote(t)
+	remote.Seed("main", checkSpecFile("test"))
+	ref := remote.PushCandidate("main", "alice", "review", map[string]string{"a": "review\n"})
+	source := remote.Ref(ref)
+	remote.SetRef("refs/heads/source", source)
+	remote.DeleteCandidate(ref)
+	c := core.Candidate{Ref: "refs/heads/for/main/github/pr-0000000001", Target: "main", SHA: source, Source: "github", Message: "Title", Version: "review-metadata"}
+	h := newIntegrationHarness(t, remote, executor.NewGatedExecutor(), config.Target{Name: "main", Branch: "main", Landing: "squash"})
+	h.d.cfg.Reviews = &integrationReviews{candidates: []core.Candidate{c}}
+	h.ch.SendCommand(core.Command{Kind: core.CommandCancel, Target: "main", Ref: c.Ref})
+	h.reconcile()
+	h.reconcile()
+	if h.d.headRun("main") != nil {
+		t.Fatal("cancelled waiting review started checks")
+	}
+	if got := h.d.done["main"][c.Ref]; got.Version != c.Version || got.SHA != source {
+		t.Fatalf("cancel lost review identity: %+v", got)
+	}
+	records := h.ch.Records()
+	if len(records) != 1 || records[0].Candidate != c {
+		t.Fatalf("cancel record lost metadata: %+v", records)
+	}
+}

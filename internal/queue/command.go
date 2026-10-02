@@ -264,13 +264,15 @@ func (d *Daemon) cancelWaiting(ctx context.Context, target, ref string, refs map
 	if !ok {
 		return // unknown to this tick's refs: nothing to cancel
 	}
-	if entry, ok := d.done[target][ref]; ok && entry.SHA == sha {
-		return // already parked at this SHA: idempotent no-op
-	}
-
 	cand := core.Candidate{Ref: ref, Target: target, SHA: sha}
 	if t, user, topic, ok := parseCandidateRef(ref); ok && t == target {
 		cand.User, cand.Topic = user, topic
+	}
+	if review, ok := d.external[ref]; ok && review.Target == target {
+		cand = review
+	}
+	if entry, ok := d.done[target][ref]; ok && entry.SHA == sha && entry.Version == cand.Version {
+		return // already parked at this revision and metadata snapshot
 	}
 
 	now := d.now()
