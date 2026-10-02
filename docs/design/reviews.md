@@ -99,6 +99,9 @@ Readiness requires a non-draft, open PR, the configured number of approvals
 from repository writers **on the current head**, no outstanding writer
 change request, and the configured status/check names. Checks accept
 success, neutral, or skipped completed check runs; statuses require success.
+Status history is paginated and the latest result per context wins. When
+multiple apps or both APIs publish a required name, every matching producer
+must be green; a passing result cannot hide another producer's failure.
 Approval/readiness, head, title, description, and request identity are
 rechecked immediately before the target CAS. Gauntlet then runs its normal
 repo-defined verification graph on the constructed history.

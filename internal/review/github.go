@@ -280,15 +280,18 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 	if len(g.p.RequiredChecks) == 0 {
 		return true, nil
 	}
-	var status struct {
-		Statuses []struct{ Context, State string }
-	}
-	if err := g.call(ctx, "GET", g.endpoint("/commits/"+p.Head.SHA+"/status?per_page=100"), nil, &status); err != nil {
+	// Status history is newest-first. Keep the latest result for each context,
+	// including contexts that appear beyond the first page.
+	type status struct{ Context, State string }
+	statuses, err := pages[status](ctx, g, "/commits/"+p.Head.SHA+"/statuses")
+	if err != nil {
 		return false, err
 	}
 	green := map[string]bool{}
-	for _, s := range status.Statuses {
-		green[s.Context] = s.State == "success"
+	for _, s := range statuses {
+		if _, seen := green[s.Context]; !seen {
+			green[s.Context] = s.State == "success"
+		}
 	}
 	// Check runs use their own paginated envelope, not the statuses API.
 	for page := 1; ; page++ {
@@ -299,7 +302,11 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 			return false, err
 		}
 		for _, r := range runs.CheckRuns {
-			green[r.Name] = r.Status == "completed" && (r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped")
+			passed := r.Status == "completed" && (r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped")
+			// Different apps (and the statuses API) may publish the same name.
+			// One passing result must not hide another producer's failure.
+			previous, seen := green[r.Name]
+			green[r.Name] = passed && (!seen || previous)
 		}
 		if len(runs.CheckRuns) < 100 {
 			break
