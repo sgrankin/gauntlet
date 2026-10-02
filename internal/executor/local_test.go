@@ -512,8 +512,7 @@ func requireTac(t *testing.T) {
 // Bounds: > 24MB rules out "nothing was captured" (a bug regressing to
 // near-zero); < 400MB gives generous headroom above the ~34MB observed
 // value for allocator/page-rounding variance across kernels and libc
-// versions without risking a flake — see CLAUDE.md: bounded-range
-// assertions must not be flaky, widen before shipping a flake.
+// versions without depending on an exact RSS measurement.
 func TestLocalExecutor_PeakRSS_BoundedRange(t *testing.T) {
 	requireTac(t)
 	dir := t.TempDir()
