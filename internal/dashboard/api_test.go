@@ -1352,7 +1352,8 @@ func TestAPIChecks_Shape(t *testing.T) {
 // (TestAPIRun_ChecksIncludeResourceUsageWhenMeasuredOmitWhenNot).
 func TestAPIChecks_ResourceUsageAggregatesPresentWhenMeasuredOmittedWhenNot(t *testing.T) {
 	store := openTestStore(t)
-	base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	// Keep the record inside the endpoint's rolling stats window.
+	base := time.Now().UTC().Add(-time.Hour)
 
 	rec := &core.RunRecord{
 		RunID: "run-usage-checks", Target: "main",
