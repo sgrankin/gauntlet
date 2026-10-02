@@ -47,17 +47,12 @@ dropped with no event.
 A run ID is `<UTC yyyymmddThhmmssZ>-<seq>-<treeOID[:12]>` (`newRunID`). Three
 parts, three jobs:
 
-- The **UTC timestamp** gives uniqueness across restarts with no persisted
-  state: the same merge re-tested after a restart mints a new ID because the
-  clock moved.
-- The **monotonic per-process counter** (`runIDCounter`, package-level, not
-  per-`Daemon`) closes the same-second gap: two trials sharing an identical
-  trial tree started within one UTC second — a re-push restoring
-  previously-tested content, or two daemon instances racing one candidate —
-  would otherwise mint identical IDs. The counter is package-level because
-  the uniqueness it protects is process-wide: two `Daemon`s in one process
-  must not collide either. It matters concretely because the container
-  executor derives container names from run IDs.
+- The **UTC timestamp** records when the run started.
+- The **randomly seeded per-process counter** separates identical-tree runs
+  within a process and makes collisions across same-second restarts unlikely
+  (62 bits of random seed). It is package-level so multiple daemon instances
+  in one process share a sequence. Run IDs also name history rows, log paths,
+  and containers; reusing one could overwrite a previous verdict.
 - The **trial tree OID** content-addresses the ID to exactly what the checks
   test, and stays human-correlatable (`git log --format='%H %T'` ties each
   merge commit to its tree).

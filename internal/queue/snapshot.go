@@ -261,7 +261,12 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 	}
 
 	var parkedRefs []string
-	for ref := range done {
+	for ref, entry := range done {
+		if entry.Version != "" {
+			if _, present := cands[ref]; !present {
+				continue
+			}
+		}
 		parkedRefs = append(parkedRefs, ref)
 	}
 	sort.Strings(parkedRefs) // deterministic snapshot order

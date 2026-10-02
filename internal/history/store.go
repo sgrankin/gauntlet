@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 15
+const schemaVersion = 16
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -78,7 +78,7 @@ func Open(path string) (*Store, error) {
 	}, nil
 }
 
-// migrate brings db from whatever PRAGMA user_version it's at up to
+// migrate atomically brings db from whatever PRAGMA user_version it's at up to
 // schemaVersion, one step at a time, re-reading user_version after every
 // step so a database several versions behind actually walks every
 // intermediate step (rather than applying only the first matching case) on
@@ -141,7 +141,12 @@ func Open(path string) (*Store, error) {
 // Add new cases above the schemaVersion case, oldest first, when schema.sql
 // next changes — each new case stamps the version it upgrades *to* and lets
 // the loop re-examine, rather than assuming it's the last step needed.
-func migrate(db *sql.DB) error {
+func migrate(store *sql.DB) error {
+	db, err := store.Begin()
+	if err != nil {
+		return fmt.Errorf("history: begin migration: %w", err)
+	}
+	defer db.Rollback()
 	for {
 		var version int
 		if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
@@ -156,7 +161,7 @@ func migrate(db *sql.DB) error {
 			if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 				return fmt.Errorf("history: set user_version: %w", err)
 			}
-			return nil
+			return db.Commit()
 		case 1:
 			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN output TEXT NOT NULL DEFAULT ''`); err != nil {
 				return fmt.Errorf("history: migrate v1->v2 (checks.output): %w", err)
@@ -365,8 +370,15 @@ CREATE TABLE deploy_nodes (
 			if _, err := db.Exec(`PRAGMA user_version = 15`); err != nil {
 				return fmt.Errorf("history: set user_version=15: %w", err)
 			}
+		case 15:
+			if _, err := db.Exec(`ALTER TABLE retry_intents ADD COLUMN retried_run TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("history: migrate v15->v16: %w", err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version = 16`); err != nil {
+				return fmt.Errorf("history: set user_version=16: %w", err)
+			}
 		case schemaVersion:
-			return nil
+			return db.Commit()
 		default:
 			return fmt.Errorf("history: unknown user_version %d (want 0..%d)", version, schemaVersion)
 		}
@@ -722,6 +734,7 @@ func (s *Store) writeHookResult(ctx context.Context, ev core.Event) error {
 func (s *Store) writeRetryIntent(ctx context.Context, ev core.Event) error {
 	if _, err := s.db.ExecContext(ctx, upsertRetryIntentSQL,
 		ev.Target, ev.Candidate.Ref, ev.Candidate.SHA, ev.At.UnixMilli(),
+		ev.Target, ev.Candidate.Ref, ev.Candidate.SHA,
 	); err != nil {
 		return fmt.Errorf("history: write retry intent: %w", err)
 	}

@@ -50,8 +50,11 @@ VALUES (?, ?, ?, ?, ?)`
 	// Store.writeRetryIntent/writeIgnoredRef/writeHookStarted/
 	// writeHookSkipped for the upsert-vs-append reasoning behind each.
 	upsertRetryIntentSQL = `
-INSERT INTO retry_intents (target, ref, sha, at) VALUES (?, ?, ?, ?)
-ON CONFLICT(target, ref) DO UPDATE SET sha = excluded.sha, at = excluded.at`
+INSERT INTO retry_intents (target, ref, sha, at, retried_run)
+VALUES (?, ?, ?, ?, COALESCE((SELECT run_id FROM runs
+WHERE target = ? AND candidate_ref = ? AND candidate_sha = ?
+ORDER BY started_at DESC, rowid DESC LIMIT 1), ''))
+ON CONFLICT(target, ref) DO UPDATE SET sha = excluded.sha, at = excluded.at, retried_run = excluded.retried_run`
 
 	insertIgnoredRefSQL = `
 INSERT OR REPLACE INTO ignored_refs (at, target, ref, detail) VALUES (?, ?, ?, ?)`
@@ -618,12 +621,7 @@ func (s *Store) DepthSeries(target string, since time.Time) ([]DepthPoint, error
 	return out, nil
 }
 
-// RefVerdict is one candidate ref's most recent terminal run outcome for a
-// target (LatestTerminalPerRef) — the read side of boot-time park seeding
-// (queue.Config.SeedParks): Outcome is the raw stored string
-// (outcomeString's vocabulary: landed|rejected|conflict|skipped|error), left
-// unparsed here since history never imports internal/core (cmd's SeedParks
-// closure, the sole caller, maps it back to core.Outcome).
+// RefVerdict is a ref's latest terminal run, used to restore parks at boot.
 type RefVerdict struct {
 	Version string
 	Ref     string
@@ -642,9 +640,8 @@ type RefVerdict struct {
 
 // LatestTerminalPerRef returns, for every distinct candidate_ref recorded
 // against target, that ref's single most recent run row: "most recent" by
-// started_at, tie-broken by run_id (both monotonic enough for this purpose —
-// newRunID's timestamp+counter scheme, internal/queue/reconcile.go). One row
-// per ref, unordered.
+// started_at, tie-broken by insertion order. Run IDs distinguish runs but
+// do not order runs across processes. One row per ref, unordered.
 //
 // Interleaved histories resolve exactly as the window function's
 // PARTITION BY/ORDER BY says they should: a ref rejected then later landed
@@ -656,39 +653,9 @@ type RefVerdict struct {
 // result as a park seed — this method itself returns every ref's latest
 // verdict regardless of outcome, landed included.
 //
-// Retry-intent read-side suppression: a ref's latest terminal row is
-// additionally suppressed — omitted from the result entirely — when a
-// retry_intents row for the same (target, ref) is newer than that row's
-// ended_at (LEFT JOIN retry_intents ... WHERE ri.at IS NULL OR ri.at <=
-// ended_at). Net effect: an operator's retry (core.EventRetryRequested,
-// internal/queue/command.go's applyRetry) that hasn't yet been superseded by
-// a fresh terminal outcome means "don't re-seed a park from the stale
-// pre-retry verdict" — a daemon crash between the retry and the retried
-// run's own terminal event no longer silently re-parks the ref at its old
-// rejection on restart. If the retried run later produces its OWN newer
-// terminal row (e.g. it rejects again), that row's ended_at is newer than
-// the retry, the join condition is satisfied again, and the ref re-parks
-// correctly with the new reason.
-//
-// Accepted millisecond-tie: both ri.at and ended_at are
-// millisecond-truncated (.UnixMilli()), and the join uses <=, so a retry
-// landing in the SAME millisecond as the terminal it's retrying
-// away from (an automated immediate-retry, or a coarse/fixed test clock)
-// still satisfies ri.at <= ended_at — the park is kept, and the operator's
-// retry is silently discarded on restart, exactly the narrow-window bug
-// this method otherwise closes. This can't be fixed by flipping to a strict
-// <: the retried run's own newer terminal, landing at ended_at == ri.at
-// (its natural case when the retry and its own outcome are timestamped
-// identically at millisecond granularity), must still satisfy the
-// comparison to re-park with the fresh reason — flipping the operator would
-// just break re-park-on-new-terminal instead. The tie is genuinely
-// unresolvable by a timestamp compare alone; disambiguating it would need a
-// monotonic sequence number or run-identity ordering, not a threshold
-// change. Accepted as low severity: a human operator's retry normally trails
-// the rejection it's responding to by seconds, not sub-millisecond, so
-// ri.at >> ended_at in practice — the seedparks/retryintent tests only pass
-// because their clock advances between reject and retry; the equal-`at`
-// boundary itself is untested.
+// Retry intents identify the exact superseded run. This resolves timestamp
+// ties between the rejection, retry, and a new failure in the same millisecond.
+// Legacy intents without a run identity retain timestamp-based suppression.
 func (s *Store) LatestTerminalPerRef(target string) ([]RefVerdict, error) {
 	rows, err := s.db.Query(`
 SELECT t.candidate_ref, t.candidate_sha, t.outcome, t.detail, t.ended_at, t.run_id, t.candidate_version
@@ -696,13 +663,15 @@ FROM (
 	SELECT candidate_ref, candidate_sha, outcome, detail, ended_at, run_id, candidate_version,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY candidate_ref
-	           ORDER BY started_at DESC, run_id DESC
+	           ORDER BY started_at DESC, rowid DESC
 	       ) AS rn
 	FROM runs
 	WHERE target = ?
 ) t
 LEFT JOIN retry_intents ri ON ri.target = ? AND ri.ref = t.candidate_ref
-WHERE t.rn = 1 AND (ri.at IS NULL OR ri.at <= t.ended_at)`, target, target)
+WHERE t.rn = 1 AND (ri.at IS NULL OR
+ (ri.retried_run != '' AND ri.retried_run != t.run_id) OR
+ (ri.retried_run = '' AND ri.at <= t.ended_at))`, target, target)
 	if err != nil {
 		return nil, fmt.Errorf("history: latest terminal per ref %s: %w", target, err)
 	}

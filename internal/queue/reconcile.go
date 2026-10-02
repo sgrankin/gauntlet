@@ -153,16 +153,18 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 		}
 	}
 	for ref, entry := range done {
-		if c, ok := cands[ref]; !ok || c.SHA != entry.SHA || c.Version != entry.Version {
+		c, present := cands[ref]
+		// A missing review may simply have lost readiness. Keep its failure
+		// verdict until a different revision or request returns; ordinary
+		// deleted refs retain their existing withdraw-and-requeue semantics.
+		if !present && entry.Version != "" {
+			continue
+		}
+		if !present || c.SHA != entry.SHA || c.Version != entry.Version {
 			delete(done, ref)
 		}
 	}
-	// autoRetried mirrors done's own per-(ref,SHA) pruning above (see its
-	// field doc, daemon.go): a vanished ref or one that moved to a new SHA
-	// no longer needs its spent auto-retry budget remembered — the next
-	// time it parks (a fresh SHA, or a re-discovered ref), it gets a fresh
-	// budget. nil-safe: ranging a nil map is a no-op, and this never
-	// allocates one (only maybeAutoRetry does, lazily, on first use).
+	// A missing ref or changed SHA renews the infrastructure retry budget.
 	if autoRetried := d.autoRetried[t.Name]; autoRetried != nil {
 		for ref, sha := range autoRetried {
 			if c, ok := cands[ref]; !ok || c.SHA != sha {

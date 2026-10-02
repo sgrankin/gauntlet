@@ -100,6 +100,7 @@ func TestMigrate_V13ToV14(t *testing.T) {
 	// with them, no deploy indexes — SQLite drops a table's indexes with it).
 	for _, stmt := range []string{
 		`ALTER TABLE runs DROP COLUMN candidate_version`,
+		`ALTER TABLE retry_intents DROP COLUMN retried_run`,
 		`DROP TABLE deploy_nodes`,
 		`DROP TABLE deploys`,
 		`PRAGMA user_version = 13`,

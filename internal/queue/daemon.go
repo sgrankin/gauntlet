@@ -300,8 +300,8 @@ type Daemon struct {
 	now      func() time.Time
 
 	// order assigns FIFO sequence numbers; done holds parks by target and ref.
-	// Parks clear on revision/metadata changes, disappearance, or explicit
-	// retry.
+	// Parks clear on revision/metadata changes or retry. Ordinary refs also
+	// clear on deletion; inactive reviews keep their failure verdict.
 	order map[string]map[string]int64
 	done  map[string]map[string]parkEntry
 	seq   int64

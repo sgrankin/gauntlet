@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"sync/atomic"
 	"time"
@@ -528,25 +529,15 @@ func eventKindForOutcome(o core.Outcome) core.EventKind {
 // runIDTimeFormat is the UTC timestamp portion of a run ID: yyyymmddThhmmssZ.
 const runIDTimeFormat = "20060102T150405Z"
 
-// runIDCounter is a monotonic per-process counter folded into every run ID.
-// Two trials sharing an identical trial tree and started within the same
-// UTC second — a re-push that restores previously-tested content, or two
-// daemon instances racing the same candidate — would otherwise mint
-// identical run IDs under the timestamp+OID-prefix scheme alone. The
-// container executor derives container names from run IDs, so such a
-// collision would also break `--name`; the counter closes the gap
-// regardless of clock resolution or tree content. Package-level (not
-// per-Daemon) because the uniqueness this protects is process-wide: two
-// Daemon instances in one process (as the duplicate-daemon tests
-// construct) must not mint colliding IDs either. See docs/design/core.md
-// ("Run identity") for the full three-part ID scheme.
-var runIDCounter atomic.Int64
+// A random starting point separates same-second runs across process restarts.
+// The package-level counter also separates daemon instances in one process.
+var runIDCounter = func() *atomic.Uint64 {
+	counter := new(atomic.Uint64)
+	counter.Store(1<<62 + rand.Uint64()>>2)
+	return counter
+}()
 
-// newRunID builds a run ID: a UTC timestamp, a monotonic per-process
-// sequence number, and the first 12 characters of oid — unique across
-// restarts (no persistence means the same merge re-tested after a restart
-// gets a new timestamp), unique within one process even for same-second
-// identical-tree trials (the counter), and human-correlatable to oid.
+// newRunID combines start time, a randomly seeded sequence, and the trial tree.
 func newRunID(t time.Time, oid string) string {
 	if len(oid) > 12 {
 		oid = oid[:12]

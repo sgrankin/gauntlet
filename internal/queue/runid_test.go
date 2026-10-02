@@ -1,7 +1,11 @@
 package queue
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,5 +108,29 @@ func TestReconcile_SameSecondIdenticalTreeRetestGetsDistinctRunID(t *testing.T) 
 	}
 	if len(ch.Records()) < 2 {
 		t.Fatal("second trial never produced a terminal record")
+	}
+}
+
+func TestNewRunIDAcrossProcesses(t *testing.T) {
+	if os.Getenv("GAUNTLET_RUNID_HELPER") == "1" {
+		fmt.Println(newRunID(time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC), "abc123abc123"))
+		os.Exit(0)
+	}
+	generate := func() string {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestNewRunIDAcrossProcesses$")
+		cmd.Env = append(os.Environ(), "GAUNTLET_RUNID_HELPER=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("subprocess: %v: %s", err, out)
+		}
+		id := strings.TrimSpace(string(out))
+		if !runIDPattern.MatchString(id) {
+			t.Fatalf("invalid subprocess run ID: %q", id)
+		}
+		return id
+	}
+	if first, second := generate(), generate(); first == second {
+		t.Fatalf("same-second process restart reused run ID %q", first)
 	}
 }

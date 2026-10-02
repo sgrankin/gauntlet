@@ -15,9 +15,15 @@ import (
 	"github.com/sgrankin/gauntlet/internal/testutil"
 )
 
-type persistedReview struct{ candidate core.Candidate }
+type persistedReview struct {
+	candidate core.Candidate
+	eligible  bool
+}
 
 func (r *persistedReview) Candidates(context.Context) ([]core.Candidate, error) {
+	if !r.eligible {
+		return nil, nil
+	}
 	return []core.Candidate{r.candidate}, nil
 }
 func (*persistedReview) Validate(context.Context, core.Candidate) error       { return nil }
@@ -33,7 +39,7 @@ func TestReviewParkSurvivesRestartAndMetadataEditUnparks(t *testing.T) {
 	source := remote.Ref(ref)
 	remote.SetRef("refs/heads/feature", source)
 	remote.DeleteCandidate(ref)
-	review := &persistedReview{core.Candidate{Ref: "refs/heads/for/main/github/pr-0000000001", Target: "main", SHA: source, Source: "github", SourceBase: base, Message: "Change", Version: "original"}}
+	review := &persistedReview{candidate: core.Candidate{Ref: "refs/heads/for/main/github/pr-0000000001", Target: "main", SHA: source, Source: "github", SourceBase: base, Message: "Change", Version: "original"}}
 	path := filepath.Join(t.TempDir(), "history.db")
 	store, err := history.Open(path)
 	if err != nil {
@@ -72,8 +78,30 @@ func TestReviewParkSurvivesRestartAndMetadataEditUnparks(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := daemon.Snapshot().Targets[0]
+	if len(snap.Parked) != 0 || len(snap.Pipeline) != 0 {
+		t.Fatalf("ineligible review appeared active: %+v", snap)
+	}
+	review.eligible = true
+	if err := daemon.ReconcileOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snap = daemon.Snapshot().Targets[0]
 	if len(snap.Parked) != 1 || len(snap.Pipeline) != 0 || snap.Parked[0].RunID != "prior" {
 		t.Fatalf("restart lost park: %+v", snap)
+	}
+	review.eligible = false
+	if err := daemon.ReconcileOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(daemon.Snapshot().Targets[0].Parked) != 0 {
+		t.Fatal("inactive review remained visible")
+	}
+	review.eligible = true
+	if err := daemon.ReconcileOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snap := daemon.Snapshot().Targets[0]; len(snap.Parked) != 1 || len(snap.Pipeline) != 0 {
+		t.Fatal("temporary readiness loss cleared failure verdict")
 	}
 	review.candidate.Version = "edited-message"
 	if err := daemon.ReconcileOnce(ctx); err != nil {

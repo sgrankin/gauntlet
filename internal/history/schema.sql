@@ -1,4 +1,4 @@
--- schema.sql: gauntlet history store schema (user_version = 15).
+-- schema.sql: gauntlet history store schema (user_version = 16).
 --
 -- Applied fresh (user_version == 0) via the migrate() stepwise switch in
 -- store.go, which stamps a new database straight to the current version. An
@@ -156,6 +156,7 @@ CREATE TABLE retry_intents (
   ref    TEXT NOT NULL,
   sha    TEXT NOT NULL,
   at     INTEGER NOT NULL,
+  retried_run TEXT NOT NULL DEFAULT '', -- exact superseded terminal (v16+)
   PRIMARY KEY (target, ref)
 );
 
