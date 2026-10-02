@@ -32,6 +32,8 @@ func main() {
 	if len(os.Args) > 1 {
 		var command func([]string) error
 		switch os.Args[1] {
+		case "prune-sources":
+			command = runPruneSources
 		case "land-pr":
 			command = runLandPR
 		case "land":

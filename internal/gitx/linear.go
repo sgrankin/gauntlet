@@ -21,7 +21,7 @@ func (r *Repo) FetchReview(ctx context.Context, remoteRef, localRef, expected st
 	if err != nil || strings.TrimSpace(actual) != expected {
 		return fmt.Errorf("review moved while fetching")
 	}
-	return nil
+	return r.touchSource(expected)
 }
 
 // ReplayTree applies just sourceBase..candidate onto the predicted target.
@@ -55,7 +55,7 @@ func (r *Repo) LinearCommit(ctx context.Context, tree, base, source, message str
 	// Single-parent landing commits do not reach their original inputs.
 	// Retain those objects locally for audit and delayed post-land hooks,
 	// even after contributor refs move. This namespace is never pushed.
-	if _, err := r.run(ctx, "update-ref", "refs/gauntlet/source/"+source, source); err != nil {
+	if err := r.retainSource(ctx, source); err != nil {
 		return "", fmt.Errorf("retain source: %w", err)
 	}
 	raw, err := r.run(ctx, "cat-file", "commit", source)
