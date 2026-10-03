@@ -265,7 +265,7 @@ type CommitInfo struct {
 // Log returns, oldest-first, the subject and body of every commit reachable
 // from tip but not from base (base..tip) — the commits a candidate branch
 // actually introduces onto the target. internal/summarize uses this to
-// build the prompt for an optional Claude-written merge-commit body;
+// build the prompt for an optional Codex-written merge-commit body;
 // nothing else in gauntlet inspects commit bodies.
 //
 // The format string delimits fields with ASCII unit/record separators

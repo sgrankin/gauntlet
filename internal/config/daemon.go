@@ -61,12 +61,11 @@ const (
 	// load, it is not the real host bound — max-executions is.
 	maxAllowedDeployMaxParallel = 64
 
-	// Summary defaults match internal/summarize without importing that
-	// package.
-	defaultSummarizeModel     = "claude-sonnet-5"
-	defaultSummarizeAPIKeyEnv = "ANTHROPIC_API_KEY"
+	// Optional summary defaults.
+	defaultSummarizeModel    = "gpt-5.4"
+	defaultSummarizeTokenEnv = "OPENAI_API_KEY"
 
-	// Effort defaults when the summarize block is present.
+	// Reasoning effort defaults when summaries are enabled.
 	defaultSummarizeEffort = "medium"
 
 	// Summary calls are synchronous; keep their timeout below the poll
@@ -114,15 +113,8 @@ const (
 	defaultServicesRuntime = "docker"
 )
 
-// validSummarizeEfforts are the legal Summarize.Effort values, per the
-// claude-api skill's output_config.effort reference: "low"/"medium"/"high"
-// are broadly supported, "xhigh" and "max" only on newer Sonnet/Opus-tier
-// models (which includes defaultSummarizeModel). validate() checks against
-// this set; "" is impossible for a loaded config because applyDefaults
-// always fills it in first when the "summarize" section is present.
 // validHooksPolicies are the legal Target.HooksPolicy values
-// (internal/hooks.Policy, duplicated here per this file's existing pattern
-// of owning its own defaults/valid-sets — see validSummarizeEfforts).
+// (internal/hooks.Policy, duplicated here to keep config independent).
 // validate() rejects any other value for a target that has hooks.
 var validHooksPolicies = map[string]bool{
 	"queue":    true,
@@ -131,14 +123,12 @@ var validHooksPolicies = map[string]bool{
 }
 
 var validSummarizeEfforts = map[string]bool{
-	// "none" omits the effort field from API requests entirely — the escape
-	// hatch for models that reject output_config.effort (e.g. claude-haiku-4-5).
+	// none leaves the model's effort default unchanged.
 	"none":   true,
 	"low":    true,
 	"medium": true,
 	"high":   true,
 	"xhigh":  true,
-	"max":    true,
 }
 
 // Daemon is the admin-written daemon config: one remote, the reconcile
@@ -245,7 +235,7 @@ type Daemon struct {
 	MaxExecutions int `kdl:"max-executions"`
 
 	// Summarize is a pointer, unlike every other optional section above:
-	// every one of its fields has its own default (Model, APIKeyEnv,
+	// every one of its fields has its own default (Model, TokenEnv,
 	// Timeout), so "required field non-empty" can't serve as the
 	// presence signal the way GitHub.Repo/Slack.Channel/etc. do — a
 	// user-written "summarize {}" with nothing set must still count as
@@ -646,36 +636,18 @@ type Environment struct {
 	OnDesiredMove string `kdl:"on-desired-move"`
 }
 
-// Summarize configures the optional Claude-written merge-commit body
-// enricher (internal/summarize). A nil *Daemon.Summarize (the node absent
-// from the document) disables it entirely; see the field doc on Daemon for
-// why presence, not any single field's non-emptiness, is the enable
-// signal.
-//
-// The summary is generated synchronously, on the reconcile loop, right
-// before a trial's merge commit is built (queue/reconcile.go): the merge
-// commit must carry it, and landing the already-tested SHA forbids amending
-// the commit later to attach one after the fact. It fires on every clean
-// trial, not just landings that go on to succeed — a trial rejected by a
-// later check still paid for one summarize call. See Timeout below and
-// README.md's Summaries section for the full stall contract.
+// Summarize enables best-effort Codex summaries before checks run.
+// Calls are synchronous, so Timeout also bounds a reconcile-loop stall.
 type Summarize struct {
-	Model     string `kdl:"model"`       // default defaultSummarizeModel
-	APIKeyEnv string `kdl:"api-key-env"` // default "ANTHROPIC_API_KEY"
+	Model    string `kdl:"model"`     // default defaultSummarizeModel
+	TokenEnv string `kdl:"token-env"` // default "OPENAI_API_KEY"
 
-	// Effort is the output_config.effort value sent with every summarize
-	// call (see internal/summarize.Params.Effort) — "low", "medium",
-	// "high", "xhigh", or "max". Defaults to "medium" whenever the
-	// "summarize" section is present; validate() rejects any other
-	// value, so a loaded config's Effort is never "".
+	Auth   string `kdl:"auth"`
+	Codex  string `kdl:"codex"`
+	APIURL string `kdl:"api-url"`
+	// Effort selects Codex reasoning effort; none uses the model default.
 	Effort string `kdl:"effort"`
-
-	// Timeout bounds the single Messages API call per trial (default 5s).
-	// Because that call runs synchronously on gauntlet's single-threaded
-	// reconcile loop, before checks start, this timeout bounds a stall of
-	// the ENTIRE loop — every target, not just the one being summarized —
-	// for up to its duration on every clean trial. Keep it well under
-	// poll-interval.
+	// Timeout bounds the synchronous Codex call before checks begin.
 	Timeout time.Duration `kdl:"timeout,format:units"`
 }
 
@@ -1044,11 +1016,23 @@ func (d *Daemon) applyDefaults() {
 	}
 
 	if d.Summarize != nil {
+		if d.Summarize.Auth == "" {
+			d.Summarize.Auth = "api-key"
+		}
+		if d.Summarize.Codex == "" {
+			d.Summarize.Codex = "codex"
+		}
+		if d.Summarize.APIURL == "" {
+			d.Summarize.APIURL = "https://api.openai.com/v1"
+		}
 		if d.Summarize.Model == "" {
 			d.Summarize.Model = defaultSummarizeModel
 		}
-		if d.Summarize.APIKeyEnv == "" {
-			d.Summarize.APIKeyEnv = defaultSummarizeAPIKeyEnv
+		if d.Summarize.TokenEnv == "" {
+			d.Summarize.TokenEnv = defaultSummarizeTokenEnv
+			if d.Summarize.Auth == "chatgpt" {
+				d.Summarize.TokenEnv = "CODEX_ACCESS_TOKEN"
+			}
 		}
 		if d.Summarize.Effort == "" {
 			d.Summarize.Effort = defaultSummarizeEffort
@@ -1382,8 +1366,8 @@ func (d *Daemon) SecretEnvNames() []string {
 			names = append(names, d.Slack.BotTokenEnv)
 		}
 	}
-	if d.Summarize != nil && d.Summarize.APIKeyEnv != "" {
-		names = append(names, d.Summarize.APIKeyEnv)
+	if d.Summarize != nil && d.Summarize.TokenEnv != "" {
+		names = append(names, d.Summarize.TokenEnv)
 	}
 	return names
 }
@@ -1745,14 +1729,26 @@ func (d *Daemon) validate() error {
 	}
 
 	if d.Summarize != nil {
-		if d.Summarize.Model == "" {
+		if d.Summarize.Auth != "api-key" && d.Summarize.Auth != "chatgpt" {
+			return fmt.Errorf("summarize: auth must be api-key or chatgpt")
+		}
+		if strings.TrimSpace(d.Summarize.Codex) == "" {
+			return fmt.Errorf("summarize: codex must name an executable")
+		}
+		if strings.ContainsAny(d.Summarize.TokenEnv, "=\x00") {
+			return fmt.Errorf("summarize: token-env must name an environment variable")
+		}
+		if err := validateModelURL(d.Summarize.APIURL); err != nil {
+			return fmt.Errorf("summarize: %w", err)
+		}
+		if strings.TrimSpace(d.Summarize.Model) == "" {
 			return fmt.Errorf("summarize: model must not be empty")
 		}
-		if d.Summarize.APIKeyEnv == "" {
-			return fmt.Errorf("summarize: api-key-env must not be empty")
+		if strings.TrimSpace(d.Summarize.TokenEnv) == "" {
+			return fmt.Errorf("summarize: token-env must not be empty")
 		}
 		if !validSummarizeEfforts[d.Summarize.Effort] {
-			return fmt.Errorf("summarize: effort must be one of none, low, medium, high, xhigh, max, got %q", d.Summarize.Effort)
+			return fmt.Errorf("summarize: effort must be one of none, low, medium, high, xhigh, got %q", d.Summarize.Effort)
 		}
 		if d.Summarize.Timeout <= 0 {
 			return fmt.Errorf("summarize: timeout must be positive, got %s", d.Summarize.Timeout)

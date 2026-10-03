@@ -94,12 +94,19 @@ func (f *FailureReview) validate() error {
 	if f.MaxOutputBytes < 256 || f.MaxOutputBytes > 65536 {
 		return fmt.Errorf("failure-review: max-output-bytes must be 256..65536")
 	}
-	u, err := url.Parse(f.APIURL)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("failure-review: api-url must be an HTTP(S) URL without credentials, query, or fragment")
+	if err := validateModelURL(f.APIURL); err != nil {
+		return fmt.Errorf("failure-review: %w", err)
 	}
 	if strings.TrimSpace(f.Codex) == "" {
 		return fmt.Errorf("failure-review: codex must name an executable")
+	}
+	return nil
+}
+
+func validateModelURL(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("api-url must be an HTTP(S) URL without credentials, query, or fragment")
 	}
 	return nil
 }

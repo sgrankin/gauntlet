@@ -221,7 +221,7 @@ disables it — a minimal config (remote, committer, targets) runs a plain
 single-lane daemon. The optional nodes: SQLite run
 `history`, the web `dashboard`, `github` commit statuses, a duplex `slack`
 channel with reaction commands, `otlp` span export, the container
-`executor`, shared `services`, Claude merge `summarize`, per-target queue
+`executor`, shared `services`, Codex merge `summarize`, per-target queue
 `mode` (serial/batch/speculate), post-land `hook`s with backlog
 policies, and `deploy` environments (below).
 See [docs/config.md](docs/config.md) for the full reference.
@@ -296,7 +296,7 @@ OTLP, deploy-ref branch protection) is walked through in
 
 Feature-complete — serial/batch/speculate modes,
 local+container executors, dashboard/API/MCP, Slack duplex with reaction
-commands, GitHub statuses, post-land hooks, Claude merge summaries, full
+commands, GitHub statuses, post-land hooks, Codex merge summaries, full
 log capture, and park persistence are all shipped; post-completion
 consistency audit done. **Deployment** (environment lanes over deploy refs,
 repo-declared deploy graphs, `/deploys` UI, API/MCP, `gauntlet

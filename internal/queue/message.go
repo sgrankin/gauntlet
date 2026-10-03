@@ -32,7 +32,7 @@ const (
 // buildMergeMessage renders a merge commit's full message: the templated
 // subject line (tmplText, or the built-in default chosen per
 // messageFields.User when tmplText is empty), an optional blank-line
-// separated body (Config.MergeBody's return, trimmed — a Claude-written
+// separated body (Config.MergeBody's return, trimmed — a Codex-written
 // summary; "" omits it entirely), and the Gauntlet-Ref / Gauntlet-Run
 // trailers.
 func buildMergeMessage(tmplText string, f messageFields, body string) (string, error) {

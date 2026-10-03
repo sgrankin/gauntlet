@@ -484,7 +484,7 @@ func TestProbeSlackTokenEnv(t *testing.T) {
 }
 
 func TestProbeSummarizeTokenEnv(t *testing.T) {
-	cfg := &config.Daemon{Summarize: &config.Summarize{APIKeyEnv: "GAUNTLET_DOCTOR_TEST_SUMMARIZE_KEY"}}
+	cfg := &config.Daemon{Summarize: &config.Summarize{TokenEnv: "GAUNTLET_DOCTOR_TEST_SUMMARIZE_KEY"}}
 
 	t.Run("unset", func(t *testing.T) {
 		os.Unsetenv("GAUNTLET_DOCTOR_TEST_SUMMARIZE_KEY")
@@ -518,7 +518,7 @@ func TestBuildProbes_ChannelGating(t *testing.T) {
 
 	cfg = &config.Daemon{
 		Slack:     config.Slack{Channel: "#builds", AppTokenEnv: "A", BotTokenEnv: "B"},
-		Summarize: &config.Summarize{APIKeyEnv: "K"},
+		Summarize: &config.Summarize{TokenEnv: "K"},
 	}
 	env = &doctorEnv{cfg: cfg, timeout: time.Second}
 	var names []string

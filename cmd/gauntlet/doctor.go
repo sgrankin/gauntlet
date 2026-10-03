@@ -494,11 +494,11 @@ func probeSlackTokenEnv(cfg *config.Daemon) probeResult {
 
 // probeSummarizeTokenEnv mirrors buildSummarizer's own gating exactly
 // (cmd/gauntlet/channels.go): a configured summarize block requires
-// cfg.Summarize.APIKeyEnv (default ANTHROPIC_API_KEY) to be set before the
-// daemon will start the summarizer at all — no Messages API call here,
+// cfg.Summarize.TokenEnv (default OPENAI_API_KEY) to be set before the
+// daemon will start the summarizer at all — no Codex call here,
 // same rationale as probeAuthTokenEnv.
 func probeSummarizeTokenEnv(cfg *config.Daemon) probeResult {
-	env := cfg.Summarize.APIKeyEnv
+	env := cfg.Summarize.TokenEnv
 	if os.Getenv(env) == "" {
 		return fail(fmt.Sprintf("%s is empty or unset", env), fmt.Sprintf("export %s with a valid API key before starting the daemon", env))
 	}

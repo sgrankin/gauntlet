@@ -55,8 +55,8 @@ services {
 }
 
 summarize {
-    model "claude-sonnet-5"
-    api-key-env "ANTHROPIC_API_KEY"
+    model "gpt-5.4"
+    token-env "OPENAI_API_KEY"
     effort "medium"
     timeout "5s"
 }
@@ -530,11 +530,11 @@ summarize {
   error. **`allow` absent ⇒ disabled**: a check spec declaring
   `service`/`needs` is then rejected at run time, loudly, like a malformed
   check spec — never silently ignored.
-- **`summarize`** — enables a Claude-written merge-commit body
+- **`summarize`** — enables a Codex-written merge-commit body
   (`internal/summarize`); see [Summaries](#summaries) below. **Node absent
   ⇒ disabled**: merge commits get exactly the plain subject +
   trailers, no body. Once the node is present (even empty, `summarize {}`),
-  an empty/unset `api-key-env` is a startup error, same rationale as
+  an empty/unset `token-env` is a startup error, same rationale as
   `github`/`slack` above.
 - **`target`'s `mode`, `max-batch`, `window`, `on-batch-red`** — per-target
   queueing discipline (serial/batch/speculate); see [Queue
@@ -543,7 +543,7 @@ summarize {
 ## Summaries
 
 `summarize` is an optional enricher: right before a trial lands, the daemon
-asks Claude for a short prose summary of what the candidate branch actually
+asks Codex for a short prose summary of what the candidate branch actually
 did — its own commit subjects/bodies and diffstat, `base..candidate` — and
 inserts that summary as the merge commit's body, between the templated
 subject line and the `Gauntlet-Ref`/`Gauntlet-Run` trailers. The
@@ -560,68 +560,37 @@ on every clean trial. Keep it well under `poll-interval`.
 
 Configuration (all fields optional; defaults shown in the example above):
 
-- **`model`** — the Claude model ID to call. Defaults to `claude-sonnet-5`
-  — prompt quality for this task was validated live against it, and its
-  configurable `effort` (below) lets operators dial intelligence vs. cost
-  rather than being stuck on a fixed tier. Fully overridable for operators
-  who want a different model, including the former default,
-  `claude-haiku-4-5` (see the `effort` note below if you do).
-- **`effort`** — the `output_config.effort` value sent with every
-  summarize call: one of `none`, `low`, `medium`, `high`, `xhigh`, `max`.
-  Defaults to `medium` whenever the `summarize` section is present,
-  regardless of `model` (same "node present ⇒ every field gets its
-  default" rule as the rest of this section). Only valid on models that
-  support it — `claude-sonnet-5` (the default model) does, but
-  **`claude-haiku-4-5` and Sonnet 4.5 do not, at any nonzero effort
-  value**: the Messages API rejects the request outright (a 400). Set
-  `effort "none"` to omit the `output_config.effort` field from the
-  request entirely — the escape hatch for exactly this case — if you
-  switch `model` to one of those. Forgetting to set it (leaving the
-  `medium` default paired with a non-supporting model) is not silent — it
-  hits the same degradation path as any other summarize error: logged as
-  a single line, answered with an empty body, never a blocked landing —
-  but it does mean every summarize call 400s until `effort "none"` is set.
-- **`api-key-env`** — the environment variable holding the Anthropic API
-  key. Defaults to `ANTHROPIC_API_KEY`. The daemon reads this at startup,
-  once; it is never read from the config file itself. Also a config-named
-  operator secret the local executor strips from every candidate-code
-  command's environment — see [checks.md's environment
-  reference](checks.md#check-environment-reference).
-- **`timeout`** — the per-call budget for the Messages API request, and
-  therefore the worst-case stall of the whole reconcile loop described
-  above. Defaults to `5s`.
+- **`model`** — Codex model ID; defaults to `gpt-5.4`.
+- **`effort`** — Codex reasoning effort (`low`, `medium`, `high`, `xhigh`);
+  defaults to `medium`. `none` uses the model default.
+- **`auth`** — `api-key` (default) or `chatgpt`, as in failure review.
+- **`token-env`** — credential environment variable, read at startup.
+  Defaults to `OPENAI_API_KEY`, or `CODEX_ACCESS_TOKEN` for ChatGPT auth.
+- **`codex`** — executable path/name; defaults to `codex`.
+- **`api-url`** — Responses endpoint base URL for API-key authentication;
+  defaults to `https://api.openai.com/v1`.
+- **`timeout`** — bounds the synchronous Codex process; defaults to `5s`.
+
+Both summaries and failure review use the same isolated Codex runner, with
+an empty home/workspace, shell and web disabled, and structured output.
+Summaries do not enable investigation tools.
 
 **Degradation guarantee:** summarization is best-effort, by contract, all
-the way down. Any failure gathering the branch's own git history, any HTTP
+the way down. Any failure gathering the branch's own git history, any Codex
 error, any timeout, any refusal, or an empty model response is logged as a
 single line and answered with an empty body — never an error, never a
 retry, never a blocked or failed landing. A merge commit with no summary is
 exactly as valid as one with one; enabling `summarize` can never turn a
 green trial red.
 
-**Cost:** one small Messages API completion per **clean trial** — the
-merge commit must carry its body before checks run (landing the tested
-SHA forbids amending later), so a trial whose checks then fail has still
-spent its summary call, and a re-queued candidate spends another on its
-re-trial. Each call is a single request against a handful of commit
-subjects/bodies and a diffstat, capped at a few hundred output tokens.
-**Batch mode multiplies this:** forming a batch of N makes N summary
-calls before checks start, run concurrently (capped at 4 in flight) on
-the reconcile loop, so the stall is bounded by `ceil(N/4) × timeout`
-(stalling all targets) rather than N separate calls back to back; large
-`max-batch` plus summaries still means accepting that stall — smaller
-now, but not zero — or disabling summaries on that daemon.
-Plainly: at the defaults (`claude-sonnet-5`, `effort "medium"`), that call
-costs on the order of **10x** what the old default (`claude-haiku-4-5`,
-no effort/thinking) cost per landing — Sonnet's per-token price is several
-times Haiku's, and `medium` effort spends some thinking tokens a
-no-thinking Haiku call never did. In absolute terms this is still small —
-a few hundred output tokens on one short completion per clean trial —
-but it is a real, deliberate step up from the
-previous default, made because prompt quality for this task was validated
-live against `claude-sonnet-5`. Set `model "claude-haiku-4-5"` (see the
-`effort` caveat above) or a lower `effort` if the per-landing cost
-matters at your merge volume.
+**Cost:** one Codex execution per clean trial, including trials that later
+fail checks. Each execution receives commit messages and a diffstat; no
+source-inspection tools are enabled. Model pricing and reasoning effort
+determine cost. Output is bounded to 8 KiB.
+
+Batch mode runs up to four summaries concurrently before checks start, so
+the stall is bounded by `ceil(N/4) × timeout` for a batch of N. Keep the
+timeout below `poll-interval`, or disable summaries to avoid that stall.
 
 ## Hooks
 

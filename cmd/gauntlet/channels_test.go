@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,8 +42,8 @@ func TestBuildSummarizer_MissingAPIKeyIsLoudError(t *testing.T) {
 	t.Setenv("GAUNTLET_TEST_SUMMARIZE_KEY", "")
 	cfg := &config.Daemon{
 		Summarize: &config.Summarize{
-			Model:     "claude-haiku-4-5",
-			APIKeyEnv: "GAUNTLET_TEST_SUMMARIZE_KEY",
+			Model:    "chosen-model",
+			TokenEnv: "GAUNTLET_TEST_SUMMARIZE_KEY",
 		},
 	}
 	_, err := buildSummarizer(cfg, fakeSummarizeGit{})
@@ -55,11 +56,16 @@ func TestBuildSummarizer_MissingAPIKeyIsLoudError(t *testing.T) {
 }
 
 func TestBuildSummarizer_ConstructsWhenConfigured(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "fake-codex")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GAUNTLET_TEST_SUMMARIZE_KEY", "sk-test-key")
 	cfg := &config.Daemon{
 		Summarize: &config.Summarize{
-			Model:     "claude-haiku-4-5",
-			APIKeyEnv: "GAUNTLET_TEST_SUMMARIZE_KEY",
+			Codex:    binary,
+			Model:    "chosen-model",
+			TokenEnv: "GAUNTLET_TEST_SUMMARIZE_KEY",
 		},
 	}
 	s, err := buildSummarizer(cfg, fakeSummarizeGit{})

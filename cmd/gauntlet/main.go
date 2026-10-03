@@ -627,7 +627,7 @@ func run() error {
 		servicesSnapshot = pool.Snapshot
 	}
 
-	// The summarizer's own Params.Timeout already bounds each Messages API
+	// The summarizer's own Params.Timeout already bounds each Codex
 	// call, but Config.MergeBody's contract (internal/queue/daemon.go)
 	// puts the timeout decision at the caller, not in queue: this closure
 	// is that caller, wrapping ctx with cfg.Summarize.Timeout before every

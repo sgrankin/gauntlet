@@ -56,7 +56,7 @@ type LocalExecutor struct {
 	// SecretEnv names the config-named operator secret environment
 	// variables (config.Daemon.SecretEnvNames — github's token-env in
 	// static mode, slack's app-token-env/bot-token-env, summarize's
-	// api-key-env) that must never enter a CANDIDATE-CODE command's
+	// token-env) that must never enter a CANDIDATE-CODE command's
 	// environment (issue #13 Gap 1, docs/checks.md's environment
 	// reference): a check, image build, or receipt producer is a
 	// candidate's own repo code, and the daemon's operator secrets are not

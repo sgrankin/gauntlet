@@ -383,13 +383,13 @@ running a check's command, and provides a result file for reporting
 **Operator secrets are stripped from candidate-code environments.** The
 daemon's own credential env vars — `github`'s `token-env` in static-token
 mode, `slack`'s `app-token-env`/`bot-token-env`, `summarize`'s
-`api-key-env` (config-named, never a hardcoded list — see
+`token-env` (config-named, never a hardcoded list — see
 [config.md](config.md)) — are removed by exact name from a candidate
 command's environment on the local executor, before this contract's own
 `GAUNTLET_*` variables are added. This covers every candidate-code job: an
 ordinary check, an `image` build, and a `receipt` producer (see
 ["Receipts"](#receipts) above) alike — none of them ever needs the
-daemon's own GitHub/Slack/Anthropic credentials to do its job, and a
+daemon's own GitHub/Slack/OpenAI credentials to do its job, and a
 repository's own commands are effectively attacker-controlled the moment
 anyone can push a `for/` ref. **Post-land hooks are exempt**: a hook's
 command comes from the daemon's own operator-written config
@@ -611,7 +611,7 @@ steps (a migration tool's applied-migrations ledger), never to gauntlet.
 **Credentials.** Deploy commands are candidate-code class — landed and gated,
 but still repo-authored — so the operator-secret stripping described above
 applies to them unchanged: a deploy node never sees the daemon's own
-GitHub/Slack/Anthropic credentials. (Post-land hooks are the exemption, and
+GitHub/Slack/OpenAI credentials. (Post-land hooks are the exemption, and
 stay the only one — a hook's command comes from the operator's own config.)
 Deploy credentials arrive the way check credentials do: fixed `env` on an
 operator-owned executor profile, or workload identity on the builder host.

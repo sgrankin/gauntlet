@@ -23,7 +23,7 @@ import (
 )
 
 // fakeSummarizer is a scriptable Config.MergeBody stand-in that sleeps for a
-// fixed duration per call (simulating a real Messages API round trip) and
+// fixed duration per call (simulating a real Codex round trip) and
 // records the maximum number of calls ever in flight simultaneously — the
 // property precomputeMergeBodies exists to bound.
 type fakeSummarizer struct {

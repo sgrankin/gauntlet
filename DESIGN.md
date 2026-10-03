@@ -6,7 +6,7 @@ environment lanes over deploy refs, repo-declared deploy graphs, `/deploys`
 UI, API/MCP, `gauntlet deploy`/`promote`) — serial/batch/speculate
 modes, local+container executors, a shared-services pool, dashboard/API/MCP,
 Slack duplex with reaction commands, GitHub statuses, post-land hooks,
-Claude merge summaries, full log capture, auto-retry, park persistence, and
+Codex merge summaries, full log capture, auto-retry, park persistence, and
 desired-state deployment dispatch are all shipped; post-completion
 consistency audit done; linear landings, GitHub PR/stack admission, and
 Gerrit change admission added · **Date:** 2026-10-02
@@ -56,8 +56,8 @@ entries below; they remain as the historical record of the earlier design.
 | **KEPT** | Generic container mounts, not a dedicated docker-socket flag | `executor`'s `mount` (host path + in-container path + optional `readonly`), config-shaped exactly like `cache`: one primitive that happens to cover the docker-socket/testcontainers case, rather than a `docker-socket true`-style special-case knob that only ever does one thing. Covers whatever else a repo's checks need visible from the host filesystem, for free. The trust change a socket mount makes is real and is the operator's own explicit, documented choice, not something this feature quietly enables: mounting `/var/run/docker.sock` hands every check — i.e. anyone who can push a `for/` ref — full control of the host docker daemon, root-equivalent on most setups; docs/setup.md's "Container executor" guide says so bluntly, including that `readonly` does not narrow the socket's own API surface. |
 | **KEPT** | Executor as plugin interface | "Run this suite against this tree, return verdict + logs." Impls: local command (v1), container-on-builder, GitHub Actions dispatch-and-await (reuse existing workflow defs at work). What "green" means is the executor's contract; the core never knows. |
 | **KEPT** | Channels as the duplex plugin abstraction | Events out (queued / testing / verdict), commands in (retry, cancel, clean-build, status). Slack (socket mode — outbound websocket, no ingress; threading; reaction commands like `:recycle:` = retry), GitHub commit status (PAT, v1) → Checks API (App, later), web dashboard, CLI, stdout — all siblings of one interface. Commands defined by the core; channels transport. |
-| **KEPT** | Templated merge commit | Subject `Merge <topic> (<author>)` — the `--first-parent` view should carry information. Trailers for machines: `Gauntlet-Ref:`, `Gauntlet-Run:`, CI URL. Optional Claude-generated summary in the body. Template in per-repo config. |
-| **KEPT** | Workload identity lives on the builder host | Azure managed identity / cloud-native federation is a property of where the executor runs, not of the queue. The daemon injects job metadata, not credentials. Daemon-side secrets (Slack, GitHub, Anthropic) from its own store. |
+| **KEPT** | Templated merge commit | Subject `Merge <topic> (<author>)` — the `--first-parent` view should carry information. Trailers for machines: `Gauntlet-Ref:`, `Gauntlet-Run:`, CI URL. Optional Codex-generated summary in the body. Template in per-repo config. |
+| **KEPT** | Workload identity lives on the builder host | Azure managed identity / cloud-native federation is a property of where the executor runs, not of the queue. The daemon injects job metadata, not credentials. Daemon-side secrets (Slack, GitHub, OpenAI) from its own store. |
 | **AMENDED (D1–D4): deployment is desired-state dispatch** | ~~Deployments as post-land hooks — a hook stage on the land event is the whole deployment story~~ → hooks stay for *land reactions*; **deployment** becomes per-environment lanes reconciling `refs/heads/deploy/<env>` (desired: human- or, under `track`, daemon-pushed) against `refs/gauntlet/deployed/<env>` (observed: daemon-owned, advanced only on an all-green graph run) | A hook is edge-triggered and keyed to the merge that just landed, so there was no surface anywhere for "environment `prod`, revision X, now" — no older revision, no re-deploy, no promotion, no per-environment view. Lanes run repo-declared `deploy` node graphs — `after` + `max-parallel`, the check grammar, the same scheduler shape — read from **the deployed revision's own tree**, so rolling back runs last week's graph. Cross-environment ordering is **source chaining** (`source env="dev"`: one lane's input is another's observed output), never a cross-env scheduler — the durable multi-step workflow state this codebase killed Temporal to avoid. Level-triggered by construction: rollback, promotion, and re-deploy are ref pushes; **approval is branch protection** on `deploy/*` (host-enforced, audited, daemon-independent — no API route can move a desired ref); crash recovery is rescan (Invariant 4). The hard boundary survives, sharpened: gauntlet is a deploy **dispatcher** (schedule, execute, record, display), never a CD **controller** (no health checks, no rollback decisions, no traffic shaping) — those live in the deploy command or the CD system it hands off to. `internal/ghstatus` ignores deploy events exactly as it ignores `EventHookFinished`, and for the same reason: a commit status describes the *landing*, and repainting an already-green landing over a CD outcome would blur that hand-off boundary — deploy failures are Slack's, the dashboard's, and the log channel's job to surface. Ratified from docs/design/deployment.md's proposed amendment. |
 | **KILLED** | Config that computes (EDN, or any lisp-shaped config) | Config is dumb data, forever. If config ever needs conditionals/loops/abstraction, the "jobs are commands, no DSL" wall is breached — the fix is moving logic back into repo scripts, not upgrading the config language. (Also binds CUE, if it wins: plain-data mode only.) |
 | **KEPT** | KDL for both config files (CUE and TOML rejected) | Head-to-head spike: CUE wins maturity and error messages; KDL decisively wins legibility of the repo-side check spec — the adoption surface every team writes — and one language/one dep beats a split. kdl-go's staleness accepted with mitigations: Go-side validation pass, all parsing isolated in one `config` package unmarshaling to plain structs (swap stays cheap), vendor/fork as last resort. If CUE ever returns: plain-data mode only. |
@@ -156,7 +156,7 @@ The review checklist. Every plan and every implementation gets graded against th
    your proxy's job. OTLP span exporter as a config option — same run records,
    exported instead of stored.
 4. **Porcelain & polish.** `land` one-worder for git and jj; post-land hooks
-   (deployments); Claude merge summaries; speculation if queue-depth data
+   (deployments); Codex merge summaries; speculation if queue-depth data
    demands it.
 
 ## Watch items
@@ -242,7 +242,7 @@ First live run (crashtest demo, 2026-07-05) surfaced three more:
 - **Apple `container` has no named volumes** — cache "volumes" work as
   host-path bind mounts (an absolute path in the cache name slot). Config
   semantics should acknowledge both forms explicitly per runtime.
-- **`summarize`'s Messages API call runs synchronously on the reconcile
+- **`summarize`'s Codex call runs synchronously on the reconcile
   loop**, before checks start, once per clean trial — its `timeout`
   (default 5s, down from 10s) bounds a stall of *every* target's
   reconciliation, not just the one being summarized. Fine while it's a

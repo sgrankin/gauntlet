@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/sgrankin/gauntlet/internal/config"
@@ -14,6 +15,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/ghauth"
 	"github.com/sgrankin/gauntlet/internal/ghstatus"
 	"github.com/sgrankin/gauntlet/internal/history"
+	"github.com/sgrankin/gauntlet/internal/llm"
 	"github.com/sgrankin/gauntlet/internal/queue"
 	"github.com/sgrankin/gauntlet/internal/slack"
 	"github.com/sgrankin/gauntlet/internal/summarize"
@@ -151,33 +153,19 @@ func parseOutcome(s string) (core.Outcome, bool) {
 	}
 }
 
-// buildSummarizer constructs the optional Claude-written merge-commit-body
-// enricher per cfg.Summarize. A nil section (disabled) returns a nil
-// *summarize.Summarizer and no error. Since the section was explicitly
-// configured, an empty API key is a loud config error, same rationale as
-// buildGHStatusChannel/buildSlackChannel: the admin turned the feature on
-// and gave it no way to authenticate.
-//
-// git is the minimal summarize.Git surface (Log/DiffStat); cmd passes its
-// already-constructed *gitx.Repo, which satisfies it structurally.
+// buildSummarizer uses the same isolated Codex runner as failure review.
 func buildSummarizer(cfg *config.Daemon, git summarize.Git) (*summarize.Summarizer, error) {
-	if cfg.Summarize == nil {
+	f := cfg.Summarize
+	if f == nil {
 		return nil, nil
 	}
-	key := os.Getenv(cfg.Summarize.APIKeyEnv)
-	if key == "" {
-		return nil, fmt.Errorf("summarize: %s is empty or unset, but summarize is configured with model %s", cfg.Summarize.APIKeyEnv, cfg.Summarize.Model)
+	token := os.Getenv(f.TokenEnv)
+	if token == "" {
+		return nil, fmt.Errorf("summarize: %s is empty or unset", f.TokenEnv)
 	}
-	effort := cfg.Summarize.Effort
-	if effort == "none" {
-		effort = "" // omit output_config entirely (validated sentinel)
+	executable, err := exec.LookPath(f.Codex)
+	if err != nil {
+		return nil, fmt.Errorf("summarize: Codex executable unavailable")
 	}
-	return summarize.New(summarize.Params{
-		Git:     git,
-		Model:   cfg.Summarize.Model,
-		Effort:  effort,
-		APIKey:  key,
-		Timeout: cfg.Summarize.Timeout,
-		Log:     os.Stderr,
-	}), nil
+	return summarize.New(summarize.Params{Git: git, Runner: llm.Codex{Model: f.Model, Token: token, Auth: f.Auth, APIURL: f.APIURL, Executable: executable, Effort: f.Effort}, Timeout: f.Timeout, Log: os.Stderr}), nil
 }

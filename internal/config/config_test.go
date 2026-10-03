@@ -308,8 +308,8 @@ summarize {
 	if d.Summarize.Model != defaultSummarizeModel {
 		t.Errorf("Summarize.Model = %q, want default %q", d.Summarize.Model, defaultSummarizeModel)
 	}
-	if d.Summarize.APIKeyEnv != defaultSummarizeAPIKeyEnv {
-		t.Errorf("Summarize.APIKeyEnv = %q, want default %q", d.Summarize.APIKeyEnv, defaultSummarizeAPIKeyEnv)
+	if d.Summarize.TokenEnv != defaultSummarizeTokenEnv {
+		t.Errorf("Summarize.TokenEnv = %q, want default %q", d.Summarize.TokenEnv, defaultSummarizeTokenEnv)
 	}
 	if d.Summarize.Effort != defaultSummarizeEffort {
 		t.Errorf("Summarize.Effort = %q, want default %q", d.Summarize.Effort, defaultSummarizeEffort)
@@ -332,8 +332,8 @@ committer {
 }
 target "main" branch="main"
 summarize {
-    model "claude-opus-4-8"
-    api-key-env "MY_ANTHROPIC_KEY"
+    model "chosen-model"
+    token-env "MY_OPENAI_KEY"
     effort "high"
     timeout "30s"
 }
@@ -348,11 +348,11 @@ summarize {
 	if d.Summarize == nil {
 		t.Fatal("Summarize = nil, want non-nil")
 	}
-	if d.Summarize.Model != "claude-opus-4-8" {
+	if d.Summarize.Model != "chosen-model" {
 		t.Errorf("Summarize.Model = %q", d.Summarize.Model)
 	}
-	if d.Summarize.APIKeyEnv != "MY_ANTHROPIC_KEY" {
-		t.Errorf("Summarize.APIKeyEnv = %q", d.Summarize.APIKeyEnv)
+	if d.Summarize.TokenEnv != "MY_OPENAI_KEY" {
+		t.Errorf("Summarize.TokenEnv = %q", d.Summarize.TokenEnv)
 	}
 	if d.Summarize.Effort != "high" {
 		t.Errorf("Summarize.Effort = %q, want %q", d.Summarize.Effort, "high")
@@ -1358,14 +1358,14 @@ committer {
 }
 target "main" branch="main"
 summarize {
-    model "claude-haiku-4-5"
+    model "chosen-model"
     bogus "nope"
 }
 `,
 			wantErr: "summarize",
 		},
 		{
-			// Semantic validation: effort must be one of the claude-api
+			// Semantic validation: effort must be one of the Codex
 			// skill's legal output_config.effort values.
 			name: "summarize with invalid effort",
 			kdl: `
@@ -2940,5 +2940,47 @@ policy {
 	}
 	if !cfg.EmergencyMerges || cfg.CircuitBreaker.Threshold != 4 || cfg.Policy.Timeout != 100*time.Millisecond || len(cfg.Policy.Teams) != 1 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+}
+
+func TestSummarizeCodexConfiguration(t *testing.T) {
+	for _, tc := range []struct{ name, block, want string }{
+		{"chatgpt", `auth "chatgpt"`, ""},
+		{"invalid auth", `auth "other"`, "auth"},
+		{"invalid endpoint", `api-url "https://user:password@example.com/v1"`, "api-url"},
+		{"invalid credential variable", `token-env "BAD=NAME"`, "token-env"},
+		{"invalid effort", `effort "max"`, "effort"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "gauntlet.kdl")
+			text := `remote "https://example.com/repo.git"
+committer { name "Gauntlet"; email "gauntlet@example.com"; }
+target "main" branch="main"
+summarize {
+` + tc.block + "\n}\n"
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadDaemon(path)
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("want %s error, got %v", tc.want, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Summarize.TokenEnv != "CODEX_ACCESS_TOKEN" || cfg.Summarize.Codex != "codex" {
+				t.Fatalf("unexpected config: %+v", cfg.Summarize)
+			}
+			found := false
+			for _, name := range cfg.SecretEnvNames() {
+				found = found || name == "CODEX_ACCESS_TOKEN"
+			}
+			if !found {
+				t.Fatal("summary credential missing from check secret filter")
+			}
+		})
 	}
 }

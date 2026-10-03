@@ -14,7 +14,7 @@ import (
 // of N. Fanning the calls out — still each individually best-effort per
 // Config.MergeBody's own contract — bounds wall clock to roughly one
 // timeout regardless of N. The cap keeps a large batch from opening dozens
-// of simultaneous Messages API calls; hand-rolled with a semaphore channel
+// of simultaneous Codex calls; hand-rolled with a semaphore channel
 // + sync.WaitGroup rather than golang.org/x/sync/errgroup, which isn't a
 // go.mod dependency of this module (only pulled in transitively) and isn't
 // worth adding for this alone.
