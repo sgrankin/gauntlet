@@ -1,5 +1,5 @@
 # Gauntlet build/test/package targets. GNU make (the one on macOS and
-# Linux); no attempt at BSD-make portability. See docs/deploy.md for how
+# Linux); no attempt at BSD-make portability. See docs/operations/hosting.md for how
 # these fit into the two deployment topologies.
 
 BINARY  := gauntlet
@@ -38,7 +38,7 @@ clean:
 # every target archive and the ghcr images without publishing anything or
 # needing a real tag/git history. goreleaser is pinned as a go.mod tool
 # dependency (`tool` directive), so `go tool` runs the exact version the
-# module records — same binary CI uses. See docs/deploy.md "Releases".
+# module records — same binary CI uses. See docs/operations/releases.md.
 release-snapshot:
 	go tool goreleaser release --snapshot --clean --skip=publish,docker
 
@@ -65,3 +65,13 @@ release:
 	}
 	git tag $(VERSION)
 	git push origin $(VERSION)
+
+# Install requirements-docs.txt into .venv-docs first, or override DOCS_PYTHON.
+DOCS_PYTHON ?= .venv-docs/bin/python
+.PHONY: docs-check docs-serve
+docs-check:
+	$(DOCS_PYTHON) scripts/check-doc-links.py
+	$(DOCS_PYTHON) -m mkdocs build --strict
+
+docs-serve:
+	$(DOCS_PYTHON) -m mkdocs serve

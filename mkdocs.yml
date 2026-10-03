@@ -1,0 +1,106 @@
+site_name: Gauntlet
+site_description: Verify and publish exact target history.
+site_url: https://sgrankin.github.io/gauntlet/
+repo_url: https://github.com/sgrankin/gauntlet
+repo_name: sgrankin/gauntlet
+edit_uri: edit/main/docs/
+strict: true
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    unrecognized_links: warn
+    anchors: warn
+theme:
+  name: material
+  features:
+  - navigation.sections
+  - navigation.footer
+  - content.code.copy
+  - content.action.edit
+  - search.suggest
+  - search.highlight
+  palette:
+  - scheme: default
+    primary: blue grey
+    toggle:
+      icon: material/weather-night
+      name: Dark mode
+  - scheme: slate
+    primary: amber
+    toggle:
+      icon: material/weather-sunny
+      name: Light mode
+plugins:
+- search
+markdown_extensions:
+- admonition
+- attr_list
+- tables
+- pymdownx.superfences
+- pymdownx.highlight
+nav:
+- Home: index.md
+- Guides:
+  - Quickstart: guides/quickstart.md
+  - Landing changes: guides/landing.md
+  - Conditional checks: guides/conditional-checks.md
+  - Container executor: guides/containers.md
+  - Deployment: guides/deployment.md
+  - Failure investigation: guides/failure-review.md
+  - Gerrit changes: guides/gerrit.md
+  - GitHub credentials: guides/github-auth.md
+  - GitHub PRs and stacks: guides/github.md
+  - Incident controls: guides/incidents.md
+  - Writing policy: guides/policy.md
+  - Receipts: guides/receipts.md
+  - Slack setup: guides/slack.md
+  - Telemetry: guides/telemetry.md
+  - Validating: guides/validating.md
+- Reference:
+  - Daemon configuration: reference/daemon.md
+  - Targets and scheduling: reference/targets.md
+  - Summaries and post-land hooks: reference/automation.md
+  - Writing checks: reference/checks.md
+  - CLI: reference/cli.md
+  - Deploy nodes: reference/deploy-nodes.md
+  - Deployment configuration: reference/deployment.md
+  - Check environment reference: reference/environment.md
+  - Execution configuration: reference/execution.md
+  - Failure review configuration: reference/failure-review.md
+  - Forge configuration: reference/github.md
+  - HTTP API: reference/http-api.md
+  - Candidate-built images: reference/images.md
+  - Incident configuration: reference/incidents.md
+  - MCP: reference/mcp.md
+  - History, dashboard, and telemetry: reference/observability.md
+  - Operator policy: reference/policy.md
+  - Receipts: reference/receipts.md
+  - Shared services: reference/services.md
+  - Commit signing: reference/signing.md
+- Operations:
+  - Maintaining the documentation: operations/documentation.md
+  - Hosting the daemon: operations/hosting.md
+  - Releases: operations/releases.md
+  - Security and access: operations/security.md
+  - State, retention, and backups: operations/storage.md
+- Architecture:
+  - Deployment model: architecture/deployment.md
+  - Known limits: architecture/limits.md
+  - Architecture: architecture/overview.md
+  - Queue modes: architecture/queue-modes.md
+  - Queue reconciliation: architecture/queue.md
+  - Review identity and host completion: architecture/reviews.md
+  - Scaling: architecture/scaling.md
+  - Shared service pool: architecture/services.md
+- Host runbooks:
+  - Immutable Azure VM templates: runbooks/azure-immutable-templates.md
+  - Azure VM operations: runbooks/azure-operations.md
+  - Azure VM Terraform alternative: runbooks/azure-terraform.md
+  - Immutable Azure VM setup: runbooks/azure-vm-immutable.md
+  - Azure VM setup: runbooks/azure-vm.md
+  - 'Runbook: deploy gauntlet on Linux (production)': runbooks/deploy-linux.md
+  - 'Runbook: run gauntlet locally on macOS (dev loop)': runbooks/deploy-macos-dev.md
+  - 'Runbook: gauntlet acceptance checklist': runbooks/verify.md

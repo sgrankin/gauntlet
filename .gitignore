@@ -1,2 +1,5 @@
 /gauntlet
 /dist/
+
+/site/
+/.venv-docs/

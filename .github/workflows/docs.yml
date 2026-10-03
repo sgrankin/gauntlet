@@ -1,0 +1,53 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'README.md', 'DESIGN.md', 'mkdocs.yml', 'requirements-docs.txt', 'scripts/check-doc-links.py', '.github/workflows/docs.yml']
+  pull_request:
+    paths: ['docs/**', 'README.md', 'DESIGN.md', 'mkdocs.yml', 'requirements-docs.txt', 'scripts/check-doc-links.py', '.github/workflows/docs.yml']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to GitHub Pages
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - run: pip install -r requirements-docs.txt
+      - run: python scripts/check-doc-links.py
+      - run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
