@@ -13,8 +13,9 @@ Git-ref-driven deployment.
 
 ## Documentation
 
-Start with the [quickstart](docs/guides/quickstart.md) or browse the
-[documentation index](docs/index.md). References cover
+Browse the [documentation site](https://sgrankin.github.io/gauntlet/), start with
+the [quickstart](docs/guides/quickstart.md), or read the
+[Markdown index](docs/index.md) on GitHub. References cover
 [daemon configuration](docs/reference/daemon.md), [checks](docs/reference/checks.md),
 and [policy](docs/reference/policy.md). The [architecture](docs/architecture/overview.md)
 explains correctness and recovery; [known limits](docs/architecture/limits.md)
