@@ -325,11 +325,12 @@ type GitHub struct {
 // policy is explicit because direct target pushes do not run the forge's
 // merge-button gate. The default requires one approval of the current head.
 type GitHubPullRequests struct {
-	WebhookSecretEnv string        `kdl:"webhook-secret-env"`
-	PollInterval     time.Duration `kdl:"poll-interval,format:units"`
-	Bot              string        `kdl:"bot"`
-	Approvals        *int          `kdl:"approvals"`
-	RequiredChecks   []string      `kdl:"require-check"`
+	WebhookSecretEnv             string        `kdl:"webhook-secret-env"`
+	PollInterval                 time.Duration `kdl:"poll-interval,format:units"`
+	Bot                          string        `kdl:"bot"`
+	Approvals                    *int          `kdl:"approvals"`
+	RequiredChecks               []string      `kdl:"require-check"`
+	RequireResolvedConversations bool          `kdl:"require-resolved-conversations"`
 }
 
 type Gerrit struct {

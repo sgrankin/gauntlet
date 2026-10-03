@@ -19,6 +19,7 @@ target "main" { branch "main"; }
 		invalid     bool
 	}{
 		{"github", `github "acme/widgets" { pull-requests { bot "lander"; approvals 2; require-check "lint" "build"; }; }`, false},
+		{"conversations", `github "acme/widgets" { pull-requests { approvals 0; require-resolved-conversations true; }; }`, false},
 		{"github-poll", `github "acme/widgets" { pull-requests { poll-interval "5s"; }; }`, false},
 		{"webhook", `dashboard { bind "127.0.0.1:8080"; }
 github "acme/widgets" { pull-requests { webhook-secret-env "HOOK_SECRET"; }; }`, false},
@@ -54,6 +55,9 @@ gerrit "https://review.example.com" { project "widgets"; }`, true},
 				t.Fatalf("bad PR config: %+v", cfg.GitHub.PullRequests)
 			}
 			if p := cfg.GitHub.PullRequests; p != nil {
+				if p.RequireResolvedConversations != (tc.name == "conversations") || (tc.name == "conversations" && *p.Approvals != 0) {
+					t.Fatalf("bad conversation/approval policy: %+v", p)
+				}
 				want := 30 * time.Second
 				if tc.name == "webhook" {
 					want = 5 * time.Minute

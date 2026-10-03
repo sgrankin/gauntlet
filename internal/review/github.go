@@ -42,10 +42,11 @@ type GitHubParams struct {
 	Tokens            Tokens
 	Git               Git
 	// Targets maps real branch names to queue target names.
-	Targets        map[string]string
-	Approvals      int
-	RequiredChecks []string
-	PollInterval   time.Duration
+	Targets                      map[string]string
+	Approvals                    int
+	RequiredChecks               []string
+	RequireResolvedConversations bool
+	PollInterval                 time.Duration
 }
 
 type GitHub struct {
@@ -301,6 +302,12 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 	}
 	if approvals < g.p.Approvals {
 		return false, nil
+	}
+	if g.p.RequireResolvedConversations {
+		resolved, err := g.conversationsResolved(ctx, p.Number)
+		if err != nil || !resolved {
+			return false, err
+		}
 	}
 	if len(g.p.RequiredChecks) == 0 {
 		return true, nil

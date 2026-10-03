@@ -30,14 +30,18 @@ func (g *reviewGit) ReviewBaseLanded(context.Context, string, string) (bool, err
 }
 
 type githubFixture struct {
-	failed     bool
-	pulls      []pull
-	commands   map[int][]comment
-	approvals  map[int]bool
-	permission string
-	responses  map[string]any
-	g          *GitHub
-	git        *reviewGit
+	failed        bool
+	pulls         []pull
+	commands      map[int][]comment
+	approvals     map[int]bool
+	permission    string
+	responses     map[string]any
+	threadPages   []any
+	threadCalls   int
+	threadStatus  int
+	threadCursors []string
+	g             *GitHub
+	git           *reviewGit
 }
 
 func newGitHubFixture(t *testing.T) *githubFixture {
@@ -58,6 +62,37 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/repos/acme/repo")
 		write := func(v any) { w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(v) }
+		if r.URL.Path == "/graphql" || r.URL.Path == "/api/graphql" {
+			var input struct {
+				Query     string
+				Variables struct {
+					Owner, Repo string
+					Number      int
+					Cursor      *string
+				}
+			}
+			if r.Method != "POST" || json.NewDecoder(r.Body).Decode(&input) != nil || !strings.Contains(input.Query, "reviewThreads") || input.Variables.Owner != "acme" || input.Variables.Repo != "repo" || input.Variables.Number != 1 {
+				t.Error("incorrect review-thread query")
+			}
+			if f.threadStatus != 0 {
+				http.Error(w, "unavailable", f.threadStatus)
+				return
+			}
+			if f.threadCalls >= len(f.threadPages) {
+				t.Error("unexpected review-thread page")
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			cursor := ""
+			if input.Variables.Cursor != nil {
+				cursor = *input.Variables.Cursor
+			}
+			f.threadCursors = append(f.threadCursors, cursor)
+			page := f.threadPages[f.threadCalls]
+			f.threadCalls++
+			write(page)
+			return
+		}
 		if v, ok := f.responses[strings.TrimPrefix(r.URL.RequestURI(), "/repos/acme/repo")]; ok {
 			write(v)
 			return

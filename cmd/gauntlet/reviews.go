@@ -18,6 +18,7 @@ import (
 func githubReviewParams(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) review.GitHubParams {
 	p := cfg.GitHub.PullRequests
 	params := review.GitHubParams{Repo: cfg.GitHub.Repo, APIURL: cfg.GitHub.APIURL, Git: repo, Targets: map[string]string{}, Bot: p.Bot, Approvals: *p.Approvals, RequiredChecks: p.RequiredChecks, PollInterval: p.PollInterval}
+	params.RequireResolvedConversations = p.RequireResolvedConversations
 	if app != nil {
 		params.Tokens = app
 	} else {

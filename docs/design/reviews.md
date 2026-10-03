@@ -57,7 +57,8 @@ github "acme/widgets" {
     token-env "GITHUB_TOKEN"
     pull-requests {
         bot "gauntlet"
-        approvals 1
+        approvals 0
+        require-resolved-conversations true
         require-check "lint"
     }
 }
@@ -127,6 +128,16 @@ collaborator permissions; existing status/trial/receipt features may need
 additional write permissions. Git transport must also be authenticated
 (the existing App token transport works, as do configured Git credentials).
 
+`approvals` defaults to one; set it to zero to require no positive approval.
+A trusted reviewer's outstanding changes-requested review still blocks admission.
+`require-resolved-conversations` defaults to false. When enabled, every review
+thread must be resolved, including outdated threads. Issue comments without a
+review thread are not resolution gates. Gauntlet reads all pages through GitHub's
+GraphQL API and checks again before landing; permission errors, partial GraphQL
+errors, or unavailable thread data block the operation rather than bypassing it.
+This works independently of the approval count and configured required checks.
+GitHub Enterprise uses its `/api/graphql` endpoint alongside REST `/api/v3`.
+
 ## Polling and optional webhooks
 
 Queue ticks and GitHub admission refreshes have separate cadences. Without
@@ -163,7 +174,8 @@ removed from candidate check environments.
 Set a GitHub App's webhook URL, or a repository webhook URL, to
 `https://<your-ingress>/hooks/github`, choose JSON, and configure the same random
 secret on GitHub and in the daemon environment. Subscribe to pull requests,
-issue comments, pull request reviews, check runs/suites, statuses, and pushes.
+issue comments, pull request reviews, review threads (`pull_request_review_thread`
+for resolution changes), check runs/suites, statuses, and pushes.
 Reverse-proxy that endpoint to the dashboard listener; expose only that route
 publicly, keeping the existing dashboard, admin API, and MCP access private.
 The daemon listener remains HTTP behind the HTTPS ingress.

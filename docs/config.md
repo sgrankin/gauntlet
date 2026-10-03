@@ -1125,6 +1125,23 @@ git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=/etc/gauntlet/allowed_signer
 
 ## Review intake
 
+For no mandatory approvals but all review conversations resolved:
+
+```kdl
+github "acme/widgets" {
+    pull-requests {
+        approvals 0
+        require-resolved-conversations true
+    }
+}
+```
+
+The conversation gate is optional (default false), includes outdated review
+threads, and is rechecked before landing. It uses GitHub GraphQL with the same
+token as REST; inaccessible or incomplete thread data blocks admission. An
+outstanding changes-requested review from a trusted reviewer still blocks even
+with `approvals 0`. `require-check` gates remain independent.
+
 A `github` block enables status reporting. Its optional `pull-requests` block
 also enables review admission and `@gauntlet` commands. `poll-interval` within
 that block controls GitHub admission refreshes independently of the daemon
