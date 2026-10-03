@@ -6,6 +6,9 @@ The daemon constructs linear target history, runs your repo's `.gauntlet.kdl`
 checks, and lands the exact tested tip with a compare-and-swap push.
 Each submission becomes one commit; GitHub PRs use their title and description.
 Serial, batch, and speculative verification all support prerequisite order.
+Optional incident controls can record an explicit validation waiver; see
+[incident controls](docs/design/incident-controls.md) and
+[operator Rego policy](docs/design/policy.md).
 
 Requires git 2.40 or newer (`git merge-tree --write-tree --merge-base`).
 See [review integration](docs/design/reviews.md) for stack commands,
@@ -14,7 +17,7 @@ limitation, and Gerrit setup.
 
 ## Documentation
 
-- [docs/roadmap.md](docs/roadmap.md) — requested features and open design decisions.
+- [docs/roadmap.md](docs/roadmap.md) — implemented feature scope and limits.
 - [DESIGN.md](DESIGN.md) — the design: model, decision ledger, invariants.
 - [docs/config.md](docs/config.md) — daemon configuration reference
   (history, dashboard, GitHub, Slack, OTLP, executors, services,

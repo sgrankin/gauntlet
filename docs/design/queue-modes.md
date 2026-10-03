@@ -368,17 +368,17 @@ precomputed concurrently, capped at 4 in flight, so the stall is roughly
 ⌈N/4⌉ × timeout rather than N × timeout. Speculate does not multiply — one call
 per candidate, the same total as serial, just issued as the window fills.
 
+## Smaller-prefix batch recovery
+
+`on-batch-red "bisect"` now verifies successively smaller dependency-valid prefixes.
+Model suspects can choose a smaller prefix but cannot supply a verdict. See
+[failure investigation](failure-review.md) for the implemented recovery contract.
+
 ## Deliberately not built
 
 These are reserved config surface, validated but rejected at daemon construction,
 so config stays forward-compatible without ever silently no-opping:
 
-- **Bisect batch red-recovery** (`on-batch-red "bisect"`): splitting a failed set
-  and recursing to find the culprit in fewer rounds. Only serial fallback is
-  implemented; bisect needs a recursive sub-batch state machine and its own
-  crash-recovery story, and its payoff depends on batch red-rate and size — the
-  exact numbers the dashboard's queue-depth data is being collected to inform.
-  Building it now is tuning ahead of measurement.
 - **Adaptive window governor** (`window-start`, `window-max`,
   `window-halve-on-red`): a window that starts small, grows on green, and halves
   on red. Only the fixed `window` is implemented. The governor would slot in

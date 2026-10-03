@@ -1002,22 +1002,16 @@ target "staging" branch="staging" {
   A repo spec that raises `max-parallel` changes that arithmetic (up to
   `window × max-parallel` per target); the executor's `max-executions`
   cap is the knob that restores a real host-wide bound.
-- **`on-batch-red`** — the batch red-recovery strategy. `"serial"`
-  (default) is the only strategy implemented: on a red batch, every
-  member re-queues unparked and the next refill for this target forms
-  them one at a time (serial semantics) until the culprit is found and
-  parked; batching resumes automatically once a landing occurs.
-  `"bisect"` (split the failed set and recurse to find the culprit in
-  fewer rounds) is a documented growth path only — it's accepted by
-  config parsing so the knob is forward-compatible, but **`LoadDaemon`
-  rejects it with a "reserved for a future release" error**; it is not
-  silently treated as `"serial"`. Legal only with `mode "batch"`.
+- **`on-batch-red`** — `"serial"` (default) retries failed batch members
+  individually. `"bisect"` verifies smaller dependency-valid prefixes, normally
+  half the failed group; model suspects may shorten the next prefix. Every prefix
+  gets real checks before landing its exact tested tip. No model hypothesis parks
+  a candidate. Legal only with `mode "batch"`.
 - **Reserved, rejected if set**: `window-start`, `window-max`, and
   `window-halve-on-red` reserve config surface for a possible future
   adaptive speculation-window governor (start small, grow on green, halve
   on red). Only the fixed `window` above is implemented; setting any of
-  these three on any target is a load-time error (same "reserved for a
-  future release" rationale as `on-batch-red "bisect"`), so a config that
+  these three on any target is a load-time error, so a config that
   names them fails loudly rather than silently no-opping.
 
 ## Formatting
@@ -1141,20 +1135,22 @@ checks are recorded as **waived**, never passed or ordinary skipped. Configured
 receipt/provenance steps (and their image builds) remain required. Conflicts,
 forge authorization/readiness, signing, and the target CAS remain enforced.
 Allowing this one request during a pause requires its separate pause override;
-the target remains paused afterward. An emergency request is not shutdown drain.
+the target remains paused afterward. **Verify and merge while paused**
+(`merge-paused` with `OverridePause true`) runs all checks for the selected prefix
+and leaves the pause intact. An emergency request is not shutdown drain.
 
 The durable control/audit file is `queue-controls.json` under the daemon state
 directory. Invalid state blocks startup. A write failure stops publication rather
-than acknowledging a pause that was forgotten. The last 500 accepted operator
-actions are retained there; emergency run history also records the actor/reason.
+than acknowledging a pause that was forgotten. Up to 500 accepted operator
+actions are retained there, subject to a shared storage bound; emergency run history also records the actor/reason.
 
 `POST /api/v1/control` accepts `Kind` (`pause`, `resume`, `urgent`,
-`merge-anyway`), `Target`, `Actor`, `Reason`, optional `OverridePause`, and
+`merge-paused`, `merge-anyway`), `Target`, `Actor`, `Reason`, optional `OverridePause`, and
 `Revisions` (`ref`, `sha`, `version`). Pause/resume accept target `*` for all
 targets. Commands are acknowledged as queued; the target status reports rejected
 requests or persistence failures. Urgency changes ordering without dropping
 prerequisites or bypassing verification. Existing work is not preempted merely
-for priority.
+for priority. After three urgent landings, eligible ordinary work gets a turn.
 
 ## Review intake
 
@@ -1212,7 +1208,8 @@ failure-review {
 
 `model` and `checks` are required. `auth` defaults to `api-key`; the other shown
 values are defaults. `max-retries` permits 1–3 extra executions per check per
-queue run. `timeout` bounds each classification (positive, at most 5 minutes),
+queue run. `max-run-retries` (default 3, range 1–20) adds a persistent shared
+budget across all selected checks in one run. `timeout` bounds each classification (positive, at most 5 minutes),
 not the check command. `max-output-bytes` limits the output tail sent to the
 model (256–65536 bytes). `api-url` defaults to `https://api.openai.com/v1` and
 must identify a Responses API endpoint base; use HTTPS for remote credentials.
@@ -1261,3 +1258,89 @@ when a flaky check recovers. Decisions and every attempt appear in check output
 and full logs. Classifications hold the check's execution slot, so the existing
 `max-executions` cap also bounds concurrent model calls. See the
 [failure-review design](design/failure-review.md) for the detailed contract.
+
+
+### Investigation tools and history
+
+Set `tools true` inside `failure-review` to expose bounded, read-only Git object,
+path, diff, and failure-history tools to Codex. Shell and web tools stay disabled.
+The model sees the run's actual member identities and source bases. Classification
+can report failure kind, suspects, and evidence, all labeled as hypotheses.
+[The investigation contract](design/failure-review.md) defines limits and isolation.
+
+`failure-review.db` keeps 30 days or 10,000 observations. The failed-run page links
+to history for each check; observed retry passes and model confidence are separate.
+`GET /api/v1/failures?check=NAME` returns up to 20 recent observations. Investigation
+traces live beside run logs and use existing log retention. No model call is needed
+for ordinary GitHub admission/failure feedback.
+
+## Infrastructure circuit breaker
+
+The breaker is opt-in and per target:
+
+```kdl
+circuit-breaker {
+    threshold 3
+    window "5m"
+    backoff "30s"
+    max-backoff "10m"
+}
+```
+
+These are defaults when the block is present. Threshold is 2–100; maximum backoff
+is at most one hour. Only executor/daemon infrastructure errors count, across
+distinct revisions. Ordinary red checks and model classifications do not open it.
+Suspension persists, stops dispatch/publication, and probes one change after
+bounded backoff. Recovery preserves manual pause. Target status exposes `circuit`.
+See [incident controls](design/incident-controls.md) for emergency command syntax,
+permissions, revision binding, and recovery.
+
+## Advanced admission policy
+
+Rego adds operator requirements to the simple gates. Inline and file policies are
+mutually exclusive. Files resolve beside the daemon config. For example, require
+an approval from the security team for sensitive paths, with no general approval
+minimum, and restrict emergency check bypass to administrators:
+
+```kdl
+policy {
+    timeout "100ms"
+    teams "acme/security"
+    rego r#"package gauntlet
+import rego.v1
+
+sensitive if {
+    some path in input.paths
+    startswith(path, "migrations/")
+}
+security_review if {
+    some user, review in input.forge.reviews
+    review.state == "APPROVED"
+    review.current
+    input.forge.teams["acme/security"][user]
+}
+default review_ok := false
+review_ok if not sensitive
+review_ok if security_review
+
+default override_ok := false
+override_ok if not input.emergency.skip_checks
+override_ok if input.forge.permission == "admin"
+
+requirements := [
+    {"name": "sensitive-path-review", "satisfied": review_ok, "reason": "Security approval is required for migrations"},
+    {"name": "emergency-authority", "satisfied": override_ok, "reason": "Only an administrator may bypass checks"},
+]
+decision := {"allow": every_requirement, "requirements": requirements}
+every_requirement := count([r | some r in requirements; not r.satisfied]) == 0
+"#
+}
+```
+
+Use `rego-file "admission.rego"` instead of `rego` to load a separate file.
+The [policy contract](design/policy.md) defines version-1 facts and adapter
+availability. Missing facts/decisions and evaluation errors deny. Network and
+nondeterministic capabilities are disabled. Policy compiles at startup and under
+`gauntlet validate`; local fixtures use `gauntlet policy-check -config ... -input ...`.
+Named decisions and hashes are audited; policy runs again with fresh facts before
+publication. This adds requirements; it cannot silently weaken existing gates.

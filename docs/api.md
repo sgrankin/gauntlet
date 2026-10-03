@@ -403,3 +403,39 @@ normal queue snapshots, history, and events, but are not remote branches.
 Use PR comments to withdraw GitHub requests, or change Gerrit readiness;
 do not push or delete these reserved slot names. See
 [review integration](design/reviews.md) for details.
+
+## Incident controls and failure observations
+
+`POST /api/v1/control` queues `pause`, `resume`, `urgent`, `merge-paused`, or `merge-anyway` with
+`Target`, `Actor`, and a mandatory `Reason`. Urgency and emergency landing require
+an ordered `Revisions` list of exact `ref`, `sha`, and `version` values from live
+status. Only pause/resume accept target `*`. `OverridePause` applies to one merge;
+it does not resume the queue. `merge-paused` requires this flag and runs all
+verification; `merge-anyway` waives validation. Forge request identities are reserved internally.
+
+A 202 response means queued, not applied. Check target `controlError`, `pause`,
+and `circuit` afterward. Stale selections require refreshing and a new request.
+Emergency merging must be enabled by the operator. It waives all validation;
+mandatory provenance, source authorization, signing, policy, and target CAS remain.
+The failed-run page exposes the same current-revision prefix selector beside logs.
+
+```sh
+gauntlet control -target main -actor operator -reason 'incident' pause
+gauntlet control -target main -actor operator -reason 'recovered' resume
+gauntlet control -target main -actor operator -reason 'emergency fix' \
+    -revisions '[{"ref":"REF","sha":"SHA","version":"VERSION"}]' merge-anyway
+```
+
+Protect admin routes with trusted ingress. Actor strings are audit context and do
+not authenticate callers. Cross-origin browser control requests are rejected.
+[MCP status](#mcp) exposes the same pause/suspension fields; investigation
+uses a separate read-only MCP server with no queue controls.
+
+`GET /api/v1/failures?check=NAME` returns 20 recent failure-review observations,
+`observedRetries`, and `observedRetryPasses`. It returns 503 when model history is
+disabled. The dashboard links these observations from check output. Fingerprints
+and actual outcomes are separate from model hypotheses and confidence.
+
+`gauntlet policy-check -config gauntlet.kdl -input facts.json` prints the policy
+hash and named decision, with unsuccessful exit on denial. It is a local fixture
+check and performs no forge writes or queue admission.

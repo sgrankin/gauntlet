@@ -19,7 +19,9 @@ older decision-ledger entries may be superseded by later decisions.
 
 ## Design and code
 
-- Land the exact tested commit. Push target and candidate refs with an
+- Normal landing requires the exact tested commit. An operator-enabled emergency
+  can waive validation explicitly; keep its revision binding, audit, mandatory
+  provenance, and fresh policy checks. Push target and candidate refs with an
   expected old SHA; recover from remote history after interrupted writes.
 - Keep the reconcile loop single-threaded. Workers return results rather
   than mutating queue state. Publish snapshots for concurrent readers.

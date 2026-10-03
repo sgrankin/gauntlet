@@ -99,7 +99,11 @@ entries below; they remain as the historical record of the earlier design.
 The review checklist. Every plan and every implementation gets graded against these.
 
 1. **Land exactly the tested SHA.** The merge commit that was tested is the
-   commit that lands — byte-identical, not "re-merge and hope."
+   commit that lands — byte-identical, not "re-merge and hope." An operator-enabled
+   emergency can explicitly waive validation for bound source revisions; land
+   its exact constructed tip and record waived checks, actor, and reason. Mandatory
+   provenance, fresh policy, signing, and CAS still apply. See
+   [incident controls](docs/design/incident-controls.md).
 2. **CAS everywhere.** Every push to the target is compare-and-swap with the
    expected old OID. A direct human push, a second daemon instance, or a
    replayed step must fail cleanly and trigger re-trial, never corrupt.

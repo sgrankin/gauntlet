@@ -1,61 +1,58 @@
-# Failure decisions and in-place retries
+# Failure investigation
 
-An operator may enable `failure-review` for named, repeatable checks. A failed
-command remains an in-flight check while its worker requests a decision. The
-model chooses one of `retry`, `abort`, or `abstain`, with confidence in that
-choice and a short evidence-based reason. It cannot return commands, edit the
-trial, approve a merge, or change policy.
+Failure review is an optional operator-owned wrapper around named, repeatable
+check commands. It retains the check worker's execution slot, workspace, services,
+and exact constructed revision until a final verdict is available. A model can
+request another execution; it cannot return a passing check or authorize landing.
 
-Gauntlet retries only `retry` decisions at or above `min-confidence`, within
-`max-retries`. Everything else retains the failed check. A rerun must actually
-pass; reporting `skipped` cannot clear an earlier failure. API refusal, malformed
-output, timeout, and provider errors also retain the failure. Infrastructure
-errors keep their existing handling rather than being reclassified as flakes.
-The ordinary failure/bubble/batch-fallback path runs after this bounded review.
+Codex CLI supplies both API-key and ChatGPT service-account authentication.
+Each invocation uses an empty workspace, private temporary home, explicit model,
+structured output schema, disabled shell/web tools, and a filtered environment.
+No user rules, config, or MCP servers are inherited. Invalid decisions, provider
+errors, low confidence, cancellation, and exhausted budgets retain the failure.
+The check must actually pass; a skipped retry cannot clear a previous failure.
 
-The retry happens inside the original worker. Its run ID, tested SHA, executor
-profile, workspace, candidate-built image, service leases, and execution slot
-remain fixed. Successful sibling checks are not repeated. Speculated successors
-can complete while the failing predecessor is being reviewed; a successful retry
-leaves their tested chain intact. A genuine target move, cancellation, or another
-check's terminal failure still invalidates work normally. Classification uses the
-worker's cancellation context and a separate per-decision timeout.
+## Tools and evidence
 
-This deliberately retries the entire named check command, not a framework-specific
-test case. Commands are opaque to Gauntlet. The operator must choose checks safe
-to repeat in their existing workspace and against their existing services; shared
-workspace mutations are not rolled back, and isolated mode retains this node's
-original private workspace. Hooks, deployment commands, image builds, and receipts
-are excluded. An operator can split expensive suites into independently retryable
-checks without teaching the queue their test framework.
+`tools true` installs only Gauntlet's investigation MCP server for that invocation.
+It can read file blobs, list/filter tree paths, compare approved commits, and read
+recent observations for the failing check. The capability file names immutable
+base, constructed-tip, original-head, and source-base objects for that run. It
+contains no credentials. Git replacement objects, external diffs, text conversion,
+and lazy fetch are disabled. Symlinks remain blobs rather than host paths.
 
-Original failure output, decisions, and rerun output are retained in the check's
-history output (up to 12 KiB per attempt and 64 KiB overall). Full attempt logs are
-kept separately and concatenated as zstd frames into the original log path, so the
-existing dashboard full-log link includes all attempts. Losing supplementary log
-writes does not change the verdict. CPU times sum across attempts, peak RSS takes
-the maximum, and check duration includes classification and retry time.
+Tools share limits of 24 calls, 256 KiB total output, 32 KiB per result, and five
+seconds per Git read. The classification deadline bounds the whole investigation.
+Truncated results are labeled; absence in a truncated result is not evidence.
+Source and logs are untrusted evidence, never instructions. Codex's bounded JSON
+trace lives beside the check log and follows run-log retention.
 
-## Providers and decision-model inspiration
+## Decisions and observed history
 
-Both API-key and ChatGPT access-token authentication use Codex CLI. Each call
-uses an empty temporary workspace/home, no user configuration or rules, shell
-tools disabled, and a read-only sandbox. API credentials are written only to
-that private temporary Codex home; access tokens are passed in its isolated
-environment. There is no separate direct-HTTP model adapter.
+Decisions contain `action` (`retry`, `abort`, `abstain`), confidence, reason,
+kind (`flake`, `regression`, `infrastructure`, `unknown`), suspected candidate refs,
+and evidence references. Suspects are filtered against the run's actual members.
+Confidence and classification are model hypotheses. Actual rerun outcomes are
+recorded separately in `failure-review.db`, with bounded output and whitespace
+normalized failure fingerprints. These are framework-neutral observations, not
+inferred test-case identities. Retention is 30 days or 10,000 observations.
 
-The evidence includes the check name, command, target, tested SHA, and a bounded
-output tail. It excludes service environment, credential values, and workspace
-paths. Repository output is untrusted evidence, explicitly distinguished from
-instructions. Enabling the feature authorizes sending the selected checks' output
-to the configured provider; operators should avoid secrets in test logs.
+Per-check retry limits combine with an atomic, persistent run-wide retry budget.
+A missing budget store never grants a retry in configured daemon operation.
+The dashboard's failure-history links and `GET /api/v1/failures?check=NAME` expose
+recent observations and actual retry success counts independently of confidence.
 
-[Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) and
-[Clef](https://blog.cloudflare.com/clef-decision-models/) motivate the constrained
-choice and abstention interface. Their probability calibration is a separate
-property: a general model's requested confidence is **self-reported, not a
-calibrated probability of correctness or of a rerun passing**. The threshold is
-an operational heuristic. Decisions and resulting test outcomes provide evidence
-for evaluating it. A future decision-model adapter can implement `flaky.Classifier`
-without changing queue semantics; there is no assumed or invented forthcoming
-OpenAI decision endpoint in this implementation.
+## Batch recovery
+
+With `on-batch-red "bisect"`, an unsuccessful batch requeues without declaring
+individual culprits. The next real verification uses a smaller dependency-valid
+prefix, normally half the failed group. Model suspects may shorten that prefix.
+A passing prefix lands its exact tested tip; remaining changes get new checks.
+A red single-member run against the real target may park that revision. Neither
+model confidence nor a failed group's verdict is transferred onto another group.
+Interactions remain possible: removing one change and observing a pass does not
+prove that another change is defective in isolation.
+
+GitHub feedback reports ordinary failures even without a model. It adds available
+model evidence as unconfirmed investigation output, then updates the durable
+comment with the landing link if the revision later lands.
