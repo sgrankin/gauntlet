@@ -1,17 +1,9 @@
-// Batch-summary parallelization suite: proves precomputeMergeBodies
-// actually bounds concurrency and wall clock (direct unit tests, a fake
-// summarizer with no queue.Daemon involved at all), and that
-// startBatchRun's wiring of it lands every member's own precomputed body
-// in its own merge commit message (an integration proof on the fake
-// harness — batch_test.go's tier — with a real-time-sleeping fake
-// summarizer, since the timing property under test is real wall clock, not
-// the harness's injected logical clock).
 package queue
 
 import (
 	"context"
 	"slices"
-	"sync"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,79 +14,66 @@ import (
 	"github.com/sgrankin/gauntlet/internal/executor"
 )
 
-// fakeSummarizer is a scriptable Config.MergeBody stand-in that sleeps for a
-// fixed duration per call (simulating a real Codex round trip) and
-// records the maximum number of calls ever in flight simultaneously — the
-// property precomputeMergeBodies exists to bound.
-type fakeSummarizer struct {
-	sleep time.Duration
-
-	mu      sync.Mutex
-	inFlite int32 // current in-flight count (atomic)
-	maxSeen int32 // high-water mark (atomic)
-
-	calls int32 // total calls made (atomic)
-}
-
-func (f *fakeSummarizer) mergeBody(ctx context.Context, cand core.Candidate, base string) string {
-	n := atomic.AddInt32(&f.inFlite, 1)
-	for {
-		max := atomic.LoadInt32(&f.maxSeen)
-		if n <= max || atomic.CompareAndSwapInt32(&f.maxSeen, max, n) {
-			break
-		}
-	}
-	atomic.AddInt32(&f.calls, 1)
-	time.Sleep(f.sleep)
-	atomic.AddInt32(&f.inFlite, -1)
-	return "summary of " + cand.Ref
-}
-
-// TestPrecomputeMergeBodies_BoundsConcurrencyAndWallClock is the direct
-// timing proof: N requests, each sleeping `sleep`, must complete in roughly
-// one `sleep` (bounded concurrency, not N*sleep serial), and the observed
-// max-in-flight must never exceed maxConcurrentMergeBodies.
-func TestPrecomputeMergeBodies_BoundsConcurrencyAndWallClock(t *testing.T) {
+func TestPrecomputeMergeBodiesBoundsConcurrencyAndSeparatesRefs(t *testing.T) {
 	const n = 10
-	sleep := 40 * time.Millisecond
-	fake := &fakeSummarizer{sleep: sleep}
-
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{}, n)
+	release := make(chan struct{}, n)
+	var active, peak atomic.Int32
 	reqs := make([]mergeBodyRequest, n)
 	for i := range reqs {
-		reqs[i] = mergeBodyRequest{
-			cand: core.Candidate{SHA: candSHA(i), Ref: candRef(i)},
-			base: "base-tip",
+		reqs[i] = mergeBodyRequest{cand: core.Candidate{SHA: "same-sha", Ref: candRef(i)}, base: "base"}
+	}
+	done := make(chan map[string]string, 1)
+	go func() {
+		done <- precomputeMergeBodies(ctx, func(ctx context.Context, c core.Candidate, base string) string {
+			current := active.Add(1)
+			for previous := peak.Load(); current > previous; previous = peak.Load() {
+				if peak.CompareAndSwap(previous, current) {
+					break
+				}
+			}
+			defer active.Add(-1)
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return "summary of " + c.Ref
+		}, reqs)
+	}()
+	// Each wave must fill all available slots before any call is released.
+	// A serial implementation cannot fill a wave; an unbounded one exceeds peak.
+	for remaining := n; remaining > 0; {
+		wave := min(remaining, maxConcurrentMergeBodies)
+		for range wave {
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("summary workers did not fill the wave")
+			}
 		}
+		for range wave {
+			release <- struct{}{}
+		}
+		remaining -= wave
 	}
-
-	start := time.Now()
-	got := precomputeMergeBodies(context.Background(), fake.mergeBody, reqs)
-	elapsed := time.Since(start)
-
-	if int(fake.calls) != n {
-		t.Fatalf("mergeBody called %d times, want %d", fake.calls, n)
+	var got map[string]string
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatal("summaries did not complete")
 	}
-	if got := atomic.LoadInt32(&fake.maxSeen); got > maxConcurrentMergeBodies {
-		t.Fatalf("max concurrency observed = %d, want <= %d", got, maxConcurrentMergeBodies)
+	if peak.Load() != maxConcurrentMergeBodies {
+		t.Fatalf("peak concurrency=%d", peak.Load())
 	}
-	if atomic.LoadInt32(&fake.maxSeen) < 2 {
-		t.Fatalf("max concurrency observed = %d, want > 1 (proves calls actually overlapped)", fake.maxSeen)
-	}
-	// N*sleep serial would be 10*40ms = 400ms; bounded concurrency of 4
-	// needs ceil(10/4)=3 waves, ~120ms, plus scheduling slack. Assert well
-	// under half the fully-serial time so a regression to serial execution
-	// fails loudly without the test being flaky about exact wave counts.
-	if elapsed >= time.Duration(n)*sleep/2 {
-		t.Fatalf("elapsed = %v, want well under serial N*sleep=%v (proves calls ran concurrently)", elapsed, time.Duration(n)*sleep)
-	}
-
 	if len(got) != n {
-		t.Fatalf("result map has %d entries, want %d", len(got), n)
+		t.Fatalf("distinct refs collapsed: %v", got)
 	}
-	for i, req := range reqs {
-		want := "summary of " + req.cand.Ref
-		if got[req.cand.SHA] != want {
-			t.Errorf("result[%d] (sha=%s) = %q, want %q", i, req.cand.SHA, got[req.cand.SHA], want)
+	for _, req := range reqs {
+		if got[req.cand.Ref] != "summary of "+req.cand.Ref {
+			t.Fatalf("wrong summary: %v", got)
 		}
 	}
 }
@@ -118,22 +97,10 @@ func TestPrecomputeMergeBodies_EmptyRequestsReturnsNilMap(t *testing.T) {
 	}
 }
 
-func candSHA(i int) string { return "sha-" + string(rune('a'+i)) }
 func candRef(i int) string { return candidateRef("main", "user", string(rune('a'+i))) }
 
-// TestBatchRun_PrecomputedBodiesLandInOwnMergeMessages is the end-to-end
-// wiring proof, on the fake-git batch harness (batch_test.go's tier): a
-// 4-member batch, each summarized by a real-time-sleeping fake, must (a)
-// complete startBatchRun's chain-building in roughly one sleep's worth of
-// wall clock, not four, and (b) land each member's own distinct precomputed
-// body in its own merge commit message — proving buildChainLinkPrecomputed
-// actually consumes precomputeMergeBodies' result keyed correctly per
-// candidate, not just per position.
 func TestBatchRun_PrecomputedBodiesLandInOwnMergeMessages(t *testing.T) {
-	sleep := 30 * time.Millisecond
-	fake := &fakeSummarizer{sleep: sleep}
-
-	h := newMergeBodyBatchHarness(t, fake.mergeBody, 8)
+	h := newMergeBodyBatchHarness(t, func(_ context.Context, c core.Candidate, _ string) string { return "summary of " + c.Ref }, 8)
 	h.git.seed("main", checkSpecFile("test"))
 	refA := candidateRef("main", "alice", "a")
 	refB := candidateRef("main", "bob", "b")
@@ -144,19 +111,7 @@ func TestBatchRun_PrecomputedBodiesLandInOwnMergeMessages(t *testing.T) {
 	h.git.pushCandidate(refC, "", map[string]string{"c.txt": "c\n"})
 	h.git.pushCandidate(refD, "", map[string]string{"d.txt": "d\n"})
 
-	start := time.Now()
-	h.reconcile() // one refill: all four chain into one batch run
-	elapsed := time.Since(start)
-
-	if int(fake.calls) != 4 {
-		t.Fatalf("mergeBody called %d times, want 4 (once per chained member)", fake.calls)
-	}
-	// 4*sleep serial would be 120ms; bounded concurrency finishes in ~1
-	// wave (cap 4 >= 4 members). Generous bound to avoid flakiness while
-	// still catching a regression to the old serial-in-the-loop behavior.
-	if elapsed >= 3*sleep {
-		t.Fatalf("startBatchRun took %v, want well under the serial bound %v (mergeBody must run concurrently)", elapsed, 4*sleep)
-	}
+	h.reconcile()
 
 	r := h.d.headRun("main")
 	if r == nil || len(r.members) != 4 {
@@ -165,10 +120,6 @@ func TestBatchRun_PrecomputedBodiesLandInOwnMergeMessages(t *testing.T) {
 	runID := h.currentRunID()
 	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed}) // green: lands all four
 
-	// Walk the landed chain tip back through its 4 merge links (first-parent),
-	// asserting each carries the summary for its own candidate ref, not a
-	// neighbor's (would fail if precompute mapped by position instead of by
-	// candidate SHA once any concurrent completion order shuffled results).
 	tip := h.git.ref("refs/heads/main")
 	wantRefsTipFirst := []string{refD, refC, refB, refA}
 	oid := tip
@@ -183,22 +134,7 @@ func TestBatchRun_PrecomputedBodiesLandInOwnMergeMessages(t *testing.T) {
 }
 
 func containsLine(haystack, want string) bool {
-	return slices.Contains(splitLines(haystack), want)
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
+	return slices.Contains(strings.Split(haystack, "\n"), want)
 }
 
 // newMergeBodyBatchHarness is newMergeBodyHarness (mergebody_test.go), but

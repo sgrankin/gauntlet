@@ -521,7 +521,7 @@ func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetN
 	// returned, without paying its latency serially.
 	var body string
 	if precomputed != nil {
-		body = precomputed[cand.SHA]
+		body = precomputed[cand.Ref]
 	} else if !linear && d.cfg.MergeBody != nil {
 		body = d.cfg.MergeBody(ctx, cand, base)
 	}
@@ -694,18 +694,7 @@ func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip s
 	}
 	defer release()
 
-	// Precompute every picked member's merge-commit body concurrently,
-	// before the chain loop below runs any trial merge, so the reconcile
-	// loop's wall clock for minting an N-member batch drops from
-	// N*cfg.Summarize.Timeout (one MergeBody call per link, serially,
-	// inline in the loop) to roughly one timeout total.
-	// Every request uses targetTip, not each link's own chained base — see
-	// precomputeMergeBodies' doc for why that's equivalent for what
-	// Config.MergeBody actually reads, and required since a link's real
-	// base isn't known until this loop's own (inherently serial) trial
-	// merges build it. A member the spec-change boundary below drops before
-	// it ever chains simply leaves its entry in precomputedBodies unused —
-	// harmless.
+	// Summarize against the current target before synthetic chain bases exist.
 	reqs := make([]mergeBodyRequest, len(picked))
 	for i, cand := range picked {
 		reqs[i] = mergeBodyRequest{cand: cand, base: targetTip}
