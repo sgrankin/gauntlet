@@ -90,7 +90,7 @@ func (f *FailureReview) validate() error {
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("failure-review: api-url must be an HTTP(S) URL without credentials, query, or fragment")
 	}
-	if f.Auth == "chatgpt" && strings.TrimSpace(f.Codex) == "" {
+	if strings.TrimSpace(f.Codex) == "" {
 		return fmt.Errorf("failure-review: codex must name an executable")
 	}
 	return nil

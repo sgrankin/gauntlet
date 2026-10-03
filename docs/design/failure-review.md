@@ -38,11 +38,11 @@ the maximum, and check duration includes classification and retry time.
 
 ## Providers and decision-model inspiration
 
-The OpenAI adapter uses the Responses API with a strict JSON schema, no tools,
-and `store: false`. The ChatGPT adapter runs Codex CLI with a service-account
-access token, an empty temporary workspace/home, no user configuration or rules,
-shell tools disabled, and a read-only sandbox. It supplies only failure evidence
-and the decision schema, not the candidate tree or the daemon's other credentials.
+Both API-key and ChatGPT access-token authentication use Codex CLI. Each call
+uses an empty temporary workspace/home, no user configuration or rules, shell
+tools disabled, and a read-only sandbox. API credentials are written only to
+that private temporary Codex home; access tokens are passed in its isolated
+environment. There is no separate direct-HTTP model adapter.
 
 The evidence includes the check name, command, target, tested SHA, and a bounded
 output tail. It excludes service environment, credential values, and workspace

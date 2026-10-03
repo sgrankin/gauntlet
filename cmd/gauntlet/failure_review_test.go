@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,11 @@ func TestBuildFailureReview(t *testing.T) {
 		t.Fatal("review enabled by default")
 	}
 	f := &config.FailureReview{Auth: "api-key", Model: "chosen-model", TokenEnv: "GAUNTLET_TEST_MODEL_TOKEN", APIURL: "https://api.openai.com/v1", Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Second, MaxOutputBytes: 256}
+	binary := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.Codex = binary
 	cfg := &config.Daemon{FailureReview: f}
 	t.Setenv(f.TokenEnv, "")
 	if _, err := buildFailureReview(cfg); err == nil {
@@ -24,8 +31,8 @@ func TestBuildFailureReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := r.Classifier.(flaky.OpenAI); !ok {
-		t.Fatal("wrong API backend")
+	if _, ok := r.Classifier.(flaky.Codex); !ok {
+		t.Fatal("wrong Codex backend")
 	}
 	f.Auth = "chatgpt"
 	f.Codex = "/definitely/missing/codex"

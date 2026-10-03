@@ -42,3 +42,30 @@ printf '%s' '{"action":"retry","confidence":0.95,"reason":"transient timeout"}' 
 		t.Fatalf("decision=%+v err=%v", decision, err)
 	}
 }
+
+func TestCodexAPIKeyIsolation(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "codex")
+	script := `#!/bin/sh
+set -eu
+test -z "${CODEX_ACCESS_TOKEN-}"
+test -z "${GITHUB_TOKEN-}"
+grep -q 'api-secret' "$CODEX_HOME/auth.json"
+output=''
+while test "$#" -gt 0; do
+ if test "$1" = --output-last-message; then shift; output="$1"; fi
+ shift
+done
+cat > /dev/null
+printf '%s' '{"action":"abstain","confidence":0.5,"reason":"uncertain"}' > "$output"
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_ACCESS_TOKEN", "must-not-inherit")
+	t.Setenv("GITHUB_TOKEN", "must-not-inherit")
+	c := Codex{Auth: "api-key", Executable: binary, Token: "api-secret", Model: "model", MaxOutputBytes: 256}
+	decision, err := c.Classify(context.Background(), core.CheckJob{}, core.CheckResult{})
+	if err != nil || decision.Action != "abstain" {
+		t.Fatalf("%+v %v", decision, err)
+	}
+}

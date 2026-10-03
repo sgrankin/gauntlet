@@ -1183,7 +1183,9 @@ queue run. `timeout` bounds each classification (positive, at most 5 minutes),
 not the check command. `max-output-bytes` limits the output tail sent to the
 model (256–65536 bytes). `api-url` defaults to `https://api.openai.com/v1` and
 must identify a Responses API endpoint base; use HTTPS for remote credentials.
-There is no automatic API retry on rate limits or provider errors.
+Both authentication modes require Codex CLI. API keys use an isolated temporary
+Codex credential file. There is no separate direct HTTP classification path.
+There is no automatic retry on provider errors.
 
 For a ChatGPT workspace service account, create a Codex-scoped access token
 and supply it through the daemon's environment:

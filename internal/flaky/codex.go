@@ -2,11 +2,13 @@ package flaky
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +21,7 @@ import (
 type Codex struct {
 	Model, Token, Executable string
 	MaxOutputBytes           int
+	Auth, APIURL             string
 }
 
 func (c Codex) Classify(ctx context.Context, job core.CheckJob, res core.CheckResult) (Decision, error) {
@@ -51,6 +54,18 @@ func (c Codex) Classify(ctx context.Context, job core.CheckJob, res core.CheckRe
 		}
 	}
 	cmd.Env = append(cmd.Env, "HOME="+home, "CODEX_HOME="+home, "CODEX_ACCESS_TOKEN="+c.Token)
+	if c.Auth == "api-key" {
+		// Codex reads API credentials from its isolated home; the token never
+		// appears in argv or the candidate's workspace/environment.
+		cmd.Env = cmd.Env[:len(cmd.Env)-1]
+		auth, _ := json.Marshal(map[string]string{"OPENAI_API_KEY": c.Token})
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), auth, 0600); err != nil {
+			return Decision{}, fmt.Errorf("write isolated Codex authentication")
+		}
+		if c.APIURL != "" && c.APIURL != "https://api.openai.com/v1" {
+			cmd.Args = append(cmd.Args, "--config", "model_provider=\"gauntlet\"", "--config", "model_providers.gauntlet={name=\"Gauntlet\",base_url="+strconv.Quote(c.APIURL)+",wire_api=\"responses\",requires_openai_auth=true}")
+		}
+	}
 	cmd.Stdin = strings.NewReader(instructions + "\n\nFailure JSON:\n" + evidence(job, res, c.MaxOutputBytes))
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
