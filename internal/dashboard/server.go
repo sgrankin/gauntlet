@@ -255,6 +255,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := targetData{
+		Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled, EmergencyChoices: emergencyChoices(ts),
 		baseData:  d.newBase(ts.Name, snap, true, "targets"),
 		Name:      ts.Name,
 		Branch:    ts.Branch,
@@ -1134,7 +1135,7 @@ func wordTag(word string) tag {
 		return tag{word, "ok"}
 	case "rejected", "conflict", "failed", "error":
 		return tag{word, "bad"}
-	case "skipped":
+	case "skipped", "waived":
 		return tag{word, "warn"}
 	case "blocked":
 		// A check that never ran because a prerequisite failed: not the
@@ -1171,6 +1172,8 @@ func checkWord(s core.CheckStatus) string {
 		return "failed"
 	case core.CheckSkipped:
 		return "skipped"
+	case core.CheckWaived:
+		return "waived"
 	case core.CheckBlocked:
 		return "blocked"
 	default:
@@ -1191,7 +1194,7 @@ func outcomeChipClass(word string) string {
 		return "ok"
 	case "rejected":
 		return "bad"
-	case "skipped":
+	case "skipped", "waived":
 		return "warn"
 	case "conflict":
 		return "conflict"
@@ -1540,6 +1543,10 @@ type runSummary struct {
 }
 
 type targetData struct {
+	Pause            *queue.Pause
+	ControlError     string
+	EmergencyEnabled bool
+	EmergencyChoices []emergencyChoice
 	baseData
 	Name, Branch, TargetTip string
 	InFlight                *inFlightView

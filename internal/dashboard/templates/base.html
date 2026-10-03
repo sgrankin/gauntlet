@@ -266,10 +266,25 @@ document.addEventListener('DOMContentLoaded', function () {
       document.getElementById('action-feedback').hidden = true;
       return;
     }
-    var btn = ev.target.closest('button[data-deploy-action], button[data-queue-action], button[data-hook-action]');
+    var btn = ev.target.closest('button[data-control-action], button[data-deploy-action], button[data-queue-action], button[data-hook-action]');
     if (!btn || btn.disabled || gauntletActionPending) return;
     var action, subject, endpoint, payload, confirmation;
-    if (btn.hasAttribute('data-deploy-action')) {
+    if (btn.hasAttribute('data-control-action')) {
+      action = btn.getAttribute('data-control-action');
+      subject = btn.getAttribute('data-target');
+      var reason = window.prompt('Reason for ' + action + ' on ' + subject + ':');
+      if (!reason || !reason.trim()) return;
+      endpoint = '/api/v1/control';
+      payload = {Kind: action, Target: subject, Reason: reason};
+      if (action === 'urgent' || action === 'merge-anyway') {
+        var select = document.getElementById('emergency-prefix');
+        if (!select || !select.value) return;
+        payload.Revisions = JSON.parse(select.value);
+        var override = document.getElementById('override-pause');
+        payload.OverridePause = !!(override && override.checked);
+        if (action === 'merge-anyway') confirmation = 'Land these ' + payload.Revisions.length + ' exact changes WITHOUT verification? Current target work will be cancelled. This exception is recorded.';
+      }
+    } else if (btn.hasAttribute('data-deploy-action')) {
       action = btn.getAttribute('data-deploy-action');
       subject = btn.getAttribute('data-deploy-env');
       endpoint = '/api/v1/deploy/' + action;
@@ -300,7 +315,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (data) {
         if (!res.ok) throw new Error(data.error || 'Request failed (HTTP ' + res.status + ').');
-        showFeedback(data.status === 'no-op' ? 'Nothing to change for ' + subject + '.' : (action === 'cancel' ? 'Cancellation' : 'Retry') + ' requested for ' + subject + '.', false);
+        showFeedback(data.status === 'no-op' ? 'Nothing to change for ' + subject + '.' : action + ' requested for ' + subject + '.', false);
       });
     }).catch(function (error) {
       var uncertain = error.name === 'AbortError' || error instanceof TypeError;
@@ -331,7 +346,7 @@ document.addEventListener('DOMContentLoaded', function () {
     setLiveState(paused ? 'Updates paused' : 'Live · every 5s', false);
   }
   function refreshPage() {
-    if (busy || gauntletActionPending) return;
+    if (busy || gauntletActionPending || document.activeElement.closest('[data-control-panel]')) return;
     if (!window.Idiomorph) { location.reload(); return; }
     busy = true;
     var controller = new AbortController();

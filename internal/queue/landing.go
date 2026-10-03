@@ -48,6 +48,9 @@ func (d *Daemon) stampReceiptRecords(r *run) {
 // member's slot simply survives at its new SHA and re-queues naturally
 // (Invariant 3); the run is still a Landed outcome.
 func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
+	if _, paused := d.controls.Pauses[t.Name]; paused && !r.overridePause {
+		return
+	}
 	_, landSpan := obs.StartLand(r.rootCtx, d.tr)
 	if d.cfg.Reviews != nil {
 		for _, m := range r.members {
@@ -181,6 +184,9 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 			detail = "land: delete slot: " + delErr.Error()
 		}
 		m.rec.Outcome = core.OutcomeLanded
+		if r.emergencyReason != "" {
+			detail = "EMERGENCY: checks bypassed; " + r.emergencyReason + "; " + detail
+		}
 		m.rec.Detail = detail
 		m.rec.EndedAt = d.now()
 		// Receipt provenance (issue #13) is already on m.rec by now —
@@ -198,6 +204,9 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 			Record:    m.rec,
 			Detail:    detail,
 		})
+	}
+	if r.emergencyReason != "" {
+		d.clearEmergency(t.Name, "")
 	}
 	// Deliberate ordering exception vs. the other terminal paths: finishRun
 	// finalizes (root-span end, export-dir removal) *before* emitting its
@@ -234,6 +243,9 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 	for i := range r.members {
 		m := &r.members[i]
 		m.rec.Outcome = outcome
+		if r.emergencyReason != "" {
+			detail = "EMERGENCY: checks bypassed; " + r.emergencyReason + "; " + detail
+		}
 		m.rec.Detail = detail
 		m.rec.EndedAt = d.now()
 

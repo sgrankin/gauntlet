@@ -32,6 +32,8 @@ func main() {
 	if len(os.Args) > 1 {
 		var command func([]string) error
 		switch os.Args[1] {
+		case "control":
+			command = runControl
 		case "land-pr":
 			command = runLandPR
 		case "land":
@@ -647,6 +649,8 @@ func run() error {
 		return err
 	}
 	qcfg := queue.Config{
+		ControlPath:          filepath.Join(*statePath, "queue-controls.json"),
+		AllowEmergency:       cfg.EmergencyMerges,
 		FailureReview:        failureReview,
 		Targets:              cfg.Targets,
 		CheckSpec:            cfg.CheckSpec,

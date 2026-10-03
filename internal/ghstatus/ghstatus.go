@@ -194,6 +194,9 @@ func candidateStatusFor(ev core.Event) (s state, description, sha string, ok boo
 	case core.EventTrialClean:
 		return statePending, "running checks", ev.Candidate.SHA, true
 	case core.EventLanded:
+		if strings.Contains(ev.Detail, "EMERGENCY:") {
+			return stateSuccess, "emergency landing: checks waived", ev.Candidate.SHA, true
+		}
 		return stateSuccess, "landed", ev.Candidate.SHA, true
 	case core.EventRejected:
 		return stateFailure, capDescription(detailOf(ev)), ev.Candidate.SHA, true
@@ -229,6 +232,9 @@ func (c *Channel) verificationStatusFor(ev core.Event) (s state, description, sh
 	case core.EventTrialMerged:
 		return statePending, "verifying merge", mergeSHAOf(ev), true
 	case core.EventVerified:
+		if strings.Contains(ev.Detail, "EMERGENCY:") {
+			return stateSuccess, "operator exception: checks waived", mergeSHAOf(ev), true
+		}
 		return stateSuccess, "merge verified", mergeSHAOf(ev), true
 	case core.EventRejected:
 		return stateFailure, capDescription(detailOf(ev)), mergeSHAOf(ev), true

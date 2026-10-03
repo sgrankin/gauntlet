@@ -1,4 +1,5 @@
 {{define "content"}}
+{{if .CanRetry}}<div class="headrow"><button class="btn danger js-action" data-control-action="pause" data-target="*">Pause all queues</button><button class="btn js-action" data-control-action="resume" data-target="*">Resume all queues</button></div>{{end}}
 {{if .Starting}}
 <p class="muted">Starting up — no reconcile pass has completed yet.</p>
 {{else if not .Targets}}

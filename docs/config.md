@@ -1123,6 +1123,39 @@ key, then run:
 git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=/etc/gauntlet/allowed_signers verify-commit SHA
 ```
 
+## Incident controls
+
+The dashboard has per-target pause/resume controls and a global pause button.
+`gauntlet control -target main -reason "incident" pause` uses the same admin API.
+Pausing cancels target verification and prevents new work and target publication;
+the pause persists across restarts until an explicit resume. Automatic recovery
+never clears an incident pause. Protect these admin routes as described in the
+API trust model. The audit records a supplied identity plus the transport peer;
+the supplied identity is not itself authentication.
+
+Set `emergency-merges true` in operator configuration to enable **Merge anyway**.
+Select a prefix and supply a reason. The request binds every selected ref, SHA,
+and review version; changed revisions require a new request. Active target work
+is cancelled and a fresh chain is constructed on the current target. Validation
+checks are recorded as **waived**, never passed or ordinary skipped. Configured
+receipt/provenance steps (and their image builds) remain required. Conflicts,
+forge authorization/readiness, signing, and the target CAS remain enforced.
+Allowing this one request during a pause requires its separate pause override;
+the target remains paused afterward. An emergency request is not shutdown drain.
+
+The durable control/audit file is `queue-controls.json` under the daemon state
+directory. Invalid state blocks startup. A write failure stops publication rather
+than acknowledging a pause that was forgotten. The last 500 accepted operator
+actions are retained there; emergency run history also records the actor/reason.
+
+`POST /api/v1/control` accepts `Kind` (`pause`, `resume`, `urgent`,
+`merge-anyway`), `Target`, `Actor`, `Reason`, optional `OverridePause`, and
+`Revisions` (`ref`, `sha`, `version`). Pause/resume accept target `*` for all
+targets. Commands are acknowledged as queued; the target status reports rejected
+requests or persistence failures. Urgency changes ordering without dropping
+prerequisites or bypassing verification. Existing work is not preempted merely
+for priority.
+
 ## Review intake
 
 For no mandatory approvals but all review conversations resolved:

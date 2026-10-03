@@ -4,6 +4,10 @@ package core
 // Invariant 8 holds because the core defines the vocabulary and the
 // application logic, while a channel only ever constructs a Command value.
 const (
+	CommandPause       = "pause"
+	CommandResume      = "resume"
+	CommandUrgent      = "urgent"
+	CommandMergeAnyway = "merge-anyway"
 	// CommandRetry clears the park for (Command.Target, Command.Ref) at its
 	// current SHA, if it is currently parked, so the next reconcile pass
 	// re-tests it.

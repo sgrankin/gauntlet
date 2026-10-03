@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -145,7 +146,7 @@ func TestRecordingChannel_SendCommandDeliversOnCommands(t *testing.T) {
 
 	select {
 	case got := <-c.Commands():
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("Commands() delivered %+v, want %+v", got, want)
 		}
 	case <-time.After(time.Second):

@@ -22,6 +22,7 @@ type Candidate struct {
 	ReviewURL  string
 	Version    string
 	DependsOn  string
+	Urgent     bool
 }
 
 // TrialMerge is the result of trial-merging a Candidate onto the target tip.
@@ -130,6 +131,9 @@ const (
 	// execution. Unlike CheckSkipped, it is not green; BlockedBy identifies
 	// the cause.
 	CheckBlocked
+
+	// CheckWaived is an explicit operator bypass, never an ordinary green result.
+	CheckWaived
 )
 
 // CheckResult reports a check verdict. Status is meaningful only when Err
@@ -664,8 +668,18 @@ type DeployRecord struct {
 // meaning "retry"). It exists for Invariant 8 (the core is
 // executor/channel-agnostic and defines the command vocabulary); no built-in
 // channel produces one.
+type Revision struct {
+	Ref     string `json:"ref"`
+	SHA     string `json:"sha"`
+	Version string `json:"version"`
+}
+
 type Command struct {
-	Kind   string
-	Target string
-	Ref    string
+	Actor         string
+	Reason        string
+	OverridePause bool
+	Revisions     []Revision
+	Kind          string
+	Target        string
+	Ref           string
 }

@@ -352,6 +352,7 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/checks", d.handleAPIChecks)
 	mux.HandleFunc("GET /api/v1/services", d.handleAPIServices)
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
+	mux.HandleFunc("/api/v1/control", d.handleAPIControl)
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
 	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
 	mux.HandleFunc("/api/v1/drain", d.handleAPIDrain)
@@ -413,13 +414,16 @@ type statusResponse struct {
 }
 
 type targetStatus struct {
-	Name     string           `json:"name"`
-	Branch   string           `json:"branch"`
-	Tip      string           `json:"tip"`
-	InFlight *inFlightStatus  `json:"inFlight"`
-	Pipeline []pipelineStatus `json:"pipeline"`
-	Waiting  []waitingStatus  `json:"waiting"`
-	Parked   []parkedStatus   `json:"parked"`
+	Pause            *queue.Pause     `json:"pause,omitempty"`
+	ControlError     string           `json:"controlError,omitempty"`
+	EmergencyEnabled bool             `json:"emergencyEnabled"`
+	Name             string           `json:"name"`
+	Branch           string           `json:"branch"`
+	Tip              string           `json:"tip"`
+	InFlight         *inFlightStatus  `json:"inFlight"`
+	Pipeline         []pipelineStatus `json:"pipeline"`
+	Waiting          []waitingStatus  `json:"waiting"`
+	Parked           []parkedStatus   `json:"parked"`
 
 	// LiveHook is this target's current post-land hook progress
 	// (hooks.Runner.Snapshot via WithHookSnapshot), nil when no hook is
@@ -614,6 +618,7 @@ func (d *dash) idleSince(snap *queue.Snapshot) time.Time {
 // are daemon-level, populated by handleAPIStatus itself, not here.
 func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
+		Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
 		Name:     ts.Name,
 		Branch:   ts.Branch,
 		Tip:      ts.TargetTip,

@@ -143,7 +143,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 	// blocked rows; same-window finishers were already recorded above.
 	if r.culprit == "" {
 		for i := range r.checks {
-			if res, ok := r.results[r.checks[i].Name]; ok && !core.NodeGreen(res) {
+			if res, ok := r.results[r.checks[i].Name]; ok && !r.nodeGreen(res) {
 				r.culprit = r.checks[i].Name
 				d.cancelRun(r)
 				break
@@ -190,7 +190,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 			// core.NodeGreen — Passed or Skipped with no Err, the same
 			// results that keep a candidate green. A non-green dep can't
 			// occur here (it would have set r.culprit above).
-			if res, ok := r.results[dep]; !ok || !core.NodeGreen(res) {
+			if res, ok := r.results[dep]; !ok || !r.nodeGreen(res) {
 				ready = false
 				break
 			}
@@ -229,8 +229,12 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 		// stay byte-identical to today's.
 		if d.cfg.TrialRefs && !r.verifiedEmitted {
 			r.verifiedEmitted = true
+			detail := ""
+			if r.emergencyReason != "" {
+				detail = "EMERGENCY: checks waived; " + r.emergencyReason
+			}
 			d.emit(ctx, core.Event{
-				Kind: core.EventVerified, At: d.now(), Target: r.target,
+				Kind: core.EventVerified, At: d.now(), Target: r.target, Detail: detail,
 				Candidate: r.members[0].cand, RunID: r.runID, MergeSHA: r.chainTip,
 			})
 		}
@@ -264,7 +268,7 @@ func (d *Daemon) materializeChecks(r *run) {
 		}
 		var blockedBy []string
 		for _, dep := range c.After {
-			if res, ok := r.results[dep]; !ok || !core.NodeGreen(res) {
+			if res, ok := r.results[dep]; !ok || !r.nodeGreen(res) {
 				blockedBy = append(blockedBy, dep)
 			}
 		}

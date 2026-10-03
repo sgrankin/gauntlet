@@ -25,6 +25,8 @@ import (
 // Config supplies queue policy and dependencies. Remote connection and
 // polling belong to the command package.
 type Config struct {
+	ControlPath    string
+	AllowEmergency bool
 	// FailureReview retries selected failed checks before publishing a red result.
 	FailureReview *flaky.Retrier
 
@@ -199,7 +201,9 @@ type runMember struct {
 // without rerunning checks — exactly why losing it (a crash) costs at most
 // a rerun, never correctness.
 type run struct {
-	releaseSources func()
+	emergencyReason string
+	overridePause   bool
+	releaseSources  func()
 
 	target    string
 	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
@@ -297,6 +301,7 @@ type lane struct {
 // Daemon is the reconcile loop over N target branches on one core.GitRepo.
 // The zero value is not usable; construct with New.
 type Daemon struct {
+	controls controlState
 	external map[string]core.Candidate
 	git      core.GitRepo
 	exec     core.Executor
@@ -422,7 +427,12 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		now = time.Now
 	}
 
+	controls, err := loadControls(cfg.ControlPath)
+	if err != nil {
+		return nil, err
+	}
 	return &Daemon{
+		controls:      controls,
 		git:           git,
 		exec:          exec,
 		chans:         chans,

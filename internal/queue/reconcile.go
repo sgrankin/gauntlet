@@ -124,6 +124,12 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 		}
 	}
 	d.syncBookkeeping(ctx, t, cands)
+	if d.reconcileEmergency(ctx, t, targetTip, cands) {
+		return
+	}
+	if _, paused := d.controls.Pauses[t.Name]; paused {
+		return
+	}
 
 	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
 		if d.advanceLane(ctx, t, targetTip, cands, l) {
@@ -257,6 +263,10 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 		refs = append(refs, ref)
 	}
 	sort.Slice(refs, func(i, j int) bool {
+		ui, uj := d.urgent(target, refs[i], cands), d.urgent(target, refs[j], cands)
+		if ui != uj {
+			return ui
+		}
 		if order[refs[i]] != order[refs[j]] {
 			return order[refs[i]] < order[refs[j]]
 		}
@@ -345,6 +355,7 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 	// (b) Advance each surviving run's current check (non-blocking; each
 	// run steps its own checks sequentially).
 	for _, r := range lane.runs {
+		d.prepareEmergency(r)
 		d.advanceChecks(ctx, t, r)
 	}
 
@@ -870,6 +881,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.lanes[t.Name] = l
 	}
 	l.runs = append(l.runs, r)
+	d.prepareEmergency(r)
 	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 }
 
@@ -1243,6 +1255,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.lanes[t.Name] = l
 	}
 	l.runs = append(l.runs, r)
+	d.prepareEmergency(r)
 	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 	return r, true
 }

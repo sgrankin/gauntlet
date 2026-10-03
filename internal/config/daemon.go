@@ -151,12 +151,13 @@ var validSummarizeEfforts = map[string]bool{
 // nodes actually present), so "section present" is encoded as "its required
 // key is non-empty" rather than a nil check.
 type Daemon struct {
-	Remote    string        `kdl:"remote"`
-	Poll      time.Duration `kdl:"poll-interval,format:units"`
-	CheckSpec string        `kdl:"check-spec"`
-	Committer core.Identity `kdl:"committer"`
-	MergeMsg  string        `kdl:"merge-message"`
-	Targets   []Target      `kdl:"target,multiple"`
+	EmergencyMerges bool          `kdl:"emergency-merges"`
+	Remote          string        `kdl:"remote"`
+	Poll            time.Duration `kdl:"poll-interval,format:units"`
+	CheckSpec       string        `kdl:"check-spec"`
+	Committer       core.Identity `kdl:"committer"`
+	MergeMsg        string        `kdl:"merge-message"`
+	Targets         []Target      `kdl:"target,multiple"`
 
 	// LogRetention bounds how long full per-check log directories survive
 	// under cmd/gauntlet's <state>/logs (DESIGN.md "Full per-check log

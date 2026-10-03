@@ -56,10 +56,13 @@ type Snapshot struct {
 
 // TargetSnapshot is one target's live queue state.
 type TargetSnapshot struct {
-	Name      string
-	Branch    string
-	TargetTip string       // "" if the target branch doesn't exist yet
-	InFlight  *RunSnapshot // the HEAD run (lane.runs[0]); nil when the lane is idle
+	Pause            *Pause
+	ControlError     string
+	EmergencyEnabled bool
+	Name             string
+	Branch           string
+	TargetTip        string       // "" if the target branch doesn't exist yet
+	InFlight         *RunSnapshot // the HEAD run (lane.runs[0]); nil when the lane is idle
 
 	// Pipeline is every in-flight run for this target, head first: nil/empty
 	// when the lane is idle; at most one element for serial and batch; up to
@@ -203,11 +206,17 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		}
 	}
 	ts := TargetSnapshot{
-		Name:      t.Name,
-		Branch:    t.Branch,
-		TargetTip: refs[targetRefName(t)],
+		ControlError:     d.controls.LastError,
+		EmergencyEnabled: d.cfg.AllowEmergency,
+		Name:             t.Name,
+		Branch:           t.Branch,
+		TargetTip:        refs[targetRefName(t)],
 	}
 
+	if p, ok := d.controls.Pauses[t.Name]; ok {
+		copy := p
+		ts.Pause = &copy
+	}
 	// Pipeline is every in-flight run for this target, head first;
 	// InFlight mirrors its head element for
 	// back-compat. Serial and batch hold at most one run, so Pipeline has at
