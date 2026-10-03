@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/statefile"
 )
 
 type Pause struct {
@@ -35,6 +36,33 @@ type controlState struct {
 	Audit            []controlAudit
 	LastError        string
 	Uncertain        bool `json:"-"`
+}
+
+// clone keeps updates separate from the published state, including fields
+// excluded from disk serialization. Persistence alone decides uncertainty.
+func (s controlState) clone() controlState {
+	s.ProcessedReviews = maps.Clone(s.ProcessedReviews)
+	s.Pauses = maps.Clone(s.Pauses)
+	s.Urgent = maps.Clone(s.Urgent)
+	s.Emergency = maps.Clone(s.Emergency)
+	for target, cmd := range s.Emergency {
+		cmd.Revisions = slices.Clone(cmd.Revisions)
+		s.Emergency[target] = cmd
+	}
+	s.Circuits = maps.Clone(s.Circuits)
+	for target, circuit := range s.Circuits {
+		circuit.Failures = slices.Clone(circuit.Failures)
+		s.Circuits[target] = circuit
+	}
+	s.Audit = slices.Clone(s.Audit)
+	for i := range s.Audit {
+		s.Audit[i].Command.Revisions = slices.Clone(s.Audit[i].Command.Revisions)
+	}
+	s.PolicyAudit = slices.Clone(s.PolicyAudit)
+	for i := range s.PolicyAudit {
+		s.PolicyAudit[i].Decision.Requirements = slices.Clone(s.PolicyAudit[i].Decision.Requirements)
+	}
+	return s
 }
 
 type controlAudit struct {
@@ -72,7 +100,6 @@ func loadControls(path string) (controlState, error) {
 }
 
 func (d *Daemon) saveControls(next controlState) bool {
-	next.Audit = slices.Clone(next.Audit)
 	if len(next.Audit) > 500 {
 		next.Audit = next.Audit[len(next.Audit)-500:]
 	}
@@ -102,6 +129,7 @@ func (d *Daemon) saveControls(next controlState) bool {
 			return false
 		}
 	}
+	next.Uncertain = false
 	d.controls = next
 	return true
 }
@@ -111,31 +139,7 @@ func writeControls(path string, state controlState) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".queue-controls-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return statefile.Write(path, data)
 }
 
 func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[string]string) {
@@ -171,9 +175,7 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 		d.controls.LastError = "unknown target"
 		return
 	}
-	data, _ := json.Marshal(d.controls)
-	var next controlState
-	_ = json.Unmarshal(data, &next)
+	next := d.controls.clone()
 	next.LastError = ""
 	if cmd.Kind == core.CommandPause {
 		next.Pauses[cmd.Target] = Pause{cmd.Actor, cmd.Reason, d.now()}
@@ -319,9 +321,7 @@ func (d *Daemon) reconcileEmergency(ctx context.Context, t config.Target, tip st
 }
 
 func (d *Daemon) clearEmergency(target, reason string) {
-	data, _ := json.Marshal(d.controls)
-	var next controlState
-	_ = json.Unmarshal(data, &next)
+	next := d.controls.clone()
 	delete(next.Emergency, target)
 	next.LastError = reason
 	d.saveControls(next)

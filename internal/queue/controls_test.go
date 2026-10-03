@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 func TestIncidentPausePersistsAndCancelsVerification(t *testing.T) {
@@ -135,5 +136,47 @@ func TestPauseOnlyOverrideRunsChecksAndLeavesPause(t *testing.T) {
 		if rec.Outcome == core.OutcomeLanded && (len(rec.Checks) != 1 || rec.Checks[0].Status != core.CheckPassed || !strings.Contains(rec.Detail, "PAUSE OVERRIDE")) {
 			t.Fatalf("dishonest pause override: %+v", rec)
 		}
+	}
+}
+
+func TestControlStateCloneOwnsMutableFields(t *testing.T) {
+	state, err := loadControls("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Uncertain = true
+	state.Pauses["main"] = Pause{Reason: "incident"}
+	state.Urgent["ref"] = core.Revision{SHA: "original"}
+	state.ProcessedReviews["1"] = true
+	state.Emergency["main"] = core.Command{Revisions: []core.Revision{{SHA: "original"}}}
+	state.Circuits["main"] = Circuit{Failures: []InfrastructureFailure{{Revision: "original"}}}
+	state.Audit = []controlAudit{{Command: core.Command{Revisions: []core.Revision{{SHA: "original"}}}}}
+	state.PolicyAudit = []PolicyAudit{{Decision: policy.Decision{Version: "policy-version", Requirements: []policy.Requirement{{Name: "original"}}}}}
+	next := state.clone()
+	delete(next.Pauses, "main")
+	delete(next.Urgent, "ref")
+	delete(next.ProcessedReviews, "1")
+	next.Emergency["main"].Revisions[0].SHA = "changed"
+	next.Circuits["main"].Failures[0].Revision = "changed"
+	next.Audit[0].Command.Revisions[0].SHA = "changed"
+	next.PolicyAudit[0].Decision.Requirements[0].Name = "changed"
+	if !next.Uncertain || next.PolicyAudit[0].Decision.Version != "policy-version" {
+		t.Fatal("clone dropped non-persisted state")
+	}
+	if len(state.Pauses) != 1 || len(state.Urgent) != 1 || len(state.ProcessedReviews) != 1 || state.Emergency["main"].Revisions[0].SHA != "original" || state.Circuits["main"].Failures[0].Revision != "original" || state.Audit[0].Command.Revisions[0].SHA != "original" || state.PolicyAudit[0].Decision.Requirements[0].Name != "original" {
+		t.Fatal("clone aliases original state")
+	}
+}
+
+func TestControlUncertaintyClearsOnlyAfterSuccessfulWrite(t *testing.T) {
+	h := newHarness(t)
+	h.d.controls.Uncertain = true
+	h.d.cfg.ControlPath = filepath.Join(t.TempDir(), "missing", "state")
+	if h.d.saveControls(h.d.controls.clone()) || !h.d.controls.Uncertain {
+		t.Fatal("failed persistence cleared uncertainty")
+	}
+	h.d.cfg.ControlPath = filepath.Join(t.TempDir(), "state")
+	if !h.d.saveControls(h.d.controls.clone()) || h.d.controls.Uncertain {
+		t.Fatal("successful persistence did not clear uncertainty")
 	}
 }

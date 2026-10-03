@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -42,9 +41,7 @@ func (d *Daemon) observeInfrastructure(ev core.Event) {
 			}
 		}
 		if healthy {
-			nextData, _ := json.Marshal(d.controls)
-			var next controlState
-			json.Unmarshal(nextData, &next)
+			next := d.controls.clone()
 			delete(next.Circuits, ev.Target)
 			d.saveControls(next)
 			return
@@ -77,9 +74,7 @@ func (d *Daemon) observeInfrastructure(ev core.Event) {
 		}
 		c.Reason = fmt.Sprintf("infrastructure failures across %d revisions; next probe after %s", len(c.Failures), c.Until.Format(time.RFC3339))
 	}
-	data, _ := json.Marshal(d.controls)
-	var next controlState
-	json.Unmarshal(data, &next)
+	next := d.controls.clone()
 	next.Circuits[ev.Target] = c
 	d.saveControls(next)
 }
@@ -118,9 +113,7 @@ func (d *Daemon) markCircuitProbe(r *run) {
 	if r.members[0].rec.StartedAt.Before(c.Until) {
 		return
 	}
-	nextData, _ := json.Marshal(d.controls)
-	var next controlState
-	json.Unmarshal(nextData, &next)
+	next := d.controls.clone()
 	c.ProbeRunID = r.runID
 	next.Circuits[r.target] = c
 	d.saveControls(next)

@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/statefile"
 )
 
 type parsedCommand struct {
@@ -81,11 +82,17 @@ func (g *GitHub) freezeIntent(ctx context.Context, r request, members []core.Can
 		return fmt.Errorf("emergency prefix exceeds 64 changes")
 	}
 	state := intentState{Version: 1, Requests: map[int64]frozenIntent{}}
-	data, err := os.ReadFile(g.p.IntentPath)
+	var data []byte
+	file, err := os.Open(g.p.IntentPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err == nil {
+		data, err = io.ReadAll(io.LimitReader(file, (2<<20)+1))
+		file.Close()
+		if err != nil {
+			return err
+		}
 		if len(data) > 2<<20 || json.Unmarshal(data, &state) != nil || state.Version != 1 || state.Requests == nil {
 			return fmt.Errorf("invalid GitHub emergency intent state")
 		}
@@ -154,29 +161,5 @@ func (g *GitHub) freezeIntent(ctx context.Context, r request, members []core.Can
 			return fmt.Errorf("emergency request too large or expired; post a new request")
 		}
 	}
-	f, err := os.CreateTemp(filepath.Dir(g.p.IntentPath), ".github-intents-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(f.Name(), g.p.IntentPath); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(g.p.IntentPath))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return statefile.Write(g.p.IntentPath, data)
 }

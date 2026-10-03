@@ -72,9 +72,7 @@ func (d *Daemon) evaluatePolicy(ctx context.Context, t config.Target, c core.Can
 		}
 	}
 	if changed {
-		data, _ := json.Marshal(d.controls)
-		var next controlState
-		json.Unmarshal(data, &next)
+		next := d.controls.clone()
 		next.PolicyAudit = append(next.PolicyAudit, audit)
 		if len(next.PolicyAudit) > 500 {
 			next.PolicyAudit = next.PolicyAudit[len(next.PolicyAudit)-500:]
