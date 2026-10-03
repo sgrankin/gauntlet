@@ -21,7 +21,9 @@ Python is needed only for documentation tooling, not for the daemon.
 1. Choose its owner: task guides, references, operations, runbooks, or architecture.
 2. Keep the directory tree two levels deep and add the page to `mkdocs.yml` navigation.
    Place it after its prerequisites and beside related tasks. Navigation follows
-   the reader's workflow; do not sort it by filename or title.
+   the reader's workflow; do not sort it by filename or title. Guides and
+   Reference use collapsible topic groups; keep the files two levels deep and
+   avoid adding groups for a single page.
 3. State a contract in one place, linking from examples and rationale.
 4. Use tables for settings/defaults, numbered procedures for tasks, and short
    code examples. Explain surprising choices outside the code rather than

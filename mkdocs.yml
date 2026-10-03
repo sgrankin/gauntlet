@@ -41,46 +41,56 @@ markdown_extensions:
 - tables
 - pymdownx.superfences
 - pymdownx.highlight
-# Curated reading order: prerequisites before dependent tasks, never alphabetical.
+# Curated reading order; nested groups collapse except along the active page path.
 nav:
 - Home: index.md
 - Guides:
-  - Quickstart: guides/quickstart.md
-  - Validating configuration: guides/validating.md
-  - Landing changes: guides/landing.md
-  - GitHub credentials: guides/github-auth.md
-  - GitHub PRs and stacks: guides/github.md
-  - Gerrit changes: guides/gerrit.md
-  - Container executor: guides/containers.md
-  - Conditional checks: guides/conditional-checks.md
-  - Writing policy: guides/policy.md
-  - Using receipts: guides/receipts.md
-  - Deployment and promotion: guides/deployment.md
-  - Slack setup: guides/slack.md
-  - Telemetry: guides/telemetry.md
-  - Failure investigation: guides/failure-review.md
-  - Incident controls: guides/incidents.md
+  - Getting started:
+    - Quickstart: guides/quickstart.md
+    - Validating configuration: guides/validating.md
+    - Landing changes: guides/landing.md
+  - Connecting review hosts:
+    - GitHub credentials: guides/github-auth.md
+    - GitHub PRs and stacks: guides/github.md
+    - Gerrit changes: guides/gerrit.md
+  - Writing validation:
+    - Container executor: guides/containers.md
+    - Conditional checks: guides/conditional-checks.md
+    - Writing policy: guides/policy.md
+  - Deployment:
+    - Using receipts: guides/receipts.md
+    - Deployment and promotion: guides/deployment.md
+  - Observing and handling failures:
+    - Slack setup: guides/slack.md
+    - Telemetry: guides/telemetry.md
+    - Failure investigation: guides/failure-review.md
+    - Incident controls: guides/incidents.md
 - Reference:
-  - Daemon configuration: reference/daemon.md
-  - Targets and scheduling: reference/targets.md
-  - Forge configuration: reference/github.md
-  - Operator policy: reference/policy.md
-  - Commit signing: reference/signing.md
-  - Execution configuration: reference/execution.md
-  - Writing checks: reference/checks.md
-  - Check environment reference: reference/environment.md
-  - Shared services: reference/services.md
-  - Candidate-built images: reference/images.md
-  - Receipts: reference/receipts.md
-  - Summaries and post-land hooks: reference/automation.md
-  - Deployment configuration: reference/deployment.md
-  - Deploy nodes: reference/deploy-nodes.md
-  - Failure review configuration: reference/failure-review.md
-  - Incident configuration: reference/incidents.md
-  - History, dashboard, and telemetry: reference/observability.md
-  - CLI: reference/cli.md
-  - HTTP API: reference/http-api.md
-  - MCP: reference/mcp.md
+  - Daemon and targets:
+    - Daemon configuration: reference/daemon.md
+    - Targets and scheduling: reference/targets.md
+  - Review hosts and policy:
+    - Forge configuration: reference/github.md
+    - Operator policy: reference/policy.md
+    - Commit signing: reference/signing.md
+  - Checks and execution:
+    - Execution configuration: reference/execution.md
+    - Writing checks: reference/checks.md
+    - Check environment reference: reference/environment.md
+    - Shared services: reference/services.md
+    - Candidate-built images: reference/images.md
+    - Receipts: reference/receipts.md
+  - Deployment:
+    - Summaries and post-land hooks: reference/automation.md
+    - Deployment configuration: reference/deployment.md
+    - Deploy nodes: reference/deploy-nodes.md
+  - Operations and interfaces:
+    - Failure review configuration: reference/failure-review.md
+    - Incident configuration: reference/incidents.md
+    - History, dashboard, and telemetry: reference/observability.md
+    - CLI: reference/cli.md
+    - HTTP API: reference/http-api.md
+    - MCP: reference/mcp.md
 - Operations:
   - Hosting the daemon: operations/hosting.md
   - Security and access: operations/security.md
