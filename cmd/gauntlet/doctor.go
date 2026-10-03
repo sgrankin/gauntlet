@@ -246,7 +246,7 @@ func buildProbes(env *doctorEnv) []probe {
 	if env.cfg.FailureReview != nil {
 		cfg := env.cfg
 		probes = append(probes, probe{"failure-review", func(context.Context) probeResult {
-			if _, err := buildFailureReview(cfg); err != nil {
+			if _, err := buildFailureReview(cfg, ""); err != nil {
 				return fail(err.Error(), "configure the failure-review credential and executable before starting")
 			}
 			return pass("failure review configured; model access not probed")

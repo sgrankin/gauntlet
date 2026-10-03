@@ -48,6 +48,8 @@ func New(p Params) *Summarizer {
 	return &Summarizer{git: p.Git, runner: p.Runner, timeout: p.Timeout, log: p.Log}
 }
 func (s *Summarizer) MergeBody(ctx context.Context, cand core.Candidate, baseOID string) string {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	commits, err := s.git.Log(ctx, baseOID, cand.SHA)
 	if err != nil {
 		s.logf("summarize: log %s..%s: %v", baseOID, cand.SHA, err)
@@ -63,10 +65,7 @@ func (s *Summarizer) MergeBody(ctx context.Context, cand core.Candidate, baseOID
 		return ""
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	text, err := s.call(cctx, buildPrompt(cand, commits, diffstat))
+	text, err := s.call(ctx, buildPrompt(cand, commits, diffstat))
 	if err != nil {
 		s.logf("summarize: %s: %v", cand.Ref, err)
 		return ""

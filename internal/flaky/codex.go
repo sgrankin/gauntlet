@@ -14,12 +14,11 @@ import (
 )
 
 type Codex struct {
-	Tools                    bool
-	ToolExecutable           string
-	History                  *History
-	Model, Token, Executable string
-	MaxOutputBytes           int
-	Auth, APIURL             string
+	Tools          bool
+	ToolExecutable string
+	History        *History
+	Client         llm.Codex
+	MaxOutputBytes int
 }
 
 func (c Codex) Classify(ctx context.Context, job core.CheckJob, res core.CheckResult) (Decision, error) {
@@ -51,7 +50,7 @@ func (c Codex) Classify(ctx context.Context, job core.CheckJob, res core.CheckRe
 	if job.LogPath != "" {
 		tracePath = strings.TrimSuffix(job.LogPath, ".log.zst") + ".investigation.jsonl"
 	}
-	data, err := (llm.Codex{Model: c.Model, Token: c.Token, Executable: c.Executable, Auth: c.Auth, APIURL: c.APIURL}).Run(ctx, llm.Request{Prompt: prompt + "\n\nFailure JSON:\n" + evidence(job, res, c.MaxOutputBytes), Schema: schema, Config: settings, TracePath: tracePath})
+	data, err := c.Client.Run(ctx, llm.Request{Prompt: prompt + "\n\nFailure JSON:\n" + evidence(job, res, c.MaxOutputBytes), Schema: schema, Config: settings, TracePath: tracePath})
 	if err != nil {
 		return Decision{}, err
 	}

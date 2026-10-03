@@ -16,9 +16,14 @@ import (
 type fakeGit struct {
 	commits         []gitx.CommitInfo
 	logErr, diffErr error
+	waitForContext  bool
 }
 
-func (g fakeGit) Log(context.Context, string, string) ([]gitx.CommitInfo, error) {
+func (g fakeGit) Log(ctx context.Context, _, _ string) ([]gitx.CommitInfo, error) {
+	if g.waitForContext {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return g.commits, g.logErr
 }
 func (g fakeGit) DiffStat(context.Context, string, string) (string, error) {
@@ -51,12 +56,14 @@ func TestMergeBody(t *testing.T) {
 }
 
 func TestMergeBodyDegrades(t *testing.T) {
-	for _, name := range []string{"no commits", "git log", "diffstat", "runner error", "invalid JSON", "empty summary", "timeout"} {
+	for _, name := range []string{"no commits", "git log", "git timeout", "diffstat", "runner error", "invalid JSON", "empty summary", "timeout"} {
 		t.Run(name, func(t *testing.T) {
 			g := fakeGit{commits: []gitx.CommitInfo{{Subject: "fix"}}}
 			switch name {
 			case "no commits":
 				g.commits = nil
+			case "git timeout":
+				g.waitForContext = true
 			case "git log":
 				g.logErr = errors.New("git unavailable")
 			case "diffstat":
@@ -65,7 +72,7 @@ func TestMergeBodyDegrades(t *testing.T) {
 			var log bytes.Buffer
 			s := New(Params{Git: g, Timeout: 10 * time.Millisecond, Log: &log, Runner: runnerFunc(func(ctx context.Context, r llm.Request) ([]byte, error) {
 				switch name {
-				case "no commits", "git log", "diffstat":
+				case "no commits", "git log", "git timeout", "diffstat":
 					t.Fatal("runner called without evidence")
 				case "runner error":
 					return nil, errors.New("unavailable")

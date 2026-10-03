@@ -627,23 +627,13 @@ func run() error {
 		servicesSnapshot = pool.Snapshot
 	}
 
-	// The summarizer's own Params.Timeout already bounds each Codex
-	// call, but Config.MergeBody's contract (internal/queue/daemon.go)
-	// puts the timeout decision at the caller, not in queue: this closure
-	// is that caller, wrapping ctx with cfg.Summarize.Timeout before every
-	// call so a hung summarizer can never wedge the reconcile loop.
 	sum, err := buildSummarizer(cfg, repo)
 	if err != nil {
 		return fmt.Errorf("build summarizer: %w", err)
 	}
 	var mergeBody func(ctx context.Context, cand core.Candidate, baseOID string) string
 	if sum != nil {
-		timeout := cfg.Summarize.Timeout
-		mergeBody = func(ctx context.Context, cand core.Candidate, baseOID string) string {
-			cctx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
-			return sum.MergeBody(cctx, cand, baseOID)
-		}
+		mergeBody = sum.MergeBody
 	}
 	// SeedParks (Feature 2, "park persistence across restarts") is only
 	// wired up when history is enabled: with no store there is nothing to
