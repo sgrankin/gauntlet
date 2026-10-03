@@ -41,66 +41,67 @@ markdown_extensions:
 - tables
 - pymdownx.superfences
 - pymdownx.highlight
+# Curated reading order: prerequisites before dependent tasks, never alphabetical.
 nav:
 - Home: index.md
 - Guides:
   - Quickstart: guides/quickstart.md
+  - Validating configuration: guides/validating.md
   - Landing changes: guides/landing.md
-  - Conditional checks: guides/conditional-checks.md
-  - Container executor: guides/containers.md
-  - Deployment: guides/deployment.md
-  - Failure investigation: guides/failure-review.md
-  - Gerrit changes: guides/gerrit.md
   - GitHub credentials: guides/github-auth.md
   - GitHub PRs and stacks: guides/github.md
-  - Incident controls: guides/incidents.md
+  - Gerrit changes: guides/gerrit.md
+  - Container executor: guides/containers.md
+  - Conditional checks: guides/conditional-checks.md
   - Writing policy: guides/policy.md
-  - Receipts: guides/receipts.md
+  - Using receipts: guides/receipts.md
+  - Deployment and promotion: guides/deployment.md
   - Slack setup: guides/slack.md
   - Telemetry: guides/telemetry.md
-  - Validating: guides/validating.md
+  - Failure investigation: guides/failure-review.md
+  - Incident controls: guides/incidents.md
 - Reference:
   - Daemon configuration: reference/daemon.md
   - Targets and scheduling: reference/targets.md
-  - Summaries and post-land hooks: reference/automation.md
-  - Writing checks: reference/checks.md
-  - CLI: reference/cli.md
-  - Deploy nodes: reference/deploy-nodes.md
-  - Deployment configuration: reference/deployment.md
-  - Check environment reference: reference/environment.md
-  - Execution configuration: reference/execution.md
-  - Failure review configuration: reference/failure-review.md
   - Forge configuration: reference/github.md
-  - HTTP API: reference/http-api.md
-  - Candidate-built images: reference/images.md
-  - Incident configuration: reference/incidents.md
-  - MCP: reference/mcp.md
-  - History, dashboard, and telemetry: reference/observability.md
   - Operator policy: reference/policy.md
-  - Receipts: reference/receipts.md
-  - Shared services: reference/services.md
   - Commit signing: reference/signing.md
+  - Execution configuration: reference/execution.md
+  - Writing checks: reference/checks.md
+  - Check environment reference: reference/environment.md
+  - Shared services: reference/services.md
+  - Candidate-built images: reference/images.md
+  - Receipts: reference/receipts.md
+  - Summaries and post-land hooks: reference/automation.md
+  - Deployment configuration: reference/deployment.md
+  - Deploy nodes: reference/deploy-nodes.md
+  - Failure review configuration: reference/failure-review.md
+  - Incident configuration: reference/incidents.md
+  - History, dashboard, and telemetry: reference/observability.md
+  - CLI: reference/cli.md
+  - HTTP API: reference/http-api.md
+  - MCP: reference/mcp.md
 - Operations:
-  - Maintaining the documentation: operations/documentation.md
   - Hosting the daemon: operations/hosting.md
-  - Releases: operations/releases.md
   - Security and access: operations/security.md
   - State, retention, and backups: operations/storage.md
-- Architecture:
-  - Deployment model: architecture/deployment.md
-  - Known limits: architecture/limits.md
-  - Architecture: architecture/overview.md
-  - Queue modes: architecture/queue-modes.md
-  - Queue reconciliation: architecture/queue.md
-  - Review identity and host completion: architecture/reviews.md
-  - Scaling: architecture/scaling.md
-  - Shared service pool: architecture/services.md
+  - Releases: operations/releases.md
+  - Maintaining the documentation: operations/documentation.md
 - Host runbooks:
-  - Immutable Azure VM templates: runbooks/azure-immutable-templates.md
-  - Azure VM operations: runbooks/azure-operations.md
+  - Linux production host: runbooks/deploy-linux.md
+  - macOS development host: runbooks/deploy-macos-dev.md
+  - Acceptance checklist: runbooks/verify.md
+  - Azure VM setup: runbooks/azure-vm.md
   - Azure VM Terraform alternative: runbooks/azure-terraform.md
   - Immutable Azure VM setup: runbooks/azure-vm-immutable.md
-  - Azure VM setup: runbooks/azure-vm.md
-  - 'Runbook: deploy gauntlet on Linux (production)': runbooks/deploy-linux.md
-  - 'Runbook: run gauntlet locally on macOS (dev loop)': runbooks/deploy-macos-dev.md
-  - 'Runbook: gauntlet acceptance checklist': runbooks/verify.md
+  - Immutable Azure VM templates: runbooks/azure-immutable-templates.md
+  - Azure VM operations: runbooks/azure-operations.md
+- Architecture:
+  - Overview: architecture/overview.md
+  - Queue reconciliation: architecture/queue.md
+  - Queue modes: architecture/queue-modes.md
+  - Review identity and host completion: architecture/reviews.md
+  - Shared service pool: architecture/services.md
+  - Deployment model: architecture/deployment.md
+  - Scaling: architecture/scaling.md
+  - Known limits: architecture/limits.md
