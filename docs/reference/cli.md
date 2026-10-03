@@ -22,7 +22,7 @@ gauntlet drain -url http://localhost:8080 -deadline 30m     # force the kill 30m
 endpoint (a daemon with no `dashboard` bind drains by signal only — a first
 SIGTERM), rather than pretending a drain began.
 
-### `gauntlet deploy` / `gauntlet promote`
+### Deploy and promote
 
 These two are **git porcelain, not API clients** — the only CLI verbs in
 this document that never talk to the daemon. Deploying an environment *is*

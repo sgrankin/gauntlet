@@ -35,5 +35,5 @@ retry/cancel existing lane work but do not change desired refs.
 
 Check lane state and observed revision after the graph completes. Re-pushing an
 already observed revision does not rerun it; use deployment retry for that.
-See [CLI flags](../reference/cli.md#gauntlet-deploy-gauntlet-promote) and
+See [CLI flags](../reference/cli.md#deploy-and-promote) and
 [deployment recovery](../architecture/deployment.md).
