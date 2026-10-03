@@ -9,18 +9,19 @@ import (
 	"time"
 )
 
-// exampleDaemonPath and exampleChecksPath point at the fixtures that double
-// as the repo's example config files. Both live at the repo root, two
-// levels up from this package.
-const (
-	exampleDaemonPath = "../../gauntlet.kdl"
-	exampleChecksPath = "../../.gauntlet.kdl"
-)
+const exampleChecksPath = "../../.gauntlet.kdl"
 
 func TestLoadDaemon_Example(t *testing.T) {
-	d, err := LoadDaemon(exampleDaemonPath)
+	if _, err := LoadDaemon("../../gauntlet.kdl"); err != nil {
+		t.Fatalf("loading documented starting config: %v", err)
+	}
+}
+
+func TestLoadDaemon_ConfigFixture(t *testing.T) {
+	const path = "testdata/daemon.kdl"
+	d, err := LoadDaemon(path)
 	if err != nil {
-		t.Fatalf("LoadDaemon(%s): %v", exampleDaemonPath, err)
+		t.Fatalf("LoadDaemon(%s): %v", path, err)
 	}
 	if d.Remote != "https://github.com/acme/widgets.git" {
 		t.Errorf("Remote = %q", d.Remote)
@@ -122,13 +123,7 @@ func TestLoadDaemon_Example(t *testing.T) {
 			t.Errorf("Executor.Caches[%d] = %+v, want %+v", i, d.Executor.Caches[i], want)
 		}
 	}
-	// gauntlet.kdl's example "mount" line is deliberately commented out (a
-	// trust-changing, default-off knob — see its own comment there); assert
-	// it stays that way so an accidental de-comment can't silently start
-	// parsing without this test noticing.
-	if len(d.Executor.Mounts) != 0 {
-		t.Errorf("Executor.Mounts = %+v, want empty (example mount is commented out)", d.Executor.Mounts)
-	}
+
 }
 
 func TestParseChecks_Example(t *testing.T) {

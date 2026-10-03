@@ -1,0 +1,48 @@
+remote "https://github.com/acme/widgets.git"
+poll-interval "10s"
+check-spec ".gauntlet.kdl"
+committer {
+    name "Gauntlet"
+    email "gauntlet@ci.acme.example"
+}
+merge-message "Merge {{.Topic}} ({{.User}})"
+log-retention "720h"
+
+target "main" branch="main" {
+
+}
+target "release" branch="release/v2" {
+}
+
+history "/var/lib/gauntlet/history.db" {
+    sample-every "10s"
+    depth-retention "336h"
+}
+
+dashboard "localhost:8080" {
+    url "https://gauntlet.internal.example"
+}
+
+github "acme/widgets" {
+    token-env "GITHUB_TOKEN"
+    api-url "https://api.github.com"
+}
+
+slack "C0123456789" {
+    app-token-env "SLACK_APP_TOKEN"
+    bot-token-env "SLACK_BOT_TOKEN"
+    allowed-users "U025FTHN3" "U0987ZYXWV"
+}
+
+otlp "localhost:4318" {
+    insecure true
+}
+
+executor "container" {
+    runtime "container"
+    image "ghcr.io/acme/ci:latest"
+    workdir "/workspace"
+    cache "gocache"    path="/root/.cache/go-build"
+    cache "gomodcache" path="/go/pkg/mod"
+
+}
