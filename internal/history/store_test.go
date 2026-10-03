@@ -2690,20 +2690,12 @@ func TestStore_BatchMembers_RedSkipped(t *testing.T) {
 	}
 }
 
-// TestStore_ConcurrentReadsDontBlockWrites is the sanity check for raising
-// SetMaxOpenConns from 1 to 4: Emit runs inline on the reconcile goroutine
-// in production, so a dashboard read must
-// never serialize behind it (or vice versa). This drives a batch of Emits
-// concurrently with a batch of read-side queries (RecentRuns, CheckStats —
-// the JOIN query called out as the risk) against one Store, under -race, and
-// simply asserts nothing errors or deadlocks: a pool capped at 1 connection
-// would still pass this correctness-wise (database/sql would just queue the
-// callers), so the real evidence the fix works is this test completing
-// promptly under `go test -race` rather than serializing to the point of
-// timing out — verified manually when this change was made.
-func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
+// Exercise contention beyond the connection pool without treating disk
+// throughput under the race detector as a performance contract.
+func TestStore_ConcurrentReadersAndWriters(t *testing.T) {
 	s := openTestStore(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 
 	// Seed some rows so the read side has something to scan.
@@ -2716,6 +2708,8 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 
 	const writers = 8
 	const readers = 8
+	const iterations = 4
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	errs := make(chan error, writers+readers)
 
@@ -2723,7 +2717,8 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			for i := range 20 {
+			<-start
+			for i := range iterations {
 				rec := sampleRecord(fmt.Sprintf("writer-%d-%d", w, i), "main", base.Add(time.Duration(w*100+i)*time.Second))
 				if err := s.Emit(ctx, core.Event{Kind: core.EventLanded, Target: "main", RunID: rec.RunID, Record: rec}); err != nil {
 					errs <- fmt.Errorf("writer %d emit %d: %w", w, i, err)
@@ -2734,7 +2729,11 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 	}
 	for range readers {
 		wg.Go(func() {
-			for range 20 {
+			<-start
+			for range iterations {
+				if ctx.Err() != nil {
+					return
+				}
 				if _, err := s.RecentRuns("main", 10); err != nil {
 					errs <- fmt.Errorf("RecentRuns: %w", err)
 					return
@@ -2747,6 +2746,7 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 		})
 	}
 
+	close(start)
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -2754,12 +2754,28 @@ func TestStore_ConcurrentReadsDontBlockWrites(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("concurrent reads/writes did not complete within 10s")
+	case <-ctx.Done():
+		t.Fatalf("concurrent reads/writes did not complete: %v", ctx.Err())
 	}
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+	rows, err := s.RecentRuns("main", 20+writers*iterations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		seen[row.RunID] = true
+	}
+	for w := range writers {
+		for i := range iterations {
+			id := fmt.Sprintf("writer-%d-%d", w, i)
+			if !seen[id] {
+				t.Errorf("concurrent write %s was not persisted", id)
+			}
+		}
 	}
 }
 
