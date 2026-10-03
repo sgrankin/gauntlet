@@ -14,6 +14,7 @@ limitation, and Gerrit setup.
 
 ## Documentation
 
+- [docs/roadmap.md](docs/roadmap.md) — requested features and open design decisions.
 - [DESIGN.md](DESIGN.md) — the design: model, decision ledger, invariants.
 - [docs/config.md](docs/config.md) — daemon configuration reference
   (history, dashboard, GitHub, Slack, OTLP, executors, services,
