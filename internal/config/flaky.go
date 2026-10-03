@@ -11,6 +11,8 @@ import (
 // FailureReview is operator-owned: only named, repeatable checks may send
 // failure output to a model and retry inside their existing queue run.
 type FailureReview struct {
+	Tools          bool          `kdl:"tools"`
+	MaxRunRetries  int           `kdl:"max-run-retries"`
 	Auth           string        `kdl:"auth"`
 	Model          string        `kdl:"model"`
 	TokenEnv       string        `kdl:"token-env"`
@@ -39,6 +41,9 @@ func (f *FailureReview) defaults() {
 	}
 	if f.Codex == "" {
 		f.Codex = "codex"
+	}
+	if f.MaxRunRetries == 0 {
+		f.MaxRunRetries = 3
 	}
 	if f.MaxRetries == 0 {
 		f.MaxRetries = 1
@@ -73,6 +78,9 @@ func (f *FailureReview) validate() error {
 			return fmt.Errorf("failure-review: invalid or duplicate check %q", name)
 		}
 		seen[name] = true
+	}
+	if f.MaxRunRetries < 1 || f.MaxRunRetries > 20 {
+		return fmt.Errorf("failure-review: max-run-retries must be 1..20")
 	}
 	if f.MaxRetries < 1 || f.MaxRetries > 3 {
 		return fmt.Errorf("failure-review: max-retries must be 1..3")

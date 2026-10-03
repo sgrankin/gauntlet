@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -1439,24 +1440,7 @@ target "main" branch="main" {
 `,
 			wantErr: "mode",
 		},
-		{
-			// on-batch-red "bisect" is validated (a legal enum value) but
-			// rejected at construction — a reserved growth path, not yet
-			// implemented.
-			name: "on-batch-red bisect rejected at construction",
-			kdl: `
-remote "https://example.com/repo.git"
-committer {
-    name "Gauntlet"
-    email "gauntlet@example.com"
-}
-target "main" branch="main" {
-    mode "batch"
-    on-batch-red "bisect"
-}
-`,
-			wantErr: "reserved for a future release",
-		},
+
 		{
 			name: "max-batch out of bounds (too high)",
 			kdl: `
@@ -2913,5 +2897,48 @@ receipt "deployment" {
 				t.Errorf("ParseChecks error = %q, want substring %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestBisectBatchRecoveryConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gauntlet.kdl")
+	err := os.WriteFile(path, []byte(`remote "https://example.com/repo.git"
+committer { name "Gauntlet"; email "gauntlet@example.com"; }
+target "main" branch="main" { mode "batch"; on-batch-red "bisect"; }
+`), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Targets[0].OnBatchRed != "bisect" {
+		t.Fatal("lost recovery mode")
+	}
+}
+
+func TestIncidentAndInlinePolicyConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gauntlet.kdl")
+	text := `remote "https://example.com/repo.git"
+committer { name "Gauntlet"; email "gauntlet@example.com"; }
+target "main" branch="main"
+emergency-merges true
+circuit-breaker { threshold 4; backoff "10s"; }
+policy {
+ rego r#"package gauntlet
+ decision := {"allow": true, "requirements": []}"#
+ teams "acme/security"
+}
+`
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadDaemon(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.EmergencyMerges || cfg.CircuitBreaker.Threshold != 4 || cfg.Policy.Timeout != 100*time.Millisecond || len(cfg.Policy.Teams) != 1 {
+		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }

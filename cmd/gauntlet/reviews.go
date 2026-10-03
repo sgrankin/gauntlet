@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/config"
@@ -17,7 +18,7 @@ import (
 
 func githubReviewParams(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) review.GitHubParams {
 	p := cfg.GitHub.PullRequests
-	params := review.GitHubParams{Repo: cfg.GitHub.Repo, APIURL: cfg.GitHub.APIURL, Git: repo, Targets: map[string]string{}, Bot: p.Bot, Approvals: *p.Approvals, RequiredChecks: p.RequiredChecks, PollInterval: p.PollInterval}
+	params := review.GitHubParams{Repo: cfg.GitHub.Repo, APIURL: cfg.GitHub.APIURL, Git: repo, Targets: map[string]string{}, Bot: p.Bot, Approvals: *p.Approvals, RequiredChecks: p.RequiredChecks, PollInterval: p.PollInterval, EmergencyEnabled: cfg.EmergencyMerges}
 	params.RequireResolvedConversations = p.RequireResolvedConversations
 	if app != nil {
 		params.Tokens = app
@@ -27,12 +28,18 @@ func githubReviewParams(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) re
 	for _, t := range cfg.Targets {
 		params.Targets[t.Branch] = t.Name
 	}
+	if cfg.Policy != nil {
+		params.PolicyTeams = cfg.Policy.Teams
+	}
 	return params
 }
 
-func buildReviewSource(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) (core.ReviewSource, error) {
+func buildReviewSource(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo, stateDir ...string) (core.ReviewSource, error) {
 	if cfg.GitHub.PullRequests != nil {
 		p := githubReviewParams(cfg, app, repo)
+		if len(stateDir) > 0 {
+			p.IntentPath = filepath.Join(stateDir[0], "github-emergency-intents.json")
+		}
 		if app == nil && os.Getenv(cfg.GitHub.TokenEnv) == "" {
 			return nil, fmt.Errorf("github review token is unset")
 		}

@@ -7,11 +7,15 @@ import "time"
 // slots use refs/heads/for/<target>/<user>/<topic>; forge adapters supply
 // virtual slots.
 type Candidate struct {
-	Ref    string
-	Target string
-	User   string
-	Topic  string
-	SHA    string
+	AdmissionBlocked                      string
+	SkipChecks, OverridePause             bool
+	Requester, RequestReason, EmergencyID string
+	RequestedCount                        int
+	Ref                                   string
+	Target                                string
+	User                                  string
+	Topic                                 string
+	SHA                                   string
 
 	// Review adapters supply Source, Message, and ReviewURL. SourceBase bounds
 	// the change's delta; DependsOn names its prerequisite slot. Version
@@ -39,6 +43,8 @@ type TrialMerge struct {
 
 // CheckJob describes one named check to run against an exported trial tree.
 type CheckJob struct {
+	GitDir     string
+	Candidates []Candidate
 	// RunID is stable for the whole run and shared by every check in it.
 	RunID string
 
@@ -140,7 +146,9 @@ const (
 // is nil. Command-start failures and nonzero exits are CheckFailed; Err is
 // reserved for cancellation and executor infrastructure failures.
 type CheckResult struct {
-	Name string
+	SuspectedRefs []string
+	FailureKind   string
+	Name          string
 
 	// Image records the build result or the immutable image a consumer used.
 	// Empty for other jobs.
@@ -675,6 +683,7 @@ type Revision struct {
 }
 
 type Command struct {
+	RequestID     string
 	Actor         string
 	Reason        string
 	OverridePause bool

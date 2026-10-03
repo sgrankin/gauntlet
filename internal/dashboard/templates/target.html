@@ -4,21 +4,8 @@
 {{else}}
 <p class="muted">branch <code>{{.Branch}}</code> @ <code title="{{.TargetTip}}">{{shortSHA .TargetTip}}</code></p>
 
-{{if .CanRetry}}
-<div class="section incident-controls" data-control-panel>
-<div class="headrow"><h2>Incident controls</h2>
-{{if .Pause}}<button class="btn js-action" data-control-action="resume" data-target="{{.Name}}">Resume queue</button>
-{{else}}<button class="btn danger js-action" data-control-action="pause" data-target="{{.Name}}">Pause queue</button>{{end}}</div>
-{{if .Pause}}<p class="tag bad">Queue paused: {{.Pause.Reason}} · {{.Pause.Actor}}</p>{{end}}
-{{if .ControlError}}<p class="tag bad">{{.ControlError}}</p>{{end}}
-{{if .EmergencyChoices}}
-<label>Requested prefix <select id="emergency-prefix">{{range .EmergencyChoices}}<option value="{{.Revisions}}">{{.Label}}</option>{{end}}</select></label>
-<button class="btn js-action" data-control-action="urgent" data-target="{{.Name}}">Prioritize</button>
-{{if .EmergencyEnabled}}<button class="btn danger js-action" data-control-action="merge-anyway" data-target="{{.Name}}">Merge anyway · skip checks</button>
-<label><input type="checkbox" id="override-pause"> Allow this merge while paused</label>{{end}}
-{{end}}
-</div>
-{{end}}
+{{if .Circuit}}<p class="error">Infrastructure suspension: {{.Circuit.Reason}}</p>{{end}}
+{{template "incidentControls" .}}
 <div class="section">
 <h2>In flight</h2>
 {{if .Pipeline}}
@@ -77,9 +64,9 @@
 {{if .Waiting}}
 <div class="table-scroll">
 <table>
-<tr><th>#</th><th>user/topic</th><th>ref</th><th>sha</th></tr>
+<tr><th>#</th><th>user/topic</th><th>ref</th><th>sha</th><th>gate</th></tr>
 {{range .Waiting}}
-<tr><td>{{.Seq}}</td><td>{{.User}}/{{.Topic}}</td><td class="mono muted" title="{{.Ref}}">{{compactRef .Ref}}</td><td><code class="nowrap" title="{{.SHA}}">{{shortSHA .SHA}}</code></td></tr>
+<tr><td>{{.Seq}}</td><td>{{.User}}/{{.Topic}}{{if .Urgent}} · urgent{{end}}</td><td class="mono muted" title="{{.Ref}}">{{compactRef .Ref}}</td><td><code class="nowrap" title="{{.SHA}}">{{shortSHA .SHA}}</code></td><td>{{.Blocked}}</td></tr>
 {{end}}
 </table>
 </div>

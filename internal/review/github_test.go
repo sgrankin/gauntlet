@@ -109,6 +109,21 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 			write(map[string]any{"base": ref{Ref: "main"}, "pull_requests": []map[string]int{{"number": 1}, {"number": 2}, {"number": 3}}})
 			return
 		}
+		if strings.HasPrefix(path, "/issues/comments/") && r.Method == "PATCH" {
+			var body struct{ Body string }
+			json.NewDecoder(r.Body).Decode(&body)
+			for n, cs := range f.commands {
+				for i, c := range cs {
+					if fmt.Sprint(c.ID) == strings.TrimPrefix(path, "/issues/comments/") {
+						f.commands[n][i].Body = body.Body
+						write(map[string]any{})
+						return
+					}
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		if strings.HasPrefix(path, "/collaborators/") {
 			write(map[string]string{"permission": f.permission})
 			return

@@ -123,14 +123,25 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 			cands[ref] = c
 		}
 	}
+	d.reviewEmergency(ctx, t, refs, cands)
+	d.policyAdmission(ctx, t, cands, targetTip)
 	d.syncBookkeeping(ctx, t, cands)
 	if d.reconcileEmergency(ctx, t, targetTip, cands) {
 		return
 	}
 	if _, paused := d.controls.Pauses[t.Name]; paused {
-		return
+		permitted := false
+		for _, c := range cands {
+			if c.OverridePause {
+				permitted = true
+			}
+		}
+		if !permitted {
+			return
+		}
 	}
 
+	d.prepareCircuitProbe(ctx, t.Name, cands)
 	if l := d.lanes[t.Name]; l != nil && len(l.runs) > 0 {
 		if d.advanceLane(ctx, t, targetTip, cands, l) {
 			return
@@ -254,6 +265,13 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 
 	var refs []string
 	for ref, c := range cands {
+		if c.AdmissionBlocked != "" || c.SkipChecks {
+			continue
+		}
+		if _, paused := d.controls.Pauses[target]; paused && !c.OverridePause {
+			continue
+		}
+
 		if parked, ok := done[ref]; ok && parked.SHA == c.SHA {
 			continue
 		}
@@ -265,6 +283,9 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 	sort.Slice(refs, func(i, j int) bool {
 		ui, uj := d.urgent(target, refs[i], cands), d.urgent(target, refs[j], cands)
 		if ui != uj {
+			if d.urgentBurst[target] >= 3 {
+				return !ui
+			}
 			return ui
 		}
 		if order[refs[i]] != order[refs[j]] {
@@ -355,6 +376,14 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 	// (b) Advance each surviving run's current check (non-blocking; each
 	// run steps its own checks sequentially).
 	for _, r := range lane.runs {
+		for _, m := range r.members {
+			if m.cand.OverridePause {
+				r.overridePause = true
+				if !m.cand.SkipChecks {
+					r.pauseOverrideReason = m.cand.Requester + ": " + m.cand.RequestReason
+				}
+			}
+		}
 		d.prepareEmergency(r)
 		d.advanceChecks(ctx, t, r)
 	}
@@ -409,6 +438,9 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 	}
 
 	// (d) Land the contiguous green prefix, FIFO.
+	if d.controls.Uncertain || d.circuitBlocked(t.Name) {
+		return false
+	}
 	concluded := false
 	for len(lane.runs) > 0 && lane.runs[0].verdict == verdictGreen {
 		d.landRun(ctx, t, lane.runs[0])
@@ -571,6 +603,9 @@ func (d *Daemon) refillLane(ctx context.Context, t config.Target, targetTip stri
 	if l != nil && len(l.runs) > 0 {
 		return // serial/batch: at most one run in flight; lane busy
 	}
+	if d.controls.Uncertain || d.circuitBlocked(t.Name) {
+		return
+	}
 	if t.Mode == "batch" && !d.batchFallback[t.Name] {
 		d.refillBatch(ctx, t, targetTip, cands)
 		return
@@ -608,6 +643,12 @@ func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip str
 	// gets correct, if degenerate, one-at-a-time batch behavior rather
 	// than an empty pick every tick.
 	maxBatch := max(t.MaxBatch, 1)
+	if d.controls.Circuits[t.Name].Backoff > 0 {
+		maxBatch = 1
+	}
+	if limit := d.batchRecovery[t.Name]; limit > 0 {
+		maxBatch = min(maxBatch, limit)
+	}
 
 	picked := d.pickUpTo(t.Name, cands, maxBatch, nil)
 	if len(picked) == 0 {
@@ -881,6 +922,14 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		d.lanes[t.Name] = l
 	}
 	l.runs = append(l.runs, r)
+	for _, m := range r.members {
+		if m.cand.OverridePause {
+			r.overridePause = true
+			if !m.cand.SkipChecks {
+				r.pauseOverrideReason = m.cand.Requester + ": " + m.cand.RequestReason
+			}
+		}
+	}
 	d.prepareEmergency(r)
 	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 }
@@ -931,7 +980,14 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 	if r.culprit != "" {
 		checkName = r.culprit
 	}
-	detail := fmt.Sprintf("batch %s red on check %q; serializing", r.batchID, checkName)
+	detail := fmt.Sprintf("batch %s red on check %q; attribution unconfirmed; checking smaller groups", r.batchID, checkName)
+	if r.pauseOverrideReason != "" {
+		d.clearEmergency(t.Name, "pause override stopped: "+detail)
+	}
+	if r.emergencyReason != "" {
+		detail = "EMERGENCY: checks waived; required provenance failed; " + r.emergencyReason + "; " + detail
+		d.clearEmergency(t.Name, "emergency stopped: "+detail)
+	}
 	now := d.now()
 
 	for i := range r.members {
@@ -956,13 +1012,39 @@ func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
 		})
 	}
 
-	d.batchFallback[t.Name] = true
+	if t.OnBatchRed == "bisect" {
+		limit := max(1, len(r.members)/2)
+		// Hypotheses choose a smaller real prefix. They cannot park a member
+		// or transfer the failed batch's verdict onto that prefix.
+		for _, result := range r.results {
+			for _, ref := range result.SuspectedRefs {
+				for i, m := range r.members {
+					if m.cand.Ref == ref {
+						limit = min(limit, max(1, i))
+					}
+				}
+			}
+		}
+		d.batchRecovery[t.Name] = limit
+	} else {
+		d.batchFallback[t.Name] = true
+	}
 }
 
 // refillSpeculate fills the window on predicted predecessor tips. Missing
 // or parked prerequisites block admission; failed predictions are retried
 // on the actual target.
 func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip string, cands map[string]core.Candidate, l *lane) {
+	if d.controls.Uncertain || d.circuitBlocked(t.Name) {
+		return
+	}
+	if d.controls.Circuits[t.Name].Backoff > 0 {
+		if l != nil && len(l.runs) > 0 {
+			return
+		}
+		d.refillSerialOne(ctx, t, targetTip, cands)
+		return
+	}
 	// Defensive only: production config (config.LoadDaemon) always
 	// defaults/validates Window >= 1 for Mode=="speculate". Mirrors
 	// refillBatch's maxBatch guard for a hand-built queue.Config.
@@ -1255,6 +1337,14 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		d.lanes[t.Name] = l
 	}
 	l.runs = append(l.runs, r)
+	for _, m := range r.members {
+		if m.cand.OverridePause {
+			r.overridePause = true
+			if !m.cand.SkipChecks {
+				r.pauseOverrideReason = m.cand.Requester + ": " + m.cand.RequestReason
+			}
+		}
+	}
 	d.prepareEmergency(r)
 	d.advanceChecks(ctx, t, r) // starts the ready roots (just checks[0] at max-parallel 1)
 	return r, true

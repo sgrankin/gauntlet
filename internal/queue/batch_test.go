@@ -446,7 +446,7 @@ func TestBatchRedEmitsPerMemberSkipped(t *testing.T) {
 		if rec.Outcome != core.OutcomeSkipped {
 			t.Errorf("record %d Outcome = %v, want Skipped", i, rec.Outcome)
 		}
-		wantDetail := fmt.Sprintf("batch %s red on check %q; serializing", batchID, "test")
+		wantDetail := fmt.Sprintf("batch %s red on check %q; attribution unconfirmed; checking smaller groups", batchID, "test")
 		if rec.Detail != wantDetail {
 			t.Errorf("record %d Detail = %q, want %q", i, rec.Detail, wantDetail)
 		}
@@ -478,5 +478,39 @@ func TestBatchRedEmitsPerMemberSkipped(t *testing.T) {
 	}
 	if len(rNext.members) != 2 {
 		t.Fatalf("post-fallback run has %d members, want 2 (bob+carol re-batched)", len(rNext.members))
+	}
+}
+
+func TestBisectRecoveryVerifiesEachPrefixBeforeLanding(t *testing.T) {
+	target := batchTarget(8)
+	target.OnBatchRed = "bisect"
+	h := newHarness(t, target)
+	h.git.seed("main", checkSpecFile("test"))
+	refs := []string{}
+	for _, name := range []string{"a", "b", "c", "d"} {
+		ref := candidateRef("main", "author", name)
+		refs = append(refs, ref)
+		h.git.pushCandidate(ref, "", map[string]string{name + ".txt": name})
+	}
+	h.reconcile()
+	failed := h.currentRunID()
+	h.release(failed, "test", core.CheckResult{Name: "test", Status: core.CheckFailed, SuspectedRefs: []string{refs[2]}})
+	for _, ref := range refs {
+		if !h.git.hasRef(ref) {
+			t.Fatal("failed batch member landed")
+		}
+	}
+	h.reconcile()
+	prefix := h.d.headRun("main")
+	if prefix == nil || len(prefix.members) != 2 {
+		t.Fatalf("expected real two-member prefix, got %+v", prefix)
+	}
+	tip := prefix.chainTip
+	h.release(prefix.runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
+	if h.git.hasRef(refs[0]) || h.git.hasRef(refs[1]) || !h.git.hasRef(refs[2]) || !h.git.hasRef(refs[3]) {
+		t.Fatal("wrong prefix landed")
+	}
+	if h.git.casLog[0].new != tip {
+		t.Fatal("did not land exact tested prefix tip")
 	}
 }

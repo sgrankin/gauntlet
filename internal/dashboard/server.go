@@ -17,6 +17,7 @@ package dashboard
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -33,6 +34,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/flaky"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/queue"
 )
@@ -60,6 +62,7 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /run/{runID}/log/{checkName}", d.handleRunLog)
 	mux.HandleFunc("GET /batch/{batchID}", d.handleBatch)
 	mux.HandleFunc("GET /checks", d.handleChecks)
+	mux.HandleFunc("GET /failures", d.handleFailures)
 	mux.HandleFunc("GET /deploys", d.handleDeploys)
 	mux.HandleFunc("GET /deploy/{runID}", d.handleDeploy)
 	mux.HandleFunc("GET /deploy/{runID}/log/{node}", d.handleDeployLog)
@@ -114,8 +117,9 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 type dash struct {
-	snapshot func() *queue.Snapshot
-	store    *history.Store
+	failureHistory *flaky.History
+	snapshot       func() *queue.Snapshot
+	store          *history.Store
 
 	// ch is nil unless New was called with WithChannel: POST /api/v1/retry
 	// only has somewhere to send a retry Command when it is set (api.go).
@@ -178,6 +182,7 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	for _, ts := range snap.Targets {
 		card := targetCard{
+			Pause: ts.Pause, Circuit: ts.Circuit,
 			Name:          ts.Name,
 			Branch:        ts.Branch,
 			TargetTip:     orDash(ts.TargetTip),
@@ -255,7 +260,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := targetData{
-		Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled, EmergencyChoices: emergencyChoices(ts),
+		Circuit: ts.Circuit, Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled, EmergencyChoices: emergencyChoices(ts),
 		baseData:  d.newBase(ts.Name, snap, true, "targets"),
 		Name:      ts.Name,
 		Branch:    ts.Branch,
@@ -282,7 +287,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].Seq < waiting[j].Seq })
 	for _, we := range waiting {
 		data.Waiting = append(data.Waiting, waitingView{
-			Seq: we.Seq, Ref: we.Candidate.Ref, User: we.Candidate.User, Topic: we.Candidate.Topic, SHA: we.Candidate.SHA,
+			Urgent: we.Urgent, Blocked: we.Candidate.AdmissionBlocked, Seq: we.Seq, Ref: we.Candidate.Ref, User: we.Candidate.User, Topic: we.Candidate.Topic, SHA: we.Candidate.SHA,
 		})
 	}
 
@@ -368,14 +373,38 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 			ReceiptPublished: row.ReceiptPublished,
 		},
 	}
+	if snap := d.snapshot(); snap != nil {
+		if target, ok := findTarget(snap, row.Target); ok && target.EmergencyEnabled {
+			for _, choice := range emergencyChoices(target) {
+				var revisions []core.Revision
+				_ = json.Unmarshal([]byte(choice.Revisions), &revisions)
+				for _, revision := range revisions {
+					if revision.Ref == row.CandidateRef && revision.SHA == row.CandidateSHA {
+						data.EmergencyChoices = emergencyChoices(target)
+						break
+					}
+				}
+			}
+			if len(data.EmergencyChoices) > 0 {
+				data.Name = row.Target
+				data.Pause = target.Pause
+				data.EmergencyEnabled = true
+				data.ControlError = target.ControlError
+			}
+		}
+	}
 	if row.BatchID != "" {
 		// "k of n": Position is 0-based, displayed 1-based.
 		data.Run.BatchPosition = fmt.Sprintf("%d of %d", row.Position+1, row.BatchSize)
 	}
 	for _, c := range checks {
+		historyURL := ""
+		if d.failureHistory != nil {
+			historyURL = "/failures?check=" + url.QueryEscape(c.Name)
+		}
 		data.Checks = append(data.Checks, checkView{
-			RowID: fmt.Sprintf("check-%d-%s", c.Seq, url.PathEscape(c.Name)),
-			Seq:   c.Seq, Name: c.Name, Status: wordTag(c.Status), Duration: formatDuration(c.Duration), Err: c.Err,
+			FailureHistoryURL: historyURL, RowID: fmt.Sprintf("check-%d-%s", c.Seq, url.PathEscape(c.Name)),
+			Seq: c.Seq, Name: c.Name, Status: wordTag(c.Status), Duration: formatDuration(c.Duration), Err: c.Err,
 			Detail: checkRowDetail(c),
 			Output: c.Output,
 			// Open the failed/errored check's output by default — this page
@@ -1357,6 +1386,8 @@ type serviceInstanceView struct {
 }
 
 type targetCard struct {
+	Pause                     *queue.Pause
+	Circuit                   *queue.Circuit
 	Name, Branch, TargetTip   string
 	InFlight                  *inFlightView
 	WaitingCount, ParkedCount int
@@ -1473,11 +1504,12 @@ func shortImageRef(ref string) string {
 }
 
 type checkView struct {
-	RowID         string
-	Seq           int
-	Name          string
-	Status        tag
-	Duration, Err string
+	FailureHistoryURL string
+	RowID             string
+	Seq               int
+	Name              string
+	Status            tag
+	Duration, Err     string
 
 	// Detail is a short muted annotation rendered beside the duration:
 	// "blocked by <prereqs>" for a blocked row (history CheckRow.BlockedBy)
@@ -1543,6 +1575,7 @@ type runSummary struct {
 }
 
 type targetData struct {
+	Circuit          *queue.Circuit
 	Pause            *queue.Pause
 	ControlError     string
 	EmergencyEnabled bool
@@ -1603,6 +1636,8 @@ type ignoredRefView struct {
 }
 
 type waitingView struct {
+	Urgent                bool
+	Blocked               string
 	Seq                   int64
 	Ref, User, Topic, SHA string
 }
@@ -1627,6 +1662,11 @@ type parkedView struct {
 }
 
 type runData struct {
+	Name             string
+	Pause            *queue.Pause
+	ControlError     string
+	EmergencyEnabled bool
+	EmergencyChoices []emergencyChoice
 	baseData
 	StoreEnabled bool
 	Run          runSummaryFull

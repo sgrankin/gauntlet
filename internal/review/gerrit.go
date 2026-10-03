@@ -229,3 +229,52 @@ func (g *Gerrit) Landed(ctx context.Context, c core.Candidate, commit string) er
 	}
 	return nil
 }
+
+func (g *Gerrit) ValidateEmergency(ctx context.Context, c core.Candidate) error {
+	_, tail, _ := strings.Cut(c.Ref, "/gerrit/change-")
+	n, err := strconv.Atoi(tail)
+	if err != nil {
+		return err
+	}
+	var current change
+	path := "/changes/" + strconv.Itoa(n)
+	if err := g.call(ctx, "GET", path+"/detail?"+changeOptions, nil, &current); err != nil {
+		return err
+	}
+	if current.CurrentRevision != c.SHA || current.Revisions[c.SHA].Commit.Message != c.Message || !g.eligible(current, false) {
+		return fmt.Errorf("Gerrit revision or non-verification submit requirements changed")
+	}
+	// Never invent a positive Verified vote for checks that did not run.
+	return g.call(ctx, "POST", path+"/revisions/"+c.SHA+"/review", map[string]any{"message": "Gauntlet operator emergency: validation checks were waived. The queue will attempt the exact constructed commit with target CAS."}, nil)
+}
+func (g *Gerrit) PolicyFacts(ctx context.Context, c core.Candidate) (map[string]any, error) {
+	_, tail, _ := strings.Cut(c.Ref, "/gerrit/change-")
+	n, err := strconv.Atoi(tail)
+	if err != nil {
+		return nil, err
+	}
+	var current change
+	path := "/changes/" + strconv.Itoa(n)
+	if err := g.call(ctx, "GET", path+"/detail?"+changeOptions, nil, &current); err != nil {
+		return nil, err
+	}
+	if current.CurrentRevision != c.SHA {
+		return nil, fmt.Errorf("Gerrit policy revision changed")
+	}
+	var files map[string]any
+	if err := g.call(ctx, "GET", path+"/revisions/"+c.SHA+"/files/", nil, &files); err != nil {
+		return nil, err
+	}
+	paths := []string{}
+	for file := range files {
+		if file != "/COMMIT_MSG" {
+			paths = append(paths, file)
+		}
+	}
+	sort.Strings(paths)
+	requirements := []map[string]string{}
+	for _, r := range current.Requirements {
+		requirements = append(requirements, map[string]string{"name": r.Name, "status": r.Status})
+	}
+	return map[string]any{"kind": "gerrit", "change": n, "head_sha": current.CurrentRevision, "state": current.Status, "work_in_progress": current.WorkInProgress, "submit_requirements": requirements, "paths": paths}, nil
+}

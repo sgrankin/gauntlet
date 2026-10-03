@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,13 +24,17 @@ type Pause struct {
 }
 
 type controlState struct {
-	Version   int
-	Pauses    map[string]Pause
-	Urgent    map[string]core.Revision
-	Emergency map[string]core.Command
-	Audit     []controlAudit
-	LastError string
-	Uncertain bool `json:"-"`
+	ReviewFloor      int64
+	ProcessedReviews map[string]bool
+	PolicyAudit      []PolicyAudit
+	Circuits         map[string]Circuit
+	Version          int
+	Pauses           map[string]Pause
+	Urgent           map[string]core.Revision
+	Emergency        map[string]core.Command
+	Audit            []controlAudit
+	LastError        string
+	Uncertain        bool `json:"-"`
 }
 
 type controlAudit struct {
@@ -37,7 +43,7 @@ type controlAudit struct {
 }
 
 func loadControls(path string) (controlState, error) {
-	s := controlState{Version: 1, Pauses: map[string]Pause{}, Urgent: map[string]core.Revision{}, Emergency: map[string]core.Command{}}
+	s := controlState{ProcessedReviews: map[string]bool{}, Circuits: map[string]Circuit{}, Version: 1, Pauses: map[string]Pause{}, Urgent: map[string]core.Revision{}, Emergency: map[string]core.Command{}}
 	if path == "" {
 		return s, nil
 	}
@@ -56,6 +62,12 @@ func loadControls(path string) (controlState, error) {
 	if err := json.Unmarshal(data, &s); err != nil || s.Version != 1 || s.Pauses == nil || s.Urgent == nil || s.Emergency == nil {
 		return s, fmt.Errorf("queue controls: invalid state; refusing to forget incident controls")
 	}
+	if s.ProcessedReviews == nil {
+		s.ProcessedReviews = map[string]bool{}
+	}
+	if s.Circuits == nil {
+		s.Circuits = map[string]Circuit{}
+	}
 	return s, nil
 }
 
@@ -64,8 +76,27 @@ func (d *Daemon) saveControls(next controlState) bool {
 	if len(next.Audit) > 500 {
 		next.Audit = next.Audit[len(next.Audit)-500:]
 	}
+	for {
+		data, _ := json.Marshal(next)
+		if len(data) <= 3<<20 {
+			break
+		}
+		if len(next.Audit) > 0 {
+			next.Audit = next.Audit[1:]
+			continue
+		}
+		if len(next.PolicyAudit) > 0 {
+			next.PolicyAudit = next.PolicyAudit[1:]
+			continue
+		}
+		d.controls = next
+		d.controls.LastError = "incident control state exceeds storage limit"
+		d.controls.Uncertain = true
+		return false
+	}
 	if path := d.cfg.ControlPath; path != "" {
 		if err := writeControls(path, next); err != nil {
+			d.controls = next
 			d.controls.LastError = "cannot persist incident control: " + err.Error()
 			d.controls.Uncertain = true
 			return false
@@ -116,9 +147,17 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 		}
 		return
 	}
+	if d.draining && ((cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) || cmd.Kind == core.CommandUrgent) {
+		d.controls.LastError = "queue is draining; no new merge requests accepted"
+		return
+	}
 	cmd.Actor, cmd.Reason = strings.TrimSpace(cmd.Actor), strings.TrimSpace(cmd.Reason)
 	if cmd.Actor == "" || cmd.Reason == "" || len(cmd.Actor) > 256 || len(cmd.Reason) > 2048 {
 		d.controls.LastError = "incident controls require actor and reason"
+		return
+	}
+	if cmd.Kind == core.CommandMergePaused && !cmd.OverridePause {
+		d.controls.LastError = "explicit pause override required"
 		return
 	}
 	var target config.Target
@@ -142,7 +181,7 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 	if cmd.Kind == core.CommandResume {
 		delete(next.Pauses, cmd.Target)
 	}
-	if cmd.Kind == core.CommandUrgent || cmd.Kind == core.CommandMergeAnyway {
+	if cmd.Kind == core.CommandUrgent || (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) {
 		cands := discoverCandidates(cmd.Target, refs)
 		for ref, c := range d.external {
 			if c.Target == cmd.Target {
@@ -166,10 +205,14 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 			}
 			selected[rev.Ref] = true
 			if cmd.Kind == core.CommandUrgent {
+				if len(next.Urgent) >= 4096 {
+					d.controls.LastError = "priority capacity reached"
+					return
+				}
 				next.Urgent[rev.Ref] = rev
 			}
 		}
-		if cmd.Kind == core.CommandMergeAnyway {
+		if cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused {
 			if !d.cfg.AllowEmergency {
 				d.controls.LastError = "emergency merging is not enabled by the operator"
 				return
@@ -181,11 +224,28 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 			next.Emergency[cmd.Target] = cmd
 		}
 	}
+	if cmd.RequestID != "" {
+		next.ProcessedReviews[cmd.RequestID] = true
+		if len(next.ProcessedReviews) > 500 {
+			ids := []int64{}
+			for id := range next.ProcessedReviews {
+				n, err := strconv.ParseInt(id, 10, 64)
+				if err == nil {
+					ids = append(ids, n)
+				}
+			}
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			if len(ids) > 0 {
+				next.ReviewFloor = max(next.ReviewFloor, ids[0])
+				delete(next.ProcessedReviews, strconv.FormatInt(ids[0], 10))
+			}
+		}
+	}
 	next.Audit = append(next.Audit, controlAudit{d.now(), cmd})
 	if !d.saveControls(next) {
 		return
 	}
-	if cmd.Kind == core.CommandPause || cmd.Kind == core.CommandMergeAnyway {
+	if cmd.Kind == core.CommandPause || (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) {
 		if l := d.lanes[cmd.Target]; l != nil {
 			d.invalidateSuffix(ctx, target, l, 0, "operator incident control: "+cmd.Reason)
 		}
@@ -232,6 +292,9 @@ func (d *Daemon) reconcileEmergency(ctx context.Context, t config.Target, tip st
 		d.advanceLane(ctx, t, tip, cands, l)
 		return true
 	}
+	if d.draining {
+		return true
+	}
 	var picked []core.Candidate
 	for _, rev := range cmd.Revisions {
 		c, exists := cands[rev.Ref]
@@ -242,6 +305,13 @@ func (d *Daemon) reconcileEmergency(ctx context.Context, t config.Target, tip st
 		picked = append(picked, c)
 	}
 	d.startBatchRun(ctx, t, tip, picked)
+	if r := d.headRun(t.Name); r != nil && len(r.members) != len(picked) {
+		d.cancelRun(r)
+		d.finishRun(ctx, t, r, core.OutcomeSkipped, "selected emergency prefix crosses a check-spec boundary; select a shorter prefix", false)
+		d.lanes[t.Name].runs = nil
+		d.clearEmergency(t.Name, "select a shorter prefix: check-spec boundary")
+		return true
+	}
 	if d.headRun(t.Name) == nil {
 		d.clearEmergency(t.Name, "emergency history could not be constructed; see run failure")
 	}
@@ -258,7 +328,7 @@ func (d *Daemon) clearEmergency(target, reason string) {
 }
 
 func (d *Daemon) prepareEmergency(r *run) {
-	if r.emergencyReason != "" {
+	if r.controlPrepared {
 		return
 	}
 	cmd, ok := d.controls.Emergency[r.target]
@@ -270,6 +340,12 @@ func (d *Daemon) prepareEmergency(r *run) {
 		if rev.Ref != m.cand.Ref || rev.SHA != m.cand.SHA || rev.Version != m.cand.Version {
 			return
 		}
+	}
+	r.controlPrepared = true
+	if cmd.Kind == core.CommandMergePaused {
+		r.overridePause = true
+		r.pauseOverrideReason = cmd.Actor + ": " + cmd.Reason
+		return
 	}
 	r.emergencyReason = cmd.Actor + ": " + cmd.Reason
 	r.overridePause = cmd.OverridePause

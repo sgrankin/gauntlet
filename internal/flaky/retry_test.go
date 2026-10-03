@@ -29,14 +29,14 @@ func TestRetryPolicy(t *testing.T) {
 		status   core.CheckStatus
 		want     int
 	}{
-		{"flake", Decision{"retry", .95, "transient connection reset"}, nil, core.CheckPassed, 2},
-		{"low confidence", Decision{"retry", .6, "uncertain"}, nil, core.CheckPassed, 1},
-		{"abort", Decision{"abort", .95, "assertion changed"}, nil, core.CheckPassed, 1},
-		{"abstain", Decision{"abstain", .9, "no evidence"}, nil, core.CheckPassed, 1},
+		{"flake", Decision{Action: "retry", Confidence: .95, Reason: "transient connection reset"}, nil, core.CheckPassed, 2},
+		{"low confidence", Decision{Action: "retry", Confidence: .6, Reason: "uncertain"}, nil, core.CheckPassed, 1},
+		{"abort", Decision{Action: "abort", Confidence: .95, Reason: "assertion changed"}, nil, core.CheckPassed, 1},
+		{"abstain", Decision{Action: "abstain", Confidence: .9, Reason: "no evidence"}, nil, core.CheckPassed, 1},
 		{"unavailable", Decision{}, errors.New("offline"), core.CheckPassed, 1},
-		{"invalid", Decision{"approve", 1, "bad action"}, nil, core.CheckPassed, 1},
-		{"exhausted", Decision{"retry", 1, "temporary"}, nil, core.CheckFailed, 3},
-		{"skipped rerun", Decision{"retry", 1, "temporary"}, nil, core.CheckSkipped, 3},
+		{"invalid", Decision{Action: "approve", Confidence: 1, Reason: "bad action"}, nil, core.CheckPassed, 1},
+		{"exhausted", Decision{Action: "retry", Confidence: 1, Reason: "temporary"}, nil, core.CheckFailed, 3},
+		{"skipped rerun", Decision{Action: "retry", Confidence: 1, Reason: "temporary"}, nil, core.CheckSkipped, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			count := 0
@@ -103,7 +103,7 @@ func TestNonFailuresAndExcludedJobsNeverClassified(t *testing.T) {
 func TestClassificationDeadlinePreservesFailure(t *testing.T) {
 	r := &Retrier{Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Millisecond, Classifier: classifyFunc(func(ctx context.Context, _ core.CheckJob, _ core.CheckResult) (Decision, error) {
 		<-ctx.Done()
-		return Decision{"retry", 1, "late"}, nil
+		return Decision{Action: "retry", Confidence: 1, Reason: "late"}, nil
 	})}
 	executions := 0
 	result := r.Run(context.Background(), core.CheckJob{Name: "test"}, func(context.Context, core.CheckJob) core.CheckResult {
@@ -119,7 +119,7 @@ func TestRetryPreservesFullLog(t *testing.T) {
 	dir := t.TempDir()
 	original := filepath.Join(dir, "test.log.zst")
 	r := &Retrier{Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Second, Classifier: classifyFunc(func(context.Context, core.CheckJob, core.CheckResult) (Decision, error) {
-		return Decision{"retry", 1, "transient"}, nil
+		return Decision{Action: "retry", Confidence: 1, Reason: "transient"}, nil
 	})}
 	job := core.CheckJob{Name: "test", Dir: dir, LogPath: original, Command: []string{"sh", "-c", `if test -f marker; then echo 'successful attempt'; else touch marker; echo 'initial failure'; exit 1; fi`}}
 	result := r.Run(context.Background(), job, executor.LocalExecutor{}.RunCheck)
@@ -154,7 +154,7 @@ func TestCancellationStopsDecisionAndRetry(t *testing.T) {
 	r := &Retrier{Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Hour, Classifier: classifyFunc(func(ctx context.Context, _ core.CheckJob, _ core.CheckResult) (Decision, error) {
 		close(deciding)
 		<-ctx.Done()
-		return Decision{"retry", 1, "too late"}, nil
+		return Decision{Action: "retry", Confidence: 1, Reason: "too late"}, nil
 	})}
 	executions := 0
 	go func() {

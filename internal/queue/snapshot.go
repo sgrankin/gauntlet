@@ -56,6 +56,7 @@ type Snapshot struct {
 
 // TargetSnapshot is one target's live queue state.
 type TargetSnapshot struct {
+	Circuit          *Circuit
 	Pause            *Pause
 	ControlError     string
 	EmergencyEnabled bool
@@ -127,6 +128,7 @@ type CurrentCheck struct {
 
 // WaitingEntry is a queued-but-not-yet-picked candidate.
 type WaitingEntry struct {
+	Urgent    bool
 	Candidate core.Candidate
 	Seq       int64 // FIFO sequence (Daemon.order); lower = earlier
 }
@@ -213,6 +215,11 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		TargetTip:        refs[targetRefName(t)],
 	}
 
+	if c, ok := d.controls.Circuits[t.Name]; ok && c.Backoff > 0 {
+		copy := c
+		copy.Failures = append([]InfrastructureFailure(nil), c.Failures...)
+		ts.Circuit = &copy
+	}
 	if p, ok := d.controls.Pauses[t.Name]; ok {
 		copy := p
 		ts.Pause = &copy
@@ -266,7 +273,7 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		return waitingRefs[i] < waitingRefs[j] // pickHead's lexical tie-break
 	})
 	for _, ref := range waitingRefs {
-		ts.Waiting = append(ts.Waiting, WaitingEntry{Candidate: cands[ref], Seq: order[ref]})
+		ts.Waiting = append(ts.Waiting, WaitingEntry{Candidate: cands[ref], Seq: order[ref], Urgent: d.urgent(t.Name, ref, cands)})
 	}
 
 	var parkedRefs []string

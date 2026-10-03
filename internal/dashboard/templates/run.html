@@ -39,6 +39,7 @@
 </table>
 </div>
 
+{{if .EmergencyChoices}}{{template "incidentControls" .}}{{end}}
 <h2>Checks</h2>
 {{if .Checks}}
 <!-- This is the "how did it fail / is it actually doing the thing" page:

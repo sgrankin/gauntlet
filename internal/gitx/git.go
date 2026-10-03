@@ -643,3 +643,15 @@ func extractTar(src io.Reader, dir string) error {
 		}
 	}
 }
+
+// ChangedPaths supplies immutable path facts to operator admission policy.
+func (r *Repo) ChangedPaths(ctx context.Context, base, head string) ([]string, error) {
+	out, err := r.run(ctx, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, head, "--")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return []string{}, nil
+	}
+	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00"), nil
+}

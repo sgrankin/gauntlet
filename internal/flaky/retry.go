@@ -22,6 +22,8 @@ type Classifier interface {
 // workspace, services, and execution slot until a final result is available.
 // It must only be configured for commands whose effects are safe to repeat.
 type Retrier struct {
+	History       *History
+	MaxRunRetries int
 	Classifier    Classifier
 	Model         string
 	Checks        []string
@@ -37,6 +39,8 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 		return res
 	}
 	var audit strings.Builder
+	var suspects []string
+	var kind string
 	canonical := res.LogPath
 	totalCPUUser, totalCPUSys, peak := res.UserCPU, res.SysCPU, res.PeakRSS
 	for attempt := 1; ; attempt++ {
@@ -58,18 +62,43 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			err = decision.Validate()
 		}
 		if err != nil {
+			if e := r.History.Record(ctx, job, res.Output, decision, err, false, false); e != nil {
+				log.Printf("failure history: %v", e)
+			}
 			note := fmt.Sprintf("gauntlet failure review: decision unavailable or invalid (%v); keeping failure.\n", err)
 			audit.WriteString(note)
 			appendNote(canonical, note)
 			break
+		}
+		kind = decision.Kind
+		for _, ref := range decision.Suspects {
+			for _, candidate := range job.Candidates {
+				if candidate.Ref == ref && !slices.Contains(suspects, ref) {
+					suspects = append(suspects, ref)
+				}
+			}
+		}
+		if len(suspects) > 0 {
+			fmt.Fprintf(&audit, "gauntlet investigation: UNCONFIRMED suspects=%q evidence=%q\n", suspects, decision.Evidence)
 		}
 		retry := decision.Action == "retry" && decision.Confidence >= r.MinConfidence && ctx.Err() == nil
 		note := fmt.Sprintf("gauntlet failure review: model=%q %s confidence=%.3f threshold=%.3f; %s; retry=%t\n", r.Model, decision.Action, decision.Confidence, r.MinConfidence, strings.Join(strings.Fields(decision.Reason), " "), retry)
 		audit.WriteString(note)
 		appendNote(canonical, note)
 		if !retry {
+			if err := r.History.Record(ctx, job, res.Output, decision, nil, false, false); err != nil {
+				log.Printf("failure history: %v", err)
+			}
 			break
 		}
+		if r.MaxRunRetries > 0 {
+			allowed, err := r.History.Reserve(ctx, job.RunID, r.MaxRunRetries)
+			if err != nil || !allowed {
+				audit.WriteString("gauntlet failure review: run-wide retry budget exhausted or unavailable; keeping failure.\n")
+				break
+			}
+		}
+		failedOutput := res.Output
 		nextJob := job
 		if job.LogPath != "" {
 			nextJob.LogPath = strings.TrimSuffix(job.LogPath, ".log.zst") + fmt.Sprintf(".attempt-%d.log.zst", attempt+1)
@@ -78,6 +107,9 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 		if res.Err == nil && res.Status == core.CheckSkipped {
 			res.Status = core.CheckFailed
 			res.Output += "\ngauntlet: a skipped retry cannot clear the original failure."
+		}
+		if err := r.History.Record(ctx, job, failedOutput, decision, nil, true, res.Err == nil && res.Status == core.CheckPassed); err != nil {
+			log.Printf("failure history: %v", err)
 		}
 		totalCPUUser += res.UserCPU
 		totalCPUSys += res.SysCPU
@@ -89,6 +121,8 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			appendLog(canonical, res.LogPath)
 		}
 	}
+	res.SuspectedRefs = suspects
+	res.FailureKind = kind
 	res.Output = tail(audit.String(), 65536)
 	res.LogPath = canonical
 	res.Duration = time.Since(start)
@@ -151,6 +185,8 @@ func resultWord(res core.CheckResult) string {
 		return "passed"
 	case core.CheckSkipped:
 		return "skipped"
+	case core.CheckWaived:
+		return "waived"
 	case core.CheckBlocked:
 		return "blocked"
 	default:

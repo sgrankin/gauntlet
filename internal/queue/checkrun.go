@@ -290,11 +290,13 @@ func (d *Daemon) materializeChecks(r *run) {
 // i.e. after executor child cleanup — so a freed slot never represents a
 // still-running process or container.
 func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
+	d.markCircuitProbe(r)
 	check := r.checks[idx]
 	checkCtx, cancel := context.WithCancel(r.rootCtx)
 	spanCtx, span := obs.StartCheck(checkCtx, d.tr, check.Name)
 
 	job := core.CheckJob{
+		GitDir:    d.cfg.SourceGitDir,
 		RunID:     r.runID,
 		Target:    r.target,
 		Name:      check.Name,
@@ -306,6 +308,9 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		MergeSHA:  r.chainTip,
 		Candidate: r.members[0].cand,
 		Clean:     false, // reserved for a future clean-build cache escape hatch; see docs/design/core.md ("Deliberately not built")
+	}
+	for _, m := range r.members {
+		job.Candidates = append(job.Candidates, m.cand)
 	}
 	// An "image:<name>" node is a BUILD: the executor swaps the result-
 	// file protocol (GAUNTLET_IMAGE_RESULT_FILE) and hands the captured

@@ -369,13 +369,17 @@ type statusOut struct {
 // JSON names), deliberately duplicated rather than imported — see the
 // package doc.
 type targetStatus struct {
-	Name     string           `json:"name"`
-	Branch   string           `json:"branch"`
-	Tip      string           `json:"tip"`
-	InFlight *inFlightStatus  `json:"inFlight"`
-	Pipeline []pipelineStatus `json:"pipeline"`
-	Waiting  []waitingStatus  `json:"waiting"`
-	Parked   []parkedStatus   `json:"parked"`
+	Pause            *queue.Pause     `json:"pause,omitempty"`
+	Circuit          *queue.Circuit   `json:"circuit,omitempty"`
+	ControlError     string           `json:"controlError,omitempty"`
+	EmergencyEnabled bool             `json:"emergencyEnabled"`
+	Name             string           `json:"name"`
+	Branch           string           `json:"branch"`
+	Tip              string           `json:"tip"`
+	InFlight         *inFlightStatus  `json:"inFlight"`
+	Pipeline         []pipelineStatus `json:"pipeline"`
+	Waiting          []waitingStatus  `json:"waiting"`
+	Parked           []parkedStatus   `json:"parked"`
 
 	// LiveHook and HookRuns mirror dashboard/api.go's own targetStatus
 	// additions field-for-field: live post-land hook progress
@@ -450,9 +454,11 @@ type pipelineMemberStatus struct {
 }
 
 type waitingStatus struct {
-	Ref string `json:"ref"`
-	SHA string `json:"sha"`
-	Seq int64  `json:"seq"`
+	AdmissionBlocked string `json:"admissionBlocked,omitempty"`
+	Urgent           bool   `json:"urgent,omitempty"`
+	Ref              string `json:"ref"`
+	SHA              string `json:"sha"`
+	Seq              int64  `json:"seq"`
 }
 
 type parkedStatus struct {
@@ -555,6 +561,7 @@ const (
 
 func buildTargetStatus(p Params, ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
+		Pause: ts.Pause, Circuit: ts.Circuit, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
 		Name:     ts.Name,
 		Branch:   ts.Branch,
 		Tip:      ts.TargetTip,
@@ -575,7 +582,7 @@ func buildTargetStatus(p Params, ts queue.TargetSnapshot) targetStatus {
 	waiting := append([]queue.WaitingEntry(nil), ts.Waiting...)
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].Seq < waiting[j].Seq })
 	for _, we := range waiting {
-		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq})
+		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq, AdmissionBlocked: we.Candidate.AdmissionBlocked, Urgent: we.Urgent})
 	}
 
 	for _, pe := range ts.Parked {

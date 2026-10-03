@@ -1647,3 +1647,43 @@ func TestQueueControlsRejectFullBuffer(t *testing.T) {
 		}
 	}
 }
+
+func TestControlAPIRejectsStaleCrossOriginAndUnacknowledgedOverrides(t *testing.T) {
+	c := core.Candidate{Ref: "refs/heads/for/main/author/fix", SHA: "revision", Version: "metadata"}
+	snap := &queue.Snapshot{Targets: []queue.TargetSnapshot{{Name: "main", EmergencyEnabled: true, Waiting: []queue.WaitingEntry{{Candidate: c}}, Pause: &queue.Pause{Actor: "operator", Reason: "incident"}}}}
+	ch := dashboard.NewChannel()
+	handler := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithChannel(ch))
+	for _, tc := range []struct {
+		body, origin string
+		want         int
+	}{
+		{`{"Kind":"pause","Target":"main","Reason":"incident"}`, "https://elsewhere.invalid", 403},
+		{`{"Kind":"pause","Target":"main","Reason":"incident"} {}`, "", 400},
+		{`{"Kind":"merge-anyway","Target":"main","Reason":"hotfix","Revisions":[{"ref":"refs/heads/for/main/author/fix","sha":"revision","version":"metadata"}]}`, "", 409},
+		{`{"Kind":"merge-anyway","Target":"main","Reason":"hotfix","OverridePause":true,"Revisions":[{"ref":"refs/heads/for/main/author/fix","sha":"stale","version":"metadata"}]}`, "", 409},
+		{`{"Kind":"merge-anyway","Target":"main","Reason":"hotfix","OverridePause":true,"Revisions":[{"ref":"refs/heads/for/main/author/fix","sha":"revision","version":"metadata"}]}`, "", 202},
+	} {
+		req := httptest.NewRequest("POST", "http://queue.test/api/v1/control", strings.NewReader(tc.body))
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != tc.want {
+			t.Fatalf("%s: %d %s", tc.body, res.Code, res.Body.String())
+		}
+	}
+	select {
+	case cmd := <-ch.Commands():
+		if cmd.Kind != core.CommandMergeAnyway || !cmd.OverridePause || len(cmd.Revisions) != 1 {
+			t.Fatalf("bad queued intent: %+v", cmd)
+		}
+	default:
+		t.Fatal("accepted command not delivered")
+	}
+	select {
+	case <-ch.Commands():
+		t.Fatal("rejected command was delivered")
+	default:
+	}
+}

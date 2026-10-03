@@ -276,12 +276,13 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!reason || !reason.trim()) return;
       endpoint = '/api/v1/control';
       payload = {Kind: action, Target: subject, Reason: reason};
-      if (action === 'urgent' || action === 'merge-anyway') {
+      if (action === 'urgent' || action === 'merge-anyway' || action === 'merge-paused') {
         var select = document.getElementById('emergency-prefix');
         if (!select || !select.value) return;
         payload.Revisions = JSON.parse(select.value);
         var override = document.getElementById('override-pause');
-        payload.OverridePause = !!(override && override.checked);
+        payload.OverridePause = action === 'merge-paused' || !!(override && override.checked);
+ if (action === 'merge-paused') confirmation = 'Verify and land these exact changes while leaving the queue paused? Current target work will be cancelled.';
         if (action === 'merge-anyway') confirmation = 'Land these ' + payload.Revisions.length + ' exact changes WITHOUT verification? Current target work will be cancelled. This exception is recorded.';
       }
     } else if (btn.hasAttribute('data-deploy-action')) {

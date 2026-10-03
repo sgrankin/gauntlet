@@ -55,12 +55,36 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	if d.cfg.Reviews != nil {
 		for _, m := range r.members {
 			if m.cand.Source != "" {
-				if err := d.cfg.Reviews.Validate(ctx, m.cand); err != nil {
+				var err error
+				if r.emergencyReason != "" {
+					if validator, ok := d.cfg.Reviews.(interface {
+						ValidateEmergency(context.Context, core.Candidate) error
+					}); ok {
+						err = validator.ValidateEmergency(ctx, m.cand)
+					} else {
+						err = fmt.Errorf("forge does not support honest emergency validation")
+					}
+				} else {
+					err = d.cfg.Reviews.Validate(ctx, m.cand)
+				}
+				if err != nil {
 					obs.EndSpan(landSpan, err)
 					d.finishRun(ctx, t, r, core.OutcomeSkipped, "review changed before land: "+err.Error(), false)
 					return
 				}
 			}
+		}
+	}
+
+	members := make([]core.Candidate, len(r.members))
+	for i, m := range r.members {
+		members[i] = m.cand
+	}
+	for _, m := range r.members {
+		if err := d.evaluatePolicy(ctx, t, m.cand, r.baseOID, members, m.rec.Checks, "landing", r.emergencyReason != "", r.overridePause); err != nil {
+			obs.EndSpan(landSpan, err)
+			d.finishRun(ctx, t, r, core.OutcomeRejected, "landing policy: "+err.Error(), true)
+			return
 		}
 	}
 
@@ -167,6 +191,7 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	// was never set (every non-batch mode, or a batch target that never
 	// went red).
 	delete(d.batchFallback, t.Name)
+	delete(d.batchRecovery, t.Name)
 
 	for i := range r.members {
 		m := &r.members[i]
@@ -183,11 +208,24 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		case delErr != nil:
 			detail = "land: delete slot: " + delErr.Error()
 		}
-		m.rec.Outcome = core.OutcomeLanded
-		if r.emergencyReason != "" {
-			detail = "EMERGENCY: checks bypassed; " + r.emergencyReason + "; " + detail
+		urgent := m.cand.Urgent
+		if revision, ok := d.controls.Urgent[m.cand.Ref]; ok && revision.SHA == m.cand.SHA && revision.Version == m.cand.Version {
+			urgent = true
 		}
-		m.rec.Detail = detail
+		if urgent {
+			d.urgentBurst[t.Name]++
+		} else {
+			d.urgentBurst[t.Name] = 0
+		}
+		m.rec.Outcome = core.OutcomeLanded
+		memberDetail := detail
+		if r.emergencyReason != "" {
+			memberDetail = "EMERGENCY: checks bypassed; " + r.emergencyReason + "; " + detail
+		}
+		if r.pauseOverrideReason != "" {
+			memberDetail = "PAUSE OVERRIDE: " + r.pauseOverrideReason + "; " + memberDetail
+		}
+		m.rec.Detail = memberDetail
 		m.rec.EndedAt = d.now()
 		// Receipt provenance (issue #13) is already on m.rec by now —
 		// stampReceiptRecords ran right after the publish, above, before
@@ -202,10 +240,10 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 			Candidate: m.cand,
 			RunID:     m.rec.RunID,
 			Record:    m.rec,
-			Detail:    detail,
+			Detail:    m.rec.Detail,
 		})
 	}
-	if r.emergencyReason != "" {
+	if r.controlPrepared {
 		d.clearEmergency(t.Name, "")
 	}
 	// Deliberate ordering exception vs. the other terminal paths: finishRun
@@ -235,6 +273,9 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 // always false there): every member of an invalidated batch must Skip and
 // re-queue, none of them singled out.
 func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome core.Outcome, detail string, park bool) {
+	if (r.emergencyReason != "" || r.pauseOverrideReason != "") && outcome != core.OutcomeSkipped && outcome != core.OutcomeLanded {
+		d.clearEmergency(t.Name, "emergency stopped: "+detail)
+	}
 	// A run concluded by its own verdict already materialized its records
 	// in advanceChecks (idempotent guard); this covers the externally
 	// concluded paths (move/cancel/skip), whose records carry whatever
@@ -243,10 +284,14 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 	for i := range r.members {
 		m := &r.members[i]
 		m.rec.Outcome = outcome
+		memberDetail := detail
 		if r.emergencyReason != "" {
-			detail = "EMERGENCY: checks bypassed; " + r.emergencyReason + "; " + detail
+			memberDetail = "EMERGENCY: checks bypassed; " + r.emergencyReason + "; " + detail
 		}
-		m.rec.Detail = detail
+		if r.pauseOverrideReason != "" {
+			memberDetail = "PAUSE OVERRIDE: " + r.pauseOverrideReason + "; " + memberDetail
+		}
+		m.rec.Detail = memberDetail
 		m.rec.EndedAt = d.now()
 
 		if park {

@@ -21,6 +21,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/deploy"
+	"github.com/sgrankin/gauntlet/internal/flaky"
 	"github.com/sgrankin/gauntlet/internal/gitx"
 	"github.com/sgrankin/gauntlet/internal/hooks"
 	"github.com/sgrankin/gauntlet/internal/obs"
@@ -32,6 +33,15 @@ func main() {
 	if len(os.Args) > 1 {
 		var command func([]string) error
 		switch os.Args[1] {
+		case "investigate-tools":
+			command = func(args []string) error {
+				if len(args) != 1 {
+					return fmt.Errorf("investigate-tools requires a capability file")
+				}
+				return flaky.RunTools(context.Background(), args[0])
+			}
+		case "policy-check":
+			command = runPolicyCheck
 		case "control":
 			command = runControl
 		case "land-pr":
@@ -644,11 +654,16 @@ func run() error {
 		seedParks = buildSeedParks(store)
 	}
 
-	failureReview, err := buildFailureReview(cfg)
+	failureReview, err := buildFailureReview(cfg, *statePath)
 	if err != nil {
 		return err
 	}
+	if failureReview != nil && failureReview.History != nil {
+		defer failureReview.History.Close()
+	}
 	qcfg := queue.Config{
+		CircuitBreaker:       cfg.CircuitBreaker,
+		SourceGitDir:         repoDir,
 		ControlPath:          filepath.Join(*statePath, "queue-controls.json"),
 		AllowEmergency:       cfg.EmergencyMerges,
 		FailureReview:        failureReview,
@@ -691,9 +706,19 @@ func run() error {
 	if pool != nil {
 		qcfg.Services = pool
 	}
-	qcfg.Reviews, err = buildReviewSource(cfg, appTokens, repo)
+	qcfg.Policy, err = buildPolicy(cfg, *configPath)
 	if err != nil {
 		return err
+	}
+	qcfg.Reviews, err = buildReviewSource(cfg, appTokens, repo, *statePath)
+	if err != nil {
+		return err
+	}
+	if source, ok := qcfg.Reviews.(interface {
+		StartFeedback(context.Context) <-chan struct{}
+	}); ok {
+		done := source.StartFeedback(ctx)
+		wg.Go(func() { <-done })
 	}
 	reviewHints := make(chan time.Time, 1)
 	webhook, err := buildGitHubWebhook(cfg, qcfg.Reviews, reviewHints)
@@ -829,7 +854,12 @@ func run() error {
 	if dt != nil {
 		deployWire = deployWiring{Snapshot: dt.Snapshot, Retry: dt.Retry, Cancel: dt.CancelCurrent}
 	}
-	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, deployWire, beginDrain, &wg, webhook)
+	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, deployWire, beginDrain, &wg, webhook, func() *flaky.History {
+		if failureReview != nil {
+			return failureReview.History
+		}
+		return nil
+	}())
 	if store != nil {
 		startDepthSampler(ctx, cfg, d.Snapshot, store, &wg)
 	}

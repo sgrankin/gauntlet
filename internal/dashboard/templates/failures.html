@@ -1,0 +1,12 @@
+{{define "content"}}
+<p>Observed failures for <strong>{{.Check}}</strong>. Model classifications and suspects are hypotheses; retry outcomes are measured separately.</p>
+<p>Last {{len .Observations}} observations: {{.Passes}} passing reruns out of {{.Retries}} retries.</p>
+{{range .Observations}}
+<div class="section"><p><a href="/run/{{.Run}}">{{.Run}}</a> · {{.At}} · revision <code>{{shortSHA .Revision}}</code></p>
+<p>Decision: {{.Decision.Action}} · confidence {{.Decision.Confidence}} · {{.Decision.Reason}}</p>
+{{if .Decision.Suspects}}<p>Unconfirmed suspects: {{.Decision.Suspects}}</p>{{end}}
+<p>{{if .Retried}}Rerun {{if .Passed}}passed{{else}}did not pass{{end}}{{else}}No rerun{{end}}{{if .Error}} · {{.Error}}{{end}}</p>
+<details><summary>Failure evidence · {{.Fingerprint}}</summary><pre class="output">{{.Output}}</pre></details>
+</div>
+{{else}}<p>No observations recorded for this check.</p>{{end}}
+{{end}}

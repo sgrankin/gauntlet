@@ -8,6 +8,7 @@ const (
 	CommandResume      = "resume"
 	CommandUrgent      = "urgent"
 	CommandMergeAnyway = "merge-anyway"
+	CommandMergePaused = "merge-paused"
 	// CommandRetry clears the park for (Command.Target, Command.Ref) at its
 	// current SHA, if it is currently parked, so the next reconcile pass
 	// re-tests it.

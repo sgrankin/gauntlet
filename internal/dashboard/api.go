@@ -350,6 +350,7 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/run/{id}", d.handleAPIRun)
 	mux.HandleFunc("GET /api/v1/batch/{id}", d.handleAPIBatch)
 	mux.HandleFunc("GET /api/v1/checks", d.handleAPIChecks)
+	mux.HandleFunc("GET /api/v1/failures", d.handleFailureHistory)
 	mux.HandleFunc("GET /api/v1/services", d.handleAPIServices)
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
 	mux.HandleFunc("/api/v1/control", d.handleAPIControl)
@@ -414,6 +415,7 @@ type statusResponse struct {
 }
 
 type targetStatus struct {
+	Circuit          *queue.Circuit   `json:"circuit,omitempty"`
 	Pause            *queue.Pause     `json:"pause,omitempty"`
 	ControlError     string           `json:"controlError,omitempty"`
 	EmergencyEnabled bool             `json:"emergencyEnabled"`
@@ -509,9 +511,11 @@ type pipelineMemberStatus struct {
 }
 
 type waitingStatus struct {
-	Ref string `json:"ref"`
-	SHA string `json:"sha"`
-	Seq int64  `json:"seq"`
+	AdmissionBlocked string `json:"admissionBlocked,omitempty"`
+	Urgent           bool   `json:"urgent,omitempty"`
+	Ref              string `json:"ref"`
+	SHA              string `json:"sha"`
+	Seq              int64  `json:"seq"`
 }
 
 type parkedStatus struct {
@@ -618,7 +622,7 @@ func (d *dash) idleSince(snap *queue.Snapshot) time.Time {
 // are daemon-level, populated by handleAPIStatus itself, not here.
 func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
-		Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
+		Circuit: ts.Circuit, Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
 		Name:     ts.Name,
 		Branch:   ts.Branch,
 		Tip:      ts.TargetTip,
@@ -639,7 +643,7 @@ func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	waiting := append([]queue.WaitingEntry(nil), ts.Waiting...)
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].Seq < waiting[j].Seq })
 	for _, we := range waiting {
-		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq})
+		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq, AdmissionBlocked: we.Candidate.AdmissionBlocked, Urgent: we.Urgent})
 	}
 
 	for _, pe := range ts.Parked {

@@ -38,6 +38,9 @@ type Git interface {
 }
 
 type GitHubParams struct {
+	EmergencyEnabled  bool
+	IntentPath        string
+	PolicyTeams       []string
 	Repo, APIURL, Bot string
 	Tokens            Tokens
 	Git               Git
@@ -50,6 +53,10 @@ type GitHubParams struct {
 }
 
 type GitHub struct {
+	feedbackQueue  chan core.Event
+	intentMu       sync.Mutex
+	feedbackMu     sync.Mutex
+	feedbackBodies map[int]string
 	p              GitHubParams
 	client         *http.Client
 	pollMu         sync.Mutex
@@ -104,16 +111,31 @@ type comment struct {
 }
 
 type request struct {
-	PR       pull
-	ID       int64
-	Action   string
-	Count    int
-	Notified bool
+	SkipChecks, OverridePause bool
+	Requester, Reason         string
+	Urgent                    bool
+	PR                        pull
+	ID                        int64
+	Action                    string
+	Count                     int
+	Notified                  bool
 }
 
 // Command accepts one whole line, not quoted prose or a substring. A count
 // always means the bottom N unlanded PRs of the stack.
 func Command(body, bot string) (string, int) {
+	parsed, ok := parseCommand(body, bot)
+	if !ok {
+		return "", 0
+	}
+	action := parsed.Action
+	if parsed.Urgent {
+		action += "-urgent"
+	}
+	return action, parsed.Count
+}
+
+func command(body, bot string) (string, int) {
 	fields := strings.Fields(strings.TrimSpace(body))
 	if len(fields) < 2 || fields[0] != "@"+bot {
 		return "", 0
@@ -225,7 +247,11 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 	}
 	var result request
 	for _, c := range cs {
-		action, count := Command(c.Body, g.p.Bot)
+		parsed, valid := parseCommand(c.Body, g.p.Bot)
+		action, count := parsed.Action, parsed.Count
+		if !valid {
+			continue
+		}
 		if action == "" {
 			continue
 		}
@@ -239,7 +265,7 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 			permissions[c.User.Login] = allowed
 		}
 		if allowed && c.ID > result.ID {
-			result = request{PR: p, ID: c.ID, Action: action, Count: count}
+			result = request{PR: p, ID: c.ID, Action: action, Count: count, Urgent: parsed.Urgent, SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause, Requester: c.User.Login, Reason: parsed.Reason}
 		}
 	}
 	for _, c := range cs {
@@ -266,8 +292,13 @@ func (g *GitHub) writer(ctx context.Context, login string) (bool, error) {
 }
 
 func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
+	ready, _, err := g.readyReason(ctx, p)
+	return ready, err
+}
+
+func (g *GitHub) readyReason(ctx context.Context, p pull, skipChecks ...bool) (bool, string, error) {
 	if p.State != "open" || p.Draft {
-		return false, nil
+		return false, "PR is closed or a draft", nil
 	}
 	type vote struct {
 		State    string
@@ -276,7 +307,7 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 	}
 	reviews, err := pages[vote](ctx, g, "/pulls/"+strconv.Itoa(p.Number)+"/reviews")
 	if err != nil {
-		return false, err
+		return false, "readiness facts unavailable", err
 	}
 	latest := map[string]vote{}
 	for _, v := range reviews {
@@ -288,36 +319,36 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 	for _, v := range latest {
 		trusted, err := g.writer(ctx, v.User.Login)
 		if err != nil {
-			return false, err
+			return false, "readiness facts unavailable", err
 		}
 		if !trusted {
 			continue
 		}
 		if v.State == "CHANGES_REQUESTED" {
-			return false, nil
+			return false, "changes requested by " + v.User.Login, nil
 		}
 		if v.State == "APPROVED" && v.CommitID == p.Head.SHA {
 			approvals++
 		}
 	}
 	if approvals < g.p.Approvals {
-		return false, nil
+		return false, fmt.Sprintf("%d current approvals; %d required", approvals, g.p.Approvals), nil
 	}
 	if g.p.RequireResolvedConversations {
 		resolved, err := g.conversationsResolved(ctx, p.Number)
 		if err != nil || !resolved {
-			return false, err
+			return false, "unresolved or inaccessible review conversations", err
 		}
 	}
-	if len(g.p.RequiredChecks) == 0 {
-		return true, nil
+	if len(g.p.RequiredChecks) == 0 || (len(skipChecks) > 0 && skipChecks[0]) {
+		return true, "", nil
 	}
 	// Status history is newest-first. Keep the latest result for each context,
 	// including contexts that appear beyond the first page.
 	type status struct{ Context, State string }
 	statuses, err := pages[status](ctx, g, "/commits/"+p.Head.SHA+"/statuses")
 	if err != nil {
-		return false, err
+		return false, "readiness facts unavailable", err
 	}
 	green := map[string]bool{}
 	for _, s := range statuses {
@@ -331,7 +362,7 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 			CheckRuns []struct{ Name, Status, Conclusion string } `json:"check_runs"`
 		}
 		if err := g.call(ctx, "GET", g.endpoint(fmt.Sprintf("/commits/%s/check-runs?per_page=100&page=%d", p.Head.SHA, page)), nil, &runs); err != nil {
-			return false, err
+			return false, "readiness facts unavailable", err
 		}
 		for _, r := range runs.CheckRuns {
 			passed := r.Status == "completed" && (r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped")
@@ -344,15 +375,15 @@ func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
 			break
 		}
 		if page >= 1000 {
-			return false, fmt.Errorf("check-run pagination exceeds limit")
+			return false, "check facts incomplete", fmt.Errorf("check-run pagination exceeds limit")
 		}
 	}
 	for _, name := range g.p.RequiredChecks {
 		if !green[name] {
-			return false, nil
+			return false, "required check is missing or not passing: " + name, nil
 		}
 	}
-	return true, nil
+	return true, "", nil
 }
 
 func slot(target string, number int) string {
@@ -427,7 +458,7 @@ func version(c core.Candidate, requestID int64) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, error) {
+func (g *GitHub) candidates(ctx context.Context, fetch bool, bypassChecks ...bool) ([]core.Candidate, error) {
 	// Closed roots retain stack-wide requests while later members land.
 	// This also distinguishes a genuinely landed ancestor from an abandoned PR.
 	open, err := pages[pull](ctx, g, "/pulls?state=all")
@@ -496,6 +527,9 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 	sort.Slice(requests, func(i, j int) bool { return requests[i].ID < requests[j].ID })
 	selected := map[string]core.Candidate{}
 	for _, r := range requests {
+		if (r.SkipChecks || r.OverridePause) && (!g.p.EmergencyEnabled || r.Reason == "" || g.p.IntentPath == "") {
+			continue
+		}
 		var members []pull
 		var branch string
 		if native, ok := nativeByMember[r.PR.Number]; ok {
@@ -552,11 +586,19 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 				sourceBase = p.Head.SHA
 				continue
 			}
-			ready, err := g.ready(ctx, p)
+			ready, reason, err := g.readyReason(ctx, p, r.SkipChecks || (len(bypassChecks) > 0 && bypassChecks[0]))
 			if err != nil {
 				return nil, err
 			}
+			blocked := ""
+			if !ready && g.p.EmergencyEnabled && strings.HasPrefix(reason, "required check") {
+				blocked = reason
+				ready = true
+			}
 			if !ready {
+				if fetch {
+					g.admissionFeedback(ctx, p, target, reason)
+				}
 				if r.Action != "merge-ready" {
 					prefix = nil
 				}
@@ -564,9 +606,17 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 			}
 			c := core.Candidate{Ref: slot(target, p.Number), Target: target, User: p.User.Login,
 				Topic: fmt.Sprintf("pr-%d", p.Number), SHA: p.Head.SHA, Source: "github",
-				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL,
+				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL, Urgent: r.Urgent, AdmissionBlocked: blocked, SkipChecks: r.SkipChecks, OverridePause: r.OverridePause, Requester: r.Requester, RequestReason: r.Reason,
 				Message: fmt.Sprintf("%s (#%d)\n\n%s", p.Title, p.Number, p.Body)}
 			c.Version = version(c, r.ID)
+			if r.Urgent {
+				c.Version += ":urgent"
+			}
+			if r.SkipChecks || r.OverridePause {
+				flags := fmt.Sprintf("%t:%t:%s", r.SkipChecks, r.OverridePause, r.Reason)
+				c.Version += ":" + fmt.Sprintf("%x", sha256.Sum256([]byte(flags)))
+				c.EmergencyID = fmt.Sprint(r.ID)
+			}
 			prefix = append(prefix, c)
 			previous, sourceBase = c.Ref, c.SHA
 			if r.Action == "merge" && p.Number == r.PR.Number {
@@ -577,6 +627,17 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool) ([]core.Candidate, 
 				if remaining == 0 {
 					break
 				}
+			}
+		}
+		if (r.SkipChecks || r.OverridePause) && len(prefix) > 0 {
+			if err := g.freezeIntent(ctx, r, prefix); err != nil {
+				if fetch {
+					g.admissionFeedback(ctx, r.PR, target, err.Error())
+				}
+				continue
+			}
+			for i := range prefix {
+				prefix[i].RequestedCount = len(prefix)
 			}
 		}
 		for _, c := range prefix {
@@ -650,7 +711,7 @@ func (g *GitHub) Validate(ctx context.Context, c core.Candidate) error {
 		return err
 	}
 	for _, n := range current {
-		if n.Ref == c.Ref && n.SHA == c.SHA && n.Version == c.Version {
+		if n.AdmissionBlocked == "" && n.Ref == c.Ref && n.SHA == c.SHA && n.Version == c.Version {
 			return nil
 		}
 	}
@@ -693,7 +754,7 @@ func (g *GitHub) Landed(ctx context.Context, c core.Candidate, commit string) er
 		if len(short) > 12 {
 			short = short[:12]
 		}
-		body := fmt.Sprintf("Landed by Gauntlet as [%s](%s), from revision `%s`.\n\nThe exact tested commit was pushed to the target. Gauntlet preserves contributor branches; GitHub’s merge API would create another commit, so this PR is closed with a landing link.\n\n%s", short, commitURL, c.SHA, marker)
+		body := fmt.Sprintf("Landed by Gauntlet as [%s](%s), from revision `%s`.\n\nThe exact constructed commit was pushed to the target. Gauntlet preserves contributor branches; GitHub’s merge API would create another commit, so this PR is closed with a landing link.\n\n%s", short, commitURL, c.SHA, marker)
 		if err := g.call(ctx, "POST", g.endpoint(fmt.Sprintf("/issues/%d/comments", n)), map[string]string{"body": body}, nil); err != nil {
 			return err
 		}
@@ -718,4 +779,18 @@ func (g *GitHub) Request(ctx context.Context, number int, action string, count i
 		return fmt.Errorf("invalid queue command")
 	}
 	return g.call(ctx, "POST", g.endpoint(fmt.Sprintf("/issues/%d/comments", number)), map[string]string{"body": body}, nil)
+}
+
+func (g *GitHub) ValidateEmergency(ctx context.Context, c core.Candidate) error {
+	defer g.Invalidate()
+	current, err := g.candidates(ctx, false, true)
+	if err != nil {
+		return err
+	}
+	for _, n := range current {
+		if n.Ref == c.Ref && n.SHA == c.SHA && n.Version == c.Version {
+			return nil
+		}
+	}
+	return fmt.Errorf("review revision, authorization, conversations, or request changed")
 }

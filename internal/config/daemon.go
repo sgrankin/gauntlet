@@ -151,13 +151,15 @@ var validSummarizeEfforts = map[string]bool{
 // nodes actually present), so "section present" is encoded as "its required
 // key is non-empty" rather than a nil check.
 type Daemon struct {
-	EmergencyMerges bool          `kdl:"emergency-merges"`
-	Remote          string        `kdl:"remote"`
-	Poll            time.Duration `kdl:"poll-interval,format:units"`
-	CheckSpec       string        `kdl:"check-spec"`
-	Committer       core.Identity `kdl:"committer"`
-	MergeMsg        string        `kdl:"merge-message"`
-	Targets         []Target      `kdl:"target,multiple"`
+	Policy          *Policy         `kdl:"policy"`
+	CircuitBreaker  *CircuitBreaker `kdl:"circuit-breaker"`
+	EmergencyMerges bool            `kdl:"emergency-merges"`
+	Remote          string          `kdl:"remote"`
+	Poll            time.Duration   `kdl:"poll-interval,format:units"`
+	CheckSpec       string          `kdl:"check-spec"`
+	Committer       core.Identity   `kdl:"committer"`
+	MergeMsg        string          `kdl:"merge-message"`
+	Targets         []Target        `kdl:"target,multiple"`
 
 	// LogRetention bounds how long full per-check log directories survive
 	// under cmd/gauntlet's <state>/logs (DESIGN.md "Full per-check log
@@ -708,8 +710,8 @@ type Target struct {
 	// to 4.
 	Window int `kdl:"window"`
 
-	// OnBatchRed selects serial fallback. Bisect is reserved and rejected.
-	OnBatchRed string `kdl:"on-batch-red"` // serial (default) | bisect (reserved, rejected)
+	// OnBatchRed selects serial recovery or smaller dependency-valid prefixes.
+	OnBatchRed string `kdl:"on-batch-red"` // serial (default) | bisect
 
 	// WindowStart, WindowMax, and WindowHalveOnRed reserve the config
 	// surface for a future adaptive speculation-window governor
@@ -828,6 +830,12 @@ func applyExecutorDefaults(e *Executor) {
 }
 
 func (d *Daemon) applyDefaults() {
+	if d.Policy != nil {
+		d.Policy.defaults()
+	}
+	if d.CircuitBreaker != nil {
+		d.CircuitBreaker.defaults()
+	}
 	if d.Signing != nil && d.Signing.Timeout == 0 {
 		d.Signing.Timeout = 10 * time.Second
 	}
@@ -1381,6 +1389,16 @@ func (d *Daemon) SecretEnvNames() []string {
 }
 
 func (d *Daemon) validate() error {
+	if d.Policy != nil {
+		if err := d.Policy.validate(); err != nil {
+			return err
+		}
+	}
+	if d.CircuitBreaker != nil {
+		if err := d.CircuitBreaker.validate(); err != nil {
+			return err
+		}
+	}
 	if d.Signing != nil {
 		if err := d.Signing.validate(); err != nil {
 			return err
@@ -1489,13 +1507,7 @@ func (d *Daemon) validate() error {
 				return fmt.Errorf("target %q: max-batch must be between 1 and %d, got %d", t.Name, maxAllowedMaxBatch, t.MaxBatch)
 			}
 			switch t.OnBatchRed {
-			case "serial":
-				// v1-implemented; see field doc.
-			case "bisect":
-				// NOTE: reserved growth path, validated but rejected at
-				// load rather than silently running as "serial" — see
-				// docs/design/queue-modes.md ("Deliberately not built").
-				return fmt.Errorf("target %q: on-batch-red \"bisect\" is reserved for a future release", t.Name)
+			case "serial", "bisect":
 			default:
 				return fmt.Errorf("target %q: on-batch-red must be \"serial\" or \"bisect\", got %q", t.Name, t.OnBatchRed)
 			}

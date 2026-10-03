@@ -52,6 +52,9 @@ func runValidateTo(w io.Writer, args []string) error {
 	var cfg *config.Daemon
 	if *configPath != "" {
 		c, err := config.LoadDaemon(*configPath)
+		if err == nil {
+			_, err = buildPolicy(c, *configPath)
+		}
 		if err != nil {
 			return err
 		}

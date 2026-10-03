@@ -19,12 +19,16 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/flaky"
 	"github.com/sgrankin/gauntlet/internal/obs"
+	"github.com/sgrankin/gauntlet/internal/policy"
 	"github.com/sgrankin/gauntlet/internal/services"
 )
 
 // Config supplies queue policy and dependencies. Remote connection and
 // polling belong to the command package.
 type Config struct {
+	Policy         *policy.Engine
+	CircuitBreaker *config.CircuitBreaker
+	SourceGitDir   string
 	ControlPath    string
 	AllowEmergency bool
 	// FailureReview retries selected failed checks before publishing a red result.
@@ -201,9 +205,11 @@ type runMember struct {
 // without rerunning checks — exactly why losing it (a crash) costs at most
 // a rerun, never correctness.
 type run struct {
-	emergencyReason string
-	overridePause   bool
-	releaseSources  func()
+	emergencyReason     string
+	pauseOverrideReason string
+	controlPrepared     bool
+	overridePause       bool
+	releaseSources      func()
 
 	target    string
 	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
@@ -332,6 +338,8 @@ type Daemon struct {
 
 	// batchFallback selects serial retries after a red batch, until the next
 	// successful landing.
+	urgentBurst   map[string]int
+	batchRecovery map[string]int
 	batchFallback map[string]bool
 
 	// seeded prevents reading park history more than once per target.
@@ -444,6 +452,8 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		autoRetried:   make(map[string]map[string]string),
 		ignoredRefs:   make(map[string]string),
 		lanes:         make(map[string]*lane),
+		urgentBurst:   make(map[string]int),
+		batchRecovery: make(map[string]int),
 		batchFallback: make(map[string]bool),
 		seeded:        make(map[string]bool),
 		landedPins:    make(map[string]string),
@@ -648,6 +658,18 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 // expected in steady state, so unlike per-check output this can't itself
 // become the noise problem.
 func (d *Daemon) emit(ctx context.Context, ev core.Event) {
+	d.observeInfrastructure(ev)
+	if feedback, ok := d.cfg.Reviews.(interface {
+		Feedback(context.Context, core.Event) error
+	}); ok {
+		fctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := feedback.Feedback(fctx, ev)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "queue: review feedback: %v\n", err)
+		}
+	}
+
 	for _, ch := range d.chans {
 		if err := ch.Emit(ctx, ev); err != nil {
 			fmt.Fprintf(os.Stderr, "queue: channel emit error (kind=%d target=%s run=%s): %v\n", ev.Kind, ev.Target, ev.RunID, err)

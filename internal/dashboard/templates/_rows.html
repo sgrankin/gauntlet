@@ -23,7 +23,7 @@
 <details class="check-row"{{if .Open}} open{{end}}{{if .RowID}} id="{{.RowID}}"{{end}}>
 <summary><span class="check-summary-line">
 <span class="check-summary-name"><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}}{{if .Err}} &middot; err: {{.Err}}{{end}}</span></span>
-<span class="check-summary-meta muted">{{.Duration}}{{if .Detail}} &middot; {{.Detail}}{{end}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
+<span class="check-summary-meta muted">{{.Duration}}{{if .Detail}} &middot; {{.Detail}}{{end}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}{{if .FailureHistoryURL}} &middot; <a href="{{.FailureHistoryURL}}">failure history</a>{{end}}</span>
 </span></summary>
 {{if .Command}}<div class="check-command">{{.Command}}</div>{{end}}
 <pre class="output">{{.Output}}</pre>
@@ -32,8 +32,27 @@
 <div class="check-row">
 <span class="check-summary-line">
 <span class="check-summary-name"><span class="chip chip-{{.Status.Class}}" title="{{.Status.Word}}"></span> <strong>{{.Name}}</strong> <span class="muted">{{.Status.Word}}{{if .Err}} &middot; err: {{.Err}}{{end}}</span></span>
-<span class="check-summary-meta muted">{{.Duration}}{{if .Detail}} &middot; {{.Detail}}{{end}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}</span>
+<span class="check-summary-meta muted">{{.Duration}}{{if .Detail}} &middot; {{.Detail}}{{end}}{{if .LogURL}} &middot; <a href="{{.LogURL}}">full log</a>{{end}}{{if .FailureHistoryURL}} &middot; <a href="{{.FailureHistoryURL}}">failure history</a>{{end}}</span>
 </span>
 </div>
 {{end}}
+{{end}}
+
+{{define "incidentControls"}}
+{{if .CanRetry}}
+<div class="section incident-controls" data-control-panel>
+<div class="headrow"><h2>Incident controls</h2>
+{{if .Pause}}<button class="btn js-action" data-control-action="resume" data-target="{{.Name}}">Resume queue</button>
+{{else}}<button class="btn danger js-action" data-control-action="pause" data-target="{{.Name}}">Pause queue</button>{{end}}</div>
+{{if .Pause}}<p class="tag bad">Queue paused: {{.Pause.Reason}} · {{.Pause.Actor}}</p>{{end}}
+{{if .ControlError}}<p class="tag bad">{{.ControlError}}</p>{{end}}
+{{if .EmergencyChoices}}
+<label>Requested prefix <select id="emergency-prefix">{{range .EmergencyChoices}}<option value="{{.Revisions}}">{{.Label}}</option>{{end}}</select></label>
+<button class="btn js-action" data-control-action="urgent" data-target="{{.Name}}">Prioritize</button>
+{{if .EmergencyEnabled}}{{if .Pause}}<button class="btn js-action" data-control-action="merge-paused" data-target="{{.Name}}">Verify and merge while paused</button>{{end}}<button class="btn danger js-action" data-control-action="merge-anyway" data-target="{{.Name}}">Merge anyway · skip checks</button>
+<label><input type="checkbox" id="override-pause"> Allow this merge while paused</label>{{end}}
+{{end}}
+</div>
+{{end}}
+
 {{end}}

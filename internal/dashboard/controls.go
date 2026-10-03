@@ -22,6 +22,9 @@ func emergencyChoices(target queue.TargetSnapshot) []emergencyChoice {
 	}
 	if len(target.Pipeline) == 0 && target.InFlight != nil {
 		pending = append(pending, target.InFlight.Members...)
+		if len(target.InFlight.Members) == 0 {
+			pending = append(pending, target.InFlight.Candidate)
+		}
 	}
 	for _, w := range target.Waiting {
 		pending = append(pending, w.Candidate)
@@ -86,8 +89,12 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 400, "one control request required")
 		return
 	}
+	if cmd.RequestID != "" {
+		writeJSONError(w, 400, "request identity is reserved for forge commands")
+		return
+	}
 	switch cmd.Kind {
-	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandMergeAnyway:
+	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandMergeAnyway, core.CommandMergePaused:
 	default:
 		writeJSONError(w, 400, "unknown control")
 		return
@@ -100,6 +107,10 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		cmd.Actor = r.RemoteAddr
 	} else {
 		cmd.Actor += " (" + r.RemoteAddr + ")"
+	}
+	if cmd.Kind == core.CommandMergePaused && !cmd.OverridePause {
+		writeJSONError(w, 400, "explicit pause override required")
+		return
 	}
 	snap := d.snapshot()
 	if snap == nil {
@@ -119,15 +130,15 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 400, "unknown target")
 		return
 	}
-	if cmd.Kind == core.CommandMergeAnyway && !target.EmergencyEnabled {
+	if (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) && !target.EmergencyEnabled {
 		writeJSONError(w, 403, "emergency merging is not enabled")
 		return
 	}
-	if cmd.Kind == core.CommandMergeAnyway && target.Pause != nil && !cmd.OverridePause {
+	if (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) && target.Pause != nil && !cmd.OverridePause {
 		writeJSONError(w, 409, "explicit pause override required")
 		return
 	}
-	if cmd.Kind == core.CommandUrgent || cmd.Kind == core.CommandMergeAnyway {
+	if cmd.Kind == core.CommandUrgent || (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) {
 		choices := emergencyChoices(target)
 		if len(cmd.Revisions) == 0 {
 			writeJSONError(w, 400, "exact revisions required")

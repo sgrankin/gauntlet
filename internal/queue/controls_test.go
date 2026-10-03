@@ -111,3 +111,29 @@ func TestControlPersistenceFailureStopsPublication(t *testing.T) {
 		t.Fatal("persistence failure did not suspend queue")
 	}
 }
+
+func TestPauseOnlyOverrideRunsChecksAndLeavesPause(t *testing.T) {
+	h := newHarness(t)
+	h.d.cfg.AllowEmergency = true
+	h.git.seed("main", nil)
+	ref := candidateRef("main", "alice", "fix")
+	sha := h.git.pushCandidate(ref, "", checkSpecFile("test"))
+	h.ch.SendCommand(core.Command{Kind: core.CommandPause, Target: "main", Actor: "operator", Reason: "incident"})
+	h.reconcile()
+	h.ch.SendCommand(core.Command{Kind: core.CommandMergePaused, Target: "main", Actor: "operator", Reason: "verified recovery", OverridePause: true, Revisions: []core.Revision{{Ref: ref, SHA: sha}}})
+	h.reconcile()
+	runID := h.currentRunID()
+	h.awaitStarted(runID, "test")
+	if !h.git.hasRef(ref) {
+		t.Fatal("pause-only override waived verification")
+	}
+	h.release(runID, "test", core.CheckResult{Name: "test", Status: core.CheckPassed})
+	if h.git.hasRef(ref) || h.d.Snapshot().Targets[0].Pause == nil {
+		t.Fatal("verified recovery did not land while preserving pause")
+	}
+	for _, rec := range h.ch.Records() {
+		if rec.Outcome == core.OutcomeLanded && (len(rec.Checks) != 1 || rec.Checks[0].Status != core.CheckPassed || !strings.Contains(rec.Detail, "PAUSE OVERRIDE")) {
+			t.Fatalf("dishonest pause override: %+v", rec)
+		}
+	}
+}

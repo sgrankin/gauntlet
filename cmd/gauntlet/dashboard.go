@@ -13,6 +13,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/deploy"
+	"github.com/sgrankin/gauntlet/internal/flaky"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/hooks"
 	gauntletmcp "github.com/sgrankin/gauntlet/internal/mcp"
@@ -87,12 +88,15 @@ type deployWiring struct {
 // three fields nil when no environment is configured, in which case the
 // deploys nav entry is hidden, /deploys says so, and every deploy route on
 // both surfaces answers "deploy not configured".
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep deployWiring, drain func(time.Time), wg *sync.WaitGroup, webhook http.Handler) {
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep deployWiring, drain func(time.Time), wg *sync.WaitGroup, webhook http.Handler, failureHistory ...*flaky.History) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
 
 	var opts []dashboard.Option
+	if len(failureHistory) > 0 {
+		opts = append(opts, dashboard.WithFailureHistory(failureHistory[0]))
+	}
 	var retryOrCancel func(core.Command) bool
 	if dashCh != nil {
 		opts = append(opts, dashboard.WithChannel(dashCh))

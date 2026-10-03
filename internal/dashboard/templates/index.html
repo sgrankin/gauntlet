@@ -10,6 +10,8 @@
 {{range .Targets}}
 <div class="card">
 <h2><a href="/t/{{.Name}}">{{.Name}}</a></h2>
+{{if .Pause}}<p class="tag bad">Paused · {{.Pause.Reason}}</p>{{end}}
+{{if .Circuit}}<p class="tag warn">Infrastructure suspension · {{.Circuit.Reason}}</p>{{end}}
 <p class="muted">branch <code>{{.Branch}}</code> @ <code title="{{.TargetTip}}">{{shortSHA .TargetTip}}</code></p>
 {{if .InFlight}}
 {{if gt .PipelineDepth 1}}

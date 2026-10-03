@@ -194,6 +194,8 @@ func checkStatusString(s core.CheckStatus) string {
 		return "failed"
 	case core.CheckSkipped:
 		return "skipped"
+	case core.CheckWaived:
+		return "waived"
 	case core.CheckBlocked:
 		return "blocked"
 	default:
