@@ -6,6 +6,10 @@
 
 {{if .Circuit}}<p class="error">Infrastructure suspension: {{.Circuit.Reason}}</p>{{end}}
 {{template "incidentControls" .}}
+{{if .Policy}}<details class="section"><summary>Policy decisions</summary>
+{{range .Policy}}<p><strong>{{.Phase}}</strong> · <code>{{compactRef .Ref}}</code> · {{if .Decision.Allow}}allowed{{else}}blocked{{end}}{{if .Error}} · {{.Error}}{{end}}</p>
+<ul>{{range .Decision.Requirements}}<li>{{.Name}}: {{if .Satisfied}}satisfied{{else}}blocked — {{.Reason}}{{end}}</li>{{end}}</ul>
+{{end}}</details>{{end}}
 <div class="section">
 <h2>In flight</h2>
 {{if .Pipeline}}

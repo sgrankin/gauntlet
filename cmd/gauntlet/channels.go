@@ -16,6 +16,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/ghstatus"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/llm"
+	"github.com/sgrankin/gauntlet/internal/policy"
 	"github.com/sgrankin/gauntlet/internal/queue"
 	"github.com/sgrankin/gauntlet/internal/slack"
 	"github.com/sgrankin/gauntlet/internal/summarize"
@@ -76,7 +77,7 @@ func buildGHStatusChannel(cfg *config.Daemon, appTokens *ghauth.App) (*ghstatus.
 // Channel=="" section (disabled) returns a nil channel and no error. Since
 // the section was explicitly configured, either token missing is a loud
 // config error, same rationale as buildGHStatusChannel.
-func buildSlackChannel(cfg *config.Daemon) (*slack.Slack, error) {
+func buildSlackChannel(cfg *config.Daemon, engine *policy.Engine) (*slack.Slack, error) {
 	if cfg.Slack.Channel == "" {
 		return nil, nil
 	}
@@ -89,6 +90,7 @@ func buildSlackChannel(cfg *config.Daemon) (*slack.Slack, error) {
 		return nil, fmt.Errorf("slack: %s is empty or unset, but slack is configured for channel %s", cfg.Slack.BotTokenEnv, cfg.Slack.Channel)
 	}
 	return slack.New(slack.Params{
+		Policy:       engine,
 		Channel:      cfg.Slack.Channel,
 		AppToken:     appToken,
 		BotToken:     botToken,

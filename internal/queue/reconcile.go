@@ -812,6 +812,15 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 
+	policyCandidates := make([]core.Candidate, len(links))
+	for i, link := range links {
+		policyCandidates[i] = link.cand
+	}
+	if err := d.executionPolicy(ctx, t, base, chainTip, policyCandidates, spec); err != nil {
+		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, err.Error(), rootSpan)
+		return
+	}
+
 	// Isolated mode defers materialization to each node (issue #9); shared
 	// mode exports the chain tip once here, as today (see startRun's
 	// matching block for the full rationale).
@@ -1229,6 +1238,11 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// supervised unit").
 	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil); reason != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, reason, rootSpan)
+		return nil, false
+	}
+
+	if err := d.executionPolicy(ctx, t, base, link.mergeOID, []core.Candidate{cand}, spec); err != nil {
+		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, err.Error(), rootSpan)
 		return nil, false
 	}
 

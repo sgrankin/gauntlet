@@ -16,6 +16,7 @@ package dashboard
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -49,7 +50,21 @@ func New(snapshot func() *queue.Snapshot, store *history.Store, opts ...Option) 
 	for _, opt := range opts {
 		opt(d)
 	}
-	return d.mux()
+	handler := d.mux()
+	if d.principalResolver == nil {
+		return handler
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			principal, err := d.principalResolver(r)
+			if err != nil || !principal.Authenticated {
+				writeJSONError(w, 403, "authenticated principal required")
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal))
+		}
+		handler.ServeHTTP(w, r)
+	})
 }
 
 // mux assembles every route: the HTML dashboard (this file) plus the JSON
@@ -117,9 +132,10 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 type dash struct {
-	failureHistory *flaky.History
-	snapshot       func() *queue.Snapshot
-	store          *history.Store
+	principalResolver func(*http.Request) (core.Principal, error)
+	failureHistory    *flaky.History
+	snapshot          func() *queue.Snapshot
+	store             *history.Store
 
 	// ch is nil unless New was called with WithChannel: POST /api/v1/retry
 	// only has somewhere to send a retry Command when it is set (api.go).
@@ -265,6 +281,14 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 		Name:      ts.Name,
 		Branch:    ts.Branch,
 		TargetTip: orDash(ts.TargetTip),
+	}
+	for i := len(snap.Policy) - 1; i >= 0; i-- {
+		if snap.Policy[i].Target == name {
+			data.Policy = append(data.Policy, snap.Policy[i])
+			if len(data.Policy) == 20 {
+				break
+			}
+		}
 	}
 	if ts.InFlight != nil {
 		data.InFlight = buildInFlight(ts.InFlight, snap.At)
@@ -1575,6 +1599,7 @@ type runSummary struct {
 }
 
 type targetData struct {
+	Policy           []queue.PolicyAudit
 	Circuit          *queue.Circuit
 	Pause            *queue.Pause
 	ControlError     string

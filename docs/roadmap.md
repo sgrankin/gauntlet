@@ -16,8 +16,9 @@ GitHub visualizes stacks, and emergency merging skips validation as a whole.
   read-only Git/history tools, retained evidence, and a run-wide retry budget.
 - Failure fingerprints, observed rerun outcomes, model failure kinds and suspects,
   dashboard history, and smaller-prefix batch recovery confirmed by real checks.
-- Optional inline/file Rego, versioned facts, named requirements, restricted
-  capabilities, fresh pre-publication evaluation, decision audit, and local tests.
+- Always-on named Rego decisions for commands, GitHub readiness, execution,
+  deployment, and retries; custom extension/replacement, trusted principals,
+  fresh batch validation, shared diagnostics, audit, and local policy fixtures.
 
 Configuration and contracts are documented in [config.md](config.md),
 [incident controls](design/incident-controls.md),

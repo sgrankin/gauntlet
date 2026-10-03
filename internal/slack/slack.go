@@ -47,6 +47,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 var _ core.Channel = (*Slack)(nil)
@@ -55,6 +56,7 @@ var _ core.Channel = (*Slack)(nil)
 // from parsed config lives only in cmd, so this package never imports
 // internal/config.
 type Params struct {
+	Policy *policy.Engine
 	// Channel is the Slack channel ID to post into (e.g. "C0123456789").
 	Channel string
 
@@ -158,6 +160,7 @@ const refRetryTTL = time.Hour
 // actual Slack calls happen on the drainer goroutine started by Run, so
 // Emit itself never blocks and never fails the reconcile loop.
 type Slack struct {
+	policy  *policy.Engine
 	channel string
 	api     *goslack.Client
 	smc     *socketmode.Client
@@ -293,7 +296,12 @@ func New(p Params) *Slack {
 		}
 	}
 
+	engine := p.Policy
+	if engine == nil {
+		engine = policy.Default()
+	}
 	return &Slack{
+		policy:     engine,
 		channel:    p.Channel,
 		api:        api,
 		smc:        smc,
@@ -1088,16 +1096,6 @@ func (s *Slack) handleSocketEvent(ctx context.Context, evt socketmode.Event) {
 		// resolve; skip it rather than issue a pointless history fetch.
 		return
 	}
-	if len(s.allowedUsers) > 0 {
-		if _, ok := s.allowedUsers[reaction.User]; !ok {
-			// Deliberately silent toward the channel (no ❓ ack — don't
-			// invite probing); loud in the daemon log so a misconfigured
-			// allowlist is diagnosable.
-			s.logf("slack: ignoring :%s: from user %s not in allowed-users", reaction.Reaction, reaction.User)
-			return
-		}
-	}
-
 	ts := reaction.Item.Timestamp
 	s.mu.Lock()
 	info, owned := s.roots[ts]
@@ -1106,7 +1104,7 @@ func (s *Slack) handleSocketEvent(ctx context.Context, evt socketmode.Event) {
 		// The still-running (or not-yet-forgotten) case: unchanged by
 		// durable ownership (package doc comment) — always resolves via
 		// whatever rootInfo postRoot recorded, batch root or not.
-		s.mintCommand(ctx, kind, ts, info.Target, info.Ref)
+		s.mintCommand(ctx, kind, ts, info.Target, info.Ref, reaction.User)
 		return
 	}
 
@@ -1114,7 +1112,7 @@ func (s *Slack) handleSocketEvent(ctx context.Context, evt socketmode.Event) {
 	// OUR OWN root after its run has already terminated and the
 	// run-tracking maps' own cleanup forgot it. Fetch the reacted message
 	// (with metadata) and verify ownership before trusting anything in it.
-	s.handleForeignReaction(ctx, reaction.Item.Channel, ts, kind)
+	s.handleForeignReaction(ctx, reaction.Item.Channel, ts, kind, reaction.User)
 }
 
 // reactionCommandKind maps a reaction_added emoji name to the core.Command
@@ -1159,14 +1157,24 @@ func reactionCommandKind(name string) (kind string, ok bool) {
 // carries no "was this my retry?" marker — so this is an accepted
 // presentation-only wrinkle (the queue itself lands the push correctly),
 // bounded by the TTL.
-func (s *Slack) mintCommand(ctx context.Context, kind, ts, target, ref string) {
+func (s *Slack) mintCommand(ctx context.Context, kind, ts, target, ref, user string) {
+	principal := core.Principal{Source: "slack", ID: user, Authenticated: user != "", AllowedByConfig: len(s.allowedUsers) == 0}
+	if _, ok := s.allowedUsers[user]; ok {
+		principal.AllowedByConfig = true
+	}
+	verdict, err := s.policy.Decide(ctx, "command", policy.Input{SchemaVersion: 1, Phase: "command", Principal: principal, Target: target, Command: policy.Command{Kind: kind}, Candidate: map[string]any{"ref": ref}})
+	if err != nil || !verdict.Allow {
+		s.logf("slack: command policy rejected user %s: %s (%v)", user, verdict.Reason(), err)
+		return
+	}
+
 	if kind == core.CommandRetry {
 		s.mu.Lock()
 		s.recordRefRetryLocked(target, ref, ts)
 		s.mu.Unlock()
 	}
 
-	cmd := core.Command{Kind: kind, Target: target, Ref: ref}
+	cmd := core.Command{Kind: kind, Target: target, Ref: ref, Principal: &principal, Actor: "slack:" + user}
 	select {
 	case s.cmds <- cmd:
 	default:
@@ -1217,7 +1225,7 @@ func (s *Slack) sweepExpiredRefRetryLocked() {
 // target but no ref — see finishBatch) mints no command at all; instead it's
 // acknowledged with ackQuestion plus a threaded reply explaining that a
 // single member can't be targeted via a bare reaction.
-func (s *Slack) handleForeignReaction(ctx context.Context, channel, ts, kind string) {
+func (s *Slack) handleForeignReaction(ctx context.Context, channel, ts, kind, user string) {
 	if channel == "" {
 		channel = s.channel
 	}
@@ -1261,7 +1269,7 @@ func (s *Slack) handleForeignReaction(ctx context.Context, channel, ts, kind str
 		return
 	}
 
-	s.mintCommand(ctx, kind, ts, target, ref)
+	s.mintCommand(ctx, kind, ts, target, ref, user)
 }
 
 // isOwnMessage reports whether msg was posted by this bot, per the user id

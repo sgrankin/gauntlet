@@ -2927,7 +2927,7 @@ emergency-merges true
 circuit-breaker { threshold 4; backoff "10s"; }
 policy {
  rego r#"package gauntlet
- decision := {"allow": true, "requirements": []}"#
+ submission := {"allow": true, "requirements": []}"#
  teams "acme/security"
 }
 `

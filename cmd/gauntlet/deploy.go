@@ -11,6 +11,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/deploy"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 // deployRuntime is the lane runner's half of the wiring (internal/deploy's
@@ -20,6 +21,7 @@ import (
 // caller that has no runner to offer (a wiring test) can pass the zero
 // value and get D1's tracker exactly.
 type deployRuntime struct {
+	Policy *policy.Engine
 	// Exec runs each node's command; Slots is the daemon-wide
 	// max-executions cap deploy nodes share with checks and hooks.
 	Exec  core.Executor
@@ -72,6 +74,7 @@ func buildDeployTracker(cfg *config.Daemon, git deploy.Git, rt deployRuntime, lo
 	}
 	return deploy.New(deploy.Params{
 		Environments: envs,
+		Policy:       rt.Policy,
 		Git:          git,
 		Log:          log,
 

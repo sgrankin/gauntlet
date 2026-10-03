@@ -12,6 +12,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 type Classifier interface {
@@ -22,6 +23,7 @@ type Classifier interface {
 // workspace, services, and execution slot until a final result is available.
 // It must only be configured for commands whose effects are safe to repeat.
 type Retrier struct {
+	Policy        *policy.Engine
 	History       *History
 	MaxRunRetries int
 	Classifier    Classifier
@@ -81,7 +83,17 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 		if len(suspects) > 0 {
 			fmt.Fprintf(&audit, "gauntlet investigation: UNCONFIRMED suspects=%q evidence=%q\n", suspects, decision.Evidence)
 		}
-		retry := decision.Action == "retry" && decision.Confidence >= r.MinConfidence && ctx.Err() == nil
+		engine := r.Policy
+		if engine == nil {
+			engine = policy.Default()
+		}
+		verdict, policyErr := engine.Decide(ctx, "retry", policy.Input{SchemaVersion: 1, Phase: "retry", Retry: map[string]any{"action": decision.Action, "confidence": decision.Confidence, "min_confidence": r.MinConfidence, "kind": decision.Kind, "check": job.Name, "attempt": attempt, "reason": decision.Reason, "evidence": decision.Evidence}})
+		retry := policyErr == nil && verdict.Allow && ctx.Err() == nil
+		if policyErr != nil {
+			fmt.Fprintf(&audit, "gauntlet retry policy unavailable: %v\n", policyErr)
+		} else if !verdict.Allow {
+			fmt.Fprintf(&audit, "gauntlet retry policy: %s\n", verdict.Reason())
+		}
 		note := fmt.Sprintf("gauntlet failure review: model=%q %s confidence=%.3f threshold=%.3f; %s; retry=%t\n", r.Model, decision.Action, decision.Confidence, r.MinConfidence, strings.Join(strings.Fields(decision.Reason), " "), retry)
 		audit.WriteString(note)
 		appendNote(canonical, note)

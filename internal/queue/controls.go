@@ -155,6 +155,9 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 		d.controls.LastError = "queue is draining; no new merge requests accepted"
 		return
 	}
+	if !d.authorizeCommand(ctx, cmd) {
+		return
+	}
 	cmd.Actor, cmd.Reason = strings.TrimSpace(cmd.Actor), strings.TrimSpace(cmd.Reason)
 	if cmd.Actor == "" || cmd.Reason == "" || len(cmd.Actor) > 256 || len(cmd.Reason) > 2048 {
 		d.controls.LastError = "incident controls require actor and reason"
@@ -215,10 +218,6 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 			}
 		}
 		if cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused {
-			if !d.cfg.AllowEmergency {
-				d.controls.LastError = "emergency merging is not enabled by the operator"
-				return
-			}
 			if _, paused := next.Pauses[cmd.Target]; paused && !cmd.OverridePause {
 				d.controls.LastError = "target paused; an explicit pause override is required"
 				return

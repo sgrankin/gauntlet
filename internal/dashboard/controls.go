@@ -118,7 +118,7 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cmd.Target == "*" && (cmd.Kind == core.CommandPause || cmd.Kind == core.CommandResume) {
-		if !d.ch.TrySend(cmd) {
+		if !d.sendCommand(r, cmd) {
 			writeJSONError(w, 429, "command buffer full")
 			return
 		}
@@ -163,7 +163,7 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !d.ch.TrySend(cmd) {
+	if !d.sendCommand(r, cmd) {
 		writeJSONError(w, 429, "command buffer full")
 		return
 	}

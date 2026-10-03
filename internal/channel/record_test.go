@@ -141,7 +141,7 @@ func TestRecordingChannel_CommandsNeverYields(t *testing.T) {
 
 func TestRecordingChannel_SendCommandDeliversOnCommands(t *testing.T) {
 	c := NewRecordingChannel()
-	want := core.Command{Kind: core.CommandRetry, Target: "main", Ref: "refs/heads/for/main/alice/feat"}
+	want := core.Command{Principal: &core.Principal{Source: "internal", ID: "test-operator", Authenticated: true}, Kind: core.CommandRetry, Target: "main", Ref: "refs/heads/for/main/alice/feat"}
 	c.SendCommand(want)
 
 	select {

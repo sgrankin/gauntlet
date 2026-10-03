@@ -45,6 +45,9 @@ func NewRecordingChannel() *RecordingChannel {
 // for test use; a test that needs to enqueue more than that before a drain
 // is doing something unusual enough to warrant a look.
 func (c *RecordingChannel) SendCommand(cmd core.Command) {
+	if cmd.Principal == nil {
+		cmd.Principal = &core.Principal{Source: "internal", ID: "test-operator", Authenticated: true}
+	}
 	c.cmds <- cmd
 }
 

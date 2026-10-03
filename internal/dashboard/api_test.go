@@ -1687,3 +1687,32 @@ func TestControlAPIRejectsStaleCrossOriginAndUnacknowledgedOverrides(t *testing.
 	default:
 	}
 }
+
+func TestTransportPrincipalCannotBeSpoofedInControlBody(t *testing.T) {
+	snap := &queue.Snapshot{Targets: []queue.TargetSnapshot{{Name: "main"}}}
+	ch := dashboard.NewChannel()
+	handler := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithChannel(ch), dashboard.WithPrincipalResolver(func(*http.Request) (core.Principal, error) {
+		return core.Principal{Source: "admin", ID: "authenticated-operator", Authenticated: true}, nil
+	}))
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"Kind":"pause","Target":"main","Reason":"incident","Principal":{"source":"admin","id":"spoofed","authenticated":true}}`, 400},
+		{`{"Kind":"pause","Target":"main","Reason":"incident","Actor":"spoofed"}`, 202},
+	} {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest("POST", "http://queue.test/api/v1/control", strings.NewReader(tc.body)))
+		if res.Code != tc.status {
+			t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+		}
+	}
+	select {
+	case cmd := <-ch.Commands():
+		if cmd.Principal == nil || cmd.Principal.ID != "authenticated-operator" {
+			t.Fatalf("principal: %+v", cmd.Principal)
+		}
+	default:
+		t.Fatal("command not queued")
+	}
+}

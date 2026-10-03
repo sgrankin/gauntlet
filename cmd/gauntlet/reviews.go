@@ -13,6 +13,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/ghauth"
 	"github.com/sgrankin/gauntlet/internal/gitx"
+	"github.com/sgrankin/gauntlet/internal/policy"
 	"github.com/sgrankin/gauntlet/internal/review"
 )
 
@@ -34,12 +35,11 @@ func githubReviewParams(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) re
 	return params
 }
 
-func buildReviewSource(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo, stateDir ...string) (core.ReviewSource, error) {
+func buildReviewSource(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo, engine *policy.Engine, stateDir string) (core.ReviewSource, error) {
 	if cfg.GitHub.PullRequests != nil {
 		p := githubReviewParams(cfg, app, repo)
-		if len(stateDir) > 0 {
-			p.IntentPath = filepath.Join(stateDir[0], "github-emergency-intents.json")
-		}
+		p.Policy = engine
+		p.IntentPath = filepath.Join(stateDir, "github-emergency-intents.json")
 		if app == nil && os.Getenv(cfg.GitHub.TokenEnv) == "" {
 			return nil, fmt.Errorf("github review token is unset")
 		}

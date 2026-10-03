@@ -21,6 +21,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/deploy"
 	"github.com/sgrankin/gauntlet/internal/executor"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 // --- the lane-runner half of stubGit (the struct lives in tracker_test.go) ---
@@ -142,7 +143,6 @@ func newRunHarness(t *testing.T, envs ...deploy.Environment) *runHarness {
 		}}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 
 	h := &runHarness{
 		t:      t,
@@ -159,6 +159,15 @@ func newRunHarness(t *testing.T, envs ...deploy.Environment) *runHarness {
 		CheckSpec:       ".gauntlet.kdl",
 		WorkDir:         t.TempDir(),
 		AutoRetryErrors: true,
+	})
+	t.Cleanup(func() {
+		cancel()
+		ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		h.tr.Wait(ctx)
+		if err := ctx.Err(); err != nil {
+			t.Errorf("wait for deploy cleanup: %v", err)
+		}
 	})
 	return h
 }
@@ -770,5 +779,31 @@ func TestPending_FalseWhileTheMirrorCatchesUp(t *testing.T) {
 	h.tick()
 	if lane := h.lane(); lane.Pending || !lane.InSync {
 		t.Errorf("once mirrored: pending=%v inSync=%v, want pending=false inSync=true", lane.Pending, lane.InSync)
+	}
+}
+
+func TestDeploymentPolicyRechecksBeforeObservedPublication(t *testing.T) {
+	engine, err := policy.Compile(context.Background(), `package gauntlet
+import rego.v1
+ready := input.phase != "publication"
+deployment := {"allow":ready,"requirements":[{"name":"publication-freeze","satisfied":ready,"reason":"Publication frozen"}]}`, time.Second, policy.Options{Extend: []string{"deployment"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newRunHarness(t)
+	h.tr = deploy.New(deploy.Params{Policy: engine, Git: h.git, Exec: h.ex, Emit: h.events.emit, CheckSpec: ".gauntlet.kdl", Environments: []deploy.Environment{{Name: "dev", SourceBranch: "main", Mode: deploy.ModeTrack}}})
+	h.git.setRef("refs/heads/main", "sha1")
+	h.tick()
+	h.release("migrate", core.CheckResult{Status: core.CheckPassed})
+	h.release("app", core.CheckResult{Status: core.CheckPassed})
+	h.awaitFinished(1)
+	record := h.lastRecord()
+	if record.Outcome != core.OutcomeRejected || !strings.Contains(record.Detail, "Publication frozen") {
+		t.Fatalf("record: %+v", record)
+	}
+	h.git.mu.Lock()
+	defer h.git.mu.Unlock()
+	if h.git.refs[deploy.ObservedRef("dev")] != "" {
+		t.Fatal("denied observed ref advanced")
 	}
 }

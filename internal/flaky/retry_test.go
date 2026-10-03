@@ -13,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/executor"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 type classifyFunc func(context.Context, core.CheckJob, core.CheckResult) (Decision, error)
@@ -172,5 +173,24 @@ func TestCancellationStopsDecisionAndRetry(t *testing.T) {
 	}
 	if executions != 1 {
 		t.Fatal("cancelled decision started another test")
+	}
+}
+
+func TestCustomRetryPolicyCannotExceedBudget(t *testing.T) {
+	engine, err := policy.Compile(context.Background(), `package gauntlet
+retry := {"allow":true,"requirements":[]}`, time.Second, policy.Options{Replace: []string{"retry"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Retrier{Policy: engine, Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .9, Timeout: time.Second, Classifier: classifyFunc(func(context.Context, core.CheckJob, core.CheckResult) (Decision, error) {
+		return Decision{Action: "retry", Confidence: .1, Reason: "infra"}, nil
+	})}
+	count := 0
+	result := r.Run(context.Background(), core.CheckJob{Name: "test"}, func(context.Context, core.CheckJob) core.CheckResult {
+		count++
+		return core.CheckResult{Status: core.CheckFailed}
+	})
+	if count != 2 || result.Status != core.CheckFailed {
+		t.Fatalf("policy bypassed budget or actual verdict: %d %+v", count, result)
 	}
 }

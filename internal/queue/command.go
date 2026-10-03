@@ -52,6 +52,11 @@ func (d *Daemon) drainOne(ctx context.Context, ch core.Channel, refs map[string]
 // Kinds are ignored, symmetric with core.Channel implementations being
 // required to ignore event kinds they don't recognize (channel/log.go).
 func (d *Daemon) applyCommand(ctx context.Context, cmd core.Command, refs map[string]string) {
+	if cmd.Kind == core.CommandRetry || cmd.Kind == core.CommandCancel {
+		if !d.authorizeCommand(ctx, cmd) {
+			return
+		}
+	}
 	switch cmd.Kind {
 	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandMergeAnyway, core.CommandMergePaused:
 		d.applyControl(ctx, cmd, refs)

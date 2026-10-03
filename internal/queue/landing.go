@@ -15,6 +15,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/obs"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 // stampReceiptRecords mirrors r.receiptBlobSHA/r.receiptPublished (and
@@ -52,7 +53,29 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 		return
 	}
 	_, landSpan := obs.StartLand(r.rootCtx, d.tr)
-	if d.cfg.Reviews != nil {
+	members := make([]core.Candidate, len(r.members))
+	for i, m := range r.members {
+		members[i] = m.cand
+	}
+	var reviewMembers []core.Candidate
+	for _, member := range members {
+		if member.Source != "" {
+			reviewMembers = append(reviewMembers, member)
+		}
+	}
+	var fresh map[string]policy.Input
+	if source, ok := d.cfg.Reviews.(interface {
+		ValidatePolicyInputs(context.Context, []core.Candidate, bool) (map[string]policy.Input, error)
+	}); ok && len(reviewMembers) > 0 {
+		var err error
+		fresh, err = source.ValidatePolicyInputs(ctx, reviewMembers, r.emergencyReason != "")
+		if err != nil {
+			obs.EndSpan(landSpan, err)
+			d.finishRun(ctx, t, r, core.OutcomeSkipped, "review changed before land: "+err.Error(), false)
+			return
+		}
+	}
+	if d.cfg.Reviews != nil && fresh == nil {
 		for _, m := range r.members {
 			if m.cand.Source != "" {
 				var err error
@@ -75,13 +98,19 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 			}
 		}
 	}
-
-	members := make([]core.Candidate, len(r.members))
-	for i, m := range r.members {
-		members[i] = m.cand
-	}
 	for _, m := range r.members {
-		if err := d.evaluatePolicy(ctx, t, m.cand, r.baseOID, members, m.rec.Checks, "landing", r.emergencyReason != "", r.overridePause); err != nil {
+		var prepared []policy.Input
+		if fresh != nil && m.cand.Source != "" {
+			input, ok := fresh[m.cand.Ref]
+			if !ok {
+				err := fmt.Errorf("fresh policy snapshot missing for %s", m.cand.Ref)
+				obs.EndSpan(landSpan, err)
+				d.finishRun(ctx, t, r, core.OutcomeSkipped, err.Error(), false)
+				return
+			}
+			prepared = append(prepared, input)
+		}
+		if err := d.evaluatePolicy(ctx, t, m.cand, r.baseOID, members, m.rec.Checks, "landing", r.emergencyReason != "", r.overridePause, prepared...); err != nil {
 			obs.EndSpan(landSpan, err)
 			d.finishRun(ctx, t, r, core.OutcomeRejected, "landing policy: "+err.Error(), true)
 			return

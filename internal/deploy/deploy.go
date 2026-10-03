@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 const (
@@ -171,6 +172,7 @@ type Git interface {
 // lane-runner block below — a Tracker built without Exec advances desired
 // refs and runs nothing at all, which is D1's Tracker exactly.
 type Params struct {
+	Policy *policy.Engine
 	// Environments is processed in this order, every tick.
 	Environments []Environment
 	Git          Git
@@ -234,10 +236,11 @@ type Params struct {
 // Snapshot, Retry, CancelCurrent, Drain and Wait may be called from any
 // goroutine.
 type Tracker struct {
-	envs []Environment
-	git  Git
-	now  func() time.Time
-	log  io.Writer
+	policy *policy.Engine
+	envs   []Environment
+	git    Git
+	now    func() time.Time
+	log    io.Writer
 
 	// Lane-runner configuration, all read-only after New.
 	exec         core.Executor
@@ -278,6 +281,7 @@ type Tracker struct {
 // New builds a Tracker over p's environments.
 func New(p Params) *Tracker {
 	t := &Tracker{
+		policy:       p.Policy,
 		envs:         append([]Environment(nil), p.Environments...),
 		git:          p.Git,
 		now:          p.Now,
@@ -293,6 +297,9 @@ func New(p Params) *Tracker {
 		autoRetry:    p.AutoRetryErrors,
 		lastAdvance:  make(map[string]time.Time, len(p.Environments)),
 		lanes:        make(map[string]*lane, len(p.Environments)),
+	}
+	if t.policy == nil {
+		t.policy = policy.Default()
 	}
 	if t.now == nil {
 		t.now = time.Now
@@ -367,7 +374,10 @@ func (t *Tracker) reconcileLane(ctx context.Context, env Environment, refs, obse
 		// during an incident is the config edit track -> manual, per the
 		// design. An IsAncestor check here would silently refuse to
 		// follow a rollback — the exact moment following matters most.
-		err := t.git.CASUpdate(ctx, DesiredRef(env.Name), lane.Desired, lane.SourceTip)
+		err := t.decideDeployment(ctx, env, "promotion", lane.SourceTip, lane.Observed, nil)
+		if err == nil {
+			err = t.git.CASUpdate(ctx, DesiredRef(env.Name), lane.Desired, lane.SourceTip)
+		}
 		switch {
 		case err == nil:
 			lane.Desired = lane.SourceTip

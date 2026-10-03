@@ -7,12 +7,10 @@ import (
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 func (d *Daemon) reviewEmergency(ctx context.Context, t config.Target, refs map[string]string, cands map[string]core.Candidate) {
-	if !d.cfg.AllowEmergency {
-		return
-	}
 	groups := map[string][]core.Candidate{}
 	for _, c := range cands {
 		if c.SkipChecks && c.EmergencyID != "" {
@@ -59,7 +57,18 @@ func (d *Daemon) reviewEmergency(ctx context.Context, t config.Target, refs map[
 		if len(ordered) != len(members) {
 			continue
 		}
-		cmd := core.Command{Kind: core.CommandMergeAnyway, Target: t.Name, Actor: "github:" + members[0].Requester, Reason: members[0].RequestReason, OverridePause: members[0].OverridePause, RequestID: id}
+		var principal *core.Principal
+		if source, ok := d.cfg.Reviews.(interface {
+			PolicyInput(context.Context, core.Candidate) (policy.Input, error)
+		}); ok {
+			input, err := source.PolicyInput(ctx, members[0])
+			if err != nil {
+				d.controls.LastError = err.Error()
+				continue
+			}
+			principal = &input.Principal
+		}
+		cmd := core.Command{Principal: principal, Kind: core.CommandMergeAnyway, Target: t.Name, Actor: "github:" + members[0].Requester, Reason: members[0].RequestReason, OverridePause: members[0].OverridePause, RequestID: id}
 		for _, c := range ordered {
 			cmd.Revisions = append(cmd.Revisions, core.Revision{Ref: c.Ref, SHA: c.SHA, Version: c.Version})
 		}

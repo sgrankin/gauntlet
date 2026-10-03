@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -15,71 +16,56 @@ import (
 )
 
 type PolicyAudit struct {
-	At                         time.Time
-	Phase, Ref, SHA, InputHash string
-	Decision                   policy.Decision
-	Version, Error             string
+	At                                 time.Time
+	Target, Phase, Ref, SHA, InputHash string
+	Decision                           policy.Decision
+	Version, Error                     string
 }
 
-func (d *Daemon) evaluatePolicy(ctx context.Context, t config.Target, c core.Candidate, base string, members []core.Candidate, checks []core.CheckResult, phase string, skipChecks, overridePause bool) error {
-	if d.cfg.Policy == nil {
-		return nil
-	}
+func (d *Daemon) evaluatePolicy(ctx context.Context, t config.Target, c core.Candidate, base string, members []core.Candidate, checks []core.CheckResult, phase string, skipChecks, overridePause bool, prepared ...policy.Input) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	input := map[string]any{"schema_version": 1, "phase": phase, "target": t.Name, "branch": t.Branch, "base_sha": base, "candidate": policyCandidate(c), "stack": policyMembers(members), "checks": policyChecks(checks), "emergency": map[string]bool{"skip_checks": skipChecks, "override_pause": overridePause}, "forge": nil, "paths": nil, "paths_available": false}
+	input := policy.Input{SchemaVersion: 1, Forge: map[string]any{}}
 	var factsErr error
-	if source, ok := d.cfg.Reviews.(interface {
-		PolicyFacts(context.Context, core.Candidate) (map[string]any, error)
+	if len(prepared) > 0 {
+		input = prepared[0]
+	} else if source, ok := d.cfg.Reviews.(interface {
+		PolicyInput(context.Context, core.Candidate) (policy.Input, error)
 	}); ok && c.Source != "" {
-		facts, ferr := source.PolicyFacts(ctx, c)
-		factsErr = ferr
-		input["forge"] = facts
-		if facts != nil {
-			if paths, ok := facts["paths"]; ok {
-				input["paths"] = paths
-				input["paths_available"] = true
+		input, factsErr = source.PolicyInput(ctx, c)
+	} else if d.cfg.Policy.HasCustom("submission") {
+		if source, ok := d.cfg.Reviews.(interface {
+			PolicyFacts(context.Context, core.Candidate) (map[string]any, error)
+		}); ok && c.Source != "" {
+			input.Forge, factsErr = source.PolicyFacts(ctx, c)
+			if paths, ok := input.Forge["paths"].([]string); ok {
+				input.Paths = paths
+				input.PathsAvailable = true
 			}
-		}
-	} else if git, ok := d.git.(interface {
-		ChangedPaths(context.Context, string, string) ([]string, error)
-	}); ok {
-		paths, err := git.ChangedPaths(ctx, base, c.SHA)
-		factsErr = err
-		if err == nil {
-			input["paths"] = paths
-			input["paths_available"] = true
+		} else if git, ok := d.git.(interface {
+			ChangedPaths(context.Context, string, string) ([]string, error)
+		}); ok {
+			input.Paths, factsErr = git.ChangedPaths(ctx, base, c.SHA)
+			input.PathsAvailable = factsErr == nil
 		}
 	}
-	decision, err := d.cfg.Policy.Evaluate(ctx, input)
+	input.Phase, input.Target, input.Branch, input.BaseSHA = phase, t.Name, t.Branch, base
+	input.Candidate, input.Stack, input.Checks = policyCandidate(c), policyMembers(members), policyChecks(checks)
+	// Adapters without a policy fact contract own their source validation.
+	_, sharedFacts := d.cfg.Reviews.(interface {
+		PolicyInput(context.Context, core.Candidate) (policy.Input, error)
+	})
+	if !sharedFacts && c.Source != "" && !d.cfg.Policy.HasCustom("submission") {
+		input.AdapterValidated = true
+	}
+	input.Emergency = policy.Emergency{SkipChecks: skipChecks, OverridePause: overridePause}
+	decision, err := d.cfg.Policy.Decide(ctx, "submission", input)
 	if factsErr != nil {
 		err = fmt.Errorf("policy facts unavailable: %w", factsErr)
 		decision.Allow = false
 	}
-	data, _ := json.Marshal(input)
-	sum := sha256.Sum256(data)
-	audit := PolicyAudit{At: d.now(), Phase: phase, Ref: c.Ref, SHA: c.SHA, InputHash: hex.EncodeToString(sum[:]), Decision: decision, Version: d.cfg.Policy.Version}
-	if err != nil {
-		audit.Error = err.Error()
-	}
-	// Audit only changed inputs/decisions, to avoid writing on every poll.
-	changed := true
-	for i := len(d.controls.PolicyAudit) - 1; i >= 0; i-- {
-		previous := d.controls.PolicyAudit[i]
-		if previous.Ref == c.Ref && previous.Phase == phase {
-			changed = previous.InputHash != audit.InputHash || previous.Version != audit.Version || previous.Error != audit.Error
-			break
-		}
-	}
-	if changed {
-		next := d.controls.clone()
-		next.PolicyAudit = append(next.PolicyAudit, audit)
-		if len(next.PolicyAudit) > 500 {
-			next.PolicyAudit = next.PolicyAudit[len(next.PolicyAudit)-500:]
-		}
-		if !d.saveControls(next) {
-			return fmt.Errorf("cannot persist policy audit")
-		}
+	if !d.recordPolicyDecision(c.Ref, c.SHA, phase, input, decision, err) {
+		return fmt.Errorf("cannot persist policy audit")
 	}
 	if err != nil {
 		return err
@@ -91,10 +77,8 @@ func (d *Daemon) evaluatePolicy(ctx context.Context, t config.Target, c core.Can
 }
 
 func (d *Daemon) policyAdmission(ctx context.Context, t config.Target, cands map[string]core.Candidate, base string) {
-	if d.cfg.Policy == nil {
-		return
-	}
-	for ref, c := range cands {
+	all := maps.Clone(cands)
+	for ref, c := range all {
 		cmd, emergency := d.controls.Emergency[t.Name]
 		selected := false
 		for _, rev := range cmd.Revisions {
@@ -106,7 +90,7 @@ func (d *Daemon) policyAdmission(ctx context.Context, t config.Target, cands map
 		seen := map[string]bool{c.Ref: true}
 		parent := c.DependsOn
 		for parent != "" {
-			p, ok := cands[parent]
+			p, ok := all[parent]
 			if !ok || seen[parent] {
 				break
 			}
@@ -157,4 +141,92 @@ func policyChecks(checks []core.CheckResult) []map[string]any {
 		out = append(out, map[string]any{"name": check.Name, "status": status})
 	}
 	return out
+}
+
+func (d *Daemon) authorizeCommand(ctx context.Context, cmd core.Command) bool {
+	principal := policy.Principal{}
+	if cmd.Principal != nil {
+		principal = *cmd.Principal
+	}
+	input := policy.Input{SchemaVersion: 1, Phase: "command", Principal: principal, Target: cmd.Target, Command: policy.Command{Kind: cmd.Kind, ID: cmd.RequestID, Reason: cmd.Reason}, Settings: policy.Settings{EmergencyEnabled: d.cfg.AllowEmergency}, Emergency: policy.Emergency{SkipChecks: cmd.Kind == core.CommandMergeAnyway, OverridePause: cmd.OverridePause}}
+	if principal.Source == "github" && len(cmd.Revisions) > 0 {
+		if source, ok := d.cfg.Reviews.(interface {
+			PolicyInput(context.Context, core.Candidate) (policy.Input, error)
+		}); ok {
+			candidate, exists := d.external[cmd.Revisions[0].Ref]
+			if !exists {
+				d.controls.LastError = "command revision unavailable"
+				return false
+			}
+			prepared, err := source.PolicyInput(ctx, candidate)
+			if err != nil {
+				d.controls.LastError = err.Error()
+				return false
+			}
+			prepared.Phase = "command"
+			input = prepared
+		}
+	}
+	decision, err := d.cfg.Policy.Decide(ctx, "command", input)
+	if !d.recordPolicyDecision(cmd.Target+":"+cmd.Ref, "", "command:"+cmd.Kind, input, decision, err) {
+		d.controls.LastError = "cannot persist command policy audit"
+		return false
+	}
+	if err != nil {
+		d.controls.LastError = "command policy: " + err.Error()
+		return false
+	}
+	if !decision.Allow {
+		d.controls.LastError = "command policy: " + decision.Reason()
+		return false
+	}
+	return true
+}
+
+func (d *Daemon) recordPolicyDecision(ref, sha, phase string, input any, decision policy.Decision, err error) bool {
+	data, _ := json.Marshal(input)
+	sum := sha256.Sum256(data)
+	audit := PolicyAudit{At: d.now(), Phase: phase, Ref: ref, SHA: sha, InputHash: hex.EncodeToString(sum[:]), Decision: decision, Version: d.cfg.Policy.Version}
+	if facts, ok := input.(policy.Input); ok {
+		audit.Target = facts.Target
+	}
+	if err != nil {
+		audit.Error = err.Error()
+	}
+	// Audit only changed inputs/decisions, to avoid writing on every poll.
+	changed := true
+	for i := len(d.controls.PolicyAudit) - 1; i >= 0; i-- {
+		previous := d.controls.PolicyAudit[i]
+		if previous.Ref == ref && previous.Phase == phase {
+			changed = previous.InputHash != audit.InputHash || previous.Version != audit.Version || previous.Error != audit.Error
+			break
+		}
+	}
+	if changed {
+		next := d.controls.clone()
+		next.PolicyAudit = append(next.PolicyAudit, audit)
+		if len(next.PolicyAudit) > 500 {
+			next.PolicyAudit = next.PolicyAudit[len(next.PolicyAudit)-500:]
+		}
+		if !d.saveControls(next) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (d *Daemon) executionPolicy(ctx context.Context, t config.Target, base, sha string, members []core.Candidate, spec *config.CheckSpec) error {
+	input := policy.Input{SchemaVersion: 1, Phase: "execution", Target: t.Name, Branch: t.Branch, BaseSHA: base, Stack: policyMembers(members), Execution: policy.Specification(spec)}
+	decision, err := d.cfg.Policy.Decide(ctx, "execution", input)
+	if !d.recordPolicyDecision(t.Name, sha, "execution", input, decision, err) {
+		return fmt.Errorf("cannot persist execution policy audit")
+	}
+	if err != nil {
+		return fmt.Errorf("execution policy: %w", err)
+	}
+	if !decision.Allow {
+		return fmt.Errorf("execution policy: %s", decision.Reason())
+	}
+	return nil
 }

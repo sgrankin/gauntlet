@@ -5,14 +5,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
-	"io"
-	"strings"
-	"time"
 )
 
 type Requirement struct {
@@ -25,15 +29,59 @@ type Decision struct {
 	Requirements []Requirement `json:"requirements"`
 	Version      string        `json:"-"`
 }
+
+//go:embed defaults.rego
+var ruleFiles embed.FS
+
+type Options struct{ Replace, Extend []string }
+
+var Names = []string{"command", "submission", "execution", "deployment", "retry"}
+
 type Engine struct {
-	query   rego.PreparedEvalQuery
-	Version string
-	Timeout time.Duration
+	queries    map[string]rego.PreparedEvalQuery
+	extensions map[string]rego.PreparedEvalQuery
+	custom     map[string]bool
+	Version    string
+	Timeout    time.Duration
 }
 
-func Compile(ctx context.Context, source string, timeout time.Duration) (*Engine, error) {
-	if len(source) == 0 || len(source) > 1<<20 {
-		return nil, fmt.Errorf("policy must contain 1..1048576 bytes")
+var defaultOnce sync.Once
+var defaultEngine *Engine
+
+func Default() *Engine {
+	defaultOnce.Do(func() {
+		var err error
+		defaultEngine, err = Compile(context.Background(), "", 100*time.Millisecond)
+		if err != nil {
+			panic(err)
+		}
+	})
+	return defaultEngine
+}
+
+func Compile(ctx context.Context, source string, timeout time.Duration, options ...Options) (*Engine, error) {
+	if len(source) > 1<<20 {
+		return nil, fmt.Errorf("policy exceeds 1048576 bytes")
+	}
+	if timeout <= 0 {
+		timeout = 100 * time.Millisecond
+	}
+	opts := Options{}
+	if source != "" {
+		opts.Extend = []string{"submission"}
+	}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	if len(opts.Replace)+len(opts.Extend) > 0 && source == "" {
+		return nil, fmt.Errorf("custom decisions require Rego source")
+	}
+	seen := map[string]bool{}
+	for _, name := range append(slices.Clone(opts.Replace), opts.Extend...) {
+		if !slices.Contains(Names, name) || seen[name] {
+			return nil, fmt.Errorf("unknown or duplicate policy decision %q", name)
+		}
+		seen[name] = true
 	}
 	caps := ast.CapabilitiesForThisVersion()
 	allowed := caps.Builtins[:0]
@@ -44,17 +92,78 @@ func Compile(ctx context.Context, source string, timeout time.Duration) (*Engine
 	}
 	caps.Builtins = allowed
 	caps.AllowNet = []string{}
-	query, err := rego.New(rego.Query("data.gauntlet.decision"), rego.Module("operator.rego", source), rego.Capabilities(caps), rego.StrictBuiltinErrors(true)).PrepareForEval(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("compile admission policy: %w", err)
+	defaults, _ := ruleFiles.ReadFile("defaults.rego")
+	e := &Engine{queries: map[string]rego.PreparedEvalQuery{}, extensions: map[string]rego.PreparedEvalQuery{}, custom: seen, Timeout: timeout}
+	prepare := func(query string, operator bool) (rego.PreparedEvalQuery, error) {
+		args := []func(*rego.Rego){rego.Query(query), rego.Module("defaults.rego", string(defaults)), rego.Capabilities(caps), rego.StrictBuiltinErrors(true)}
+		if operator {
+			args = append(args, rego.Module("operator.rego", source))
+		}
+		return rego.New(args...).PrepareForEval(ctx)
 	}
-	sum := sha256.Sum256([]byte(source))
-	return &Engine{query: query, Version: hex.EncodeToString(sum[:]), Timeout: timeout}, nil
+	for _, name := range Names {
+		query := "data.gauntlet.defaults." + name
+		if slices.Contains(opts.Replace, name) {
+			query = "data.gauntlet." + name
+		}
+		prepared, err := prepare(query, slices.Contains(opts.Replace, name))
+		if err != nil {
+			return nil, fmt.Errorf("compile %s policy: %w", name, err)
+		}
+		e.queries[name] = prepared
+		if slices.Contains(opts.Extend, name) {
+			prepared, err = prepare("data.gauntlet."+name, true)
+			if err != nil {
+				return nil, fmt.Errorf("compile %s extension: %w", name, err)
+			}
+			e.extensions[name] = prepared
+		}
+	}
+	data, _ := json.Marshal(struct {
+		Defaults, Source string
+		Options          Options
+	}{string(defaults), source, opts})
+	sum := sha256.Sum256(data)
+	e.Version = hex.EncodeToString(sum[:])
+	return e, nil
 }
-func (e *Engine) Evaluate(ctx context.Context, input any) (Decision, error) {
+
+func (e *Engine) HasCustom(name string) bool { return e.custom[name] }
+func (e *Engine) Decide(ctx context.Context, name string, input any) (Decision, error) {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return Decision{}, fmt.Errorf("invalid policy facts: %w", err)
+	}
+	if len(data) > 1<<20 {
+		return Decision{}, fmt.Errorf("policy facts exceed 1048576 bytes")
+	}
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return Decision{}, err
+	}
+	input = normalized
+	query, ok := e.queries[name]
+	if !ok {
+		return Decision{}, fmt.Errorf("unknown policy decision %q", name)
+	}
 	ctx, cancel := context.WithTimeout(ctx, e.Timeout)
 	defer cancel()
-	results, err := e.query.Eval(ctx, rego.EvalInput(input))
+	decision, err := e.evaluate(ctx, query, input)
+	if err != nil {
+		return Decision{}, err
+	}
+	if extension, ok := e.extensions[name]; ok {
+		extra, err := e.evaluate(ctx, extension, input)
+		if err != nil {
+			return Decision{}, err
+		}
+		decision.Allow = decision.Allow && extra.Allow
+		decision.Requirements = append(decision.Requirements, extra.Requirements...)
+	}
+	return decision, nil
+}
+func (e *Engine) evaluate(ctx context.Context, query rego.PreparedEvalQuery, input any) (Decision, error) {
+	results, err := query.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
 		return Decision{}, fmt.Errorf("policy evaluation: %w", err)
 	}
@@ -96,7 +205,7 @@ func (d Decision) Reason() string {
 		}
 	}
 	if len(reasons) == 0 && !d.Allow {
-		return "policy denied admission"
+		return "policy denied"
 	}
 	return strings.Join(reasons, "; ")
 }

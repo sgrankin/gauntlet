@@ -49,7 +49,7 @@ func parseCommand(body, bot string) (parsedCommand, bool) {
 		}
 	}
 	out.Action, out.Count = command(strings.Join(rest, " "), bot)
-	if out.Action == "" || out.Action == "cancel" && (out.Urgent || out.SkipChecks || out.OverridePause) {
+	if out.Action == "" || (out.Action == "cancel" || out.Action == "check") && (out.Urgent || out.SkipChecks || out.OverridePause) {
 		return out, false
 	}
 	if hasReason {

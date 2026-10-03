@@ -83,6 +83,9 @@ func (c *Channel) Commands() <-chan core.Command { return c.cmds }
 // distinguish "queued" from "dropped, buffer full" the way an HTTP
 // response code lets api.go's caller do.
 func (c *Channel) TrySend(cmd core.Command) bool {
+	if cmd.Principal == nil {
+		cmd.Principal = &core.Principal{Source: "admin", ID: "trusted-ingress", Authenticated: true}
+	}
 	select {
 	case c.cmds <- cmd:
 		return true
@@ -352,6 +355,14 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/checks", d.handleAPIChecks)
 	mux.HandleFunc("GET /api/v1/failures", d.handleFailureHistory)
 	mux.HandleFunc("GET /api/v1/services", d.handleAPIServices)
+	mux.HandleFunc("GET /api/v1/policy-decisions", func(w http.ResponseWriter, r *http.Request) {
+		snap := d.snapshot()
+		if snap == nil {
+			writeJSONError(w, 503, "queue starting")
+			return
+		}
+		writeJSON(w, 200, snap.Policy)
+	})
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
 	mux.HandleFunc("/api/v1/control", d.handleAPIControl)
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
@@ -1215,7 +1226,7 @@ func (d *dash) handleAPIRetry(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "queue controls unavailable")
 		return
 	}
-	if !d.ch.TrySend(core.Command{Kind: core.CommandRetry, Target: req.Target, Ref: req.Ref}) {
+	if !d.sendCommand(r, core.Command{Kind: core.CommandRetry, Target: req.Target, Ref: req.Ref}) {
 		writeJSONError(w, http.StatusTooManyRequests, "command buffer full; try again shortly")
 		return
 	}
@@ -1256,7 +1267,7 @@ func (d *dash) handleAPICancel(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "queue controls unavailable")
 		return
 	}
-	if !d.ch.TrySend(core.Command{Kind: core.CommandCancel, Target: req.Target, Ref: req.Ref}) {
+	if !d.sendCommand(r, core.Command{Kind: core.CommandCancel, Target: req.Target, Ref: req.Ref}) {
 		writeJSONError(w, http.StatusTooManyRequests, "command buffer full; try again shortly")
 		return
 	}
@@ -1700,4 +1711,20 @@ func formatRFC3339(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// WithPrincipalResolver attaches identities established by a trusted authenticator.
+// It does not trust headers itself. Without it, the admin ingress is one trusted
+// service principal, as are commands from local CLI/MCP clients.
+func WithPrincipalResolver(resolve func(*http.Request) (core.Principal, error)) Option {
+	return func(d *dash) { d.principalResolver = resolve }
+}
+
+type principalContextKey struct{}
+
+func (d *dash) sendCommand(r *http.Request, cmd core.Command) bool {
+	if principal, ok := r.Context().Value(principalContextKey{}).(core.Principal); ok {
+		cmd.Principal = &principal
+	}
+	return d.ch.TrySend(cmd)
 }

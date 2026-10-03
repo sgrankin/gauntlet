@@ -190,7 +190,16 @@ func (t *Tracker) stepLane(ctx context.Context, env Environment, ls *LaneState) 
 		// about draining and about the syncedSHA mirror window.
 		ls.Pending = t.canStart(l, ls)
 		if ls.Pending {
-			t.startLane(ctx, env, l, ls)
+			t.mu.Unlock()
+			err := t.decideDeployment(ctx, env, "admission", ls.Desired, ls.Observed, nil)
+			t.mu.Lock()
+			ls.Pending = err == nil && t.canStart(l, ls)
+			if err != nil {
+				ls.LastError = err.Error()
+			}
+			if ls.Pending {
+				t.startLane(ctx, env, l, ls)
+			}
 		}
 	}
 
@@ -295,6 +304,10 @@ func (t *Tracker) execGraph(ctx context.Context, env Environment, l *lane, rec *
 	nodes, reason := t.deployGraph(ctx, env, desired)
 	if reason != "" {
 		return core.OutcomeRejected, specRejectPrefix + reason
+	}
+
+	if err := t.decideDeployment(ctx, env, "execution", desired, observed, nodes); err != nil {
+		return core.OutcomeRejected, err.Error()
 	}
 
 	// ONE shared export for the whole graph run. internal/hooks — the
@@ -409,6 +422,9 @@ func (t *Tracker) execGraph(ctx context.Context, env Environment, l *lane, rec *
 		return core.OutcomeRejected, fmt.Sprintf("deploy node %q failed", culprit)
 	default:
 		// All green (skipped counts green): advance OBSERVED, and only now.
+		if err := t.decideDeployment(ctx, env, "publication", desired, observed, nodes); err != nil {
+			return core.OutcomeRejected, err.Error()
+		}
 		if err := t.git.CASUpdate(ctx, ObservedRef(env.Name), observed, desired); err != nil {
 			detail := "advance observed ref: " + err.Error()
 			if errors.Is(err, core.ErrCASStale) {

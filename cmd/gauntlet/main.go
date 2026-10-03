@@ -119,6 +119,11 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	operatorPolicy, err := buildPolicy(cfg, *configPath)
+	if err != nil {
+		return err
+	}
+
 	// Fail loudly, before touching any git plumbing, if the git on $PATH is
 	// missing or too old for `git merge-tree --write-tree`, which the
 	// trial-merge mechanism rests on. context.Background(): the root ctx
@@ -470,7 +475,7 @@ func run() error {
 		})
 	}
 
-	sc, err := buildSlackChannel(cfg)
+	sc, err := buildSlackChannel(cfg, operatorPolicy)
 	if err != nil {
 		return fmt.Errorf("build slack channel: %w", err)
 	}
@@ -556,8 +561,9 @@ func run() error {
 	var deployObs *obs.DeployRecorder
 	deploysDir := filepath.Join(*statePath, "deploys")
 	dt := buildDeployTracker(cfg, repo, deployRuntime{
-		Exec:  ex,
-		Slots: slots,
+		Policy: operatorPolicy,
+		Exec:   ex,
+		Slots:  slots,
 		Emit: func(ctx context.Context, ev core.Event) {
 			// Observability FIRST, before the channel fan-out: a slow or
 			// blocked channel must not delay or reorder the span tree, and
@@ -648,6 +654,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if failureReview != nil {
+		failureReview.Policy = operatorPolicy
+	}
 	if failureReview != nil && failureReview.History != nil {
 		defer failureReview.History.Close()
 	}
@@ -696,11 +705,8 @@ func run() error {
 	if pool != nil {
 		qcfg.Services = pool
 	}
-	qcfg.Policy, err = buildPolicy(cfg, *configPath)
-	if err != nil {
-		return err
-	}
-	qcfg.Reviews, err = buildReviewSource(cfg, appTokens, repo, *statePath)
+	qcfg.Policy = operatorPolicy
+	qcfg.Reviews, err = buildReviewSource(cfg, appTokens, repo, operatorPolicy, *statePath)
 	if err != nil {
 		return err
 	}

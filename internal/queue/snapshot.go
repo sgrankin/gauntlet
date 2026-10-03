@@ -23,6 +23,7 @@ import (
 type Snapshot struct {
 	At      time.Time
 	Targets []TargetSnapshot
+	Policy  []PolicyAudit
 
 	// IdleSince is the instant the QUEUE (every target, this package's own
 	// view) most recently became idle — no waiting candidates and no
@@ -157,6 +158,7 @@ type ParkedEntry struct {
 // from by the time this returns.
 func (d *Daemon) buildSnapshot(refs map[string]string) *Snapshot {
 	snap := &Snapshot{At: d.now()}
+	snap.Policy = d.controls.clone().PolicyAudit
 	for _, t := range d.cfg.Targets {
 		snap.Targets = append(snap.Targets, d.buildTargetSnapshot(t, refs))
 	}

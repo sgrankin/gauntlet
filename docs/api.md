@@ -436,6 +436,20 @@ uses a separate read-only MCP server with no queue controls.
 disabled. The dashboard links these observations from check output. Fingerprints
 and actual outcomes are separate from model hypotheses and confidence.
 
-`gauntlet policy-check -config gauntlet.kdl -input facts.json` prints the policy
+`gauntlet policy-check -decision submission -config gauntlet.kdl -input facts.json` prints the policy
 hash and named decision, with unsuccessful exit on denial. It is a local fixture
 check and performs no forge writes or queue admission.
+
+### Policy decisions
+
+`GET /api/v1/policy-decisions` returns the bounded queue policy audit also shown
+on target pages. Entries contain target, phase, ref/SHA, policy version, input
+hash, named requirements, and evaluation errors. Entries describe completed
+evaluations; they do not evaluate hypothetical commands.
+
+The standalone admin interface represents one trusted ingress principal.
+`Actor` is an audit label; JSON callers cannot supply a principal. Embedded HTTP
+handlers can use `WithPrincipalResolver` to attach an authenticated individual.
+GitHub comments use the forge identity and raw permissions; Slack uses Socket
+Mode user identity and configured allowlist membership. See the
+[policy contract](design/policy.md) for default and custom authorization.

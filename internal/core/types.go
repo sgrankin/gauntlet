@@ -682,7 +682,18 @@ type Revision struct {
 	Version string `json:"version"`
 }
 
+// Principal holds transport-established identity. Actor remains audit text.
+type Principal struct {
+	Source          string          `json:"source"`
+	ID              string          `json:"id"`
+	Authenticated   bool            `json:"authenticated"`
+	AllowedByConfig bool            `json:"allowed_by_config"`
+	Permission      string          `json:"permission"`
+	Teams           map[string]bool `json:"teams"`
+}
+
 type Command struct {
+	Principal     *Principal `json:"-"`
 	RequestID     string
 	Actor         string
 	Reason        string

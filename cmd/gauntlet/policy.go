@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/sgrankin/gauntlet/internal/config"
-	"github.com/sgrankin/gauntlet/internal/policy"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/sgrankin/gauntlet/internal/config"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 func buildPolicy(cfg *config.Daemon, configPath string) (*policy.Engine, error) {
 	if cfg.Policy == nil {
-		return nil, nil
+		return policy.Default(), nil
 	}
 	source := cfg.Policy.Rego
 	if cfg.Policy.File != "" {
@@ -33,11 +34,12 @@ func buildPolicy(cfg *config.Daemon, configPath string) (*policy.Engine, error) 
 		}
 		source = string(data)
 	}
-	return policy.Compile(context.Background(), source, cfg.Policy.Timeout)
+	return policy.Compile(context.Background(), source, cfg.Policy.Timeout, policy.Options{Replace: cfg.Policy.Replace, Extend: cfg.Policy.Extend})
 }
 func runPolicyCheck(args []string) error {
 	fs := flag.NewFlagSet("policy-check", flag.ContinueOnError)
 	configPath := fs.String("config", "gauntlet.kdl", "operator configuration")
+	decisionName := fs.String("decision", "submission", "policy decision entry point")
 	inputPath := fs.String("input", "", "versioned policy facts JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -50,9 +52,6 @@ func runPolicyCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	if engine == nil {
-		return fmt.Errorf("policy not configured")
-	}
 	data, err := os.ReadFile(*inputPath)
 	if err != nil {
 		return err
@@ -64,7 +63,7 @@ func runPolicyCheck(args []string) error {
 	if err := json.Unmarshal(data, &input); err != nil {
 		return err
 	}
-	decision, err := engine.Evaluate(context.Background(), input)
+	decision, err := engine.Decide(context.Background(), *decisionName, input)
 	if err != nil {
 		return err
 	}

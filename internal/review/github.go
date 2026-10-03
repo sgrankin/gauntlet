@@ -7,11 +7,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -20,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sgrankin/gauntlet/internal/core"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 type Tokens interface {
@@ -38,6 +37,7 @@ type Git interface {
 }
 
 type GitHubParams struct {
+	Policy            *policy.Engine
 	EmergencyEnabled  bool
 	IntentPath        string
 	PolicyTeams       []string
@@ -62,11 +62,15 @@ type GitHub struct {
 	pollMu         sync.Mutex
 	pollGeneration uint64
 	cached         []core.Candidate
+	cachedInputs   map[string]policy.Input
 	nextPoll       time.Time
 	now            func() time.Time
 }
 
 func NewGitHub(p GitHubParams) *GitHub {
+	if p.Policy == nil {
+		p.Policy = policy.Default()
+	}
 	if p.APIURL == "" {
 		p.APIURL = "https://api.github.com"
 	}
@@ -148,7 +152,7 @@ func command(body, bot string) (string, int) {
 		if len(fields) == 3 && fields[2] == "stack" {
 			return "merge-through", 0
 		}
-	case "merge-stack", "merge-ready", "cancel":
+	case "merge-stack", "merge-ready", "cancel", "check":
 		if len(fields) == 2 {
 			return fields[1], 0
 		}
@@ -240,7 +244,7 @@ func (g *GitHub) getPull(ctx context.Context, number int) (pull, error) {
 	return p, err
 }
 
-func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[string]bool) (request, error) {
+func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[string]policy.Principal, open []pull, feedback bool) (request, error) {
 	cs, err := pages[comment](ctx, g, "/issues/"+strconv.Itoa(p.Number)+"/comments")
 	if err != nil {
 		return request{}, err
@@ -255,16 +259,28 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 		if action == "" {
 			continue
 		}
-		allowed, known := permissions[c.User.Login]
+		principal, known := permissions[c.User.Login]
 		if !known {
 			var err error
-			allowed, err = g.writer(ctx, c.User.Login)
+			principal, err = g.principal(ctx, c.User.Login)
 			if err != nil {
 				return request{}, err
 			}
-			permissions[c.User.Login] = allowed
+			permissions[c.User.Login] = principal
 		}
-		if allowed && c.ID > result.ID {
+		decision, err := g.commandDecision(ctx, p, c, parsed, principal, open)
+		if err != nil {
+			return request{}, err
+		}
+		if feedback && (!decision.Allow || action == "check") {
+			if err := g.commandFeedback(ctx, p, c, parsed, decision); err != nil {
+				return request{}, err
+			}
+		}
+		if action == "check" {
+			continue
+		}
+		if decision.Allow && c.ID > result.ID {
 			result = request{PR: p, ID: c.ID, Action: action, Count: count, Urgent: parsed.Urgent, SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause, Requester: c.User.Login, Reason: parsed.Reason}
 		}
 	}
@@ -278,112 +294,6 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 
 func stackRejectionMarker(id int64) string {
 	return fmt.Sprintf("<!-- gauntlet:stack-required:%d -->", id)
-}
-
-func (g *GitHub) writer(ctx context.Context, login string) (bool, error) {
-	var p struct{ Permission string }
-	if err := g.call(ctx, "GET", g.endpoint("/collaborators/"+url.PathEscape(login)+"/permission"), nil, &p); err != nil {
-		if e, ok := errors.AsType[*apiError](err); ok && e.status == 404 {
-			return false, nil
-		}
-		return false, err
-	}
-	return p.Permission == "admin" || p.Permission == "maintain" || p.Permission == "write", nil
-}
-
-func (g *GitHub) ready(ctx context.Context, p pull) (bool, error) {
-	ready, _, err := g.readyReason(ctx, p)
-	return ready, err
-}
-
-func (g *GitHub) readyReason(ctx context.Context, p pull, skipChecks ...bool) (bool, string, error) {
-	if p.State != "open" || p.Draft {
-		return false, "PR is closed or a draft", nil
-	}
-	type vote struct {
-		State    string
-		CommitID string `json:"commit_id"`
-		User     struct{ Login string }
-	}
-	reviews, err := pages[vote](ctx, g, "/pulls/"+strconv.Itoa(p.Number)+"/reviews")
-	if err != nil {
-		return false, "readiness facts unavailable", err
-	}
-	latest := map[string]vote{}
-	for _, v := range reviews {
-		if v.State != "COMMENTED" && v.State != "PENDING" {
-			latest[v.User.Login] = v
-		}
-	}
-	approvals := 0
-	for _, v := range latest {
-		trusted, err := g.writer(ctx, v.User.Login)
-		if err != nil {
-			return false, "readiness facts unavailable", err
-		}
-		if !trusted {
-			continue
-		}
-		if v.State == "CHANGES_REQUESTED" {
-			return false, "changes requested by " + v.User.Login, nil
-		}
-		if v.State == "APPROVED" && v.CommitID == p.Head.SHA {
-			approvals++
-		}
-	}
-	if approvals < g.p.Approvals {
-		return false, fmt.Sprintf("%d current approvals; %d required", approvals, g.p.Approvals), nil
-	}
-	if g.p.RequireResolvedConversations {
-		resolved, err := g.conversationsResolved(ctx, p.Number)
-		if err != nil || !resolved {
-			return false, "unresolved or inaccessible review conversations", err
-		}
-	}
-	if len(g.p.RequiredChecks) == 0 || (len(skipChecks) > 0 && skipChecks[0]) {
-		return true, "", nil
-	}
-	// Status history is newest-first. Keep the latest result for each context,
-	// including contexts that appear beyond the first page.
-	type status struct{ Context, State string }
-	statuses, err := pages[status](ctx, g, "/commits/"+p.Head.SHA+"/statuses")
-	if err != nil {
-		return false, "readiness facts unavailable", err
-	}
-	green := map[string]bool{}
-	for _, s := range statuses {
-		if _, seen := green[s.Context]; !seen {
-			green[s.Context] = s.State == "success"
-		}
-	}
-	// Check runs use their own paginated envelope, not the statuses API.
-	for page := 1; ; page++ {
-		var runs struct {
-			CheckRuns []struct{ Name, Status, Conclusion string } `json:"check_runs"`
-		}
-		if err := g.call(ctx, "GET", g.endpoint(fmt.Sprintf("/commits/%s/check-runs?per_page=100&page=%d", p.Head.SHA, page)), nil, &runs); err != nil {
-			return false, "readiness facts unavailable", err
-		}
-		for _, r := range runs.CheckRuns {
-			passed := r.Status == "completed" && (r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped")
-			// Different apps (and the statuses API) may publish the same name.
-			// One passing result must not hide another producer's failure.
-			previous, seen := green[r.Name]
-			green[r.Name] = passed && (!seen || previous)
-		}
-		if len(runs.CheckRuns) < 100 {
-			break
-		}
-		if page >= 1000 {
-			return false, "check facts incomplete", fmt.Errorf("check-run pagination exceeds limit")
-		}
-	}
-	for _, name := range g.p.RequiredChecks {
-		if !green[name] {
-			return false, "required check is missing or not passing: " + name, nil
-		}
-	}
-	return true, "", nil
 }
 
 func slot(target string, number int) string {
@@ -459,6 +369,11 @@ func version(c core.Candidate, requestID int64) string {
 }
 
 func (g *GitHub) candidates(ctx context.Context, fetch bool, bypassChecks ...bool) ([]core.Candidate, error) {
+	return g.scan(ctx, fetch, len(bypassChecks) > 0 && bypassChecks[0], nil)
+}
+func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[string]policy.Input) ([]core.Candidate, error) {
+	ctx = context.WithValue(ctx, factCacheKey{}, map[string]map[string]any{})
+	ctx = context.WithValue(ctx, permissionCacheKey{}, map[string]string{})
 	// Closed roots retain stack-wide requests while later members land.
 	// This also distinguishes a genuinely landed ancestor from an abandoned PR.
 	open, err := pages[pull](ctx, g, "/pulls?state=all")
@@ -511,12 +426,12 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool, bypassChecks ...boo
 		}
 	}
 	var requests []request
-	permissions := map[string]bool{}
+	permissions := map[string]policy.Principal{}
 	for _, p := range open {
 		if !active[p.Number] {
 			continue
 		}
-		r, err := g.latestRequest(ctx, p, permissions)
+		r, err := g.latestRequest(ctx, p, permissions, open, fetch)
 		if err != nil {
 			return nil, err
 		}
@@ -527,7 +442,7 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool, bypassChecks ...boo
 	sort.Slice(requests, func(i, j int) bool { return requests[i].ID < requests[j].ID })
 	selected := map[string]core.Candidate{}
 	for _, r := range requests {
-		if (r.SkipChecks || r.OverridePause) && (!g.p.EmergencyEnabled || r.Reason == "" || g.p.IntentPath == "") {
+		if (r.SkipChecks || r.OverridePause) && (r.Reason == "" || g.p.IntentPath == "") {
 			continue
 		}
 		var members []pull
@@ -586,12 +501,26 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool, bypassChecks ...boo
 				sourceBase = p.Head.SHA
 				continue
 			}
-			ready, reason, err := g.readyReason(ctx, p, r.SkipChecks || (len(bypassChecks) > 0 && bypassChecks[0]))
+			c := core.Candidate{Ref: slot(target, p.Number), Target: target, User: p.User.Login,
+				Topic: fmt.Sprintf("pr-%d", p.Number), SHA: p.Head.SHA, Source: "github",
+				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL, Urgent: r.Urgent, SkipChecks: r.SkipChecks, OverridePause: r.OverridePause, Requester: r.Requester, RequestReason: r.Reason,
+				Message: fmt.Sprintf("%s (#%d)\n\n%s", p.Title, p.Number, p.Body)}
+			c.Version = version(c, r.ID)
+			if r.Urgent {
+				c.Version += ":urgent"
+			}
+			if r.SkipChecks || r.OverridePause {
+				flags := fmt.Sprintf("%t:%t:%s", r.SkipChecks, r.OverridePause, r.Reason)
+				c.Version += ":" + fmt.Sprintf("%x", sha256.Sum256([]byte(flags)))
+				c.EmergencyID = fmt.Sprint(r.ID)
+			}
+			decision, input, err := g.readiness(ctx, p, c, r, branch, r.SkipChecks || bypassChecks, members...)
+			ready, reason := decision.Allow, decision.Reason()
 			if err != nil {
 				return nil, err
 			}
 			blocked := ""
-			if !ready && g.p.EmergencyEnabled && strings.HasPrefix(reason, "required check") {
+			if !ready && g.p.EmergencyEnabled && onlyCheckFailures(decision) {
 				blocked = reason
 				ready = true
 			}
@@ -604,18 +533,9 @@ func (g *GitHub) candidates(ctx context.Context, fetch bool, bypassChecks ...boo
 				}
 				break
 			}
-			c := core.Candidate{Ref: slot(target, p.Number), Target: target, User: p.User.Login,
-				Topic: fmt.Sprintf("pr-%d", p.Number), SHA: p.Head.SHA, Source: "github",
-				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL, Urgent: r.Urgent, AdmissionBlocked: blocked, SkipChecks: r.SkipChecks, OverridePause: r.OverridePause, Requester: r.Requester, RequestReason: r.Reason,
-				Message: fmt.Sprintf("%s (#%d)\n\n%s", p.Title, p.Number, p.Body)}
-			c.Version = version(c, r.ID)
-			if r.Urgent {
-				c.Version += ":urgent"
-			}
-			if r.SkipChecks || r.OverridePause {
-				flags := fmt.Sprintf("%t:%t:%s", r.SkipChecks, r.OverridePause, r.Reason)
-				c.Version += ":" + fmt.Sprintf("%x", sha256.Sum256([]byte(flags)))
-				c.EmergencyID = fmt.Sprint(r.ID)
+			c.AdmissionBlocked = blocked
+			if inputs != nil {
+				inputs[c.Ref] = input
 			}
 			prefix = append(prefix, c)
 			previous, sourceBase = c.Ref, c.SHA
@@ -687,7 +607,8 @@ func (g *GitHub) Candidates(ctx context.Context) ([]core.Candidate, error) {
 	}
 	generation := g.pollGeneration
 	g.pollMu.Unlock()
-	current, err := g.candidates(ctx, true)
+	inputs := map[string]policy.Input{}
+	current, err := g.scan(ctx, true, false, inputs)
 	g.pollMu.Lock()
 	defer g.pollMu.Unlock()
 	if err != nil {
@@ -695,27 +616,20 @@ func (g *GitHub) Candidates(ctx context.Context) ([]core.Candidate, error) {
 		g.cached = nil
 		return nil, err
 	}
+	g.cachedInputs = inputs
 	// A delivery arriving during the poll requests another refresh. Do not
 	// overwrite it with a snapshot assembled before the delivery.
 	if generation == g.pollGeneration {
 		g.cached = slices.Clone(current)
+		g.cachedInputs = inputs
 		g.nextPoll = g.now().Add(g.p.PollInterval)
 	}
 	return current, nil
 }
 
 func (g *GitHub) Validate(ctx context.Context, c core.Candidate) error {
-	defer g.Invalidate()
-	current, err := g.candidates(ctx, false)
-	if err != nil {
-		return err
-	}
-	for _, n := range current {
-		if n.AdmissionBlocked == "" && n.Ref == c.Ref && n.SHA == c.SHA && n.Version == c.Version {
-			return nil
-		}
-	}
-	return fmt.Errorf("review revision, message, dependency, approval, or request changed")
+	_, err := g.ValidatePolicyInputs(ctx, []core.Candidate{c}, false)
+	return err
 }
 
 func pullNumber(ref string) (int, error) {
@@ -782,15 +696,6 @@ func (g *GitHub) Request(ctx context.Context, number int, action string, count i
 }
 
 func (g *GitHub) ValidateEmergency(ctx context.Context, c core.Candidate) error {
-	defer g.Invalidate()
-	current, err := g.candidates(ctx, false, true)
-	if err != nil {
-		return err
-	}
-	for _, n := range current {
-		if n.Ref == c.Ref && n.SHA == c.SHA && n.Version == c.Version {
-			return nil
-		}
-	}
-	return fmt.Errorf("review revision, authorization, conversations, or request changed")
+	_, err := g.ValidatePolicyInputs(ctx, []core.Candidate{c}, true)
+	return err
 }

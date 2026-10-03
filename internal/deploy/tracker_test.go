@@ -11,6 +11,7 @@ import (
 
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/deploy"
+	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
 // stubGit is a deploy.Git whose every method is a field, for the cases the
@@ -446,5 +447,23 @@ func TestSnapshotBeforeFirstPass(t *testing.T) {
 	tr := deploy.New(deploy.Params{Git: &stubGit{}})
 	if snap := tr.Snapshot(); snap != nil {
 		t.Errorf("Snapshot = %+v before any pass, want nil", snap)
+	}
+}
+
+func TestDeploymentPolicyStopsTrackedPromotion(t *testing.T) {
+	engine, err := policy.Compile(context.Background(), `package gauntlet
+import rego.v1
+deployment := {"allow":false,"requirements":[{"name":"deployment-freeze","satisfied":false,"reason":"Production is frozen"}]}`, time.Second, policy.Options{Extend: []string{"deployment"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	git := &stubGit{refs: map[string]string{"refs/heads/main": "new", "refs/heads/deploy/prod": "old"}}
+	tracker := deploy.New(deploy.Params{Policy: engine, Git: git, Environments: []deploy.Environment{{Name: "prod", SourceBranch: "main", Mode: deploy.ModeTrack}}})
+	tracker.ReconcileOnce(context.Background())
+	if len(git.casCalls) != 0 {
+		t.Fatalf("policy did not stop promotion: %+v", git.casCalls)
+	}
+	if !strings.Contains(tracker.Snapshot().Lanes[0].LastError, "Production is frozen") {
+		t.Fatalf("missing denial: %+v", tracker.Snapshot())
 	}
 }

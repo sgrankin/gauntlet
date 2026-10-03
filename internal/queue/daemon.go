@@ -390,6 +390,9 @@ func (d *Daemon) Snapshot() *Snapshot { return d.snap.Load() }
 // New constructs a Daemon. now is injected so tests can control run-ID
 // timestamps deterministically; a nil now defaults to time.Now.
 func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config, now func() time.Time) (*Daemon, error) {
+	if cfg.Policy == nil {
+		cfg.Policy = policy.Default()
+	}
 	if git == nil {
 		return nil, fmt.Errorf("queue: git repo is required")
 	}
