@@ -398,7 +398,7 @@ func (d *Daemon) advanceLane(ctx context.Context, t config.Target, targetTip str
 	// Detail saying so explicitly, and re-queues; it re-forms at the front
 	// of a future window and, if it's STILL red once it's actually testing
 	// against the real target tip (index 0), parks for real at that point
-	// via this same branch. See docs/design/queue-modes.md ("Red bubble:
+	// via this same branch. See docs/architecture/queue-modes.md ("Red bubble:
 	// only index 0 parks") for the full rationale.
 	//
 	// A genuine multi-member batch (len(members) > 1) instead takes the
@@ -466,7 +466,7 @@ func (d *Daemon) invalidateSuffix(ctx context.Context, t config.Target, lane *la
 }
 
 // chainLink is one candidate's link in the merge-commit chain (see
-// docs/design/queue-modes.md, "The merge-commit chain"): the --no-ff merge
+// docs/architecture/queue-modes.md, "The merge-commit chain"): the --no-ff merge
 // commit itself, the tree it was tested against, and the candidate it links
 // in. len(lane.runs[*].members) is 1 for serial/speculate; batch chains up
 // to Target.MaxBatch links via repeated buildChainLink calls (startBatchRun),
@@ -1151,7 +1151,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		// Run ID from the trial *tree* OID, not the merge commit OID — a
 		// commit OID hashes its own message, and the message must carry
 		// this run ID in its Gauntlet-Run trailer, so an ID derived from
-		// the commit OID would be circular. See docs/design/core.md ("Run
+		// the commit OID would be circular. See docs/architecture/queue.md ("Run
 		// identity") for the full three-part ID scheme.
 		//
 		// Minted here, before EventTrialClean, and reused verbatim for the
@@ -1173,7 +1173,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		// no-park branch for a post-merge check ERROR (verdictErrored
 		// treated identically to verdictRejected at lane index >0). Skip
 		// unparked instead of parking on an unproven base. See
-		// docs/design/queue-modes.md ("Conflict against a predicted base is
+		// docs/architecture/queue-modes.md ("Conflict against a predicted base is
 		// a skip, not a park").
 		if predicted {
 			d.skipPreMergePredicted(ctx, t, cand, "predicted-base build error (retesting once real): "+err.Error(), rootSpan)
@@ -1234,7 +1234,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// image on a non-container profile are configuration errors rejected
 	// before any command starts — never a red verdict mid-run
 	// (Config.KnownExecutorProfile's / ImageCapableProfile's docs;
-	// docs/design/services.md, "The model: a cache entry, not a
+	// docs/architecture/services.md, "The model: a cache entry, not a
 	// supervised unit").
 	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil); reason != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, reason, rootSpan)

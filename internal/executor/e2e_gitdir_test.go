@@ -58,7 +58,7 @@ func bareRepoWithUnpushedMerge(t *testing.T) (gitDir, baseSHA, candSHA, mergeSHA
 func TestLocalExecutor_GitDirEndToEndQueries(t *testing.T) {
 	gitDir, baseSHA, candSHA, mergeSHA := bareRepoWithUnpushedMerge(t)
 
-	// The three query shapes docs/checks.md documents, run by a real shell
+	// The three query shapes docs/reference/checks.md documents, run by a real shell
 	// against a real bare repo, resolving a merge commit no remote has:
 	// content identity (rev-parse of a subtree), affected-paths diff, and
 	// last-changing-commit provenance. All name explicit SHAs, never HEAD.
@@ -97,7 +97,7 @@ last=$(g log -1 --format=%%H "$GAUNTLET_MERGE_SHA" -- web/)
 
 // TestLocalExecutor_GitDirQueriesSurviveReadOnly re-runs the same queries
 // against a repo whose files were made read-only — the cooperative local
-// analogue of the container's :ro mount (docs/checks.md documents the
+// analogue of the container's :ro mount (docs/reference/checks.md documents the
 // local boundary as trust-based; this proves read-only *suffices* for the
 // query contract, so a stricter deployment loses nothing).
 func TestLocalExecutor_GitDirQueriesSurviveReadOnly(t *testing.T) {

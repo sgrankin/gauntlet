@@ -1,310 +1,39 @@
 # gauntlet
 
-Gauntlet is a merge queue. Push a branch to `for/<target>/<user>/<topic>`,
-request a GitHub PR through `@gauntlet merge`, or admit a Gerrit change.
-The daemon constructs linear target history, runs your repo's `.gauntlet.kdl`
-checks, and lands the exact tested tip with a compare-and-swap push.
-Each submission becomes one commit; GitHub PRs use their title and description.
-Serial, batch, and speculative verification all support prerequisite order.
-Optional incident controls can record an explicit validation waiver; see
-[incident controls](docs/design/incident-controls.md) and
-[operator Rego policy](docs/design/policy.md).
+Gauntlet is a merge queue that constructs target history, verifies the exact
+commit it will publish, and advances the branch with a compare-and-swap. It
+supports Git ref submissions, GitHub PRs and stacks, Gerrit changes, and
+Git-ref-driven deployment.
 
-Requires git 2.40 or newer (`git merge-tree --write-tree --merge-base`).
-See [review integration](docs/design/reviews.md) for stack commands,
-configuration, optional signed webhooks, GitHub's closed-versus-merged
-limitation, and Gerrit setup.
+- One commit per submission by default, with serial, batch, or speculative validation.
+- Repository-owned KDL check graphs; operator-owned executors, credentials, and Rego policy.
+- Container services, receipts, optional commit signing, and bounded Codex failure review.
+- Dashboard, history, HTTP API, CLI, MCP, GitHub status reporting, and Slack notifications.
+- Incident pause/resume, priority, and explicit emergency validation waivers.
 
 ## Documentation
 
-- [docs/roadmap.md](docs/roadmap.md) — implemented feature scope and limits.
-- [DESIGN.md](DESIGN.md) — the design: model, decision ledger, invariants.
-- [docs/config.md](docs/config.md) — daemon configuration reference
-  (history, dashboard, GitHub, Slack, OTLP, executors, services,
-  summaries, hooks, queue modes, deployment environments,
-  [failure review](docs/config.md#failure-review)).
-- [docs/checks.md](docs/checks.md) — writing checks: the check spec, the
-  `GAUNTLET_*` environment contract, logs, conditional execution, shared
-  services, deploy nodes.
-- [docs/api.md](docs/api.md) — the JSON API, CLI, idle signal, and MCP
-  server.
-- [docs/setup.md](docs/setup.md) — one-time integration setup and live
-  verification: GitHub PAT, Slack app, container executor, OTLP.
-- [docs/deploy.md](docs/deploy.md) — production deployment guide, plus
-  step-by-step [runbooks](docs/runbooks/).
-- [docs/maintenance-review.md](docs/maintenance-review.md) — cleanup findings and
-  remaining maintenance priorities.
-- [docs/design/](docs/design/) — feature design docs: the queue core,
-  queue modes (batch/speculate), shared services, scaling, and deployment.
+Start with the [quickstart](docs/guides/quickstart.md) or browse the
+[documentation index](docs/index.md). References cover
+[daemon configuration](docs/reference/daemon.md), [checks](docs/reference/checks.md),
+and [policy](docs/reference/policy.md). The [architecture](docs/architecture/overview.md)
+explains correctness and recovery; [known limits](docs/architecture/limits.md)
+covers deployment constraints.
 
-## Running
+## Build and run
 
-Build the daemon:
+Use the Go version in `go.mod` and Git 2.40 or newer:
 
 ```sh
-go build -o gauntlet ./cmd/gauntlet
+make build
+./gauntlet validate -config gauntlet.kdl
+./gauntlet -config gauntlet.kdl -state /var/lib/gauntlet
 ```
 
-There are two config files:
-
-- **Daemon config** (admin-written, one per daemon instance) — points at the
-  remote, the poll interval, the committer identity used for landing commits,
-  and the target branches to reconcile. See [`gauntlet.kdl`](gauntlet.kdl)
-  for a full example and [docs/config.md](docs/config.md) for the
-  reference. Passed via `-config`.
-- **Repo check spec** (adopter-written, lives in the repo the daemon
-  watches) — the named checks a candidate must pass before it lands. See
-  [`.gauntlet.kdl`](.gauntlet.kdl) for a full example and
-  [docs/checks.md](docs/checks.md) for the reference. The daemon reads this
-  file out of each candidate's own trial tree, so a branch is always tested
-  by its own check spec.
-
-Run it:
-
-```sh
-gauntlet -config gauntlet.kdl -state ~/.cache/gauntlet
-```
-
-- `-config` (required) — path to the daemon config (`gauntlet.kdl`).
-- `-state` — directory for the daemon's local bare-repo clone(s), keyed per
-  remote, plus a `trials/` scratch directory (see below). Defaults to
-  `gauntlet` under `os.UserCacheDir()`.
-
-At startup the daemon probes `git --version` and refuses to run below git
-2.40 (the `git merge-tree --write-tree --merge-base` requirement above) — a clear error
-naming the requirement, rather than a confusing failure the first time a
-trial merge runs. It also removes and recreates `<state>/trials`, the
-scratch directory each candidate's trial tree is exported into: it only ever
-holds ephemeral exports for whatever run is currently in flight, never
-anything that needs to survive a restart, so sweeping it on every startup is
-always safe and cleans up anything an earlier crash left behind.
-
-**The land flow:** push your branch to `refs/heads/for/<target>/<user>/<topic>`.
-Each poll tick the daemon trial-merges the candidate onto the live tip of
-`<target>` and runs the checks from your repo's own `.gauntlet.kdl` against
-that trial tree. All green lands it as one single-parent commit onto
-`<target>` and deletes the `for/...` ref. Set `landing "merge"` explicitly to retain legacy merge
-commits during migration.
-Red (or a conflict) parks the ref alone — nothing re-runs until you push a
-new SHA to it.
-
-The daemon shuts down cleanly on `SIGINT`/`SIGTERM`.
-
-`gauntlet -version` (or the `version` subcommand) prints the daemon's
-version, the Go toolchain and GOOS/GOARCH it was built with, and — when
-built with `go build` from a VCS checkout — the exact commit, straight from
-`runtime/debug.BuildInfo`.
-
-## Deploying
-
-See [docs/deploy.md](docs/deploy.md) for the production guide: the
-recommended warm-builder-VM topology (systemd unit included) and a
-container-based alternative, plus git-version/remote-auth requirements,
-GitHub PAT permissions, dashboard/API/MCP exposure guidance, and backup
-notes. `make build` (version stamped from `git describe`), `make test`, and
-`make image` (docker/podman/`container`) are the build entry points; see
-the [`Makefile`](Makefile) and [`Dockerfile`](Dockerfile). Tagged releases
-(binaries and a `ghcr.io/sgrankin/gauntlet` image, built via GitHub Actions
-and goreleaser) are also available — see docs/deploy.md's ["Releases"](docs/deploy.md#releases)
-section.
-
-## Landing changes
-
-Queue slot = ref name, SHA = what gets tested (see [DESIGN.md](DESIGN.md)
-"The model"). Landing a change is just pushing to
-`for/<target>/<user>/<topic>`; everything below is porcelain around that one
-push.
-
-**`gauntlet land`** does it for you:
-
-```sh
-gauntlet land                                  # infer target and topic
-gauntlet land -target main -topic my-feature   # or spell them out
-```
-
-- `-target` — the target name from the daemon's `gauntlet.kdl`. Defaults to
-  the remote's default branch, read from `refs/remotes/<remote>/HEAD` (set
-  once by clone, or by `git remote set-head origin --auto`).
-- `-topic` — defaults to the current branch name; on a detached HEAD (the
-  normal state of a colocated jj repo, which exports bookmarks as git
-  branches), to the one local branch pointing at HEAD. The target's own
-  branch never counts — sitting on the target tip is an error, not a
-  candidate.
-- `-remote` — defaults to `origin`.
-
-It derives `<user>` from `git config user.name` (falling back to `$USER`),
-slugifies it, and runs `git push <remote> HEAD:refs/heads/for/<target>/<user>/<topic>`.
-
-**Git alias**, if you'd rather not build the subcommand:
-
-```sh
-git config alias.land '!f() { git push origin "HEAD:refs/heads/for/${1:?target}/${USER}/${2:?topic}"; }; f'
-```
-
-```sh
-git land main my-feature
-```
-
-**jj equivalent** — jj is first-class client-side even though the daemon
-never touches it (DESIGN.md "Decision ledger": jj was killed as the daemon's
-VCS backend, kept for clients). A candidate ref is just a bookmark pushed
-into the `for/` namespace:
-
-```sh
-jj bookmark set for/main/$USER/my-feature -r @
-jj git push -b for/main/$USER/my-feature
-```
-
-(`-r @` if you're landing the change you just described; `-r @-` if you've
-already moved on to a new empty commit on top of it.)
-
-Or skip the `for/` spelling entirely: in a colocated repo, a bookmark on the
-change you're landing (`jj bookmark set my-feature -r @-`) is a git branch
-at HEAD, so a bare `gauntlet land` picks it up as the topic.
-
-**Author cancellation** is ref deletion — nothing more:
-
-```sh
-git push origin --delete for/main/$USER/my-feature
-# or: jj bookmark delete for/main/$USER/my-feature && jj git push -b for/main/$USER/my-feature
-```
-
-(See "Operator cancellation" below for the other kind — an operator stopping
-someone else's in-flight candidate without touching the ref at all.)
-
-**Retry semantics.** Red (or a conflict) parks the ref at that SHA — the
-daemon won't re-test it again on its own. To retry: push a new SHA (amend
-and re-push the same ref name; the SHA change is what un-parks it), or, once
-the Slack channel is configured (see [docs/config.md](docs/config.md)),
-react `:recycle:` on the run's root message to re-queue the same SHA without
-a new push — this works whether the run is still in flight or has long since
-finished (the normal case for a ❌ root someone reacts to), and threads the
-re-queued run's own progress under the same root rather than posting a new
-one (see the [Slack app guide](docs/setup.md#slack-app)). Not available on
-a batch root — see the batch-root exception there.
-
-An `OutcomeError` park — a daemon-side infra failure (executor unreachable, a
-service failing to come up, a service dying mid-run), never a red verdict or
-a trial conflict — is additionally auto-retried once per `(ref, SHA)`
-without any operator action, using this exact same retry machinery
-(`auto-retry-errors`, default on — see [docs/config.md](docs/config.md)). If
-that automatic retry also errors, the park sticks around for a human exactly
-as before; a fresh push (new SHA) always gets its own fresh auto-retry
-budget. Set `auto-retry-errors false` to disable this, so every
-infra-error park waits for an operator.
-
-**Operator cancellation.** An operator (not the author) can stop
-a candidate that's currently being tested, or pull one out of the queue
-before it's ever picked up, without deleting the ref: react `:x:` on the
-run's root message in Slack, `POST /api/v1/cancel`, the MCP `cancel` tool, or
-`gauntlet cancel`. This parks the ref at its current SHA exactly like a red
-verdict (`Detail: "cancelled by operator"`) — the same retry semantics above
-clear it. Per queueing discipline: serial and speculate park the cancelled
-run itself (a speculation window's suffix behind it re-queues, unparked,
-same as a real bubble); batch parks only the named member and re-queues its
-batch-mates (unparked, "batch member cancelled") — but only when driven via
-the API/CLI: a Slack reaction can't name a single batch member (see the
-[Slack app guide](docs/setup.md#slack-app)), so use those for a batch. See
-[docs/api.md](docs/api.md) for the wire shape; the full per-mode
-cancellation semantics are recorded in [docs/design/queue-modes.md's
-"Cancellation semantics per mode"](docs/design/queue-modes.md#cancellation-semantics-per-mode).
-
-Post-land hooks have their own, separate cancel surface
-(`POST /api/v1/hooks/cancel`, the MCP `hook_cancel` tool, or
-`gauntlet hooks-cancel`), since a hook stage has no candidate ref to name —
-see [docs/config.md's "Hooks"](docs/config.md#hooks).
-
-## Configuring the daemon
-
-Every optional daemon feature is a node in `gauntlet.kdl`, and absence
-disables it — a minimal config (remote, committer, targets) runs a plain
-single-lane daemon. The optional nodes: SQLite run
-`history`, the web `dashboard`, `github` commit statuses, a duplex `slack`
-channel with reaction commands, `otlp` span export, the container
-`executor`, shared `services`, Codex merge `summarize`, per-target queue
-`mode` (serial/batch/speculate), post-land `hook`s with backlog
-policies, and `deploy` environments (below).
-See [docs/config.md](docs/config.md) for the full reference.
-
-## Deploying your code (CD)
-
-Landing a change and *running* it are separate concerns, and gauntlet has a
-separate subsystem for the second: **desired-state dispatch over deploy
-refs**. Each environment is a lane between two refs —
-`refs/heads/deploy/<env>`, an ordinary branch saying what it *should* run,
-and `refs/gauntlet/deployed/<env>`, daemon-owned, advanced only once that
-environment's whole deploy graph has finished green.
-
-```sh
-gauntlet deploy -env prod -rev v1.4.2     # deploy a revision  (a CAS git push)
-gauntlet deploy -env prod -rev <old-sha>  # roll back          (also a git push)
-gauntlet promote -from dev -to prod       # promote what dev finished deploying
-```
-
-Everything falls out of that. Rollback, promotion, and re-deploy are ref
-pushes; **approval is branch protection** on `deploy/*` (host-enforced,
-audited, working while the daemon is down — nothing in gauntlet's API can
-move a desired ref); crash recovery is a rescan. An environment can also
-`track` a source — a branch, or another environment's *observed* ref — so
-`main` → `dev` → `prod` promotes automatically, each link independently
-level-triggered.
-
-What runs is a graph of `deploy` nodes declared in the deployed revision's
-*own* `.gauntlet.kdl` (`command`, `after`, `executor` — the check grammar,
-the same scheduler), so rolling back to last week's SHA runs last week's
-deploy graph. Nodes get the check environment contract plus
-`GAUNTLET_DEPLOY_ENV`/`_NODE`/`_SHA` and `GAUNTLET_DEPLOYED_SHA`, which makes
-affected-only deploys a one-line diff-and-skip.
-
-The scope line is unchanged: gauntlet is a deploy **dispatcher** — schedule
-named commands against a revision, record and display the outcomes — and
-never a CD **controller**. No health checks, no rollback decisions, no
-traffic shaping; a node that needs those drives the system that owns them.
-See [docs/config.md's "Deployment"](docs/config.md#deployment) for the
-environment block, [docs/checks.md's "Deploy
-nodes"](docs/checks.md#deploy-nodes) for the graph and its environment
-contract, and [docs/design/deployment.md](docs/design/deployment.md) for why
-it is shaped this way.
-
-## Writing checks
-
-A check is a named command in your repo's `.gauntlet.kdl`, run against an
-export of the trial-merged tree with a small `GAUNTLET_*` environment
-contract: the base/merge/candidate SHAs, the candidate ref, a read-only git
-dir that resolves those SHAs (for affected-only diffs and content-keyed
-caching), a run ID for namespacing shared resources, and a result file for
-reporting `skipped`.
-Checks that need a real backing service (a database, a broker) can declare
-`service`/`needs` and get a warm, pooled instance. See
-[docs/checks.md](docs/checks.md) for the full contract, including full-log
-capture and the affected-only/monorepo pattern.
-
-## Operating
-
-The dashboard serves human-readable queue state, run history, and per-check
-stats; the same bind also exposes a JSON API under `/api/v1` and an MCP
-server at `/mcp`, and `gauntlet status`/`retry`/`cancel`/`hooks-cancel` are
-thin CLI wrappers over the API — see [docs/api.md](docs/api.md). Deployment
-adds `/deploys` and `/deploy/{id}` pages, four `/api/v1/deploy*` routes, and
-four MCP tools; `gauntlet deploy`/`promote` are git porcelain rather than
-API clients, since deploying is a ref push. One-time
-integration setup (GitHub PAT, Slack app manifest, container executor,
-OTLP, deploy-ref branch protection) is walked through in
-[docs/setup.md](docs/setup.md).
-
-## Status
-
-Feature-complete — serial/batch/speculate modes,
-local+container executors, dashboard/API/MCP, Slack duplex with reaction
-commands, GitHub statuses, post-land hooks, Codex merge summaries, full
-log capture, and park persistence are all shipped; post-completion
-consistency audit done. **Deployment** (environment lanes over deploy refs,
-repo-declared deploy graphs, `/deploys` UI, API/MCP, `gauntlet
-deploy`/`promote`) shipped 2026-08-09 as phases D1–D4 — see
-[docs/design/deployment.md](docs/design/deployment.md).
-
-See [DESIGN.md](DESIGN.md) for the full design and rationale.
+Edit the [example config](gauntlet.kdl) for your remote and identity first.
+Keep the dashboard private or behind authenticated ingress.
+See [hosting](docs/operations/hosting.md) for a persistent service.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

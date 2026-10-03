@@ -1,4 +1,4 @@
-# Container image for gauntlet. See docs/deploy.md for the two deployment
+# Container image for gauntlet. See docs/operations/hosting.md for the two deployment
 # topologies this fits into.
 #
 # NOTE: the LOCAL executor running inside this image has no toolchains at
@@ -8,7 +8,7 @@
 # checks run elsewhere, or (b) the container executor is configured with a
 # builder image of its own via a mounted container socket. The recommended
 # topology — a warm builder VM with the toolchains already on the host — runs
-# the plain binary directly on that host instead (docs/deploy.md §"warm
+# the plain binary directly on that host instead (docs/operations/hosting.md §"warm
 # builder VM"); it does not use this image at all.
 
 FROM golang:1.27.1-alpine AS builder
@@ -32,7 +32,7 @@ FROM alpine:latest AS runtime
 
 # Fixed UID/GID (1000:1000) rather than whatever `adduser -S` picks: makes
 # `chown -R 1000:1000 <host-state-dir>` a stable, documentable step for a
-# bind-mounted /data (docs/deploy.md "container deployment").
+# bind-mounted /data (docs/operations/hosting.md "container deployment").
 RUN apk add --no-cache \
         git \
         openssh-client \
@@ -46,7 +46,7 @@ RUN apk add --no-cache \
 COPY --from=builder /out/gauntlet /usr/local/bin/gauntlet
 
 # State (the bare repo clone(s), trial scratch dir, and history.db if
-# configured) lives entirely under /data; see docs/deploy.md's "state dir
+# configured) lives entirely under /data; see docs/operations/hosting.md's "state dir
 # layout" for what's disposable (trials/, history.db) vs. what to persist
 # (repos/, and the config file itself if you keep it here rather than
 # bind-mounting it separately).

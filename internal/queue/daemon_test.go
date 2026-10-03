@@ -21,7 +21,7 @@ const testCheckSpecPath = ".gauntlet.kdl"
 
 var testCommitter = core.Identity{Name: "Gauntlet", Email: "gauntlet@example.com"}
 
-// runIDPattern matches the run-ID scheme (see docs/design/core.md, "Run
+// runIDPattern matches the run-ID scheme (see docs/architecture/queue.md, "Run
 // identity"): a UTC timestamp, a hyphen, the per-process sequence number, a
 // hyphen, and 12 hex characters taken from an OID (the trial tree's for a
 // run that got one; the candidate's own SHA for pre-trial outcomes and for
@@ -100,14 +100,14 @@ func newHarnessWithExecutor(t *testing.T, exec interface {
 	}
 	h.d = d
 	// Every terminal event must carry a non-nil RunRecord (see
-	// docs/design/core.md, "Event model"). Enforced across every test built
+	// docs/architecture/queue.md, "Event model"). Enforced across every test built
 	// on this harness, for free, rather than repeating the assertion per test.
 	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })
 	return h
 }
 
 // assertAllTerminalEventsHaveRecords fails t if any terminal-kind event in
-// events carries a nil Record (see docs/design/core.md, "Event model"): a
+// events carries a nil Record (see docs/architecture/queue.md, "Event model"): a
 // property every emit site — present and future — must uphold.
 func assertAllTerminalEventsHaveRecords(t *testing.T, events []core.Event) {
 	t.Helper()

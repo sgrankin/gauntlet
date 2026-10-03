@@ -199,7 +199,7 @@ CREATE TABLE hook_runs (
 );
 
 -- deploys/deploy_nodes (v14+) record one environment deploy graph run
--- (docs/design/deployment.md, "Logs and history"): written once, from the
+-- (docs/architecture/deployment.md, "Logs and history"): written once, from the
 -- TERMINAL core.EventDeployFinished's carried core.DeployRecord, exactly as
 -- runs/checks are written from a terminal RunRecord. The started and
 -- per-node-finished deploy events write NOTHING here — by the time the

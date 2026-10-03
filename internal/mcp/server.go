@@ -1138,7 +1138,7 @@ func handleChecks(p Params, in checksIn) (checksOut, error) {
 type servicesIn struct{}
 
 // serviceInstance mirrors dashboard/api.go's serviceInstanceJSON
-// field-for-field. Key carries the full key (see docs/design/services.md,
+// field-for-field. Key carries the full key (see docs/architecture/services.md,
 // "Full key versus name" — only the full key is guaranteed collision-free);
 // KeyHash12 is the same truncation the dashboard HTML table shows for
 // compact display.

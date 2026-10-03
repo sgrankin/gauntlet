@@ -74,7 +74,7 @@ type Instance struct {
 // Driver is the tiny CLI shim behind one Mode/runtime. containerDriver
 // (driver_container.go) is the only implementation built; the interface
 // exists so the Pool's unit tests run against a fake with no docker, and
-// so an artifact driver (see docs/design/services.md, "Deliberately not
+// so an artifact driver (see docs/architecture/services.md, "Deliberately not
 // built") could slot in later without Pool changes.
 type Driver interface {
 	// Create starts a new instance for is. ModeNetwork: idempotently

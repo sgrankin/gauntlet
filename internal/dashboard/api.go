@@ -105,7 +105,7 @@ func WithChannel(ch *Channel) Option {
 
 // WithVersion sets the gauntlet version string shown in every page's
 // footer (cmd/gauntlet wires this from its own main.version — see
-// docs/deploy.md for how that's packaged). Without this option the footer
+// docs/operations/hosting.md for how that's packaged). Without this option the footer
 // omits the version line entirely, same as today.
 func WithVersion(v string) Option {
 	return func(d *dash) { d.version = v }
@@ -1145,7 +1145,7 @@ func (d *dash) handleAPIChecks(w http.ResponseWriter, r *http.Request) {
 
 // serviceInstanceJSON is one live shared-service instance, mirroring
 // ServiceStatus field-for-field. Key is the full key (see
-// docs/design/services.md, "Full key versus name" — only the full key is
+// docs/architecture/services.md, "Full key versus name" — only the full key is
 // guaranteed collision-free); KeyHash12 is the same truncation the
 // dashboard HTML table shows for compact display.
 type serviceInstanceJSON struct {

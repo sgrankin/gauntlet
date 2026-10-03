@@ -3,7 +3,7 @@
 // integration_test.go (see that file's package doc). These tests call
 // buildChainLink directly, repeatedly, with the base advancing to the prior
 // call's mergeOID — exactly the shape batch and speculate drive it in (see
-// docs/design/queue-modes.md, "The merge-commit chain"). Nothing here goes
+// docs/architecture/queue-modes.md, "The merge-commit chain"). Nothing here goes
 // through ReconcileOnce/reconcileTarget: no run/lane is ever created, no ref
 // is ever mutated — the chain is pure trial-merge/commit-tree plumbing that
 // exists before any run does.
@@ -266,7 +266,7 @@ func TestSpecChanged(t *testing.T) {
 
 // TestChainBuild_MergeBodyCalledPerLinkWithChainedBase is the chained-base
 // MergeBody sanity case: buildChainLink invokes Config.MergeBody once per
-// call (see docs/design/queue-modes.md, "Merge-body cost"), so building a
+// call (see docs/architecture/queue-modes.md, "Merge-body cost"), so building a
 // chain via N buildChainLink calls must invoke it exactly N times, each
 // with that link's own candidate and its own (possibly chained, unpushed)
 // base —

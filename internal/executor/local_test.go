@@ -653,7 +653,7 @@ func TestLocalExecutor_CommandNotFound_ResourceFieldsZero(t *testing.T) {
 // deployJob is baseJob shaped as one node of an environment's deploy graph:
 // the deploy coordinates set, OperatorOwned deliberately left FALSE — a
 // deploy command comes from the deployed revision's own repo spec, so it is
-// candidate-code class exactly like a check (docs/design/deployment.md,
+// candidate-code class exactly like a check (docs/architecture/deployment.md,
 // "What runs": credentials).
 func deployJob(t *testing.T, command []string) core.CheckJob {
 	t.Helper()
@@ -752,7 +752,7 @@ exit 0
 }
 
 // TestLocalExecutor_SecretEnvStrippedFromDeployJob pins the credential
-// stance for deploys (docs/design/deployment.md, "What runs"): a deploy
+// stance for deploys (docs/architecture/deployment.md, "What runs"): a deploy
 // command is landed, gated, repo-authored code — candidate class — so
 // issue #13's stripping applies to it unchanged. Nothing about the deploy
 // fields exempts a job; only OperatorOwned does, and the lane runner leaves

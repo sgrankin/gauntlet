@@ -28,7 +28,7 @@ target "main" branch="main"
 }
 
 // TestLoadDaemon_DeployExample is the design doc's own three-environment
-// example (docs/design/deployment.md), loaded verbatim: it is the config
+// example (docs/architecture/deployment.md), loaded verbatim: it is the config
 // grammar's acceptance criterion, so a change that silently stops parsing
 // it fails here.
 func TestLoadDaemon_DeployExample(t *testing.T) {

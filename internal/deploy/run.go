@@ -54,7 +54,7 @@ import (
 // specRejectPrefix marks the Detail of a park caused by the deployed
 // revision's own spec rather than by anything a node did. Never a red
 // verdict: no command ran, so no node has a verdict to report — the
-// fail-closed stance from docs/design/deployment.md ("an environment must
+// fail-closed stance from docs/architecture/deployment.md ("an environment must
 // never silently believe it deployed when no command existed to run").
 const specRejectPrefix = "spec reject: "
 
@@ -89,7 +89,7 @@ func newDeployRunID(t time.Time, env, sha string) string {
 // Everything in it is in-memory by design: the refs are the ground truth,
 // so a restart that forgets a park, a spent auto-retry budget, or a synced
 // marker costs at most one re-run — and a re-run is the contract deploy
-// commands already have to tolerate (docs/design/deployment.md,
+// commands already have to tolerate (docs/architecture/deployment.md,
 // "Crash mid-graph").
 type lane struct {
 	// running/run/cancel describe the graph in flight, if any.

@@ -56,7 +56,7 @@ type CheckSpec struct {
 	// host; this knob only widens one candidate's slice of it.
 	MaxParallel int `kdl:"max-parallel"`
 
-	// Deploys declares this revision's deploy nodes (docs/design/
+	// Deploys declares this revision's deploy nodes (docs/architecture/
 	// deployment.md): the graph an environment runs when the daemon
 	// deploys THIS revision, read from the deployed revision's own tree —
 	// the deploy-side twin of "a candidate is tested by its own
@@ -89,12 +89,12 @@ type CheckSpec struct {
 	// its own private materialization of the run's exact chain-tip tree,
 	// so parallel (or `after`-related) nodes never observe one another's
 	// mutations — `after` becomes verdict ordering only, not a shared
-	// working tree. Any other value is a spec error. See docs/checks.md.
+	// working tree. Any other value is a spec error. See docs/reference/checks.md.
 	Workspace string `kdl:"workspace"`
 }
 
 // Check is one named check: a command to run against the exported trial
-// tree. See core.CheckJob and docs/checks.md for the environment/verdict
+// tree. See core.CheckJob and docs/reference/checks.md for the environment/verdict
 // contract the executor applies when it runs Command.
 type Check struct {
 	Name    string   `kdl:",arg"`
@@ -617,7 +617,7 @@ func (cs *CheckSpec) validateDeploys() error {
 		}
 		// The run-graph node-name prefixes reserved for image builds and
 		// the receipt node, held against deploy nodes too: deploy nodes
-		// are scheduled into that same name space (docs/design/
+		// are scheduled into that same name space (docs/architecture/
 		// deployment.md, "the third tenant").
 		if strings.HasPrefix(d.Name, "image:") {
 			return fmt.Errorf("deploy %q: the \"image:\" name prefix is reserved for image-build nodes", d.Name)
@@ -701,7 +701,7 @@ func (cs *CheckSpec) validateDeployAcyclic() error {
 // transitive closure of names over After — naming a node pulls in every
 // ancestor it declares it needs, because running "app1" without the
 // "migrate" it depends on is exactly the silent lie spec rejection exists
-// to prevent (docs/design/deployment.md). The result is always in
+// to prevent (docs/architecture/deployment.md). The result is always in
 // DECLARATION order, never selection order, so a subgraph schedules
 // identically to the way it would as part of the whole graph.
 //

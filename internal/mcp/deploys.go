@@ -3,7 +3,7 @@ package mcp
 // The deploy tools: deploys (the lane overview), deploy (one graph run's
 // detail), deploy_retry and deploy_cancel — the MCP mirrors of
 // GET /api/v1/deploys, GET /api/v1/deploy/{id}, and the two env-addressed
-// POST routes (docs/design/deployment.md, "API/MCP").
+// POST routes (docs/architecture/deployment.md, "API/MCP").
 //
 // Same semantics as the HTTP surface, deliberately down to the wording:
 // "deploy not configured" when this daemon has no deploy tracker, "env is

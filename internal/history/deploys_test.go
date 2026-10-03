@@ -11,7 +11,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 )
 
-// Deploy history (v14+, docs/design/deployment.md's "Logs and history"):
+// Deploy history (v14+, docs/architecture/deployment.md's "Logs and history"):
 // the deploys/deploy_nodes tables, their one writer (the terminal
 // core.EventDeployFinished), and the two read methods the dashboard/API/MCP
 // surfaces query.

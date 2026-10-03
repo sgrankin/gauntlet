@@ -129,7 +129,7 @@ func TestReconcile_IsAncestorRecovery(t *testing.T) {
 	// The recovery path must synthesize a complete RunRecord rather than
 	// emit EventLanded with Record==nil — the terminal-event contract every
 	// channel (and history's SQLite writer) relies on (see
-	// docs/design/core.md, "Event model").
+	// docs/architecture/queue.md, "Event model").
 	recs := h.ch.Records()
 	last := recs[len(recs)-1]
 	if last.Outcome != core.OutcomeLanded {

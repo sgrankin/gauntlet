@@ -81,7 +81,7 @@ func newIntegrationHarness(t *testing.T, remote *testutil.Remote, exec core.Exec
 		t.Fatalf("New: %v", err)
 	}
 	// Every terminal event must carry a non-nil RunRecord (see
-	// docs/design/core.md, "Event model"), asserted across the whole
+	// docs/architecture/queue.md, "Event model"), asserted across the whole
 	// RecordingChannel stream for every integration test built on this
 	// harness.
 	t.Cleanup(func() { assertAllTerminalEventsHaveRecords(t, ch.Events()) })

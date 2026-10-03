@@ -1,6 +1,6 @@
 // Batch-mode suite: batch refill, red serial-fallback, the spec-change
 // batch boundary, and the per-member RunRecord shape (see
-// docs/design/queue-modes.md, "Batch"). Built on the fake harness
+// docs/architecture/queue-modes.md, "Batch"). Built on the fake harness
 // (daemon_test.go's testHarness/fakeGitRepo), the same tier
 // TestReconcile_GreenMultiCheckLand and land_test.go's IsAncestor-recovery
 // test use — batch's state-machine behavior (which member chains, which
@@ -188,7 +188,7 @@ func TestBatchMemberRecords_ShareBatchID(t *testing.T) {
 // candidate slots were never deleted — the crash-before-slot-delete
 // window. Each member recovers independently, head-pick-only per refill,
 // with no re-merge and no re-test (Invariant 4). See
-// docs/design/queue-modes.md ("Crash recovery adds no durable state").
+// docs/architecture/queue-modes.md ("Crash recovery adds no durable state").
 func TestBatchCrashRecovery(t *testing.T) {
 	h := newHarness(t, batchTarget(8))
 	base := h.git.seed("main", nil)

@@ -21,7 +21,7 @@ import (
 // Release calls — in the same spirit as executor.GatedExecutor, never a
 // mock framework. It never touches a real driver/container: EnsureAll
 // fabricates env pairs straight from needs, the same shape the real pool
-// produces (see docs/design/services.md, "The endpoint contract"), so the
+// produces (see docs/architecture/services.md, "The endpoint contract"), so the
 // queue-layer wrapper (reconcile.go's startCheck) can be tested without the
 // real pool machinery.
 type fakeServicePool struct {
@@ -143,7 +143,7 @@ func waitForRunTerminal(h *testHarness, runID string) core.Event {
 
 // TestServices_Gating_RejectedLoud covers capability gating: a spec
 // declaring needs on a daemon with Config.Services == nil is rejected
-// loudly (see docs/design/services.md, "The model: a cache entry, not a
+// loudly (see docs/architecture/services.md, "The model: a cache entry, not a
 // supervised unit" — "loud like a malformed check"), never silently run
 // without its dependency.
 func TestServices_Gating_RejectedLoud(t *testing.T) {

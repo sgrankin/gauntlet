@@ -166,4 +166,4 @@ threaded under the SAME root (not a new message) with no new push.
 
 If any check fails, cross-reference [deploy-linux.md](deploy-linux.md) or
 [deploy-macos-dev.md](deploy-macos-dev.md)'s phase that configures the
-failing surface, and [deploy.md](../deploy.md) for the full rationale.
+failing surface, and [hosting guide](../operations/hosting.md) for the full rationale.

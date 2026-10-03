@@ -215,7 +215,7 @@ type Daemon struct {
 	// allows a repo to select it; there is no separate allow-list.
 	// Selecting one grants the check every capability attached to it
 	// (mounts, env, sockets), so prefer several small profiles over one
-	// all-powerful default — see docs/config.md.
+	// all-powerful default — see docs/reference/daemon.md.
 	Profiles []Executor `kdl:"-"`
 
 	// Export configures trial-tree materialization (every export: check
@@ -571,7 +571,7 @@ type Services struct {
 	Runtime string `kdl:"runtime"`
 }
 
-// Deploy configures the optional deployment lanes (docs/design/
+// Deploy configures the optional deployment lanes (docs/architecture/
 // deployment.md). Environments are DAEMON config, not repo config:
 // deployment capability is operator-owned, like executor profiles and
 // hooks. len(Environments)==0 — a missing block, or a bare `deploy {}` —
@@ -596,7 +596,7 @@ type DeploySource struct {
 // naturally want because kdl-go binds `track` to a bool by ARGUMENT, and a
 // bare argument-less node fails to unmarshal outright ("track expects 1
 // argument(s), 0 provided") — while `track true` would then be the only
-// legal spelling, which is not the grammar docs/design/deployment.md
+// legal spelling, which is not the grammar docs/architecture/deployment.md
 // defines. Binding a pointer-to-struct instead makes presence itself the
 // signal, reusing the mechanism Daemon.Summarize already documents (kdl-go
 // only allocates a pointer-typed child-node field when the node is present
@@ -1511,7 +1511,7 @@ func (d *Daemon) validate() error {
 
 		// NOTE: reserved adaptive-window-governor knobs, parsed for forward
 		// compatibility and always rejected regardless of Mode — see
-		// docs/design/queue-modes.md ("Deliberately not built").
+		// docs/architecture/queue-modes.md ("Deliberately not built").
 		if t.WindowStart != 0 {
 			return fmt.Errorf("target %q: window-start is reserved for a future adaptive-window governor", t.Name)
 		}
@@ -1697,7 +1697,7 @@ func (d *Daemon) validate() error {
 			case "artifact", "oci-unpack":
 				// NOTE: reserved growth path — the artifact and oci-unpack
 				// drivers were designed and deliberately left unbuilt; see
-				// docs/design/services.md ("Deliberately not built").
+				// docs/architecture/services.md ("Deliberately not built").
 				// Validated but rejected at load rather than silently
 				// no-opping, same "reserved for a future release"
 				// treatment as Target.OnBatchRed's "bisect" above.

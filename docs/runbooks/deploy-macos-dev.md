@@ -129,7 +129,7 @@ timeout 2 gauntlet -config ~/gauntlet.kdl -state ~/.cache/gauntlet; echo "exit: 
 For a fuller host preflight beyond config parsing (git version, `-state`,
 GitHub auth, remote reachability, executor runtimes, dashboard port), run
 `gauntlet doctor -config ~/gauntlet.kdl -state ~/.cache/gauntlet` instead —
-see [deploy.md](../deploy.md#preflight-gauntlet-doctor).
+see [hosting guide](../guides/validating.md#preflight-gauntlet-doctor).
 
 ## Phase 5 — Run it
 

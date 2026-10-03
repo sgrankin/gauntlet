@@ -1,5 +1,5 @@
 // Package obs is a thin OTel wrapper around the queue's run lifecycle: it
-// starts/ends the span tree described in docs/design/core.md
+// starts/ends the span tree described in docs/architecture/queue.md
 // ("Observability") and maps core.RunRecord / core.CheckResult onto span
 // attributes. It depends only on core and the OTel API (no SDK) — with no
 // provider registered, every span produced here is a no-op.

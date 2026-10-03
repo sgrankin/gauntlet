@@ -29,7 +29,7 @@ type Snapshot struct {
 	// view) most recently became idle — no waiting candidates and no
 	// in-flight pipeline runs, anywhere — or the zero time if the queue is
 	// busy right now (the park-the-builder idle signal; see
-	// docs/design/scaling.md, "Axis 2 — park the builder"). Parked
+	// docs/architecture/scaling.md, "Axis 2 — park the builder"). Parked
 	// candidates don't count: they're dormant, not being worked on.
 	//
 	// This is QUEUE idleness only. The daemon's post-land hooks

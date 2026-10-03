@@ -239,7 +239,7 @@ func TestSnapshot_WaitingExcludesBatchMembers(t *testing.T) {
 }
 
 // TestSnapshot_IdleSince covers the queue-idleness signal (see
-// docs/design/core.md, "Snapshot and the idle signal"): an idle repo
+// docs/architecture/queue.md, "Snapshot and the idle signal"): an idle repo
 // stamps IdleSince on its very first pass, holds
 // that instant steady across further idle passes, zeroes it the instant a
 // candidate arrives, and stamps a FRESH instant (not the original) once the

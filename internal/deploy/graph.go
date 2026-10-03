@@ -13,7 +13,7 @@ import (
 //
 // It is a deliberate SECOND implementation of internal/queue's
 // advanceChecks, not an extraction of it — the D2 spike's verdict
-// (docs/design/deployment.md, Phase D2) after finding that only ~85 of the
+// (docs/architecture/deployment.md, Phase D2) after finding that only ~85 of the
 // queue scheduler's lines are graph logic, that the rest is queue tenancy
 // (image/receipt validation mutating results mid-drain, batch attribution,
 // trial-ref gates), and that the two tenants want different admission

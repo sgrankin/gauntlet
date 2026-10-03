@@ -1,6 +1,6 @@
 package obs
 
-// Deploy observability (docs/design/deployment.md, "Logs and history"): a
+// Deploy observability (docs/architecture/deployment.md, "Logs and history"): a
 // `deploy` root span per environment graph run with a `deploy-node` child
 // per node, plus terminal metrics — the same shape the queue's run tree and
 // node histograms already have, over the deploy event stream.

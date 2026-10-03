@@ -1,6 +1,6 @@
 package dashboard
 
-// The two deploy pages (docs/design/deployment.md, "Surfaces"): /deploys,
+// The two deploy pages (docs/architecture/deployment.md, "Surfaces"): /deploys,
 // the per-environment overview, and /deploy/{runID}, the per-run detail page
 // — plus the full per-node log route beside it.
 //

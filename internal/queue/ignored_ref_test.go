@@ -7,7 +7,7 @@ import (
 )
 
 // TestReconcile_IgnoredRefEmittedOnce covers checkIgnoredRefs (see
-// docs/design/core.md, "Candidate ref grammar"): a well-formed candidate
+// docs/architecture/queue.md, "Candidate ref grammar"): a well-formed candidate
 // ref naming a target that isn't configured must produce exactly one
 // core.EventIgnoredRef per (ref, SHA) — not one every tick.
 func TestReconcile_IgnoredRefEmittedOnce(t *testing.T) {

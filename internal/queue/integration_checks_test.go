@@ -59,7 +59,7 @@ func TestIntegration_SkippedCheck(t *testing.T) {
 // those directly and fails the check if either is wrong. CandidateSHA and
 // MergeSHA can't be baked into the very script whose content determines
 // those hashes (the same hash-circularity a run ID minted from the merge
-// commit OID would hit — see docs/design/core.md, "Run identity"), so the
+// commit OID would hit — see docs/architecture/queue.md, "Run identity"), so the
 // script only reports them and the test compares against the RunRecord's
 // own authoritative fields — still a real assertion, just performed in Go
 // instead of shell.

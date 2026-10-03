@@ -1,6 +1,6 @@
 package slack
 
-// Deploy-lane posting (docs/design/deployment.md, "Surfaces"): one ROOT
+// Deploy-lane posting (docs/architecture/deployment.md, "Surfaces"): one ROOT
 // message per graph run, node failures threaded under it, the root edited to
 // its verdict when the run concludes. Structurally the candidate-run shape
 // (postFreshRoot/postCheckReply/postTerminal) — decided over a

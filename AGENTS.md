@@ -2,8 +2,7 @@
 
 Gauntlet builds, verifies, and lands target history. Read [README.md](README.md)
 for usage and [DESIGN.md](DESIGN.md) for the invariants before changing the
-queue. Consult the relevant [design document](docs/design/) for a feature;
-older decision-ledger entries may be superseded by later decisions.
+queue. Consult the relevant [architecture note](docs/architecture/overview.md) for a feature.
 
 ## Verification
 
@@ -29,7 +28,7 @@ older decision-ledger entries may be superseded by later decisions.
 - Prefer concrete code and small interfaces at external boundaries. Add
   abstractions when another implementation or a clear test boundary needs them.
 - Comments should explain contracts, ownership, ordering, or surprising
-  choices. Keep design history in `docs/design/`, not beside each statement.
+  choices. Keep design rationale in `docs/architecture/`, not beside each statement.
 
 ## Tests and commits
 
@@ -46,3 +45,12 @@ older decision-ledger entries may be superseded by later decisions.
 - Commit subjects use `area: subject`, not conventional-commit prefixes.
   Make commits when requested; preserve unrelated work and do not rewrite
   published history without authorization.
+
+## Documentation
+
+- Put task steps in `docs/guides/`, settings/contracts in `docs/reference/`,
+  operational procedures in `docs/operations/` or `docs/runbooks/`, and rationale
+  in `docs/architecture/`. Keep pages within this two-level tree.
+- Explain a contract once and link to it. Prefer option tables, numbered steps,
+  and short executable examples; reserve prose for reasoning and tradeoffs.
+- Run `make docs-check` after editing docs and update `mkdocs.yml` navigation.

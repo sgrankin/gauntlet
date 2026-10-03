@@ -55,7 +55,7 @@ func TestIntegration_PinnedTrialSurvivesGCPruneNow(t *testing.T) {
 	// unreferenced loose object and this collects it.
 	testutil.GCPruneNow(h.t, h.dir)
 
-	// The exact queries docs/checks.md tells check scripts to run against
+	// The exact queries docs/reference/checks.md tells check scripts to run against
 	// $GAUNTLET_GIT_DIR must still work mid-check.
 	if out, err := h.gitDirQuery("cat-file", "-e", tip); err != nil {
 		t.Fatalf("merge commit %s lost to gc --prune=now mid-check: %v %s", tip, err, out)

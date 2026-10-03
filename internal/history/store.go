@@ -132,7 +132,7 @@ func Open(path string) (*Store, error) {
 //     a pre-v13 row), stamp user_version=13, loop.
 //   - 13 (schema v13: no deploys/deploy_nodes tables): CREATE TABLE both
 //     (one environment deploy graph run and its per-node rows —
-//     core.DeployRecord, docs/design/deployment.md's "Logs and history"),
+//     core.DeployRecord, docs/architecture/deployment.md's "Logs and history"),
 //     stamp user_version=14, loop. Purely additive: nothing about an
 //     existing runs/checks row changes, and a daemon with no deploy
 //     environments configured simply never writes to either table.

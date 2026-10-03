@@ -518,7 +518,7 @@ func (d *Daemon) rejectPreMerge(ctx context.Context, t config.Target, cand core.
 // untouched by this call, so it re-queues and re-forms in a later window;
 // if it's still bad once it genuinely reaches lane index 0 against the REAL
 // target tip, it parks there for real via rejectPreMerge. See
-// docs/design/queue-modes.md ("Red bubble: only index 0 parks" and
+// docs/architecture/queue-modes.md ("Red bubble: only index 0 parks" and
 // "Conflict against a predicted base is a skip, not a park") for the
 // rationale this generalizes.
 func (d *Daemon) skipPreMergePredicted(ctx context.Context, t config.Target, cand core.Candidate, detail string, rootSpan trace.Span) {

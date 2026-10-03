@@ -75,7 +75,7 @@ func TestIntegration_CrashBetweenLandAndDelete(t *testing.T) {
 
 	// A real-git integration test driving the daemon's recovery path end
 	// to end: the synthesized RunRecord (never a nil one — see
-	// docs/design/core.md, "Event model") must hold here exactly as it does
+	// docs/architecture/queue.md, "Event model") must hold here exactly as it does
 	// against the fake git in TestReconcile_IsAncestorRecovery.
 	recs := h2.ch.Records()
 	last := recs[len(recs)-1]

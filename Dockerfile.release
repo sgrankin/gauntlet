@@ -5,7 +5,7 @@
 # (linux/amd64/gauntlet, linux/arm64/gauntlet), hence the $TARGETPLATFORM
 # COPY below. Runtime contract (packages, fixed UID, volume, entrypoint) is
 # intentionally identical to the top-level Dockerfile's runtime stage; keep
-# the two in sync by hand if either changes (see docs/deploy.md "Releases").
+# the two in sync by hand if either changes (see docs/operations/hosting.md "Releases").
 
 FROM alpine:latest
 

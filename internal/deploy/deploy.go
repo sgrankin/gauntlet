@@ -1,5 +1,5 @@
 // Package deploy implements the deploy-ref tracker: the half of
-// docs/design/deployment.md that keeps each environment's DESIRED ref
+// docs/architecture/deployment.md that keeps each environment's DESIRED ref
 // pointing at what that environment is supposed to be running.
 //
 // Two refs describe an environment, and nothing else does:

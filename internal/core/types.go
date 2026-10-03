@@ -481,7 +481,7 @@ const (
 	EventRetryRequested
 
 	// EventDeployStarted reports that one environment's deploy graph run is
-	// about to start (internal/deploy, docs/design/deployment.md): DeployEnv
+	// about to start (internal/deploy, docs/architecture/deployment.md): DeployEnv
 	// is the environment, RunID the deploy run's own ID, DeploySHA the
 	// revision being deployed (the desired ref's value) and DeployedSHA the
 	// observed ref's value before this run ("" on an environment's
@@ -543,7 +543,7 @@ type Event struct {
 	// RunID identifies the run this event belongs to: a queue run's ID on
 	// every candidate/hook event, and the DEPLOY run's own ID on the three
 	// deploy kinds — one field, because "run-scoped events carry the run
-	// ID" (docs/design/core.md, "Event model") is a contract about
+	// ID" (docs/architecture/queue.md, "Event model") is a contract about
 	// joinability, not about which subsystem minted the ID. The two ID
 	// spaces never collide (both are unique per process) and no consumer
 	// joins across them: a deploy event carries no Candidate, so nothing
@@ -618,7 +618,7 @@ type Event struct {
 // from this one value rather than re-deriving anything.
 //
 // It is NOT correctness state. The refs remain the ground truth for what an
-// environment should and does run (docs/design/deployment.md: desired vs
+// environment should and does run (docs/architecture/deployment.md: desired vs
 // observed); losing every record costs old detail pages and nothing else,
 // which is exactly why retry re-runs the whole graph instead of resuming
 // from the per-node rows here.

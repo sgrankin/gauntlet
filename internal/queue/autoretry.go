@@ -4,8 +4,8 @@ package queue
 // ledger, "Auto-retry once on infra-error parks"): a narrow, scoped
 // exception to the "no unbounded retry loops" rule. Two pressures
 // manufacture OutcomeError parks that a single automatic retry absorbs
-// without a human: cold-service ready-timeouts (see docs/design/services.md,
-// "Failure semantics") and evictable builders (see docs/design/scaling.md,
+// without a human: cold-service ready-timeouts (see docs/architecture/services.md,
+// "Failure semantics") and evictable builders (see docs/architecture/scaling.md,
 // "The one real prerequisite: auto-requeue on infra errors"). Scope is
 // deliberately narrow: only OutcomeError (never OutcomeRejected — a red
 // verdict is an author problem — and never OutcomeConflict), exactly once

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// deploySpecExample is docs/design/deployment.md's own deploy graph, with
+// deploySpecExample is docs/architecture/deployment.md's own deploy graph, with
 // the one check ParseChecks requires (a spec with no checks is rejected
 // for reasons that predate deploy nodes and are untouched by them).
 const deploySpecExample = `

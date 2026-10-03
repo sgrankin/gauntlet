@@ -170,7 +170,7 @@ type dash struct {
 	// servicesSnapshot is nil unless New was called with
 	// WithServicesSnapshot: the index page's "Services" section and GET
 	// /api/v1/services both treat the shared-services pool as absent in
-	// that case — see docs/design/services.md ("The hit counter") for what
+	// that case — see docs/architecture/services.md ("The hit counter") for what
 	// this pool's tuning surface is for, and api.go's
 	// WithServicesSnapshot doc.
 	servicesSnapshot func() ServicesStatus
@@ -235,7 +235,7 @@ func (d *dash) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Shared-services pool (docs/design/services.md, "The hit counter"'s
+	// Shared-services pool (docs/architecture/services.md, "The hit counter"'s
 	// tuning surface): a DAEMON-level section, like ignored refs above —
 	// the pool is per-daemon, not scoped to any one target. Nil
 	// (WithServicesSnapshot never wired up, e.g. no services configured)
@@ -294,7 +294,7 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 		data.InFlight = buildInFlight(ts.InFlight, snap.At)
 	}
 
-	// Render the stacked pipeline view (docs/design/queue-modes.md,
+	// Render the stacked pipeline view (docs/architecture/queue-modes.md,
 	// "Snapshot and pipeline view") only when there's something a single
 	// InFlight card can't show: more than one run in flight (speculation)
 	// or the head run has more than one member (batch). A single-run,
@@ -725,7 +725,7 @@ func pathUnder(root, path string) bool {
 // --- /batch/{batchID} ---------------------------------------------------------
 
 // handleBatch renders the members of one batch run (see
-// docs/design/queue-modes.md, "Member run identity"): the link from
+// docs/architecture/queue-modes.md, "Member run identity"): the link from
 // /run/{id}'s "landed in batch <id> (k of n)" line. Each member is its own
 // history row (per-member RunRecords sharing a BatchID), so this is a small
 // listing over history.BatchMembers, not a new data source.
@@ -1004,7 +1004,7 @@ func buildInFlight(rs *queue.RunSnapshot, at time.Time) *inFlightView {
 }
 
 // buildPipelineRun builds one pipelineRunView from a RunSnapshot for the
-// target page's stacked pipeline list (docs/design/queue-modes.md,
+// target page's stacked pipeline list (docs/architecture/queue-modes.md,
 // "Snapshot and pipeline view"): every member (topic/user, short SHA), the
 // predicted/batch badges the template
 // renders from Predicted/len(Members), and the same per-run check-progress
@@ -1057,7 +1057,7 @@ func buildHookRunView(hr history.HookRunSummary) hookRunView {
 }
 
 // buildServicesView builds index.html's view of the shared-services pool
-// (docs/design/services.md, "The hit counter") from a ServicesStatus
+// (docs/architecture/services.md, "The hit counter") from a ServicesStatus
 // snapshot. at is the queue snapshot's "now" (snap.At), the same reference
 // point buildInFlight/
 // buildPipelineRun use for their own elapsed-time fields — Age is computed
@@ -1358,7 +1358,7 @@ type indexData struct {
 	// section").
 	IgnoredRefs []ignoredRefView
 
-	// Services is the shared-services pool (docs/design/services.md, "The
+	// Services is the shared-services pool (docs/architecture/services.md, "The
 	// hit counter"'s tuning surface), another daemon-level section like
 	// IgnoredRefs — the pool isn't scoped to any one target either. Nil
 	// when WithServicesSnapshot was never wired up (no services configured
@@ -1383,7 +1383,7 @@ type idleSinceView struct {
 }
 
 // servicesView is index.html's view of the shared-services pool
-// (ServicesStatus; docs/design/services.md, "The hit counter"): the pool's
+// (ServicesStatus; docs/architecture/services.md, "The hit counter"): the pool's
 // own tuning knobs (MaxInstances/Pending) plus one serviceInstanceView per
 // live instance.
 type servicesView struct {
@@ -1393,7 +1393,7 @@ type servicesView struct {
 }
 
 // serviceInstanceView is one row of the Services table: KeyHash12 (not the
-// full key) for compact display — see docs/design/services.md ("Full key
+// full key) for compact display — see docs/architecture/services.md ("Full key
 // versus name"); the same truncation the API/MCP surfaces carry the full
 // Key alongside. Age is elapsed-since-CreatedAt (formatDuration, like a
 // check's duration); LastUsed gets the existing formatTime <time> treatment

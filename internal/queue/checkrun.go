@@ -307,7 +307,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		BaseSHA:   r.baseOID,
 		MergeSHA:  r.chainTip,
 		Candidate: r.members[0].cand,
-		Clean:     false, // reserved for a future clean-build cache escape hatch; see docs/design/core.md ("Deliberately not built")
+		Clean:     false, // reserved for a future clean-build cache escape hatch; see docs/architecture/queue.md ("Deliberately not built")
 	}
 	for _, m := range r.members {
 		job.Candidates = append(job.Candidates, m.cand)
@@ -365,7 +365,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	}
 	// ALL blocking service work — EnsureAll and the mid-run liveness
 	// re-probe — happens here, inside this check's own goroutine, never on
-	// the reconcile goroutine; see docs/design/services.md ("Lifecycle:
+	// the reconcile goroutine; see docs/architecture/services.md ("Lifecycle:
 	// ensure, release, reap") for why that's load-bearing. needs/svcs are
 	// captured by value into the closure so a later mutation of r (none
 	// happens, but defensively) can't race this goroutine.
@@ -427,7 +427,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		ens, err := d.cfg.Services.EnsureAll(spanCtx, svcs, needs) // BLOCKING, off the reconcile loop
 		if err != nil {
 			result <- core.CheckResult{Name: check.Name, Command: job.Command, Materialized: materialized, Err: fmt.Errorf("service ensure: %w", err)}
-			return // -> verdictErrored -> OutcomeError, park-as-error (see docs/design/services.md "Failure semantics")
+			return // -> verdictErrored -> OutcomeError, park-as-error (see docs/architecture/services.md "Failure semantics")
 		}
 		defer d.cfg.Services.Release(ens) // refcount--; last-used is touched on release, not ensure
 		job.ServiceEnv, job.Networks = ens.Env, ens.Networks

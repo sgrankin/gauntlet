@@ -157,7 +157,7 @@ read that doc for the *why*; this is the *how*, in order.
    For a fuller host preflight beyond config parsing (git version, `-state`,
    GitHub auth, remote reachability, executor runtimes, dashboard port), run
    `ssh <TARGET_HOST> gauntlet doctor -config /etc/gauntlet/gauntlet.kdl
-   -state /var/lib/gauntlet/state` instead — see [deploy.md](../deploy.md#preflight-gauntlet-doctor).
+   -state /var/lib/gauntlet/state` instead — see [hosting guide](../guides/validating.md#preflight-gauntlet-doctor).
 
 ### Phase 3b — Container executor + a real backing service (optional)
 
@@ -207,7 +207,7 @@ check "test" {
 }
 ```
 
-See [checks.md](../checks.md) for the full
+See [check reference](../reference/checks.md) for the full
 check-spec grammar (`service`/`needs`, multi-command checks, etc.) — one
 minimal check is enough to verify the pipeline end-to-end before adding more.
 
@@ -396,6 +396,6 @@ its pin — the same race it has with any concurrent `git commit` — causing
 a spurious, auto-retried infra park; prefer plain `git gc` on a live
 daemon and keep `--prune=now` for quiesced repos.
 
-See [docs/deploy.md](../deploy.md) for the full production guide this
-runbook distills, and [docs/config.md](../config.md) for the complete
+See [docs/deploy.md](../operations/hosting.md) for the full production guide this
+runbook distills, and [docs/config.md](../reference/daemon.md) for the complete
 configuration reference.

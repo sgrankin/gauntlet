@@ -97,7 +97,7 @@ func New(cfg Config) (*Pool, error) {
 	// services — it has no docker-style shared user network, so a service
 	// container and a check container have no verified way to reach each
 	// other. Rejected loudly here rather than silently limping.
-	// See docs/design/services.md ("Reachability mode").
+	// See docs/architecture/services.md ("Reachability mode").
 	if cfg.Runtime == "container" {
 		return nil, fmt.Errorf("services: runtime %q is not supported: services require docker or podman (Apple's container CLI lacks the shared container network services need)", cfg.Runtime)
 	}

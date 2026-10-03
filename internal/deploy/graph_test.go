@@ -1,6 +1,6 @@
 // Deploy node-graph scheduling suite: the divergence guard for the D2
 // spike's "a second minimal scheduler, not an extraction" verdict
-// (docs/design/deployment.md, Phase D2). Every behavior of
+// (docs/architecture/deployment.md, Phase D2). Every behavior of
 // internal/queue/parallel_test.go is ported here under the SAME test name,
 // adapted to deploy.Scheduler's API — diamond overlap and join, fail-fast
 // with blocked rows, drain-then-cull, slot starvation with Waited

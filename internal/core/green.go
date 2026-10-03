@@ -17,7 +17,7 @@ package core
 // internal/queue's advanceChecks/materializeChecks, which restated it
 // inline three times, and internal/deploy's node-graph scheduler. The
 // spike that chose "a second minimal scheduler, not an extraction"
-// (docs/design/deployment.md, Phase D2) named this predicate as the one
+// (docs/architecture/deployment.md, Phase D2) named this predicate as the one
 // piece that IS genuinely shared — sharing the rule costs nothing and
 // keeps the two tenants' notion of green from drifting apart, which is the
 // only way their divergence could become a correctness bug rather than a

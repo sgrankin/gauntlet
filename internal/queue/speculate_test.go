@@ -1,6 +1,6 @@
 // Speculate-mode suite: the speculate refill, the lane-general validity
 // sweep/bubble/prefix-drain exercised at depth > 1, and the Speculated flag
-// (see docs/design/queue-modes.md, "Speculate"). Built on the fake harness
+// (see docs/architecture/queue-modes.md, "Speculate"). Built on the fake harness
 // (daemon_test.go's testHarness/fakeGitRepo), the same tier batch_test.go's
 // state-machine suite uses — speculate's window-filling, bubble, and
 // invalidation behavior is exactly what the fake proves most cheaply and
@@ -100,7 +100,7 @@ func TestSpeculateRefill_FillsWindowChained(t *testing.T) {
 // against a non-head (predicted, unpushed) base is NOT proven against
 // reality — parking it there would be the same false-negative park already
 // ruled out for a post-merge red at lane index >0 (see
-// docs/design/queue-modes.md, "Conflict against a predicted base is a skip,
+// docs/architecture/queue-modes.md, "Conflict against a predicted base is a skip,
 // not a park"). It must Skip unparked instead (Detail still documents the
 // conflict as being against a PREDICTION — "conflicts with in-flight
 // <topic>@<sha> (predicted base)" — not the generic "trial merge conflict"
@@ -225,7 +225,7 @@ func TestSpeculateConflictAgainstPredictedBase_SkipsRequeuesThenParksOnRealRetes
 }
 
 // TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands
-// proves the regression scenario documented in docs/design/queue-modes.md
+// proves the regression scenario documented in docs/architecture/queue-modes.md
 // ("Conflict against a predicted base is a skip, not a park"): window
 // [A,B], B conflicts with A's predicted (unpushed) chainTip, then A itself
 // goes red at head and never lands — so the real target tip never advances
@@ -312,7 +312,7 @@ func TestSpeculateConflictAgainstPredictedBase_LandsWhenPredecessorNeverLands(t 
 }
 
 // TestSpeculateBubble_MiddleRedUnparkedRequeuesThenParksOnRealRetest proves
-// the bubble step at depth 3 (see docs/design/queue-modes.md, "Red bubble:
+// the bubble step at depth 3 (see docs/architecture/queue-modes.md, "Red bubble:
 // only index 0 parks"): bob's base at lane index 1 is alice's own
 // PREDICTED (unpushed) chainTip, never the real target tip, so a red there
 // proves nothing about bob himself — it could just as easily be alice's
@@ -551,7 +551,7 @@ func TestSpeculateHeadTargetMoved_WholeWindowInvalidated(t *testing.T) {
 // execution — a separate concern the depth-3 race soak below covers) and
 // calling ReconcileOnce exactly once must land all three, each land's CAS
 // old value equal to the PRIOR run's own chainTip (see
-// docs/design/queue-modes.md, "FIFO landings, structurally CAS-enforced")
+// docs/architecture/queue-modes.md, "FIFO landings, structurally CAS-enforced")
 // — never the tick's stale target-tip snapshot.
 func TestSpeculateGreenPrefixDrain_MultipleRunsOneTick(t *testing.T) {
 	h := newHarness(t, speculateTarget(3))
@@ -611,7 +611,7 @@ func TestSpeculateGreenPrefixDrain_MultipleRunsOneTick(t *testing.T) {
 }
 
 // TestSpeculateLand_FIFOCAS proves FIFO landing is structurally
-// CAS-enforced (see docs/design/queue-modes.md, "FIFO landings,
+// CAS-enforced (see docs/architecture/queue-modes.md, "FIFO landings,
 // structurally CAS-enforced"): window 3, all green, released in
 // run0/run1/run2 order (a separate tick's worth of check-completion per
 // run, unlike the prefix-drain test above, which forces simultaneity) —
@@ -682,7 +682,7 @@ func TestSpeculateLand_FIFOCAS(t *testing.T) {
 }
 
 // TestSpeculateCrashRecovery covers speculate crash-recovery (see
-// docs/design/queue-modes.md, "Crash recovery adds no durable state"): a
+// docs/architecture/queue-modes.md, "Crash recovery adds no durable state"): a
 // PREFIX of the window landed (target advanced past two members) before a
 // crash interrupted slot deletion, and the un-landed suffix's predicted
 // link (built against what was, at the time, an in-flight prediction) is

@@ -9,7 +9,10 @@ Codex CLI supplies both API-key and ChatGPT service-account authentication.
 Each invocation uses an empty workspace, private temporary home, explicit model,
 structured output schema, disabled shell/web tools, and a filtered environment.
 No user rules, config, or MCP servers are inherited. Invalid decisions, provider
-errors, low confidence, cancellation, and exhausted budgets retain the failure.
+errors, cancellation, and exhausted budgets retain the failure. Shipped retry
+policy also requires the configured confidence threshold; custom Rego can extend
+or replace that decision. See [failure-review settings](../reference/failure-review.md)
+and [policy](../reference/policy.md).
 The check must actually pass; a skipped retry cannot clear a previous failure.
 
 ## Tools and evidence

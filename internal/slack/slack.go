@@ -592,7 +592,7 @@ func (s *Slack) postCheckReply(ctx context.Context, ev core.Event) {
 // long-running daemon must not leak an entry per run.
 //
 // Batch-aware: a batch's per-member records each carry a distinct RunID
-// (see docs/design/queue-modes.md, "Member run identity" — memberRunID
+// (see docs/architecture/queue-modes.md, "Member run identity" — memberRunID
 // keeps history's runs table from clobbering N-1 of N members' rows), but
 // the root was posted — and is tracked in runRoot/roots — under the batch's
 // shared BatchID (== the bare RunID

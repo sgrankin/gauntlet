@@ -38,7 +38,7 @@ type Config struct {
 	// ordinary queue refs; the core retains the same scheduler and CAS land.
 	Reviews core.ReviewSource
 	// Targets are the target branches to reconcile, keyed by name in the
-	// candidate ref grammar (see docs/design/core.md, "Candidate ref grammar").
+	// candidate ref grammar (see docs/architecture/queue.md, "Candidate ref grammar").
 	Targets []config.Target
 
 	// CheckSpec is the path, within each candidate's trial tree, of the
@@ -125,7 +125,7 @@ type ServicePool interface {
 	// EnsureAll resolves every name in needs against svcs to a ready
 	// instance, BLOCKING (create + up-to-ReadyTimeout ready-poll). Errors
 	// map to CheckResult.Err (park-as-error, never a verdict — see
-	// docs/design/services.md, "Failure semantics").
+	// docs/architecture/services.md, "Failure semantics").
 	EnsureAll(ctx context.Context, svcs []config.Service, needs []string) (services.Ensured, error)
 
 	// Release drops one reference per key in e and touches its last-used
@@ -529,7 +529,7 @@ func (d *Daemon) Run(ctx context.Context, tick <-chan time.Time) error {
 // before draining commands — see below), drain inbound commands, flag any
 // candidate ref naming an unconfigured target, then per-target
 // state-machine advancement (reconcile.go), and finally publish a Snapshot
-// of the resulting state. See docs/design/core.md ("The reconcile pass")
+// of the resulting state. See docs/architecture/queue.md ("The reconcile pass")
 // for the full mechanism.
 //
 // Seeding runs before drainCommands, not after (as it did when it lived
