@@ -60,6 +60,9 @@ replayed in comment order across the stack:
 | `@gauntlet check` | Explain command authorization and current readiness without enqueueing |
 | `@gauntlet cancel` | Withdraw this PR's request; its dependents cannot run without it |
 
+For opener-only or team-based merge authorization, see the
+[worked command policy](policy.md#allow-merge-requests-from-the-opener-or-selected-teams).
+
 `gauntlet land-pr -config gauntlet.kdl -pr 123` posts the same request.
 Use `-stack` to request the stack through that PR, `-whole-stack` for the entire
 stack, or `-ready`, `-prefix N`, and `-cancel` for the other commands.

@@ -61,6 +61,75 @@ Other entry points are `scope`, `execution`, `deployment`, and `retry`. Use
 decision with local facts. `@gauntlet check` reports GitHub command authorization
 and current PR readiness without requesting a merge.
 
+## Allow merge requests from the opener or selected teams
+
+This example permits GitHub merge requests only from the PR opener or an active
+member of `acme/maintainers` or `acme/release`. Other repository writers and admins
+are denied too; there is no implicit administrator bypass.
+
+```kdl
+policy {
+    replace "command"
+    teams "acme/maintainers" "acme/release"
+    rego r#"package gauntlet
+import rego.v1
+
+github_merge if {
+    input.principal.source == "github"
+    startswith(input.command.kind, "merge")
+}
+
+default may_merge := false
+may_merge if {
+    input.principal.authenticated
+    input.principal.id == input.forge.author
+}
+may_merge if {
+    input.principal.authenticated
+    some team in {"acme/maintainers", "acme/release"}
+    input.principal.teams[team]
+}
+
+command := data.gauntlet.defaults.command if not github_merge
+command := {"allow": true, "requirements": requirements} if github_merge
+
+requirements := array.concat([
+    {
+        "name": "merge-requester",
+        "satisfied": may_merge,
+        "reason": "Only the PR opener or a member of the selected teams may request a merge",
+    },
+], [r |
+    some r in data.gauntlet.defaults.command.requirements
+    r.name != "command-authority"
+])
+"#
+}
+```
+
+| GitHub merge requester | Allowed by this command policy? |
+| --- | --- |
+| Authenticated PR opener without repository write access | Yes |
+| Active member of either selected team | Yes |
+| Other repository writer or administrator | No |
+| Other contributor | No |
+
+- `replace "command"` replaces the ordinary writer requirement. Using `extend`
+  would require the opener/team member to have write access as well.
+- The example covers standalone, stack, ready-prefix, and urgent merge requests.
+  For a stack request, "opener" means the opener of the PR containing the command.
+- The shipped emergency-enable requirement still applies. `check`, `cancel`,
+  Slack, and queue admin commands retain their shipped command policy.
+- Ownership and submission readiness keep their shipped decisions, including
+  configured checks, approvals, and conversation resolution.
+- Team names use `organization/team-slug`. Gauntlet's GitHub credentials need
+  access to read those memberships; failed lookups block the operation. Membership
+  and command authorization are checked again before landing.
+
+Run `gauntlet policy-check -decision command -config gauntlet.kdl -input facts.json`
+with version-1 fixtures before applying the policy. Keep this command decision
+and any other custom decisions in the same policy source.
+
 ## Choose which PRs Gauntlet manages
 
 Use `scope` for ownership rather than readiness. For example, manage PRs targeting
