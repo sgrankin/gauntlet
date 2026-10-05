@@ -1,7 +1,7 @@
 # Operator policy
 
 Rego is Gauntlet's decision layer. The daemon always loads shipped defaults,
-which preserve its ordinary command, review, execution, deployment, and retry
+which preserve its ordinary ownership, command, review, execution, deployment, and retry
 behavior. Candidate-owned check specs cannot supply policy. Go collects facts
 and enforces mechanics: valid graphs, supported executors, explicit stack requests,
 revision binding, required receipts, signing, retention, retry budgets, and CAS.
@@ -10,6 +10,7 @@ revision binding, required receipts, signing, retention, retry budgets, and CAS.
 
 | Entry point | Evaluation |
 | --- | --- |
+| `scope` | GitHub PR ownership, before instructions or command intake; rechecked before landing |
 | `command` | GitHub comment selection, Slack reaction commands, queue admin commands |
 | `submission` | Candidate admission and freshly validated landing |
 | `execution` | Before materializing/running candidate check or deployment graphs |
@@ -62,7 +63,16 @@ Current deployment refs mean the latest fetched view, with final publication
 protected by an observed-ref CAS. A direct human push to a manual desired ref
 is authenticated by Git hosting; policy gates the daemon's subsequent execution.
 
-GitHub facts include PR number/head/state/draft, requester/request ID/permission,
+GitHub metadata includes PR number/head/state/draft, title/body/author, labels,
+repository/head repository, and base ref/SHA. `scope` receives this metadata,
+the resolved root `branch` and configured `target`, without a requester or
+readiness facts. Custom scope rules also receive complete changed paths.
+Shipped scope owns PRs whose stack resolves to a configured target. Drafts and
+failing checks do not remove ownership. Closed stack prerequisites retain their
+ownership decision but receive no welcome comment. Every requested stack member
+must be in scope; excluding a prerequisite blocks its dependents.
+
+Command and submission facts additionally include requester/request ID/permission,
 latest substantive reviews keyed by login with raw reviewer permission and
 current-revision status, conversation resolution, checks with producer identity,
 paths, and configured team memberships. Go does not interpret review readiness
@@ -72,10 +82,10 @@ configured, and all matching producers of each required host check to pass.
 Shipped command rules require write/maintain/admin for merge/cancel, permit
 readers to run `check`, and require operator enablement for emergencies.
 
-One GitHub scan shares immutable fact snapshots between command and readiness
+One GitHub scan shares immutable fact snapshots between scope, command, and readiness
 rules. Landing performs one fresh scan for the batch and then evaluates
 `submission` with actual check results. A revoked permission, edited request,
-changed revision/dependency, or newly failing readiness condition stops landing.
+changed revision/dependency, removed ownership, or newly failing readiness condition stops landing.
 Custom command/submission rules collect complete paths and conversations;
 incomplete lists and failed membership lookups fail closed.
 

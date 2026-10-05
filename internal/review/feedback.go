@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 
@@ -67,6 +68,15 @@ func (g *GitHub) feedbackSync(ctx context.Context, ev core.Event) error {
 	if rec.BatchID != "" {
 		body += "\n\nThis was a batch failure. Attribution to this PR is **unconfirmed**; changes will be checked separately."
 	}
+	runID := rec.RunID
+	if rec.BatchID != "" {
+		runID = rec.BatchID
+	}
+	runURL := ""
+	if g.p.DashboardURL != "" && runID != "" {
+		runURL = strings.TrimRight(g.p.DashboardURL, "/") + "/run/" + url.PathEscape(runID)
+		body += "\n\n[Run and failure details](" + runURL + ")."
+	}
 	for _, check := range rec.Checks {
 		if check.Err == nil && check.Status != core.CheckFailed {
 			continue
@@ -76,6 +86,9 @@ func (g *GitHub) feedbackSync(ctx context.Context, ev core.Event) error {
 			output = output[len(output)-6000:]
 		}
 		body += "\n\n**" + safeMarkdown(check.Name) + "**\n\n<pre>" + safeMarkdown(output) + "</pre>"
+		if runURL != "" && check.LogPath != "" {
+			body += "\n\n[Full log](" + runURL + "/log/" + url.PathEscape(check.Name) + ")."
+		}
 		if check.Err != nil {
 			body += "\n\nInfrastructure error: " + safeMarkdown(check.Err.Error())
 		}

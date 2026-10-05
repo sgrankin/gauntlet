@@ -32,7 +32,7 @@ func (p *Policy) validate() error {
 	}
 	seen := map[string]bool{}
 	for _, name := range append(slices.Clone(p.Replace), p.Extend...) {
-		if !slices.Contains([]string{"command", "submission", "execution", "deployment", "retry"}, name) || seen[name] {
+		if !slices.Contains([]string{"scope", "command", "submission", "execution", "deployment", "retry"}, name) || seen[name] {
 			return fmt.Errorf("policy: unknown or duplicate decision %q", name)
 		}
 		seen[name] = true

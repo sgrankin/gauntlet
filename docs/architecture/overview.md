@@ -12,7 +12,7 @@ exact tip before publication.
 - Read checks from the trial tree, so validation changes validate themselves.
 - Keep the reconcile loop single-threaded. Workers return results; snapshots
   serve concurrent readers without exposing mutable queue state.
-- Treat Rego as the decision layer for commands, submission, execution,
+- Treat Rego as the decision layer for ownership, commands, submission, execution,
   deployment, and retries. Git mechanics, revision binding, provenance, and
   publication CAS remain mandatory safeguards.
 - A model can recommend bounded retries and failure suspects. It cannot declare

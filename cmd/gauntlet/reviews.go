@@ -21,6 +21,12 @@ func githubReviewParams(cfg *config.Daemon, app *ghauth.App, repo *gitx.Repo) re
 	p := cfg.GitHub.PullRequests
 	params := review.GitHubParams{Repo: cfg.GitHub.Repo, APIURL: cfg.GitHub.APIURL, Git: repo, Targets: map[string]string{}, Bot: p.Bot, Approvals: *p.Approvals, RequiredChecks: p.RequiredChecks, PollInterval: p.PollInterval, EmergencyEnabled: cfg.EmergencyMerges}
 	params.RequireResolvedConversations = p.RequireResolvedConversations
+	if cfg.Dashboard.Bind != "" && cfg.History.Path != "" {
+		params.DashboardURL = cfg.Dashboard.URL
+	}
+	if cfg.GitHub.Auth != nil {
+		params.AppID = cfg.GitHub.Auth.AppID
+	}
 	if app != nil {
 		params.Tokens = app
 	} else {

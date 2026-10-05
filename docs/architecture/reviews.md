@@ -50,9 +50,16 @@ requests. In-flight trials are rebuilt after restart, and interrupted forge
 acknowledgements are retried from target history. This does not serialize live
 processes or automatically resume post-land hooks.
 
-Commands waiting on admission have no separate acknowledgement comment;
-trial/status events start once admitted. Detailed blocked-request feedback
-remains follow-up work.
+GitHub's Rego `scope` decision runs before command intake and again during fresh
+landing validation. It selects ownership independently of readiness. Managed open
+PRs get a durable instructions comment identified by its marker and authenticated
+author/App. Readiness, failures, and landing feedback use separate comments, so
+they cannot replace onboarding instructions. The instructions write is advisory;
+the queue retries it during later refreshes without changing a verdict.
+
+Requests waiting on admission receive requirement feedback when blocked;
+trial/status events start once admitted. Failure feedback links to the dashboard
+run and retained check logs, using the shared suite ID for a batch.
 
 ## GitHub completion: experimental evidence
 

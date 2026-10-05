@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"slices"
 	"sort"
@@ -42,6 +43,8 @@ type GitHubParams struct {
 	IntentPath        string
 	PolicyTeams       []string
 	Repo, APIURL, Bot string
+	DashboardURL      string
+	AppID             int64
 	Tokens            Tokens
 	Git               Git
 	// Targets maps real branch names to queue target names.
@@ -57,6 +60,7 @@ type GitHub struct {
 	intentMu       sync.Mutex
 	feedbackMu     sync.Mutex
 	feedbackBodies map[int]string
+	commentAuthor  string
 	p              GitHubParams
 	client         *http.Client
 	pollMu         sync.Mutex
@@ -101,6 +105,7 @@ type pull struct {
 	Draft              bool
 	HTMLURL            string `json:"html_url"`
 	Head, Base         ref
+	Labels             []struct{ Name string }
 	User               struct{ Login string }
 	Stack              *struct {
 		Number, Position, Size int
@@ -109,9 +114,10 @@ type pull struct {
 }
 
 type comment struct {
-	ID   int64
-	Body string
-	User struct{ Login string }
+	ID              int64
+	Body            string
+	User            struct{ Login string }
+	PerformedViaApp *struct{ ID int64 } `json:"performed_via_github_app"`
 }
 
 type request struct {
@@ -248,6 +254,11 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 	cs, err := pages[comment](ctx, g, "/issues/"+strconv.Itoa(p.Number)+"/comments")
 	if err != nil {
 		return request{}, err
+	}
+	if feedback && p.State == "open" {
+		if err := g.instructions(ctx, p, cs); err != nil {
+			log.Printf("github PR instructions: %v", err)
+		}
 	}
 	var result request
 	for _, c := range cs {
@@ -425,17 +436,42 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 			}
 		}
 	}
-	var requests []request
-	permissions := map[string]policy.Principal{}
+	managed := map[int]bool{}
+	unresolved := map[int]error{}
 	for _, p := range open {
 		if !active[p.Number] {
 			continue
 		}
-		r, err := g.latestRequest(ctx, p, permissions, open, fetch)
+		var branch string
+		if native, ok := nativeByMember[p.Number]; ok {
+			branch = native.branch
+		} else {
+			_, branch, err = g.stack(ctx, p, open, false)
+			if err != nil {
+				unresolved[p.Number] = err
+				continue
+			}
+		}
+		decision, err := g.scope(ctx, p, branch)
+		if err != nil {
+			return nil, fmt.Errorf("PR #%d scope: %w", p.Number, err)
+		}
+		managed[p.Number] = decision.Allow && g.p.Targets[branch] != ""
+	}
+	var requests []request
+	permissions := map[string]policy.Principal{}
+	for _, p := range open {
+		if !active[p.Number] || (!managed[p.Number] && unresolved[p.Number] == nil) {
+			continue
+		}
+		r, err := g.latestRequest(ctx, p, permissions, open, fetch && managed[p.Number])
 		if err != nil {
 			return nil, err
 		}
 		if r.ID != 0 {
+			if err := unresolved[p.Number]; err != nil {
+				return nil, err
+			}
 			requests = append(requests, r)
 		}
 	}
@@ -486,6 +522,10 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 		var previous, sourceBase string
 		remaining := r.Count
 		for _, p := range members {
+			if !managed[p.Number] {
+				prefix = nil
+				break
+			}
 			if p.State != "open" {
 				// A manually closed PR is not evidence of a landing. Only a
 				// predecessor whose original head is on the target, or whose

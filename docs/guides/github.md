@@ -1,6 +1,6 @@
 # GitHub PRs and stacks
 
-## GitHub admission and stacks
+## Setup and happy path
 
 Enable admission explicitly; the existing `github` block alone continues
 to provide status reporting without importing PRs:
@@ -22,6 +22,27 @@ target "main" {
     max-batch 4
 }
 ```
+
+1. Configure credentials and [reserve target updates for the queue](github-auth.md#reserve-the-target-for-gauntlet).
+2. Open a PR targeting a configured branch, or a stack rooted there. The Rego
+   `scope` decision determines ownership. Gauntlet posts one instructions comment
+   on each managed open PR, including drafts, without waiting for green checks.
+3. Comment `@gauntlet check` to inspect requirements, then `@gauntlet merge`
+   (or an explicit stack command below). Authorized requests wait until the
+   submission policy allows admission.
+4. Gauntlet constructs one commit per PR and runs the repository's checks on
+   the proposed target history. It rechecks ownership, authorization, and
+   readiness before pushing the exact tested tip.
+5. Success closes each PR with its actual commit link. Failure updates a
+   separate feedback comment with check details and available log links.
+
+The welcome comment survives daemon restarts and source updates. Changes to its
+instructions update the same bot-owned comment; copied markers from other users
+cannot suppress it. Publication errors are logged and retried on a later refresh
+without blocking an otherwise eligible request. To exclude PRs, use a custom
+[scope policy](policy.md#choose-which-prs-gauntlet-manages).
+
+## Commands and stacks
 
 Under shipped Rego policy, a whole comment from someone with write, maintain,
 or admin permission is a queue request. Custom [policy](../reference/policy.md)
@@ -78,11 +99,8 @@ repo-defined verification graph on the constructed history.
 
 This explicit policy does **not** reproduce every GitHub ruleset or CODEOWNERS
 rule. Configure the admission policy deliberately and reserve target pushes
-for the bot. The bot needs repository contents read/write, pull requests
-read/write, issues read/write (comments), checks/statuses read, and access to
-collaborator permissions; existing status/trial/receipt features may need
-additional write permissions. Git transport must also be authenticated
-(the existing App token transport works, as do configured Git credentials).
+for the bot. See [credentials and permissions](github-auth.md) for API and
+Git transport setup.
 
 `approvals` defaults to one; set it to zero to require no positive approval.
 A trusted reviewer's outstanding changes-requested review still blocks admission.
@@ -149,4 +167,11 @@ register one with GitHub.
 
 On success, the bot posts the exact landed commit link and closes the PR. GitHub
 reports it as closed, not natively merged. Failures receive check context and
-bounded model feedback when configured. See [completion experiments](../architecture/reviews.md#github-completion-experimental-evidence) and [incident commands](incidents.md).
+bounded model feedback when configured. With the dashboard and history enabled, feedback links
+to the run and each failing check's retained full log. Batch failures link to the
+shared suite and remain explicitly unattributed until individual verification.
+Set the dashboard's public `url` to an address readers can reach; links do not
+grant dashboard access. Without dashboard/history or a retained log, details remain in
+the comment. Feedback uses ordinary PR conversation comments, not nested replies.
+See [completion experiments](../architecture/reviews.md#github-completion-experimental-evidence)
+and [incident commands](incidents.md).

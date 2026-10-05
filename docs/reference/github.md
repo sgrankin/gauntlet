@@ -34,17 +34,22 @@ an executable temporary directory. See [credentials and permissions](../guides/g
 
 | Child of `pull-requests` | Default | Contract |
 |---|---|---|
-| `bot` | `"gauntlet"` | Mention prefix for commands. |
+| `bot` | `"gauntlet"` | Mention prefix for commands and instructions; independent of the account/App that posts them. |
 | `approvals` | `1` | 0–10 current-head writer approvals under shipped policy. |
 | `require-check` | None | One or more host check/status names; all matching producers must pass. |
 | `require-resolved-conversations` | `false` | All review threads, including outdated threads, must be resolved. |
 | `poll-interval` | `"30s"`, or `"5m"` with webhook secret | Independent intake refresh interval; at least one second. |
 | `webhook-secret-env` | None | Enables signed `/hooks/github` hints; requires dashboard and populated secret. |
 
-Shipped Rego rules define requester authorization and readiness; custom policy
+Shipped Rego rules define PR ownership (`scope`), requester authorization, and readiness; custom policy
 can extend or replace them. Approval count zero still retains trusted vetoes,
 configured check gates, and conversation gates. Missing or incomplete forge
 facts fail closed. See [policy](policy.md) and [GitHub commands/webhook setup](../guides/github.md).
+
+Managed open PRs receive one persistent bot-owned instructions comment, separate
+from run feedback. Failure feedback includes run/full-log links when both history
+and the dashboard are enabled; `dashboard "127.0.0.1:8080" { url "https://queue.example.com"; }` sets their reader-facing
+base URL. Configure dashboard authentication and reachability separately.
 
 ## Trial refs
 

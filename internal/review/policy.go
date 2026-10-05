@@ -12,6 +12,65 @@ import (
 	"github.com/sgrankin/gauntlet/internal/policy"
 )
 
+func (g *GitHub) reviewFacts(p pull) map[string]any {
+	labels := []string{}
+	for _, label := range p.Labels {
+		labels = append(labels, label.Name)
+	}
+	headRepo := ""
+	if p.Head.Repo != nil {
+		headRepo = p.Head.Repo.FullName
+	}
+	return map[string]any{"kind": "github", "pr": p.Number, "head_sha": p.Head.SHA,
+		"draft": p.Draft, "state": p.State, "title": p.Title, "body": p.Body,
+		"author": p.User.Login, "labels": labels, "repository": g.p.Repo,
+		"head_repository": headRepo, "base_ref": p.Base.Ref, "base_sha": p.Base.SHA}
+}
+
+func (g *GitHub) scope(ctx context.Context, p pull, branch string) (policy.Decision, error) {
+	input := policy.Input{SchemaVersion: 1, Phase: "scope", Target: g.p.Targets[branch], Branch: branch,
+		Candidate: map[string]any{"source": "github", "sha": p.Head.SHA}, Forge: g.reviewFacts(p), Settings: g.settings()}
+	if g.p.Policy.HasCustom("scope") && input.Target != "" {
+		paths, err := g.changedPaths(ctx, p)
+		if err != nil {
+			return policy.Decision{}, err
+		}
+		input.Paths, input.PathsAvailable = paths, true
+		input.Forge["paths"], input.Forge["paths_available"] = paths, true
+	}
+	return g.p.Policy.Decide(ctx, "scope", input)
+}
+
+func (g *GitHub) changedPaths(ctx context.Context, p pull) ([]string, error) {
+	cache, _ := ctx.Value(factCacheKey{}).(map[string]map[string]any)
+	key := fmt.Sprintf("paths:%d:%s", p.Number, p.Head.SHA)
+	if facts, ok := cache[key]; ok {
+		return facts["paths"].([]string), nil
+	}
+	type file struct {
+		Previous string `json:"previous_filename"`
+		Filename string `json:"filename"`
+	}
+	files, err := pages[file](ctx, g, fmt.Sprintf("/pulls/%d/files", p.Number))
+	if err != nil {
+		return nil, err
+	}
+	if len(files) >= 3000 {
+		return nil, fmt.Errorf("GitHub changed-path facts may be truncated")
+	}
+	paths := []string{}
+	for _, file := range files {
+		paths = append(paths, file.Filename)
+		if file.Previous != "" {
+			paths = append(paths, file.Previous)
+		}
+	}
+	if cache != nil {
+		cache[key] = map[string]any{"paths": paths}
+	}
+	return paths, nil
+}
+
 func (g *GitHub) settings() policy.Settings {
 	return policy.Settings{Approvals: g.p.Approvals, RequiredChecks: g.p.RequiredChecks, ResolvedConversations: g.p.RequireResolvedConversations, EmergencyEnabled: g.p.EmergencyEnabled}
 }
@@ -150,24 +209,12 @@ func (g *GitHub) collectFacts(ctx context.Context, p pull, details bool) (map[st
 	}
 	paths := []string{}
 	if details {
-		type file struct {
-			Previous string `json:"previous_filename"`
-			Filename string `json:"filename"`
-		}
-		files, err := pages[file](ctx, g, fmt.Sprintf("/pulls/%d/files", n))
+		paths, err = g.changedPaths(ctx, p)
 		if err != nil {
 			return nil, err
 		}
-		if len(files) >= 3000 {
-			return nil, fmt.Errorf("GitHub changed-path facts may be truncated")
-		}
-		for _, file := range files {
-			paths = append(paths, file.Filename)
-			if file.Previous != "" {
-				paths = append(paths, file.Previous)
-			}
-		}
 	}
+
 	checks := []map[string]any{}
 	if len(g.p.RequiredChecks) > 0 || details {
 		type status struct {
@@ -230,7 +277,10 @@ func (g *GitHub) collectFacts(ctx context.Context, p pull, details bool) (map[st
 		}
 		teams[team] = members
 	}
-	facts := map[string]any{"kind": "github", "pr": n, "head_sha": p.Head.SHA, "draft": p.Draft, "state": p.State, "reviews": reviews, "conversations_resolved": resolved, "checks": checks, "paths": paths, "paths_available": details, "teams": teams}
+	facts := g.reviewFacts(p)
+	for key, value := range map[string]any{"reviews": reviews, "conversations_resolved": resolved, "checks": checks, "paths": paths, "paths_available": details, "teams": teams} {
+		facts[key] = value
+	}
 	if cache != nil {
 		cache[key] = facts
 	}

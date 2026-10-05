@@ -35,7 +35,7 @@ var ruleFiles embed.FS
 
 type Options struct{ Replace, Extend []string }
 
-var Names = []string{"command", "submission", "execution", "deployment", "retry"}
+var Names = []string{"scope", "command", "submission", "execution", "deployment", "retry"}
 
 type Engine struct {
 	queries    map[string]rego.PreparedEvalQuery

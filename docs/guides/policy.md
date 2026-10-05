@@ -2,7 +2,7 @@
 
 ## Operator policy
 
-Shipped Rego controls command authorization, GitHub readiness, execution, deployment,
+Shipped Rego controls GitHub ownership, command authorization, readiness, execution, deployment,
 and retry decisions. Custom rules can extend or replace each decision. Inline and file policies are
 mutually exclusive. Files resolve beside the daemon config. For example, require
 an approval from the security team for sensitive paths, with no general approval
@@ -56,7 +56,43 @@ requirements. Every listed entry point must return a decision; there is no fallb
 when a custom rule is undefined. Signing, exact revisions, configured receipt
 provenance, and CAS remain code invariants.
 
-Other entry points are `execution`, `deployment`, and `retry`. Use
+Other entry points are `scope`, `execution`, `deployment`, and `retry`. Use
 `gauntlet policy-check -decision command -config ... -input ...` to test a named
 decision with local facts. `@gauntlet check` reports GitHub command authorization
 and current PR readiness without requesting a merge.
+
+## Choose which PRs Gauntlet manages
+
+Use `scope` for ownership rather than readiness. For example, manage PRs targeting
+configured queue branches except those labeled `external-merge`:
+
+```kdl
+policy {
+    extend "scope"
+    rego r#"package gauntlet
+import rego.v1
+
+external_merge := "external-merge" in input.forge.labels
+scope := {
+    "allow": true,
+    "requirements": [{
+        "name": "queue-owned",
+        "satisfied": not_external,
+        "reason": "PRs labeled external-merge belong to another workflow",
+    }],
+}
+not_external := external_merge == false
+"#
+}
+```
+
+The shipped scope decision still requires a configured target. Managed open PRs
+receive instructions even while draft or failing checks; excluded PRs receive
+no instructions and cannot enter this queue. Removing ownership before landing
+stops publication, including when the PR is a stack prerequisite.
+
+Scope facts include labels, author, title/body, repositories, base ref, and
+complete changed paths. They omit reviews, checks, conversation state, and
+requester identity. Put authorization in `command` and readiness in `submission`.
+When combining policies, list every custom entry point in `extend` or `replace`
+and define each decision in the same policy source.

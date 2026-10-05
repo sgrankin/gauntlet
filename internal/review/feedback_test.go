@@ -155,3 +155,42 @@ func TestEmergencyAvailabilityDoesNotWeakenNormalCheckGate(t *testing.T) {
 		t.Fatal("emergency skipped requester authorization")
 	}
 }
+
+func TestFailureFeedbackLinksRunAndAvailableLogs(t *testing.T) {
+	for _, tc := range []struct{ name, base, batch, wantRun string }{
+		{"single", "https://queue.example/gauntlet/", "", "member"},
+		{"batch", "https://queue.example/gauntlet/", "suite", "suite"},
+		{"disabled", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGitHubFixture(t)
+			f.g.p.DashboardURL = tc.base
+			c := core.Candidate{Ref: slot("main", 1), SHA: f.pulls[0].Head.SHA, Source: "github"}
+			rec := &core.RunRecord{RunID: "member", BatchID: tc.batch, Outcome: core.OutcomeRejected, Checks: []core.CheckResult{
+				{Name: "sql/test (primary)", Status: core.CheckFailed, LogPath: "/state/private.log", Output: "failed"},
+				{Name: "without log", Status: core.CheckFailed},
+				{Name: "green", Status: core.CheckPassed, LogPath: "/state/green.log"},
+			}}
+			if err := f.g.Feedback(context.Background(), core.Event{Candidate: c, Record: rec}); err != nil {
+				t.Fatal(err)
+			}
+			body := f.commands[1][0].Body
+			if strings.Contains(body, "/state/") {
+				t.Fatal("local filesystem path leaked in feedback")
+			}
+			if tc.wantRun == "" {
+				if strings.Contains(body, "[Full log]") || strings.Contains(body, "[Run and failure details]") {
+					t.Fatal("links produced without dashboard")
+				}
+				return
+			}
+			runURL := strings.TrimRight(tc.base, "/") + "/run/" + tc.wantRun
+			if !strings.Contains(body, "[Run and failure details]("+runURL+")") || !strings.Contains(body, "/log/sql%2Ftest%20%28primary%29") {
+				t.Fatalf("missing or unsafe links: %s", body)
+			}
+			if strings.Count(body, "[Full log]") != 1 {
+				t.Fatalf("linked unavailable/passing logs: %s", body)
+			}
+		})
+	}
+}

@@ -9,6 +9,10 @@ emergency := object.get(input, "emergency", {})
 candidate := object.get(input, "candidate", {"source": ""})
 forge := object.get(input, "forge", {})
 
+# Scope identifies owned reviews, independently of readiness or requester authority.
+scope_ok := count([true | candidate.source == "github"; input.target != ""]) > 0
+scope := {"allow":true,"requirements":[{"name":"managed-target","satisfied":scope_ok,"reason":"PR does not belong to a configured target"}]}
+
 authorized if { principal.authenticated; principal.source == "github"; writer(principal.permission) }
 authorized if { principal.authenticated; principal.source in {"admin", "internal"} }
 authorized if { principal.authenticated; principal.source == "slack"; principal.allowed_by_config }

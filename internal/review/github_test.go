@@ -31,8 +31,11 @@ func (g *reviewGit) ReviewBaseLanded(context.Context, string, string) (bool, err
 
 type githubFixture struct {
 	failed        bool
+	welcomeFailed bool
 	pulls         []pull
 	commands      map[int][]comment
+	instructions  map[int][]comment
+	nextCommentID int64
 	approvals     map[int]bool
 	permission    string
 	responses     map[string]any
@@ -46,7 +49,7 @@ type githubFixture struct {
 
 func newGitHubFixture(t *testing.T) *githubFixture {
 	t.Helper()
-	f := &githubFixture{commands: map[int][]comment{}, approvals: map[int]bool{1: true, 2: true}, permission: "write", responses: map[string]any{}, git: &reviewGit{}}
+	f := &githubFixture{commands: map[int][]comment{}, instructions: map[int][]comment{}, nextCommentID: 1000, approvals: map[int]bool{1: true, 2: true}, permission: "write", responses: map[string]any{}, git: &reviewGit{}}
 	for n := 1; n <= 3; n++ {
 		p := pull{Number: n, Title: fmt.Sprintf("Change %d", n), Body: "Description", State: "open", HTMLURL: fmt.Sprintf("https://github.com/acme/repo/pull/%d", n), Head: ref{SHA: strings.Repeat(fmt.Sprint(n), 40), Ref: fmt.Sprintf("feature-%d", n)}, Base: ref{Ref: "main"}}
 		p.User.Login = "author"
@@ -62,6 +65,10 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/repos/acme/repo")
 		write := func(v any) { w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(v) }
+		if r.URL.Path == "/user" {
+			write(map[string]string{"login": "merge-bot"})
+			return
+		}
 		if r.URL.Path == "/graphql" || r.URL.Path == "/api/graphql" {
 			var input struct {
 				Query     string
@@ -112,15 +119,18 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 		if strings.HasPrefix(path, "/issues/comments/") && r.Method == "PATCH" {
 			var body struct{ Body string }
 			json.NewDecoder(r.Body).Decode(&body)
-			for n, cs := range f.commands {
-				for i, c := range cs {
-					if fmt.Sprint(c.ID) == strings.TrimPrefix(path, "/issues/comments/") {
-						f.commands[n][i].Body = body.Body
-						write(map[string]any{})
-						return
+			for _, comments := range []map[int][]comment{f.commands, f.instructions} {
+				for n, cs := range comments {
+					for i, c := range cs {
+						if fmt.Sprint(c.ID) == strings.TrimPrefix(path, "/issues/comments/") {
+							comments[n][i].Body = body.Body
+							write(comments[n][i])
+							return
+						}
 					}
 				}
 			}
+
 			http.NotFound(w, r)
 			return
 		}
@@ -148,16 +158,29 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 				if r.Method == "POST" {
 					var c comment
 					json.NewDecoder(r.Body).Decode(&c)
-					c.ID = 999
-					f.commands[n] = append(f.commands[n], c)
+					if f.welcomeFailed && strings.Contains(c.Body, instructionsMarker) {
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					c.ID = f.nextCommentID
+					f.nextCommentID++
+					c.User.Login = "merge-bot"
+					if f.g.p.AppID != 0 {
+						c.PerformedViaApp = &struct{ ID int64 }{f.g.p.AppID}
+					}
+					if strings.Contains(c.Body, instructionsMarker) {
+						f.instructions[n] = append(f.instructions[n], c)
+					} else {
+						f.commands[n] = append(f.commands[n], c)
+					}
+					write(c)
+					return
 				}
-				cs := f.commands[n]
-				if cs == nil {
-					cs = []comment{}
-				}
+				cs := append(append([]comment{}, f.commands[n]...), f.instructions[n]...)
 				write(cs)
 				return
 			}
+
 		}
 		t.Errorf("unexpected request %s %s", r.Method, r.URL)
 		http.NotFound(w, r)
