@@ -523,7 +523,12 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 		remaining := r.Count
 		for _, p := range members {
 			if !managed[p.Number] {
-				prefix = nil
+				if r.Action != "merge-ready" {
+					prefix = nil
+					if fetch {
+						g.admissionFeedback(ctx, r.PR, target, fmt.Sprintf("PR #%d is outside Gauntlet's scope", p.Number))
+					}
+				}
 				break
 			}
 			if p.State != "open" {

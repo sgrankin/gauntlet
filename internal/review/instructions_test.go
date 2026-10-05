@@ -137,6 +137,34 @@ scope := {"allow":true}`, time.Second, policy.Options{Replace: []string{"scope"}
 	}
 }
 
+func TestReadyPrefixStopsBeforeAnExcludedSuccessor(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    int
+	}{{"merge-ready", 2}, {"merge-stack", 0}} {
+		t.Run(tc.command, func(t *testing.T) {
+			f := newGitHubFixture(t)
+			engine, err := policy.Compile(context.Background(), `package gauntlet
+scope := {"allow":input.forge.pr != 3,"requirements":[]}`, time.Second, policy.Options{Extend: []string{"scope"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.g.p.Policy = engine
+			for _, p := range f.pulls {
+				f.responses[fmt.Sprintf("/pulls/%d/files?per_page=100&page=1", p.Number)] = []any{}
+			}
+			f.request(1, "@gauntlet "+tc.command)
+			candidates, err := f.g.Candidates(context.Background())
+			if err != nil || len(candidates) != tc.want {
+				t.Fatalf("incorrect scoped prefix: %+v %v", candidates, err)
+			}
+			if tc.want == 0 && !strings.Contains(f.commands[1][len(f.commands[1])-1].Body, "outside Gauntlet's scope") {
+				t.Fatal("excluded stack member was not explained to the requester")
+			}
+		})
+	}
+}
+
 func TestWelcomePublicationFailureDoesNotBlockAdmissionAndRetries(t *testing.T) {
 	f := newGitHubFixture(t)
 	f.welcomeFailed = true

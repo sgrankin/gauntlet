@@ -71,6 +71,8 @@ Shipped scope owns PRs whose stack resolves to a configured target. Drafts and
 failing checks do not remove ownership. Closed stack prerequisites retain their
 ownership decision but receive no welcome comment. Every requested stack member
 must be in scope; excluding a prerequisite blocks its dependents.
+`merge-ready` stops at an excluded successor and retains the earlier eligible
+prefix; a request for the full stack admits nothing if any member is excluded.
 
 Command and submission facts additionally include requester/request ID/permission,
 latest substantive reviews keyed by login with raw reviewer permission and
