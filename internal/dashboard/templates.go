@@ -58,6 +58,7 @@ var (
 	indexTmpl    = mustParse("index.html")
 	targetTmpl   = mustParse("target.html")
 	runTmpl      = mustParse("run.html")
+	progressTmpl = mustParse("progress.html")
 	batchTmpl    = mustParse("batch.html")
 	checksTmpl   = mustParse("checks.html")
 	deploysTmpl  = mustParse("deploys.html")

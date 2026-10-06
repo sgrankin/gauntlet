@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 16
+const schemaVersion = 17
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -376,6 +376,13 @@ CREATE TABLE deploy_nodes (
 			}
 			if _, err := db.Exec(`PRAGMA user_version = 16`); err != nil {
 				return fmt.Errorf("history: set user_version=16: %w", err)
+			}
+		case 16:
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_runs_candidate_sha ON runs(candidate_sha, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_merge_sha ON runs(merge_sha, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_change ON runs(target, candidate_ref, started_at DESC);
+PRAGMA user_version = 17`); err != nil {
+				return fmt.Errorf("history: index progress lookups: %w", err)
 			}
 		case schemaVersion:
 			return db.Commit()

@@ -30,21 +30,22 @@ func (g *reviewGit) ReviewBaseLanded(context.Context, string, string) (bool, err
 }
 
 type githubFixture struct {
-	failed        bool
-	welcomeFailed bool
-	pulls         []pull
-	commands      map[int][]comment
-	instructions  map[int][]comment
-	nextCommentID int64
-	approvals     map[int]bool
-	permission    string
-	responses     map[string]any
-	threadPages   []any
-	threadCalls   int
-	threadStatus  int
-	threadCursors []string
-	g             *GitHub
-	git           *reviewGit
+	failed         bool
+	welcomeFailed  bool
+	progressFailed bool
+	pulls          []pull
+	commands       map[int][]comment
+	instructions   map[int][]comment
+	nextCommentID  int64
+	approvals      map[int]bool
+	permission     string
+	responses      map[string]any
+	threadPages    []any
+	threadCalls    int
+	threadStatus   int
+	threadCursors  []string
+	g              *GitHub
+	git            *reviewGit
 }
 
 func newGitHubFixture(t *testing.T) *githubFixture {
@@ -159,6 +160,10 @@ func newGitHubFixture(t *testing.T) *githubFixture {
 					var c comment
 					json.NewDecoder(r.Body).Decode(&c)
 					if f.welcomeFailed && strings.Contains(c.Body, instructionsMarker) {
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					if f.progressFailed && strings.Contains(c.Body, "<!-- gauntlet:feedback -->") {
 						http.Error(w, "unavailable", http.StatusServiceUnavailable)
 						return
 					}

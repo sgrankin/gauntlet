@@ -74,6 +74,8 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /{$}", d.handleIndex)
 	mux.HandleFunc("GET /t/{target}", d.handleTarget)
 	mux.HandleFunc("GET /run/{runID}", d.handleRun)
+	mux.HandleFunc("GET /commit/{sha}", d.handleCommit)
+	mux.HandleFunc("GET /change", d.handleChange)
 	mux.HandleFunc("GET /run/{runID}/log/{checkName}", d.handleRunLog)
 	mux.HandleFunc("GET /batch/{batchID}", d.handleBatch)
 	mux.HandleFunc("GET /checks", d.handleChecks)
@@ -362,7 +364,13 @@ func findTarget(snap *queue.Snapshot, name string) (queue.TargetSnapshot, bool) 
 // --- /run/{runID} -----------------------------------------------------------
 
 func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
-	runID := r.PathValue("runID")
+	d.renderRun(w, r, r.PathValue("runID"), false)
+}
+
+func (d *dash) renderRun(w http.ResponseWriter, r *http.Request, runID string, follow bool) {
+	if d.liveRun(w, runID, follow) {
+		return
+	}
 	if d.store == nil {
 		render(w, runTmpl, runData{baseData: d.newBase("Run", nil, false, "targets")})
 		return
@@ -380,8 +388,9 @@ func (d *dash) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := runData{
-		baseData:     d.newBase("Run", nil, false, "targets"),
-		StoreEnabled: true,
+		baseData:        d.newBase("Run", nil, follow, "targets"),
+		FollowingChange: follow,
+		StoreEnabled:    true,
 		Run: runSummaryFull{
 			RunID: row.RunID, Target: row.Target,
 			Ref: row.CandidateRef, User: row.CandidateUser, Topic: row.CandidateTopic, SHA: row.CandidateSHA,
@@ -1687,6 +1696,9 @@ type parkedView struct {
 }
 
 type runData struct {
+	FollowingChange  bool
+	Live             bool
+	Members          []memberView
 	Name             string
 	Pause            *queue.Pause
 	ControlError     string

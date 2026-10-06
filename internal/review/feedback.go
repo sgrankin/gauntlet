@@ -14,12 +14,14 @@ import (
 // Feedback is advisory. Failure to publish a comment never changes a verdict.
 func (g *GitHub) Feedback(ctx context.Context, ev core.Event) error {
 	if g.feedbackQueue != nil {
-		if ev.Record == nil || ev.Candidate.Source != "github" {
+		if (ev.Record == nil && ev.Kind != core.EventTrialClean) || ev.Candidate.Source != "github" {
 			return nil
 		}
-		copy := *ev.Record
-		copy.Checks = append([]core.CheckResult(nil), copy.Checks...)
-		ev.Record = &copy
+		if ev.Record != nil {
+			copy := *ev.Record
+			copy.Checks = append([]core.CheckResult(nil), copy.Checks...)
+			ev.Record = &copy
+		}
 		select {
 		case g.feedbackQueue <- ev:
 			return nil
@@ -55,13 +57,20 @@ func (g *GitHub) StartFeedback(ctx context.Context) <-chan struct{} {
 }
 
 func (g *GitHub) feedbackSync(ctx context.Context, ev core.Event) error {
-	if ev.Candidate.Source != "github" || ev.Record == nil {
+	if ev.Candidate.Source != "github" {
+		return nil
+	}
+	if ev.Record == nil {
+		if ev.Kind == core.EventTrialClean {
+			return g.feedback(ctx, ev.Candidate, "Gauntlet is verifying this revision on the proposed target history."+g.progressLink(ev.Candidate))
+		}
 		return nil
 	}
 	rec := ev.Record
 	if rec.Outcome == core.OutcomeLanded {
 		url := strings.Split(ev.Candidate.ReviewURL, "/pull/")[0] + "/commit/" + rec.MergeSHA
 		body := fmt.Sprintf("Landed by Gauntlet as [%s](%s).\n\n%s", rec.MergeSHA, url, safeMarkdown(rec.Detail))
+		body += "\n\n<!-- gauntlet:landed:" + rec.MergeSHA + " -->" + g.progressLink(ev.Candidate)
 		return g.feedback(ctx, ev.Candidate, body, true)
 	}
 	body := fmt.Sprintf("Gauntlet could not land this revision (`%s`).\n\n%s", ev.Candidate.SHA, safeMarkdown(rec.Detail))
@@ -96,7 +105,7 @@ func (g *GitHub) feedbackSync(ctx context.Context, ev core.Event) error {
 	if rec.MergeSHA != "" {
 		body += "\n\nConstructed revision: `" + rec.MergeSHA + "`."
 	}
-	return g.feedback(ctx, ev.Candidate, body)
+	return g.feedback(ctx, ev.Candidate, body+g.progressLink(ev.Candidate))
 }
 
 func safeMarkdown(s string) string {
@@ -109,6 +118,10 @@ func safeMarkdown(s string) string {
 }
 
 func (g *GitHub) feedback(ctx context.Context, c core.Candidate, body string, allowClosed ...bool) error {
+	return g.commentFeedback(ctx, c, body, "<!-- gauntlet:feedback -->", len(allowClosed) != 0 && allowClosed[0])
+}
+
+func (g *GitHub) commentFeedback(ctx context.Context, c core.Candidate, body, marker string, allowClosed bool) error {
 	g.feedbackMu.Lock()
 	defer g.feedbackMu.Unlock()
 	n, err := pullNumber(c.Ref)
@@ -119,31 +132,38 @@ func (g *GitHub) feedback(ctx context.Context, c core.Candidate, body string, al
 	if err != nil {
 		return err
 	}
-	if (p.State != "open" && (len(allowClosed) == 0 || !allowClosed[0])) || p.Head.SHA != c.SHA {
+	if (p.State != "open" && !allowClosed) || p.Head.SHA != c.SHA {
 		return nil
 	}
-	marker := "<!-- gauntlet:feedback -->"
 	body += "\n\n" + marker
-	if g.feedbackBodies[n] == body {
-		return nil
-	}
-	if g.feedbackBodies == nil {
-		g.feedbackBodies = map[int]string{}
-	}
 	comments, err := pages[comment](ctx, g, fmt.Sprintf("/issues/%d/comments", n))
 	if err != nil {
 		return err
 	}
-	// PATCH verifies ownership at GitHub, so a copied marker cannot impersonate
-	// a bot-owned comment. Try older markers too after a credential rotation.
 	for i := len(comments) - 1; i >= 0; i-- {
 		v := comments[i]
 		if !strings.Contains(v.Body, marker) {
 			continue
 		}
+		owned, err := g.ownsComment(ctx, v)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			continue
+		}
+		if marker == "<!-- gauntlet:feedback -->" {
+			var current bool
+			body, current = preserveReceipt(c, v.Body, body)
+			if !current {
+				return nil
+			}
+		}
+		if v.Body == body {
+			return nil
+		}
 		err = g.call(ctx, "PATCH", g.endpoint(fmt.Sprintf("/issues/comments/%d", v.ID)), map[string]string{"body": body}, nil)
 		if err == nil {
-			g.feedbackBodies[n] = body
 			return nil
 		}
 		if e, ok := err.(*apiError); !ok || (e.status != 403 && e.status != 404) {
@@ -151,15 +171,13 @@ func (g *GitHub) feedback(ctx context.Context, c core.Candidate, body string, al
 		}
 	}
 	err = g.call(ctx, "POST", g.endpoint(fmt.Sprintf("/issues/%d/comments", n)), map[string]string{"body": body}, nil)
-	if err == nil {
-		g.feedbackBodies[n] = body
-	}
 	return err
 }
 
 func (g *GitHub) admissionFeedback(ctx context.Context, p pull, target, reason string) {
 	c := core.Candidate{Ref: slot(target, p.Number), SHA: p.Head.SHA}
-	if err := g.feedback(ctx, c, "Gauntlet admission blocked: "+safeMarkdown(reason)+".\n\nThe request remains pending; gates are rechecked automatically."); err != nil {
+	c.Target = target
+	if err := g.feedback(ctx, c, "Gauntlet admission blocked: "+safeMarkdown(reason)+".\n\nThe request remains pending; gates are rechecked automatically."+g.progressLink(c)); err != nil {
 		log.Printf("github admission feedback: %v", err)
 	}
 }

@@ -28,13 +28,14 @@ target "main" {
    `scope` decision determines ownership. Gauntlet posts one instructions comment
    on each managed open PR, including drafts, without waiting for green checks.
 3. Comment `@gauntlet check` to inspect requirements, then `@gauntlet merge`
-   (or an explicit stack command below). Authorized requests wait until the
+   (or an explicit stack command below). Gauntlet acknowledges the selected
+   request with a progress comment. Authorized requests wait until the
    submission policy allows admission.
 4. Gauntlet constructs one commit per PR and runs the repository's checks on
    the proposed target history. It rechecks ownership, authorization, and
    readiness before pushing the exact tested tip.
-5. Success closes each PR with its actual commit link. Failure updates a
-   separate feedback comment with check details and available log links.
+5. Success updates the progress comment with the actual commit link and closes
+   the PR. Failure updates the same comment with check details and log links.
 
 The welcome comment survives daemon restarts and source updates. Changes to its
 instructions update the same bot-owned comment; copied markers from other users
@@ -166,15 +167,38 @@ restarts are recovered by polling, so delivery IDs need no persistent ledger.
 Configure the webhook on GitHub separately; enabling the KDL setting does not
 register one with GitHub.
 
-## Outcomes
+## Request progress and outcomes
 
-On success, the bot posts the exact landed commit link and closes the PR. GitHub
-reports it as closed, not natively merged. Failures receive check context and
-bounded model feedback when configured. With the dashboard and history enabled, feedback links
+The latest authorized request gets a bot-owned progress comment linking to the
+original command and its source revision. With the dashboard and history enabled,
+**Follow progress** opens a [stable change link](../reference/observability.md#change-progress-links)
+derived from the PR number, so it survives contributor updates, rebases, and
+retries. It works before a run exists:
+
+- Awaiting admission: the page explains that no run exists yet; blocked
+  requirements appear in the GitHub comment.
+- Queued or paused: the page shows the queue state.
+- Verifying: the page shows the live run, including shared batch members/checks.
+- Finished: the page shows the latest recorded attempt and its results.
+
+The same comment is updated for admission blocks, verification, failure,
+cancellation, and success. New requests update it in place; polling and restarts
+do not repost the acknowledgement or duplicate the comment. A delayed result
+cannot overwrite a newer request, including an edited command for the same SHA. Welcome instructions and policy diagnostics use separate comments.
+
+Acknowledgement happens when Gauntlet reads the command, before verification.
+Signed webhooks request the next refresh promptly; without them, it arrives on
+the configured polling interval. Failed acknowledgement publication is logged and retried
+on a later refresh without changing the queue verdict.
+
+On success, the comment links to the exact landed commit and the PR is closed.
+GitHub reports it as closed, not natively merged. Failures receive check context
+and bounded model feedback when configured. Feedback also links
 to the run and each failing check's retained full log. Batch failures link to the
 shared suite and remain explicitly unattributed until individual verification.
 Set the dashboard's public `url` to an address readers can reach; links do not
 grant dashboard access. Without dashboard/history or a retained log, details remain in
 the comment. Feedback uses ordinary PR conversation comments, not nested replies.
-See [completion experiments](../architecture/reviews.md#github-completion-experimental-evidence)
+See [commit progress links](../reference/observability.md#commit-progress-links),
+[completion experiments](../architecture/reviews.md#github-completion-experimental-evidence)
 and [incident commands](incidents.md).

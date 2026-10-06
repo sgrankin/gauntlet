@@ -10,12 +10,14 @@ type Candidate struct {
 	AdmissionBlocked                      string
 	SkipChecks, OverridePause             bool
 	Requester, RequestReason, EmergencyID string
-	RequestedCount                        int
-	Ref                                   string
-	Target                                string
-	User                                  string
-	Topic                                 string
-	SHA                                   string
+	// RequestID binds progress/results to the selected forge command.
+	RequestID      string
+	RequestedCount int
+	Ref            string
+	Target         string
+	User           string
+	Topic          string
+	SHA            string
 
 	// Review adapters supply Source, Message, and ReviewURL. SourceBase bounds
 	// the change's delta; DependsOn names its prerequisite slot. Version

@@ -68,6 +68,9 @@ CREATE TABLE runs (
 );
 CREATE INDEX idx_runs_target_started ON runs(target, started_at DESC);
 CREATE INDEX idx_runs_batch_id ON runs(batch_id) WHERE batch_id != '';
+CREATE INDEX idx_runs_candidate_sha ON runs(candidate_sha, started_at DESC);
+CREATE INDEX idx_runs_merge_sha ON runs(merge_sha, started_at DESC);
+CREATE INDEX idx_runs_change ON runs(target, candidate_ref, started_at DESC);
 
 CREATE TABLE checks (
   run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,

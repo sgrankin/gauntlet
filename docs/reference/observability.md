@@ -38,6 +38,40 @@ The browser's Theme selector offers System, Light, and Dark · amber. Light uses
 the Classic Mac layout; dark uses an amber terminal palette. Explicit selection
 persists in the browser. Without JavaScript, browser preference still applies.
 
+### Change progress links
+
+`/change?target=main&ref=REF` follows a queue slot across source revisions and
+verification attempts. Both parameters are required. GitHub slots derive from
+PR numbers; Gerrit slots derive from change numbers. For example, PR #42 on
+`main` has ref `refs/heads/for/main/github/pr-0000000042`.
+
+- Awaiting admission: shows that no attempt is known yet and refreshes automatically.
+- Queued: shows waiting, paused, or infrastructure circuit state.
+- Verifying: shows the live run, including other members of a shared batch.
+- Finished: shows the latest recorded attempt and its results.
+
+The browser stays on the change URL while refreshing, so a new head or retry
+appears without reopening the link. **Link to this attempt** opens `/run/<id>`
+for a specific run. Pages are not cached.
+
+Live/waiting views work without history; completed results need the history
+store. GitHub progress links require both dashboard and history to be enabled,
+with a reader-accessible public `url`. Ingress authentication still applies.
+
+### Commit progress links
+
+`/commit/<full-sha>` resolves a particular source or constructed revision. Use a
+40- or 64-digit hex SHA; optional `?target=main&ref=REF` parameters distinguish
+commits submitted to multiple targets/slots.
+
+- Active commits redirect to the containing live `/run/<id>` page.
+- Queued commits show waiting/paused state.
+- Completed commits redirect to the latest recorded attempt for that SHA.
+- Unknown commits show an automatically refreshing page before admission.
+
+A source SHA survives Gauntlet's internal rebases, but changes when a contributor
+updates their branch. Use a change link to follow those updates.
+
 ## OTLP
 
 `otlp` enables HTTP trace and metric exporters. Its argument is the collector

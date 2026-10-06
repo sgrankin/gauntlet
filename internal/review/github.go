@@ -59,7 +59,6 @@ type GitHub struct {
 	feedbackQueue  chan core.Event
 	intentMu       sync.Mutex
 	feedbackMu     sync.Mutex
-	feedbackBodies map[int]string
 	commentAuthor  string
 	p              GitHubParams
 	client         *http.Client
@@ -250,7 +249,7 @@ func (g *GitHub) getPull(ctx context.Context, number int) (pull, error) {
 	return p, err
 }
 
-func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[string]policy.Principal, open []pull, feedback bool) (request, error) {
+func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[string]policy.Principal, open []pull, feedback bool, target string) (request, error) {
 	cs, err := pages[comment](ctx, g, "/issues/"+strconv.Itoa(p.Number)+"/comments")
 	if err != nil {
 		return request{}, err
@@ -293,6 +292,11 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 		}
 		if decision.Allow && c.ID > result.ID {
 			result = request{PR: p, ID: c.ID, Action: action, Count: count, Urgent: parsed.Urgent, SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause, Requester: c.User.Login, Reason: parsed.Reason}
+		}
+	}
+	if feedback && result.ID != 0 && p.State == "open" {
+		if err := g.acknowledge(ctx, result, target, cs); err != nil {
+			log.Printf("github request acknowledgement: %v", err)
 		}
 	}
 	for _, c := range cs {
@@ -372,10 +376,10 @@ func (g *GitHub) stack(ctx context.Context, p pull, open []pull, whole bool) ([]
 	return chain, chain[0].Base.Ref, nil
 }
 
-func version(c core.Candidate, requestID int64) string {
+func version(c core.Candidate) string {
 	// A predecessor landing changes DependsOn from a slot to "" without
 	// changing the tested delta. SourceBase still pins its original revision.
-	data, _ := json.Marshal([]any{c.SHA, c.SourceBase, c.Message, c.ReviewURL, requestID})
+	data, _ := json.Marshal([]any{c.SHA, c.SourceBase, c.Message, c.ReviewURL, c.RequestID})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
@@ -437,6 +441,7 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 		}
 	}
 	managed := map[int]bool{}
+	branches := map[int]string{}
 	unresolved := map[int]error{}
 	for _, p := range open {
 		if !active[p.Number] {
@@ -457,6 +462,7 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 			return nil, fmt.Errorf("PR #%d scope: %w", p.Number, err)
 		}
 		managed[p.Number] = decision.Allow && g.p.Targets[branch] != ""
+		branches[p.Number] = branch
 	}
 	var requests []request
 	permissions := map[string]policy.Principal{}
@@ -464,7 +470,7 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 		if !active[p.Number] || (!managed[p.Number] && unresolved[p.Number] == nil) {
 			continue
 		}
-		r, err := g.latestRequest(ctx, p, permissions, open, fetch && managed[p.Number])
+		r, err := g.latestRequest(ctx, p, permissions, open, fetch && managed[p.Number], g.p.Targets[branches[p.Number]])
 		if err != nil {
 			return nil, err
 		}
@@ -511,7 +517,7 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 				// request independently admits them. Feedback survives restarts.
 				if fetch && !r.Notified {
 					body := fmt.Sprintf("Cannot merge PR #%d alone: it has unlanded prerequisite PRs. Use `@%s merge stack` to request the stack through this PR; all members must be ready.\n\n%s", r.PR.Number, g.p.Bot, stackRejectionMarker(r.ID))
-					if err := g.call(ctx, "POST", g.endpoint(fmt.Sprintf("/issues/%d/comments", r.PR.Number)), map[string]string{"body": body}, nil); err != nil {
+					if err := g.feedback(ctx, core.Candidate{Ref: slot(target, r.PR.Number), SHA: r.PR.Head.SHA}, body); err != nil {
 						return nil, err
 					}
 				}
@@ -547,10 +553,11 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 				continue
 			}
 			c := core.Candidate{Ref: slot(target, p.Number), Target: target, User: p.User.Login,
-				Topic: fmt.Sprintf("pr-%d", p.Number), SHA: p.Head.SHA, Source: "github",
+				RequestID: requestIdentity(r),
+				Topic:     fmt.Sprintf("pr-%d", p.Number), SHA: p.Head.SHA, Source: "github",
 				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL, Urgent: r.Urgent, SkipChecks: r.SkipChecks, OverridePause: r.OverridePause, Requester: r.Requester, RequestReason: r.Reason,
 				Message: fmt.Sprintf("%s (#%d)\n\n%s", p.Title, p.Number, p.Body)}
-			c.Version = version(c, r.ID)
+			c.Version = version(c)
 			if r.Urgent {
 				c.Version += ":urgent"
 			}
@@ -704,7 +711,13 @@ func (g *GitHub) Landed(ctx context.Context, c core.Candidate, commit string) er
 	found := false
 	for _, v := range cs {
 		if strings.Contains(v.Body, marker) {
-			found = true
+			g.feedbackMu.Lock()
+			owned, err := g.ownsComment(ctx, v)
+			g.feedbackMu.Unlock()
+			if err != nil {
+				return err
+			}
+			found = found || owned
 		}
 	}
 	if !found {
@@ -714,7 +727,7 @@ func (g *GitHub) Landed(ctx context.Context, c core.Candidate, commit string) er
 			short = short[:12]
 		}
 		body := fmt.Sprintf("Landed by Gauntlet as [%s](%s), from revision `%s`.\n\nThe exact constructed commit was pushed to the target. Gauntlet preserves contributor branches; GitHub’s merge API would create another commit, so this PR is closed with a landing link.\n\n%s", short, commitURL, c.SHA, marker)
-		if err := g.call(ctx, "POST", g.endpoint(fmt.Sprintf("/issues/%d/comments", n)), map[string]string{"body": body}, nil); err != nil {
+		if err := g.feedback(ctx, c, body+g.progressLink(c), true); err != nil {
 			return err
 		}
 	}

@@ -47,7 +47,10 @@ configured check gates, and conversation gates. Missing or incomplete forge
 facts fail closed. See [policy](policy.md) and [GitHub commands/webhook setup](../guides/github.md).
 
 Managed open PRs receive one persistent bot-owned instructions comment, separate
-from run feedback. Failure feedback includes run/full-log links when both history
+from request progress and policy diagnostics. The selected authorized command is
+acknowledged with its original comment link; that progress comment is updated in
+place through verification and results. See [request progress](../guides/github.md#request-progress-and-outcomes).
+Progress and failure feedback include change/run/full-log links when both history
 and the dashboard are enabled; `dashboard "127.0.0.1:8080" { url "https://queue.example.com"; }` sets their reader-facing
 base URL. Configure dashboard authentication and reachability separately.
 

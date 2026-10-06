@@ -18,8 +18,8 @@ func TestFailureFeedbackIsDurableAndRevisionBound(t *testing.T) {
 	if len(f.commands[1]) != 1 || !strings.Contains(f.commands[1][0].Body, "unconfirmed") || strings.Contains(f.commands[1][0].Body, "<script>") {
 		t.Fatalf("unsafe or missing feedback: %+v", f.commands[1])
 	}
-	// Forget in-memory dedup to simulate a restart; the existing comment is updated.
-	f.g.feedbackBodies = nil
+	// Restart the adapter; the existing comment is updated.
+	f.g = NewGitHub(f.g.p)
 	ev.Record.Checks[0].Output = "second failure"
 	if err := f.g.Feedback(context.Background(), ev); err != nil {
 		t.Fatal(err)

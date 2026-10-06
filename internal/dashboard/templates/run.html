@@ -2,6 +2,13 @@
 {{if not .StoreEnabled}}
 <p class="muted">history disabled</p>
 {{else}}
+{{if .FollowingChange}}
+<p class="muted">Following the latest attempt for this change. <a href="/run/{{.Run.RunID}}">Link to this attempt</a></p>
+{{end}}
+{{if .Live}}
+<p class="muted">Verification is in progress. This page refreshes automatically.</p>
+<p>Run members: {{range .Members}}<code title="{{.SHA}}">{{.User}}/{{.Topic}} ({{shortSHA .SHA}})</code> {{end}}</p>
+{{end}}
 <p>
 <strong>{{.Run.User}}/{{.Run.Topic}}</strong> on target <a href="/t/{{.Run.Target}}">{{.Run.Target}}</a>
 &middot; <span class="tag {{.Run.Outcome.Class}}">{{.Run.Outcome.Word}}</span>

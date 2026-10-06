@@ -53,13 +53,24 @@ processes or automatically resume post-land hooks.
 GitHub's Rego `scope` decision runs before command intake and again during fresh
 landing validation. It selects ownership independently of readiness. Managed open
 PRs get a durable instructions comment identified by its marker and authenticated
-author/App. Readiness, failures, and landing feedback use separate comments, so
-they cannot replace onboarding instructions. The instructions write is advisory;
+author/App. Progress/results and policy diagnostics each have their own comment,
+so they cannot replace onboarding instructions. The instructions write is advisory;
 the queue retries it during later refreshes without changing a verdict.
 
-Requests waiting on admission receive requirement feedback when blocked;
-trial/status events start once admitted. Failure feedback links to the dashboard
-run and retained check logs, using the shared suite ID for a batch.
+The latest authorized request receives a durable acknowledgement before
+verification. Its comment preserves the original command link and revision
+through admission blocks, trials, and results. Forge request IDs and command
+content digests travel with queue candidates, so delayed results cannot replace
+a newer or edited request's receipt.
+Later stack requests can update receipts belonging to earlier member requests.
+Comment writes verify the authenticated author/App; copied markers are ignored.
+Policy diagnostics stay separate from request progress.
+
+Change progress links use the existing target/ref identity (PR or change number),
+resolving live snapshots before recorded history. They follow contributor head
+updates as well as queue retries. Commit links resolve source or constructed SHAs
+to the latest attempt for that revision. Failure feedback links to the
+dashboard run and retained check logs, using the shared suite ID for a batch.
 
 ## GitHub completion: experimental evidence
 

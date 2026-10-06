@@ -1,0 +1,6 @@
+{{define "content"}}
+<p>{{.Label}} <code title="{{.Identity}}">{{compactRef .Identity}}</code></p>
+<p>{{.Detail}}</p>
+{{if .Target}}<p><a href="/t/{{.Target}}">View target {{.Target}}</a></p>{{end}}
+<p class="muted">This page refreshes automatically. When verification starts, it opens the run containing this change or revision.</p>
+{{end}}

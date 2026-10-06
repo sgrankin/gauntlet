@@ -26,6 +26,13 @@ Missing resources return 404; missing/disabled stores or not-yet-published
 snapshots return 503. Statistics count a shared batch suite once. Policy audit
 entries describe completed evaluations, not hypothetical command previews.
 
+For browser links that follow a PR/change across revisions, use the HTML
+[change progress route](observability.md#change-progress-links). To inspect a
+particular source or landing revision, use the
+[commit progress route](observability.md#commit-progress-links).
+`/run/{id}` also renders live verification; the JSON run endpoint remains backed
+by completed history.
+
 ```sh
 curl -s 'http://localhost:8080/api/v1/runs?target=main&limit=5' | jq .
 ```

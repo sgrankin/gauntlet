@@ -176,7 +176,7 @@ func (g *Gerrit) Candidates(ctx context.Context) ([]core.Candidate, error) {
 				continue
 			}
 		}
-		candidate.Version = version(candidate, 0)
+		candidate.Version = version(candidate)
 		out = append(out, candidate)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })

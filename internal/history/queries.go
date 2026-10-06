@@ -260,6 +260,23 @@ const selectRunColumns = `run_id, target, candidate_ref, candidate_user, candida
 	batch_id, position, batch_size, speculated, recovered,
 	receipt_ref, receipt_blob, receipt_published, candidate_version`
 
+// RunForCommit resolves a source or constructed commit to its latest attempt.
+// Target and ref disambiguate commits submitted to several queue slots.
+func (s *Store) RunForCommit(sha, target, ref string) (RunRow, error) {
+	row := s.db.QueryRow(`SELECT `+selectRunColumns+` FROM runs
+WHERE (candidate_sha = ? OR merge_sha = ?)
+AND (? = '' OR target = ?) AND (? = '' OR candidate_ref = ?)
+ORDER BY started_at DESC, rowid DESC LIMIT 1`, sha, sha, target, target, ref, ref)
+	return scanRunRow(row)
+}
+
+// RunForChange follows a queue slot across source revisions and landing attempts.
+func (s *Store) RunForChange(target, ref string) (RunRow, error) {
+	return scanRunRow(s.db.QueryRow(`SELECT `+selectRunColumns+` FROM runs
+WHERE target = ? AND candidate_ref = ?
+ORDER BY started_at DESC, rowid DESC LIMIT 1`, target, ref))
+}
+
 // RecentRuns returns target's most recent runs, newest first, capped at
 // limit. Each row also carries its own ChecksTotal/ChecksPassed — see
 // RunRow's doc for what those feed (target.html's compact "✓ n/m" ratio).

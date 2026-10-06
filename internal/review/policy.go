@@ -391,7 +391,7 @@ func (g *GitHub) commandFeedback(ctx context.Context, p pull, c comment, parsed 
 			}
 		}
 	}
-	return g.feedback(ctx, core.Candidate{Ref: slot("policy", p.Number), SHA: p.Head.SHA}, body.String())
+	return g.commentFeedback(ctx, core.Candidate{Ref: slot("policy", p.Number), SHA: p.Head.SHA}, body.String(), "<!-- gauntlet:policy -->", false)
 }
 
 type factCacheKey struct{}
