@@ -72,7 +72,8 @@ Removal request:
 Mutation success: `{"version":1}`. Error: `{"version":1,"error":"diagnostic"}`.
 
 The provider must compare the inventory generation before mutation, **never
-shrink during grow**, and delete only the exact named incarnation. Operations
+shrink during grow**, and delete only the exact named incarnation. Reapplying the same capacity must be safe, including retrying partially failed
+provisioning. Operations
 must be idempotent: a response can be lost, and retries use fresh inventory.
 Deleting an already absent incarnation succeeds; a replacement must survive.
 The adapter must list only nodes owned by its dedicated pool. Read-only

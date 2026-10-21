@@ -183,7 +183,7 @@ func (s *Scaler) Tick(ctx context.Context) error {
 						return e
 					}
 					if a.Kind == "grow" {
-						if a.Desired <= poolLimit(p) && inv.Capacity < a.Desired {
+						if a.Desired <= poolLimit(p) && inv.Capacity <= a.Desired {
 							e = p.Provider.Grow(ctx, inv, a.Desired)
 						} else {
 							e = fmt.Errorf("pending growth exceeds current pool limit")

@@ -82,8 +82,8 @@ func (p CommandProvider) Inventory(ctx context.Context) (Inventory, error) {
 	return p.call(ctx, capacityRequest{Operation: "inventory"})
 }
 func (p CommandProvider) Grow(ctx context.Context, inv Inventory, n int) error {
-	if n <= inv.Capacity {
-		return fmt.Errorf("grow must increase capacity")
+	if n < inv.Capacity {
+		return fmt.Errorf("grow must not reduce capacity")
 	}
 	_, err := p.call(ctx, capacityRequest{Operation: "grow", Generation: inv.Generation, Desired: n})
 	return err
@@ -210,7 +210,7 @@ func (p AzureVMSS) Inventory(ctx context.Context) (Inventory, error) {
 	if etag == "" {
 		return Inventory{}, fmt.Errorf("Azure inventory has no ETag; refusing unconditional scaling")
 	}
-	inv := Inventory{Generation: etag, Capacity: set.SKU.Capacity, Busy: set.Properties.ProvisioningState != "Succeeded"}
+	inv := Inventory{Generation: etag, Capacity: set.SKU.Capacity, Busy: azureProvisioningBusy(set.Properties.ProvisioningState)}
 	path := p.ResourceID + "/virtualMachines"
 	for page := 0; path != ""; page++ {
 		if page >= 100 {
@@ -238,7 +238,7 @@ func (p AzureVMSS) Inventory(ctx context.Context) (Inventory, error) {
 		}
 		for _, vm := range list.Value {
 			inv.Nodes = append(inv.Nodes, Node{ID: vm.InstanceID, Incarnation: vm.Properties.VMID, Worker: vm.Properties.OSProfile.ComputerName})
-			if vm.Properties.ProvisioningState != "Succeeded" {
+			if azureProvisioningBusy(vm.Properties.ProvisioningState) {
 				inv.Busy = true
 			}
 		}
@@ -262,8 +262,8 @@ func (p AzureVMSS) Inventory(ctx context.Context) (Inventory, error) {
 	return inv, validateInventory(inv)
 }
 func (p AzureVMSS) Grow(ctx context.Context, inv Inventory, n int) error {
-	if n <= inv.Capacity || inv.Generation == "" {
-		return fmt.Errorf("Azure growth requires a newer capacity and ETag")
+	if n < inv.Capacity || inv.Generation == "" {
+		return fmt.Errorf("Azure growth cannot reduce capacity and requires an ETag")
 	}
 	_, _, err := p.request(ctx, "PATCH", p.ResourceID, inv.Generation, map[string]any{"sku": map[string]any{"capacity": n}})
 	return err
@@ -295,4 +295,13 @@ func (p AzureVMSS) Remove(ctx context.Context, inv Inventory, n Node) error {
 	}
 	_, _, err = p.request(ctx, "POST", p.ResourceID+"/delete", inv.Generation, map[string]any{"instanceIds": []string{n.ID}})
 	return err
+}
+
+func azureProvisioningBusy(state string) bool {
+	switch strings.ToLower(state) {
+	case "succeeded", "failed", "canceled":
+		return false
+	default:
+		return true
+	}
 }

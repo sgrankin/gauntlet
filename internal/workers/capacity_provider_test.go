@@ -31,6 +31,7 @@ esac
 	if err != nil || inv.Generation != "v1" {
 		t.Fatalf("inventory %+v %v", inv, err)
 	}
+
 	if err = p.Grow(t.Context(), inv, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +46,7 @@ esac
 func TestAzureVMSSConditionalGrowthAndExactDeletion(t *testing.T) {
 	const resource = "/subscriptions/s/resourceGroups/g/providers/Microsoft.Compute/virtualMachineScaleSets/sql"
 	generation := "v1"
+	provisioning := "Succeeded"
 	capacity := 1
 	vmid := "vm-one"
 	var mutated []string
@@ -55,7 +57,7 @@ func TestAzureVMSSConditionalGrowthAndExactDeletion(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == resource:
 			w.Header().Set("ETag", generation)
-			fmt.Fprintf(w, `{"sku":{"capacity":%d},"properties":{"orchestrationMode":"Uniform","provisioningState":"Succeeded"}}`, capacity)
+			fmt.Fprintf(w, `{"sku":{"capacity":%d},"properties":{"orchestrationMode":"Uniform","provisioningState":%q}}`, capacity, provisioning)
 		case r.Method == "GET" && r.URL.Path == resource+"/virtualMachines":
 			fmt.Fprintf(w, `{"value":[{"instanceId":"0","properties":{"vmId":%q,"provisioningState":"Succeeded","osProfile":{"computerName":"sql000"}}}]}`, vmid)
 		case r.Method == "PATCH" && r.URL.Path == resource:
@@ -67,7 +69,7 @@ func TestAzureVMSSConditionalGrowthAndExactDeletion(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body.SKU.Capacity <= capacity {
+			if body.SKU.Capacity < capacity {
 				t.Errorf("unsafe growth: %d", body.SKU.Capacity)
 			}
 			capacity = body.SKU.Capacity
@@ -95,6 +97,17 @@ func TestAzureVMSSConditionalGrowthAndExactDeletion(t *testing.T) {
 	if err != nil || inv.Generation != "v1" || inv.Nodes[0].Worker != "sql000" {
 		t.Fatalf("inventory: %+v %v", inv, err)
 	}
+	provisioning = "Failed"
+	failed, err := p.Inventory(t.Context())
+	if err != nil || failed.Busy {
+		t.Fatalf("failed provisioning cannot recover: %+v %v", failed, err)
+	}
+	provisioning = "Updating"
+	updating, err := p.Inventory(t.Context())
+	if err != nil || !updating.Busy {
+		t.Fatalf("concurrent update permits another mutation: %+v %v", updating, err)
+	}
+	provisioning = "Succeeded"
 	if err = p.Grow(t.Context(), inv, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +121,9 @@ func TestAzureVMSSConditionalGrowthAndExactDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = p.Grow(t.Context(), inv, inv.Capacity); err != nil {
+		t.Fatalf("could not retry partially provisioned capacity: %v", err)
+	}
 	vmid = "replacement"
 	if err = p.Remove(t.Context(), inv, inv.Nodes[0]); err == nil {
 		t.Fatal("replacement deleted")
@@ -116,7 +132,7 @@ func TestAzureVMSSConditionalGrowthAndExactDeletion(t *testing.T) {
 	if err = p.Remove(t.Context(), inv, inv.Nodes[0]); err != nil {
 		t.Fatal(err)
 	}
-	if len(mutated) != 2 {
+	if len(mutated) != 3 {
 		t.Fatalf("mutations: %+v", mutated)
 	}
 }

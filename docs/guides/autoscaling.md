@@ -14,6 +14,7 @@ to pull checks; cloud instances never receive publication credentials.
 3. Add matching remote profiles and a pool to the daemon configuration:
 
 ```kdl
+max-executions 32
 executor "sql" kind="remote" {
     labels "linux" "sql-v1"
     cpus "4"
@@ -42,6 +43,10 @@ workers {
     }
 }
 ```
+
+The daemon's `max-executions` bounds all local and remote check invocations,
+including remote jobs awaiting a worker. Size it for the fleet; repository
+`max-parallel` and the target's window/batch settings also bound demand.
 
 The pool describes **one node**, and must match its actual worker advertisement.
 Set `image-profiles` for profiles that support candidate container images and

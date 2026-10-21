@@ -20,11 +20,11 @@ type fakeCapacity struct {
 
 func (p *fakeCapacity) Inventory(context.Context) (Inventory, error) { return p.inv, nil }
 func (p *fakeCapacity) Grow(_ context.Context, inv Inventory, n int) error {
-	if inv.Generation != p.inv.Generation || n <= p.inv.Capacity {
+	if inv.Generation != p.inv.Generation || n < p.inv.Capacity {
 		return errors.New("stale growth")
 	}
 	p.grows = append(p.grows, n)
-	for i := p.inv.Capacity; i < n; i++ {
+	for i := len(p.inv.Nodes); i < n; i++ {
 		p.inv.Nodes = append(p.inv.Nodes, Node{ID: fmt.Sprint(i), Incarnation: fmt.Sprint(i, "-vm"), Worker: fmt.Sprint("node-", i)})
 	}
 	p.inv.Capacity = n
@@ -238,5 +238,21 @@ func TestCapacityProviderErrorSurvivesRestartUntilReconciled(t *testing.T) {
 	tickCapacity(t, restored)
 	if restored.status[0].Error != "" || restored.state["sql"].Action != nil {
 		t.Fatalf("diagnostic did not clear: %+v", restored.status)
+	}
+}
+
+func TestCapacityRetriesSettledPartialGrowthWithoutIncreasingItsBudget(t *testing.T) {
+	_, s, p, now := capacityFixture(t)
+	s.Pools[0].Warm = 1
+	tickCapacity(t, s)
+	p.inv.Nodes = nil // Desired capacity was recorded, but instance creation failed.
+	*now = now.Add(6 * time.Minute)
+	tickCapacity(t, s)
+	if len(p.grows) != 2 || p.grows[1] != 1 {
+		t.Fatalf("partial growth was not retried at the same budget: %+v", p.grows)
+	}
+	tickCapacity(t, s)
+	if s.state["sql"].Action != nil || p.inv.Capacity != 1 || len(p.inv.Nodes) != 1 {
+		t.Fatalf("partial growth never recovered: %+v %+v", s.state, p.inv)
 	}
 }
