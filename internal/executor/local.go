@@ -279,6 +279,16 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		}
 	}
 
+	if job.InputsCapture {
+		key := strings.TrimSpace(string(readReceiptResult(resultFile, 4096)))
+		res := core.CheckResult{Name: job.Name, Status: core.CheckPassed, InputsKey: key, Output: out.String(), LogPath: logPath, Duration: duration}
+		if key == "" || len(key) > 4096 {
+			res.Status = core.CheckFailed
+			res.Output += "\ngauntlet: inputs command must write 1..4096 bytes to GAUNTLET_INPUTS_RESULT_FILE"
+		}
+		return res
+	}
+
 	if job.ImageBuild {
 		// An image build has no skipped verdict; exit 0 hands the result
 		// file's content back verbatim for the QUEUE to validate (a
@@ -364,6 +374,8 @@ func readImageResult(path string) string {
 // core.EnvReceiptResultFile's docs).
 func resultFileEnv(job core.CheckJob) string {
 	switch {
+	case job.InputsCapture:
+		return core.EnvInputsResultFile
 	case job.ImageBuild:
 		return core.EnvImageResultFile
 	case job.ReceiptCapture:

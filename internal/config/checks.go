@@ -97,6 +97,8 @@ type CheckSpec struct {
 // tree. See core.CheckJob and docs/reference/checks.md for the environment/verdict
 // contract the executor applies when it runs Command.
 type Check struct {
+	// Inputs writes an opaque identity for all semantic inputs to this check.
+	Inputs  []string `kdl:"inputs,child"`
 	Name    string   `kdl:",arg"`
 	Command []string `kdl:"command,child"`
 
@@ -476,6 +478,12 @@ func (cs *CheckSpec) validate() error {
 	// sequence), then per-check fields and edges against the full name set.
 	seen := make(map[string]bool, len(cs.Checks))
 	for _, c := range cs.Checks {
+		if c.Inputs != nil && len(c.Inputs) == 0 {
+			return fmt.Errorf("check %q: inputs command must not be empty", c.Name)
+		}
+		if len(c.Inputs) > 0 && cs.Workspace != "isolated" {
+			return fmt.Errorf("check %q: inputs requires workspace isolated", c.Name)
+		}
 		if c.Name == "" {
 			return fmt.Errorf("check: name must not be empty")
 		}

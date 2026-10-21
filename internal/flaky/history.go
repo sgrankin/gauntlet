@@ -75,6 +75,34 @@ func (h *History) Reserve(ctx context.Context, run string, limit int) (bool, err
 	n, err := result.RowsAffected()
 	return n == 1, err
 }
+
+// ReserveEvidence atomically charges both the queue-run budget and the stable
+// check-input budget. Reconstructing a run cannot replenish the latter.
+func (h *History) ReserveEvidence(ctx context.Context, run, identity string, runLimit, inputLimit int) (bool, error) {
+	if h == nil {
+		return false, fmt.Errorf("failure history unavailable")
+	}
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	for _, budget := range []struct {
+		key   string
+		limit int
+	}{{run, runLimit}, {"inputs:" + identity, inputLimit}} {
+		result, err := tx.ExecContext(ctx, `INSERT INTO retry_budget(run,used,at) VALUES(?,1,?) ON CONFLICT(run) DO UPDATE SET used=used+1 WHERE used < ?`, budget.key, time.Now().Unix(), budget.limit)
+		if err != nil {
+			return false, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil || n != 1 {
+			return false, err
+		}
+	}
+	return true, tx.Commit()
+}
+
 func (h *History) Recent(ctx context.Context, check string) ([]Observation, error) {
 	if h == nil {
 		return nil, fmt.Errorf("history disabled")

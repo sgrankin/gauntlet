@@ -1,6 +1,7 @@
 # Queue modes
 
-All modes build per-submission commit links and publish the exact tested tip.
+All modes build per-submission commit links and publish the exact verified tip.
+Checks execute on that tip or supply matching declared-input evidence.
 With the default squash landing:
 
 ```text
@@ -47,3 +48,11 @@ or an external target update also invalidate affected work.
 
 The window bounds runs, not command concurrency. Repo `max-parallel` and the
 operator's `max-executions` control execution demand.
+
+## Retaining independent verification
+
+Checks with [declared input identities](../guides/reusable-checks.md) retain
+running or completed passing evidence independently of a speculative run.
+Invalidating a suffix still rebuilds its commit chain, but matching checks
+reattach to existing executions/results. A dependency on a rejected change
+continues to block admission; verification reuse cannot remove that dependency.

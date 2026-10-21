@@ -29,8 +29,10 @@ update clears its old park. Cancellation parks the named member; unrelated
 batch members are requeued. Infrastructure errors are distinct from rejections
 and receive one automatic retry per ref/SHA by default.
 
-History seeds failed ref parks at startup, validated against current refs.
-Review parks have durable state. Retry records suppress stale park seeding.
+Scheduler checkpoints preserve FIFO order, parks, and spent infrastructure
+retry budgets across restart, independently of optional history. Current refs
+validate restored parks. History can seed parks before the first checkpoint.
+Retry records suppress stale history seeding.
 Incident pause and emergency requests have their own durable control state.
 See [storage](../operations/storage.md) and [incident controls](../guides/incidents.md).
 

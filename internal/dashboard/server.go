@@ -1477,6 +1477,9 @@ type memberView struct {
 // all, never a misleading "0 B" or "cpu 0s".
 func checkRowDetail(c history.CheckRow) string {
 	var parts []string
+	if c.Reused {
+		parts = append(parts, "reused verification from "+c.ExecutedRun+" at "+shortSHA(c.ExecutedSHA))
+	}
 	if c.BlockedBy != "" {
 		parts = append(parts, "blocked by "+strings.ReplaceAll(c.BlockedBy, ",", ", "))
 	}

@@ -780,3 +780,27 @@ exit 0
 		t.Fatalf("Status = %v, want CheckPassed (a deploy job is candidate class: secrets stripped); output=%q", res.Status, res.Output)
 	}
 }
+
+func TestLocalExecutorInputsIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		pass       bool
+	}{
+		{"valid", `printf '%s' billing-v1 > "$GAUNTLET_INPUTS_RESULT_FILE"`, true},
+		{"missing", `true`, false},
+		{"oversized", `head -c 4097 /dev/zero > "$GAUNTLET_INPUTS_RESULT_FILE"`, false},
+		{"nonzero", `printf '%s' billing-v1 > "$GAUNTLET_INPUTS_RESULT_FILE"; exit 1`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := baseJob(t, script(t, t.TempDir(), "inputs.sh", "#!/bin/sh\n"+tc.body+"\n"))
+			job.InputsCapture = true
+			res := (LocalExecutor{}).RunCheck(t.Context(), job)
+			if (res.Status == core.CheckPassed) != tc.pass || res.Err != nil {
+				t.Fatalf("identity: %+v", res)
+			}
+			if tc.pass && res.InputsKey != "billing-v1" {
+				t.Fatalf("identity=%q", res.InputsKey)
+			}
+		})
+	}
+}

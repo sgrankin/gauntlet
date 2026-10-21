@@ -45,8 +45,11 @@ type TrialMerge struct {
 
 // CheckJob describes one named check to run against an exported trial tree.
 type CheckJob struct {
-	GitDir     string
-	Candidates []Candidate
+	// VerificationID binds retries and results to declared semantic inputs.
+	VerificationID string
+	InputsCapture  bool
+	GitDir         string
+	Candidates     []Candidate
 	// RunID is stable for the whole run and shared by every check in it.
 	RunID string
 
@@ -148,9 +151,15 @@ const (
 // is nil. Command-start failures and nonzero exits are CheckFailed; Err is
 // reserved for cancellation and executor infrastructure failures.
 type CheckResult struct {
-	SuspectedRefs []string
-	FailureKind   string
-	Name          string
+	// InputsKey is transient output from an input-identity command. VerificationID
+	// binds evidence to inputs; execution provenance survives reuse and restart.
+	InputsKey                string
+	VerificationID           string
+	ExecutedRun, ExecutedSHA string
+	Reused                   bool
+	SuspectedRefs            []string
+	FailureKind              string
+	Name                     string
 
 	// Image records the build result or the immutable image a consumer used.
 	// Empty for other jobs.
@@ -231,7 +240,8 @@ const (
 	// always CheckFailed regardless of the file's contents (the file is
 	// ignored on failure); on exit 0, the file containing "skipped" is
 	// CheckSkipped, and an empty or absent file is CheckPassed.
-	EnvResultFile = "GAUNTLET_RESULT_FILE"
+	EnvResultFile       = "GAUNTLET_RESULT_FILE"
+	EnvInputsResultFile = "GAUNTLET_INPUTS_RESULT_FILE"
 
 	// EnvRunID namespaces external resources per run. It is shared by all
 	// checks and all members of a batch.

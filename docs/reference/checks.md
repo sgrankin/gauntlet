@@ -25,6 +25,15 @@ A candidate passes when every check exits 0 (or reports `skipped` — see the
 parse (with an unhelpful "line 0" error), so always write the braces across
 lines as above.
 
+## Reusable verification
+
+An optional `inputs "./ci/input-identity"` command identifies a check's complete
+semantic inputs and allows matching passing or running verification to survive
+queue reconstruction. It requires `workspace "isolated"`. The command writes
+1–4096 bytes to `GAUNTLET_INPUTS_RESULT_FILE`; the check itself must actually pass.
+See [reusable checks](../guides/reusable-checks.md) for the dependency contract,
+example, retention, recovery, and provenance.
+
 ## Ordering and parallelism
 
 By default checks run **one at a time, in declaration order** — upgrading

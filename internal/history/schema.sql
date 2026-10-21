@@ -114,6 +114,10 @@ CREATE TABLE checks (
   peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
   user_cpu_ms    INTEGER NOT NULL DEFAULT 0,
   sys_cpu_ms     INTEGER NOT NULL DEFAULT 0,
+  verification_id TEXT NOT NULL DEFAULT '',
+  executed_run TEXT NOT NULL DEFAULT '',
+  executed_sha TEXT NOT NULL DEFAULT '',
+  reused INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

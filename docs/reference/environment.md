@@ -92,3 +92,10 @@ identical treatment: each hook's full log lands at
 the exact same retention sweep and served through the exact same
 `GET /run/{id}/log/{name}` route, with no separate configuration.
 To read one offline: `zstd -d <path>` (or `zstd -dc <path> | less`).
+
+## Input identity commands
+
+An opted-in check's `inputs` command receives `GAUNTLET_INPUTS_RESULT_FILE`
+instead of `GAUNTLET_RESULT_FILE`. Exit zero must write 1–4096 bytes identifying
+all semantic inputs. Its workspace is disposable and separate from the check's
+workspace. See [reusable verification](../guides/reusable-checks.md).

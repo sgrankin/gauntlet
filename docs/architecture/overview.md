@@ -6,8 +6,9 @@ exact tip before publication.
 
 ## Invariants
 
-- Publish the exact tested commit with an expected old target SHA. A concurrent
-  target update invalidates work; rebuild and verify against the new tip.
+- Publish the exact constructed commit with an expected old target SHA. Required
+  checks execute on that commit, or carry matching declared-input verification
+  evidence. A target update requires reconstruction and fresh evidence matching.
 - Default to one single-parent commit per submission, PR, or Gerrit change.
 - Read checks from the trial tree, so validation changes validate themselves.
 - Keep the reconcile loop single-threaded. Workers return results; snapshots

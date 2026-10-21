@@ -59,3 +59,19 @@ func TestChangeLookupTracksNewHeadsWithoutCrossingTargets(t *testing.T) {
 		t.Fatalf("crossed change identities: %v", err)
 	}
 }
+
+func TestVerificationProvenanceRoundTrips(t *testing.T) {
+	s := openTestStore(t)
+	record := sampleRecord("rebuilt", "main", time.Now())
+	record.Checks[0].VerificationID = "inputs-identity"
+	record.Checks[0].ExecutedRun = "original"
+	record.Checks[0].ExecutedSHA = "old-commit"
+	record.Checks[0].Reused = true
+	if err := s.Emit(t.Context(), core.Event{Record: record}); err != nil {
+		t.Fatal(err)
+	}
+	_, checks, err := s.Run("rebuilt")
+	if err != nil || len(checks) == 0 || checks[0].VerificationID != "inputs-identity" || checks[0].ExecutedRun != "original" || checks[0].ExecutedSHA != "old-commit" || !checks[0].Reused {
+		t.Fatalf("provenance: %+v %v", checks, err)
+	}
+}

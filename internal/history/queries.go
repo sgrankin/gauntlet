@@ -19,8 +19,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -137,11 +137,13 @@ type RunRow struct {
 
 // CheckRow is one row of the checks table, as read back for the dashboard.
 type CheckRow struct {
-	Seq      int
-	Name     string
-	Status   string // passed|failed|skipped
-	Duration time.Duration
-	Err      string
+	VerificationID, ExecutedRun, ExecutedSHA string
+	Reused                                   bool
+	Seq                                      int
+	Name                                     string
+	Status                                   string // passed|failed|skipped
+	Duration                                 time.Duration
+	Err                                      string
 	// Output is the check's captured output, stored verbatim for every
 	// status: green output is diagnostics too. The executor's 64KiB tail
 	// cap is the only bound; history does not re-cap.
@@ -372,7 +374,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -384,7 +386,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	for rows.Next() {
 		var c CheckRow
 		var durationMS, waitedMS, materializeMS, userCPUms, sysCPUms int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms, &c.VerificationID, &c.ExecutedRun, &c.ExecutedSHA, &c.Reused); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		c.Duration = time.Duration(durationMS) * time.Millisecond

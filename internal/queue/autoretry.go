@@ -43,14 +43,8 @@ const (
 // channel or log rendering events in arrival order reads "errored, then
 // auto-retried" — never the reverse.
 //
-// The once-per-SHA guard (d.autoRetried) is in-memory only, by design: a
-// daemon restart resets it, which only re-grants one already-spent
-// auto-retry per still-parked ref — bounded by restarts, never an unbounded
-// retry-every-tick loop. syncBookkeeping
-// (reconcile.go) prunes stale entries — a vanished ref, or one that moved
-// to a new SHA — in lockstep with d.done, so this map never grows without
-// bound over a long daemon lifetime, and a fresh SHA on the same ref always
-// gets its own fresh budget (requirement 3 of this feature's test suite).
+// The once-per-SHA guard is checkpointed with parks and queue order. A vanished
+// ref or new SHA clears its old budget during reconciliation.
 func (d *Daemon) maybeAutoRetry(ctx context.Context, target string, cand core.Candidate, outcome core.Outcome) {
 	if outcome != core.OutcomeError || !d.cfg.AutoRetryErrors {
 		return

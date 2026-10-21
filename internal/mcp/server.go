@@ -792,12 +792,16 @@ type runOut struct {
 // doesn't render output either — this tool is the one place that surfaces
 // it).
 type checkDetail struct {
-	Seq        int    `json:"seq"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	DurationMs int64  `json:"durationMs"`
-	Err        string `json:"err"`
-	Output     string `json:"output"`
+	VerificationID string `json:"verificationId,omitempty"`
+	ExecutedRun    string `json:"executedRun,omitempty"`
+	ExecutedSHA    string `json:"executedSha,omitempty"`
+	Reused         bool   `json:"reused,omitempty"`
+	Seq            int    `json:"seq"`
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	DurationMs     int64  `json:"durationMs"`
+	Err            string `json:"err"`
+	Output         string `json:"output"`
 	// LogPath is the check's full per-check log file path on disk (empty if
 	// none was written), verbatim from history.CheckRow.LogPath.
 	LogPath string `json:"logPath"`
@@ -852,6 +856,7 @@ func handleRun(p Params, in runIn) (runOut, error) {
 	}
 	for _, c := range checks {
 		out.Checks = append(out.Checks, checkDetail{
+			VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err, Output: c.Output,
 			LogPath: c.LogPath,

@@ -354,6 +354,16 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		}
 	}
 
+	if job.InputsCapture {
+		key := strings.TrimSpace(string(readReceiptResult(resultFile, 4096)))
+		res := core.CheckResult{Name: job.Name, Status: core.CheckPassed, InputsKey: key, Output: out.String(), LogPath: logPath, Duration: duration}
+		if key == "" || len(key) > 4096 {
+			res.Status = core.CheckFailed
+			res.Output += "\ngauntlet: inputs command must write 1..4096 bytes to GAUNTLET_INPUTS_RESULT_FILE"
+		}
+		return res
+	}
+
 	if job.ImageBuild {
 		// Mirrors LocalExecutor: exit 0 hands the result file's content
 		// back verbatim; validation (and the single-root-cause failure on

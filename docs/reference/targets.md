@@ -20,7 +20,7 @@ target "main" branch="main" {
 | `window` | `4` | Speculate only; 1–32 in-flight runs. |
 
 A batch of two PRs produces two commits and one target push. Speculative runs
-land in order. All modes publish the exact tested tip with a compare-and-swap;
+land in order. All modes publish the exact verified tip with a compare-and-swap;
 a changed target invalidates the trial.
 
 `max-executions` in [execution configuration](execution.md) bounds host-wide

@@ -37,7 +37,7 @@ type Retrier struct {
 func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.Context, core.CheckJob) core.CheckResult) core.CheckResult {
 	start := time.Now()
 	res := run(ctx, job)
-	if r == nil || r.Classifier == nil || job.OperatorOwned || job.ImageBuild || job.ReceiptCapture || !slices.Contains(r.Checks, job.Name) || res.Err != nil || res.Status != core.CheckFailed || ctx.Err() != nil {
+	if r == nil || r.Classifier == nil || job.OperatorOwned || job.ImageBuild || job.ReceiptCapture || job.InputsCapture || !slices.Contains(r.Checks, job.Name) || res.Err != nil || res.Status != core.CheckFailed || ctx.Err() != nil {
 		return res
 	}
 	var audit strings.Builder
@@ -104,7 +104,13 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			break
 		}
 		if r.MaxRunRetries > 0 {
-			allowed, err := r.History.Reserve(ctx, job.RunID, r.MaxRunRetries)
+			var allowed bool
+			var err error
+			if job.VerificationID != "" {
+				allowed, err = r.History.ReserveEvidence(ctx, job.RunID, job.VerificationID, r.MaxRunRetries, r.MaxRetries)
+			} else {
+				allowed, err = r.History.Reserve(ctx, job.RunID, r.MaxRunRetries)
+			}
 			if err != nil || !allowed {
 				audit.WriteString("gauntlet failure review: run-wide retry budget exhausted or unavailable; keeping failure.\n")
 				break

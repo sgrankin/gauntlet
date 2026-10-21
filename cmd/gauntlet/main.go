@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/obs"
 	"github.com/sgrankin/gauntlet/internal/queue"
 	"github.com/sgrankin/gauntlet/internal/services"
+	"github.com/sgrankin/gauntlet/internal/verification"
 )
 
 func main() {
@@ -660,7 +663,19 @@ func run() error {
 	if failureReview != nil && failureReview.History != nil {
 		defer failureReview.History.Close()
 	}
+	evidence, err := verification.Open(ctx, filepath.Join(*statePath, "verification.db"))
+	if err != nil {
+		return fmt.Errorf("verification: %w", err)
+	}
+	defer evidence.Close()
+	// Include ambient local environment: undeclared environment changes must not
+	// silently reuse local evidence after restarting with a different environment.
+	verificationEnv := os.Environ()
+	sort.Strings(verificationEnv)
+	verificationContext := verification.Key(cfg.Remote, cfg.CheckSpec, cfg.Executor, cfg.Profiles, cfg.Export, []byte(strings.Join(verificationEnv, "\x00")), versionString())
 	qcfg := queue.Config{
+		Verification:         evidence,
+		VerificationContext:  verificationContext,
 		CircuitBreaker:       cfg.CircuitBreaker,
 		SourceGitDir:         repoDir,
 		ControlPath:          filepath.Join(*statePath, "queue-controls.json"),

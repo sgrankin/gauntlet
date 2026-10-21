@@ -50,3 +50,29 @@ func TestRunRetryBudgetAndObservedHistory(t *testing.T) {
 		t.Fatalf("history=%+v %v", rows, err)
 	}
 }
+
+func TestInputRetryBudgetSurvivesQueueReconstruction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "retry.db")
+	h, err := OpenHistory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.ReserveEvidence(t.Context(), "original", "billing-inputs", 3, 1); err != nil || !ok {
+		t.Fatalf("reserve: %t %v", ok, err)
+	}
+	h.Close()
+	h, err = OpenHistory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if ok, err := h.ReserveEvidence(t.Context(), "rebuilt", "billing-inputs", 3, 1); err != nil || ok {
+		t.Fatalf("reconstruction renewed input budget: %t %v", ok, err)
+	}
+	if ok, err := h.ReserveEvidence(t.Context(), "original", "other-inputs", 1, 1); err != nil || ok {
+		t.Fatalf("shared run budget bypassed: %t %v", ok, err)
+	}
+	if ok, err := h.ReserveEvidence(t.Context(), "fresh", "other-inputs", 3, 1); err != nil || !ok {
+		t.Fatalf("failed reservation charged input budget: %t %v", ok, err)
+	}
+}

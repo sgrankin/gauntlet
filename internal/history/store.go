@@ -24,7 +24,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 17
+const schemaVersion = 18
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -384,6 +384,14 @@ CREATE INDEX IF NOT EXISTS idx_runs_change ON runs(target, candidate_ref, starte
 PRAGMA user_version = 17`); err != nil {
 				return fmt.Errorf("history: index progress lookups: %w", err)
 			}
+		case 17:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN verification_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE checks ADD COLUMN executed_run TEXT NOT NULL DEFAULT '';
+ALTER TABLE checks ADD COLUMN executed_sha TEXT NOT NULL DEFAULT '';
+ALTER TABLE checks ADD COLUMN reused INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 18`); err != nil {
+				return fmt.Errorf("history: verification provenance: %w", err)
+			}
 		case schemaVersion:
 			return db.Commit()
 		default:
@@ -584,6 +592,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			cr.PeakRSS,
 			cr.UserCPU.Milliseconds(),
 			cr.SysCPU.Milliseconds(),
+			cr.VerificationID, cr.ExecutedRun, cr.ExecutedSHA, cr.Reused,
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

@@ -21,16 +21,19 @@ import (
 	"github.com/sgrankin/gauntlet/internal/obs"
 	"github.com/sgrankin/gauntlet/internal/policy"
 	"github.com/sgrankin/gauntlet/internal/services"
+	"github.com/sgrankin/gauntlet/internal/verification"
 )
 
 // Config supplies queue policy and dependencies. Remote connection and
 // polling belong to the command package.
 type Config struct {
-	Policy         *policy.Engine
-	CircuitBreaker *config.CircuitBreaker
-	SourceGitDir   string
-	ControlPath    string
-	AllowEmergency bool
+	Verification        *verification.Manager
+	VerificationContext string
+	Policy              *policy.Engine
+	CircuitBreaker      *config.CircuitBreaker
+	SourceGitDir        string
+	ControlPath         string
+	AllowEmergency      bool
 	// FailureReview retries selected failed checks before publishing a red result.
 	FailureReview *flaky.Retrier
 
@@ -324,7 +327,7 @@ type Daemon struct {
 	seq   int64
 
 	// autoRetried records the ref/SHA pairs that spent their infrastructure
-	// retry. Restarting renews that budget.
+	// retry. Scheduler checkpoints retain the budget across restart.
 	autoRetried map[string]map[string]string
 
 	// ignoredRefs dedupes core.EventIgnoredRef: ref -> last-emitted-for SHA,
@@ -442,6 +445,21 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 	if err != nil {
 		return nil, err
 	}
+	order := cloneNested(controls.Order)
+	var seq int64
+	for _, refs := range order {
+		for _, n := range refs {
+			if n >= seq {
+				seq = n + 1
+			}
+		}
+	}
+	seeded := map[string]bool{}
+	if controls.Checkpoint {
+		for _, target := range cfg.Targets {
+			seeded[target.Name] = true
+		}
+	}
 	return &Daemon{
 		controls:      controls,
 		git:           git,
@@ -450,15 +468,16 @@ func New(git core.GitRepo, exec core.Executor, chans []core.Channel, cfg Config,
 		tr:            obs.Tracer(),
 		cfg:           cfg,
 		now:           now,
-		order:         make(map[string]map[string]int64),
-		done:          make(map[string]map[string]parkEntry),
-		autoRetried:   make(map[string]map[string]string),
+		order:         order,
+		seq:           seq,
+		done:          cloneNested(controls.Parks),
+		autoRetried:   cloneNested(controls.AutoRetried),
 		ignoredRefs:   make(map[string]string),
 		lanes:         make(map[string]*lane),
 		urgentBurst:   make(map[string]int),
 		batchRecovery: make(map[string]int),
 		batchFallback: make(map[string]bool),
-		seeded:        make(map[string]bool),
+		seeded:        seeded,
 		landedPins:    make(map[string]string),
 		trialReap:     make(map[string]trialReapEntry),
 	}, nil
@@ -559,6 +578,11 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	// Fold any external drain request into the tick's live state first, so
 	// admission gating and this tick's Snapshot agree (issue #8).
 	d.syncDrainRequest()
+	if d.cfg.Verification != nil {
+		if err := d.cfg.Verification.Maintain(d.now()); err != nil {
+			return fmt.Errorf("verification maintenance: %w", err)
+		}
+	}
 	if err := d.git.Fetch(ctx); err != nil {
 		return fmt.Errorf("queue: fetch: %w", err)
 	}
@@ -642,6 +666,9 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 		d.reaperArmed = true
 	}
 
+	if !d.persistScheduler() {
+		fmt.Fprintf(os.Stderr, "queue: %s\n", d.controls.LastError)
+	}
 	d.snap.Store(d.buildSnapshot(refs))
 	return nil
 }

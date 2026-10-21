@@ -12,6 +12,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/obs"
+	"github.com/sgrankin/gauntlet/internal/verification"
 )
 
 // advanceChecks consumes completed workers in spec order, records the first
@@ -378,9 +379,25 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	for i, member := range r.members {
 		sources[i] = member.cand.SHA
 	}
+	if len(check.Inputs) > 0 {
+		sources = append(sources, chainTip)
+	}
+	dependencyKeys := []string{verification.Key("graph", r.checks, r.maxParallel, r.isolated)}
+	for _, name := range check.After {
+		previous := r.results[name]
+		key := previous.VerificationID
+		if key == "" {
+			key = verification.Key(name, chainTip)
+		}
+		dependencyKeys = append(dependencyKeys, key)
+	}
 	releaseSources, sourceErr := core.RetainSources(ctx, d.git, sources...)
 
 	go func() {
+		if len(check.Inputs) > 0 && sourceErr == nil {
+			result <- d.reusableCheck(checkCtx, job, check, chainTree, svcs, dependencyKeys, releaseSources)
+			return
+		}
 		// The execution slot advanceChecks acquired for this check is
 		// released only when this goroutine exits — RunCheck has returned
 		// and the executor's child cleanup is complete by then, so the

@@ -18,7 +18,8 @@ queue. Consult the relevant [architecture note](docs/architecture/overview.md) f
 
 ## Design and code
 
-- Normal landing requires the exact tested commit. An operator-enabled emergency
+- Normal landing requires the exact constructed commit with passing checks or
+  matching declared-input verification evidence. An operator-enabled emergency
   can waive validation explicitly; keep its revision binding, audit, mandatory
   provenance, and fresh policy checks. Push target and candidate refs with an
   expected old SHA; recover from remote history after interrupted writes.

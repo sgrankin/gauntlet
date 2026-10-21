@@ -25,6 +25,10 @@ type Pause struct {
 }
 
 type controlState struct {
+	Checkpoint       bool
+	Order            map[string]map[string]int64
+	Parks            map[string]map[string]parkEntry
+	AutoRetried      map[string]map[string]string
 	ReviewFloor      int64
 	ProcessedReviews map[string]bool
 	PolicyAudit      []PolicyAudit
@@ -41,6 +45,9 @@ type controlState struct {
 // clone keeps updates separate from the published state, including fields
 // excluded from disk serialization. Persistence alone decides uncertainty.
 func (s controlState) clone() controlState {
+	s.Order = cloneNested(s.Order)
+	s.Parks = cloneNested(s.Parks)
+	s.AutoRetried = cloneNested(s.AutoRetried)
 	s.ProcessedReviews = maps.Clone(s.ProcessedReviews)
 	s.Pauses = maps.Clone(s.Pauses)
 	s.Urgent = maps.Clone(s.Urgent)
@@ -89,6 +96,9 @@ func loadControls(path string) (controlState, error) {
 	}
 	if err := json.Unmarshal(data, &s); err != nil || s.Version != 1 || s.Pauses == nil || s.Urgent == nil || s.Emergency == nil {
 		return s, fmt.Errorf("queue controls: invalid state; refusing to forget incident controls")
+	}
+	if s.Checkpoint && (s.Order == nil || s.Parks == nil || s.AutoRetried == nil) {
+		return s, fmt.Errorf("queue controls: incomplete scheduler checkpoint")
 	}
 	if s.ProcessedReviews == nil {
 		s.ProcessedReviews = map[string]bool{}

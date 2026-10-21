@@ -126,6 +126,9 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 	d.reviewEmergency(ctx, t, refs, cands)
 	d.policyAdmission(ctx, t, cands, targetTip)
 	d.syncBookkeeping(ctx, t, cands)
+	if !d.persistScheduler() {
+		return
+	}
 	if d.reconcileEmergency(ctx, t, targetTip, cands) {
 		return
 	}

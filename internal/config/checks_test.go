@@ -271,3 +271,18 @@ func TestCheckSpec_RequiresServices(t *testing.T) {
 		})
 	}
 }
+
+func TestReusableCheckRequiresIsolatedWorkspace(t *testing.T) {
+	spec := `check "billing" {
+ command "./ci/billing"
+ inputs "./ci/billing-inputs"
+}
+`
+	if _, err := ParseChecks([]byte(spec)); err == nil {
+		t.Fatal("shared workspace accepted reusable checks")
+	}
+	parsed, err := ParseChecks([]byte("workspace \"isolated\"\n" + spec))
+	if err != nil || len(parsed.Checks[0].Inputs) != 1 {
+		t.Fatalf("isolated inputs: %+v %v", parsed, err)
+	}
+}

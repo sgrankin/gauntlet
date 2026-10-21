@@ -21,6 +21,12 @@ results, and artifact/log transport. They are not implemented. Git CAS protects
 publication but does not provide distributed worker scheduling or leader election.
 Local caches remain replaceable efficiency state.
 
+[Reusable verification](../guides/reusable-checks.md) already separates passing
+evidence and running local checks from queue attempts. The scheduler persists
+FIFO order and completed evidence; restarted local work runs again. This is a
+recoverable single scheduler, with no leader election. Remote execution and
+worker reconnection remain separate capabilities.
+
 Infrastructure errors are distinct from red validation and receive a bounded
 automatic retry. The [infrastructure breaker](../reference/incidents.md) suspends
 unhealthy execution across revisions without clearing manual incident pauses.

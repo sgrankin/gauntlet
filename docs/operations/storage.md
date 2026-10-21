@@ -39,3 +39,12 @@ race object creation.
 - Use SQLite's backup mechanism for a consistent live history backup.
 - Logs, exported trees, and caches are replaceable; include them only when the
   diagnostic or recovery value justifies the storage.
+
+## Verification evidence
+
+`verification.db` retains passing [input-based verification](../guides/reusable-checks.md)
+for 24 hours, capped at 10,000 entries and pruned during live reconciliation.
+It is independent of optional history. Back it up with scheduler state to retain
+completed evidence across recovery; losing it causes checks to run again.
+`queue-controls.json` also checkpoints FIFO order, parks, and infrastructure retry
+state, independently of optional run history.
