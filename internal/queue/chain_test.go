@@ -60,7 +60,7 @@ func newChainHarness(t *testing.T, remote *testutil.Remote, mergeBody func(ctx c
 // tests that don't care about the minted run ID (every test here: run IDs
 // only matter to EventTrialClean/the run record, neither of which exists at
 // this layer).
-func chainOnClean(core.TrialMerge) string { return "test-run" }
+func chainOnClean(core.TrialMerge, string) string { return "test-run" }
 
 // chainCommit is one commit's SHA and parent list, as inspected directly out
 // of the local bare clone's object store (firstParentChain).

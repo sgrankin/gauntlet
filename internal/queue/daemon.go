@@ -580,6 +580,7 @@ func (d *Daemon) ReconcileOnce(ctx context.Context) error {
 	// Fold any external drain request into the tick's live state first, so
 	// admission gating and this tick's Snapshot agree (issue #8).
 	d.syncDrainRequest()
+	d.prunePrepared()
 	if d.cfg.Verification != nil {
 		if err := d.cfg.Verification.Maintain(d.now()); err != nil {
 			return fmt.Errorf("verification maintenance: %w", err)

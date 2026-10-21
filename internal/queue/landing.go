@@ -376,6 +376,9 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 // rather than leaking it, and a path that registers the handoff never
 // double-releases.
 func (d *Daemon) finalizeRun(ctx context.Context, r *run) {
+	if len(r.members) > 0 && r.members[0].rec.Outcome != core.OutcomeSkipped {
+		d.forgetPrepared(r.runID)
+	}
 	if r.releaseSources != nil {
 		r.releaseSources()
 	}
@@ -543,6 +546,7 @@ func (d *Daemon) skipPreMergePredicted(ctx context.Context, t config.Target, can
 // check spec, or an export failure). rootSpan is always non-nil here: every
 // call site follows a successful StartRun.
 func (d *Daemon) rejectRun(ctx context.Context, t config.Target, cand core.Candidate, runID, baseOID, mergeOID string, trial core.TrialMerge, outcome core.Outcome, detail string, rootSpan trace.Span) {
+	d.forgetPrepared(runID)
 	// Every rejectRun call site sits after startRun's pin site (the pin
 	// failure itself included — unpinning a never-created pin is a no-op),
 	// and this run never reaches finalizeRun, so the pin is released here.

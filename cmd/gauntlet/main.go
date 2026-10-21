@@ -672,7 +672,7 @@ func run() error {
 	// silently reuse local evidence after restarting with a different environment.
 	verificationEnv := os.Environ()
 	sort.Strings(verificationEnv)
-	verificationContext := verification.Key(cfg.Remote, cfg.CheckSpec, cfg.Executor, cfg.Profiles, cfg.Export, []byte(strings.Join(verificationEnv, "\x00")), versionString())
+	verificationContext := verification.Key(cfg, []byte(strings.Join(verificationEnv, "\x00")), versionString())
 	qcfg := queue.Config{
 		Verification:         evidence,
 		VerificationContext:  verificationContext,

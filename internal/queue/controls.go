@@ -25,6 +25,7 @@ type Pause struct {
 }
 
 type controlState struct {
+	Prepared         map[string]preparedEntry
 	Scheduled        map[string]string
 	Priorities       map[string]priorityEntry
 	Enqueued         map[string]time.Time
@@ -47,6 +48,7 @@ type controlState struct {
 // clone keeps updates separate from the published state, including fields
 // excluded from disk serialization. Persistence alone decides uncertainty.
 func (s controlState) clone() controlState {
+	s.Prepared = maps.Clone(s.Prepared)
 	s.Order = cloneNested(s.Order)
 	s.Parks = cloneNested(s.Parks)
 	s.AutoRetried = cloneNested(s.AutoRetried)

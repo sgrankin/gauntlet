@@ -62,3 +62,16 @@ Channels consume lifecycle events and emit commands; they do not choose queue
 outcomes. Terminal records carry the verification result. Retry events are
 persisted so a restart does not restore the superseded failed park. Snapshot
 publication separates concurrent readers from reconcile-owned state.
+
+## Prepared trial recovery
+
+The scheduler records clean constructed commits before dispatch in its atomic
+control checkpoint. It can reuse the exact commit and run ID after restart when
+source metadata, replayed tree, base, operator configuration, and selected batch
+match. A missing object or changed context reconstructs a new trial. Source archive
+refs retain prepared objects independently of the startup GC-pin sweep.
+
+This checkpoint contains no passing verdict. Local commands rerun, current policy
+still applies, and publication still requires the target CAS. Terminal runs retire
+their prepared identity. Unadopted checkpoints expire after 24 hours, with a
+2,048-entry bound; active entries are protected from capacity eviction.

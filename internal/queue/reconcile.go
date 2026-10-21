@@ -15,6 +15,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/obs"
+	"github.com/sgrankin/gauntlet/internal/verification"
 )
 
 // candidatePrefix is the fixed portion of the candidate ref grammar:
@@ -507,13 +508,13 @@ type chainLink struct {
 // buildChainLink replays a candidate and creates its landing commit.
 // onClean supplies the run ID before the message is built. Dirty trials
 // have no commit.
-func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string)) (chainLink, core.TrialMerge, error) {
+func (d *Daemon) buildChainLink(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge, restoredRun string) (runID string)) (chainLink, core.TrialMerge, error) {
 	return d.buildChainLinkPrecomputed(ctx, rootCtx, targetName, base, cand, onClean, nil)
 }
 
 // buildChainLinkPrecomputed uses precomputed legacy message bodies when
 // supplied; nil computes them on demand.
-func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge) (runID string), precomputed map[string]string) (chainLink, core.TrialMerge, error) {
+func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetName, base string, cand core.Candidate, onClean func(trial core.TrialMerge, restoredRun string) (runID string), precomputed map[string]string, group ...string) (chainLink, core.TrialMerge, error) {
 	_, trialSpan := obs.StartTrialMerge(rootCtx, d.tr)
 	linear := d.linearTarget(targetName)
 	var trial core.TrialMerge
@@ -533,7 +534,12 @@ func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetN
 	}
 	obs.EndSpan(trialSpan, nil)
 
-	runID := onClean(trial)
+	key := d.preparedKey(targetName, base, cand, group)
+	previous := d.recallPrepared(ctx, key, trial.TreeOID)
+	runID := onClean(trial, previous.RunID)
+	if previous.RunID != "" && previous.RunID == runID {
+		return chainLink{mergeOID: previous.Commit, treeOID: previous.Tree, cand: cand}, trial, nil
+	}
 
 	// Best-effort per Config.MergeBody's contract (daemon.go): called at
 	// most once per trial, right here, before the message (and therefore
@@ -588,6 +594,9 @@ func (d *Daemon) buildChainLinkPrecomputed(ctx, rootCtx context.Context, targetN
 	}
 	if err != nil {
 		return chainLink{}, trial, fmt.Errorf("commit-tree: %w", err)
+	}
+	if !d.rememberPrepared(ctx, key, preparedEntry{RunID: runID, Commit: mergeOID, Tree: trial.TreeOID, At: d.now()}) {
+		return chainLink{}, trial, fmt.Errorf("persist prepared trial: %s", d.controls.LastError)
 	}
 	return chainLink{mergeOID: mergeOID, treeOID: trial.TreeOID, cand: cand}, trial, nil
 }
@@ -740,17 +749,20 @@ func (d *Daemon) startBatchRun(ctx context.Context, t config.Target, targetTip s
 
 chain:
 	for _, cand := range picked {
-		link, trial, err := d.buildChainLinkPrecomputed(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
+		link, trial, err := d.buildChainLinkPrecomputed(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge, restoredRun string) string {
 			if runID == "" {
 				// Minted from the FIRST member's trial tree, exactly as
 				// serial's startRun mints its single run ID — reused
 				// verbatim as the batch's BatchID.
-				runID = newRunID(d.now(), trial.TreeOID)
+				runID = restoredRun
+				if runID == "" {
+					runID = newRunID(d.now(), trial.TreeOID)
+				}
 				rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
 			}
 			d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
 			return runID
-		}, precomputedBodies)
+		}, precomputedBodies, verification.Key("batch", picked))
 
 		switch {
 		case err != nil:
@@ -961,6 +973,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 // rejectBatch records a setup failure and parks every member without
 // running checks.
 func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID string, links []chainLink, trials []core.TrialMerge, outcome core.Outcome, detail string, rootSpan trace.Span) {
+	d.forgetPrepared(runID)
 	// Mirrors rejectRun: a chain rejected after finishBatchStart's pin site
 	// never reaches finalizeRun, so its tip pin is released here. Call
 	// sites before the pin (or the pin failure itself) unpin a ref that
@@ -1173,7 +1186,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	}()
 
 	var runID string
-	link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge) string {
+	link, trial, err := d.buildChainLink(ctx, rootCtx, t.Name, base, cand, func(trial core.TrialMerge, restoredRun string) string {
 		// Run ID from the trial *tree* OID, not the merge commit OID — a
 		// commit OID hashes its own message, and the message must carry
 		// this run ID in its Gauntlet-Run trailer, so an ID derived from
@@ -1185,7 +1198,10 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 		// (Slack threading, ghstatus's target_url), so an EventTrialClean
 		// emitted without one breaks that join for the run's entire
 		// lifetime.
-		runID = newRunID(d.now(), trial.TreeOID)
+		runID = restoredRun
+		if runID == "" {
+			runID = newRunID(d.now(), trial.TreeOID)
+		}
 		rootSpan.SetAttributes(attribute.String(obs.AttrRunID, runID))
 		d.emit(ctx, core.Event{Kind: core.EventTrialClean, At: d.now(), Target: t.Name, Candidate: cand, RunID: runID})
 		return runID

@@ -23,7 +23,11 @@ Local caches remain replaceable efficiency state.
 
 [Reusable verification](../guides/reusable-checks.md) already separates passing
 evidence and running local checks from queue attempts. The scheduler persists
-FIFO order and completed evidence; restarted local work runs again. This is a
+FIFO order and completed evidence. Prepared commits and run IDs recover within
+a 24-hour, 2,048-entry checkpoint, bound to source, base, configuration, and batch
+composition. Restarted local commands run again; their retry budgets remain
+bound to the recovered run. Terminal attempts retire their prepared identity so
+an explicit retry receives a fresh trial. This is a
 recoverable single scheduler, with no leader election. Remote execution and
 worker reconnection remain separate capabilities.
 
