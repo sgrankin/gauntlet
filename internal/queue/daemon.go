@@ -214,16 +214,17 @@ type run struct {
 	overridePause       bool
 	releaseSources      func()
 
-	target    string
-	members   []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
-	baseOID   string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto
-	chainTip  string      // the tested merge commit == members[len-1].mergeOID (== members[0].mergeOID for len(members)==1)
-	chainTree string      // the exact tested tree OID (chainTip^{tree}); what shared-mode export and isolated materialization both archive — NOT the commit, to avoid export-subst divergence
-	predicted bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false for serial/batch and speculate's own head run
-	batchID   string      // "" unless batch; shared across member records (runID reused verbatim)
-	runID     string
-	dir       string // exported trial tree; removed on every terminal transition
-	checks    []config.Check
+	target               string
+	members              []runMember // len 1 for serial/speculate; up to Target.MaxBatch for batch
+	baseOID              string      // target tip (or, non-head speculate, a predicted predecessor chainTip) this run's chain was built onto
+	chainTip             string      // the tested merge commit == members[len-1].mergeOID (== members[0].mergeOID for len(members)==1)
+	chainTree            string      // the exact tested tree OID (chainTip^{tree}); what shared-mode export and isolated materialization both archive — NOT the commit, to avoid export-subst divergence
+	predicted            bool        // true iff baseOID is an unpushed predicted commit (speculate, non-head); always false for serial/batch and speculate's own head run
+	batchID              string      // "" unless batch; shared across member records (runID reused verbatim)
+	runID                string
+	dir                  string // exported trial tree; removed on every terminal transition
+	verificationGraphKey string
+	checks               []config.Check
 
 	// maxParallel bounds running checks; defaults are resolved when the run is
 	// created.

@@ -16,7 +16,7 @@ func TestExecutionSurvivesWaiterAndRestoresEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := core.CheckJob{Name: "billing", RunID: "original", MergeSHA: "old-sha"}
+	job := core.CheckJob{Name: "billing", RunID: "original", MergeSHA: "old-sha", Candidates: []core.Candidate{{Ref: "web"}, {Ref: "billing"}}}
 	ctx, cancel := context.WithCancel(t.Context())
 	started, finish := make(chan struct{}), make(chan struct{})
 	detached := make(chan core.CheckResult, 1)
@@ -26,7 +26,7 @@ func TestExecutionSurvivesWaiterAndRestoresEvidence(t *testing.T) {
 			close(started)
 			select {
 			case <-finish:
-				return core.CheckResult{Name: job.Name, Status: core.CheckPassed, LogPath: "original.log", Output: "tested"}
+				return core.CheckResult{Name: job.Name, Status: core.CheckPassed, LogPath: "original.log", Output: "tested", SuspectedRefs: []string{"web", "billing"}}
 			case <-ctx.Done():
 				return core.CheckResult{Err: ctx.Err()}
 			}
@@ -41,6 +41,7 @@ func TestExecutionSurvivesWaiterAndRestoresEvidence(t *testing.T) {
 		t.Fatal("detaching destroyed execution resources")
 	}
 	job.RunID, job.MergeSHA = "rebuilt", "new-sha"
+	job.Candidates = []core.Candidate{{Ref: "billing"}}
 	adopted := make(chan core.CheckResult, 1)
 	attached := make(chan struct{})
 	go func() {
@@ -49,7 +50,7 @@ func TestExecutionSurvivesWaiterAndRestoresEvidence(t *testing.T) {
 	<-attached
 	close(finish)
 	res := <-adopted
-	if res.Err != nil || !res.Reused || res.ExecutedSHA != "old-sha" || res.LogPath != "original.log" || cleaned.Load() != 1 {
+	if res.Err != nil || !res.Reused || res.ExecutedSHA != "old-sha" || res.LogPath != "original.log" || cleaned.Load() != 1 || len(res.SuspectedRefs) != 1 || res.SuspectedRefs[0] != "billing" {
 		t.Fatalf("adoption: %+v cleanup=%d", res, cleaned.Load())
 	}
 	if err := m.Close(); err != nil {

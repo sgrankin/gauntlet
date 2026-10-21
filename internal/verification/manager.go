@@ -86,7 +86,7 @@ func (m *Manager) Run(ctx context.Context, key string, job core.CheckJob, run fu
 				m.mu.Unlock()
 				cleanup()
 				result.Reused = true
-				return result
+				return forRun(result, job)
 			}
 			if err == nil {
 				err = errors.New("invalid stored passing evidence")
@@ -123,8 +123,22 @@ func (m *Manager) Run(ctx context.Context, key string, job core.CheckJob, run fu
 		result := e.result
 		m.mu.Unlock()
 		result.Reused = result.ExecutedRun != job.RunID || result.ExecutedSHA != job.MergeSHA
-		return result
+		return forRun(result, job)
 	}
+}
+
+func forRun(result core.CheckResult, job core.CheckJob) core.CheckResult {
+	var suspects []string
+	for _, ref := range result.SuspectedRefs {
+		for _, candidate := range job.Candidates {
+			if candidate.Ref == ref {
+				suspects = append(suspects, ref)
+				break
+			}
+		}
+	}
+	result.SuspectedRefs = suspects
+	return result
 }
 
 func (m *Manager) execute(ctx context.Context, key string, e *execution, job core.CheckJob, run func(context.Context) core.CheckResult, cleanup func()) {

@@ -379,17 +379,20 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	for i, member := range r.members {
 		sources[i] = member.cand.SHA
 	}
+	var dependencyKeys []string
 	if len(check.Inputs) > 0 {
 		sources = append(sources, chainTip)
-	}
-	dependencyKeys := []string{verification.Key("graph", r.checks, r.maxParallel, r.isolated)}
-	for _, name := range check.After {
-		previous := r.results[name]
-		key := previous.VerificationID
-		if key == "" {
-			key = verification.Key(name, chainTip)
+		if r.verificationGraphKey == "" {
+			r.verificationGraphKey = verification.Key("graph", r.checks, r.maxParallel, r.isolated)
 		}
-		dependencyKeys = append(dependencyKeys, key)
+		dependencyKeys = append(dependencyKeys, r.verificationGraphKey)
+		for _, name := range check.After {
+			key := r.results[name].VerificationID
+			if key == "" {
+				key = verification.Key(name, chainTip)
+			}
+			dependencyKeys = append(dependencyKeys, key)
+		}
 	}
 	releaseSources, sourceErr := core.RetainSources(ctx, d.git, sources...)
 
