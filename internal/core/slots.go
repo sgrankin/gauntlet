@@ -91,3 +91,13 @@ func (s *Slots) InUse() int {
 	defer s.mu.Unlock()
 	return s.used
 }
+
+// Saturated reports ordinary-capacity pressure without acquiring a slot.
+func (s *Slots) Saturated() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.used >= s.limit-s.reserve
+}

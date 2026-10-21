@@ -428,17 +428,18 @@ type statusResponse struct {
 }
 
 type targetStatus struct {
-	Circuit          *queue.Circuit   `json:"circuit,omitempty"`
-	Pause            *queue.Pause     `json:"pause,omitempty"`
-	ControlError     string           `json:"controlError,omitempty"`
-	EmergencyEnabled bool             `json:"emergencyEnabled"`
-	Name             string           `json:"name"`
-	Branch           string           `json:"branch"`
-	Tip              string           `json:"tip"`
-	InFlight         *inFlightStatus  `json:"inFlight"`
-	Pipeline         []pipelineStatus `json:"pipeline"`
-	Waiting          []waitingStatus  `json:"waiting"`
-	Parked           []parkedStatus   `json:"parked"`
+	Scheduling       *queue.Scheduling `json:"scheduling,omitempty"`
+	Circuit          *queue.Circuit    `json:"circuit,omitempty"`
+	Pause            *queue.Pause      `json:"pause,omitempty"`
+	ControlError     string            `json:"controlError,omitempty"`
+	EmergencyEnabled bool              `json:"emergencyEnabled"`
+	Name             string            `json:"name"`
+	Branch           string            `json:"branch"`
+	Tip              string            `json:"tip"`
+	InFlight         *inFlightStatus   `json:"inFlight"`
+	Pipeline         []pipelineStatus  `json:"pipeline"`
+	Waiting          []waitingStatus   `json:"waiting"`
+	Parked           []parkedStatus    `json:"parked"`
 
 	// LiveHook is this target's current post-land hook progress
 	// (hooks.Runner.Snapshot via WithHookSnapshot), nil when no hook is
@@ -636,7 +637,8 @@ func (d *dash) idleSince(snap *queue.Snapshot) time.Time {
 // are daemon-level, populated by handleAPIStatus itself, not here.
 func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
-		Circuit: ts.Circuit, Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
+		Scheduling: ts.Scheduling,
+		Circuit:    ts.Circuit, Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
 		Name:     ts.Name,
 		Branch:   ts.Branch,
 		Tip:      ts.TargetTip,

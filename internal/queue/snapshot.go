@@ -57,6 +57,7 @@ type Snapshot struct {
 
 // TargetSnapshot is one target's live queue state.
 type TargetSnapshot struct {
+	Scheduling       *Scheduling
 	Circuit          *Circuit
 	Pause            *Pause
 	ControlError     string
@@ -211,6 +212,7 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		}
 	}
 	ts := TargetSnapshot{
+		Scheduling:       d.schedulingSnapshot(t),
 		ControlError:     d.controls.LastError,
 		EmergencyEnabled: d.cfg.AllowEmergency,
 		Name:             t.Name,

@@ -4,6 +4,9 @@
 {{else}}
 <p class="muted">branch <code>{{.Branch}}</code> @ <code title="{{.TargetTip}}">{{shortSHA .TargetTip}}</code></p>
 
+{{if .Scheduling}}<details class="section"><summary>Adaptive {{.Scheduling.Mode}}: {{.Scheduling.Limit}} / {{.Scheduling.Ceiling}}</summary>
+<p>{{if .Scheduling.CapacityLimited}}Capacity pressure: new admission capped at {{.Scheduling.Admission}}. {{end}}{{.Scheduling.Reason}} · {{.Scheduling.Landed}} landed · {{.Scheduling.Retried}} recovered retries · {{.Scheduling.Failed}} failed trials · {{.Scheduling.Invalidated}} invalidated trials</p>
+<p class="muted">Useful execution: {{printf "%.1f" .Scheduling.UsefulSeconds}}s · invalidated/failed execution: {{printf "%.1f" .Scheduling.WastedSeconds}}s. Capacity pressure may lower new admission temporarily.</p></details>{{end}}
 {{if .Circuit}}<p class="error">Infrastructure suspension: {{.Circuit.Reason}}</p>{{end}}
 {{template "incidentControls" .}}
 {{if .Policy}}<details class="section"><summary>Policy decisions</summary>

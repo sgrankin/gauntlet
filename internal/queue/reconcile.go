@@ -677,7 +677,7 @@ func (d *Daemon) refillBatch(ctx context.Context, t config.Target, targetTip str
 	// queue.Config (as tests may construct) that leaves it zero still
 	// gets correct, if degenerate, one-at-a-time batch behavior rather
 	// than an empty pick every tick.
-	maxBatch := max(t.MaxBatch, 1)
+	maxBatch := d.adaptiveLimit(ctx, t)
 	if d.controls.Circuits[t.Name].Backoff > 0 {
 		maxBatch = 1
 	}
@@ -1013,6 +1013,7 @@ func (d *Daemon) rejectBatch(ctx context.Context, t config.Target, base, runID s
 // finishBatchRed skips the failed batch without parking individual members:
 // the culprit is unknown. Serial fallback tests them independently.
 func (d *Daemon) finishBatchRed(ctx context.Context, t config.Target, r *run) {
+	d.governorFeedback(t, r, core.OutcomeRejected)
 	checkName := "?"
 	if r.culprit != "" {
 		checkName = r.culprit
@@ -1085,7 +1086,7 @@ func (d *Daemon) refillSpeculate(ctx context.Context, t config.Target, targetTip
 	// Defensive only: production config (config.LoadDaemon) always
 	// defaults/validates Window >= 1 for Mode=="speculate". Mirrors
 	// refillBatch's maxBatch guard for a hand-built queue.Config.
-	window := max(t.Window, 1)
+	window := d.adaptiveLimit(ctx, t)
 
 	var runs []*run
 	if l != nil {

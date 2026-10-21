@@ -9,7 +9,9 @@ Git-ref-driven deployment.
 - Repository-owned KDL check graphs; operator-owned executors, credentials, and Rego policy.
 - Container services, receipts, optional commit signing, and bounded Codex failure review.
 - Dashboard, history, HTTP API, CLI, MCP, GitHub status reporting, and Slack notifications.
-- Incident pause/resume, priority, and explicit emergency validation waivers.
+- Incident pause/resume, fair priorities, safe reordering, and explicit emergency validation waivers.
+- Recoverable pull workers, pluggable autoscaling, and adaptive speculation/batching.
+- Declared-input verification reuse and structured test/shard retries for flakes.
 
 ## Documentation
 

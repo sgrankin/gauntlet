@@ -42,3 +42,12 @@ and running leases can be adopted when that exact prepared identity matches.
 Infrastructure errors are distinct from red validation and receive a bounded
 automatic retry. The [infrastructure breaker](../reference/incidents.md) suspends
 unhealthy execution across revisions without clearing manual incident pauses.
+
+## Adaptive admission
+
+Use the [adaptive governor](../reference/targets.md#adaptive-admission) to learn
+speculative depth or batch size within operator ceilings. Clean useful landings
+grow admission; retries hold growth; failed and invalidated work reduce it.
+Execution saturation and sustained remote backlog limit new speculation while
+existing workers and capacity providers continue making progress. The target
+page exposes the learned limit and useful/wasted execution estimates.

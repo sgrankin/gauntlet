@@ -43,3 +43,43 @@ Gauntlet appends provenance trailers in both modes.
 
 See [landing changes](../guides/landing.md) for submission and retry commands,
 and [queue modes](../architecture/queue-modes.md) for scheduling and recovery.
+
+## Adaptive admission
+
+Enable gradual sizing within the existing `window` or `max-batch` ceiling:
+
+```kdl
+target "main" branch="main" {
+    mode "speculate"
+    window 12
+    adaptive {
+        start 2
+        successes 4
+    }
+}
+```
+
+| `adaptive` field | Default | Contract |
+|---|---|---|
+| `start` | `1` | Initial depth or batch size, at least 1 and no greater than the mode's ceiling. |
+| `successes` | `4` | Clean landed suites needed to grow by one, 1–1,000. |
+
+- A clean, newly executed landed suite advances growth; a batch counts once.
+- A recovered retry resets the clean streak and holds the limit. Reused evidence
+  and emergency validation waivers do not train growth.
+- Failed validation halves the limit, down to one. Invalidated trials with
+  discarded execution do the same. Matching retained verification is not waste.
+- Local execution saturation or a remote backlog older than one lease temporarily
+  caps new admission at `start`. Existing trials continue; bounds never cancel
+  active work. Pending remote checks still wake pools from zero.
+- Learned limits, counters, and a bounded feedback deduplication ledger persist
+  with queue controls. A smaller configured ceiling immediately caps new work.
+- The target page, HTTP status and MCP expose `scheduling`: learned limit,
+  ceiling, current admission cap/capacity pressure, clean streak, landed/retried/failed/invalidated counts, execution cost
+  estimates and the last adjustment reason.
+
+Cost estimates use completed command CPU time when measured, otherwise command
+elapsed time. Cancelled ordinary checks contribute elapsed time up to cancellation;
+this can include remote waiting. Shared/reused verification is excluded from waste.
+These counters describe this governor's observed trials, not a cloud billing meter.
+Without an `adaptive` block, admission uses the fixed configured limit.

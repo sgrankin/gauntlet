@@ -734,6 +734,7 @@ func run() error {
 	// interface in that case, so this only assigns when pool is real.
 	if workerPool != nil {
 		qcfg.KeepExecutions = workerPool.Broker.KeepRun
+		qcfg.ExecutionPressure = workerPool.Broker.Pressure
 	}
 	if pool != nil {
 		qcfg.Services = pool

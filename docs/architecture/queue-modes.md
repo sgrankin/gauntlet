@@ -56,3 +56,14 @@ running or completed passing evidence independently of a speculative run.
 Invalidating a suffix still rebuilds its commit chain, but matching checks
 reattach to existing executions/results. A dependency on a rejected change
 continues to block admission; verification reuse cannot remove that dependency.
+
+## Adaptive sizing
+
+The optional [adaptive governor](../reference/targets.md#adaptive-admission) uses
+additive growth after clean useful landings and multiplicative reduction after
+failed or discarded validation. Batch sizing and speculative depth share this
+feedback model; the configured mode ceiling remains authoritative. Recovered
+retries hold growth, and capacity pressure limits new admission without
+invalidating active work. All feedback runs on the reconcile owner and persists
+with queue controls. Models can investigate retries but cannot change these
+publication rules or train the governor from a validation waiver.

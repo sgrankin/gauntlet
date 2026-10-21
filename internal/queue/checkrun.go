@@ -515,6 +515,15 @@ func stampConsumedImage(res *core.CheckResult, job core.CheckJob) {
 // anymore, and each releases its own execution slot on exit regardless.
 func (d *Daemon) cancelRun(r *run) {
 	for name, inf := range r.inflight {
+		reusable := false
+		for _, check := range r.checks {
+			if check.Name == name && len(check.Inputs) > 0 {
+				reusable = true
+			}
+		}
+		if !reusable && !inf.start.IsZero() {
+			r.abandonedSeconds += max(0, d.now().Sub(inf.start).Seconds())
+		}
 		inf.cancel()
 		obs.EndSpan(inf.span, context.Canceled)
 		delete(r.inflight, name)

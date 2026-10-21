@@ -27,6 +27,7 @@ import (
 // Config supplies queue policy and dependencies. Remote connection and
 // polling belong to the command package.
 type Config struct {
+	ExecutionPressure     func(context.Context) bool
 	KeepExecutions        func(context.Context, string, string) error
 	RemoteExecutorProfile func(string) bool
 	Verification          *verification.Manager
@@ -210,6 +211,7 @@ type runMember struct {
 // without rerunning checks — exactly why losing it (a crash) costs at most
 // a rerun, never correctness.
 type run struct {
+	abandonedSeconds    float64
 	emergencyReason     string
 	pauseOverrideReason string
 	controlPrepared     bool
@@ -313,6 +315,7 @@ type lane struct {
 // Daemon is the reconcile loop over N target branches on one core.GitRepo.
 // The zero value is not usable; construct with New.
 type Daemon struct {
+	admission      map[string]int
 	controls       controlState
 	schedulerDirty bool
 	external       map[string]core.Candidate

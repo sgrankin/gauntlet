@@ -1497,7 +1497,7 @@ target "main" branch="main" {
 			wantErr: "window",
 		},
 		{
-			name: "reserved window-start governor knob rejected",
+			name: "adaptive start beyond ceiling rejected",
 			kdl: `
 remote "https://example.com/repo.git"
 committer {
@@ -1506,13 +1506,13 @@ committer {
 }
 target "main" branch="main" {
     mode "speculate"
-    window-start 1
+    adaptive { start 9; }
 }
 `,
-			wantErr: "reserved for a future adaptive-window governor",
+			wantErr: "adaptive start",
 		},
 		{
-			name: "reserved window-max governor knob rejected",
+			name: "adaptive negative success threshold rejected",
 			kdl: `
 remote "https://example.com/repo.git"
 committer {
@@ -1521,13 +1521,13 @@ committer {
 }
 target "main" branch="main" {
     mode "speculate"
-    window-max 8
+    adaptive { successes -1; }
 }
 `,
-			wantErr: "reserved for a future adaptive-window governor",
+			wantErr: "adaptive start",
 		},
 		{
-			name: "reserved window-halve-on-red governor knob rejected",
+			name: "adaptive negative start rejected",
 			kdl: `
 remote "https://example.com/repo.git"
 committer {
@@ -1536,10 +1536,10 @@ committer {
 }
 target "main" branch="main" {
     mode "speculate"
-    window-halve-on-red true
+    adaptive { start -1; }
 }
 `,
-			wantErr: "reserved for a future adaptive-window governor",
+			wantErr: "adaptive start",
 		},
 		{
 			name: "services allow artifact rejected",

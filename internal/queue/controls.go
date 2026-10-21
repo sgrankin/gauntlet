@@ -25,6 +25,7 @@ type Pause struct {
 }
 
 type controlState struct {
+	Governors        map[string]Governor
 	Prepared         map[string]preparedEntry
 	Scheduled        map[string]string
 	Priorities       map[string]priorityEntry
@@ -49,6 +50,11 @@ type controlState struct {
 // excluded from disk serialization. Persistence alone decides uncertainty.
 func (s controlState) clone() controlState {
 	s.Prepared = maps.Clone(s.Prepared)
+	s.Governors = maps.Clone(s.Governors)
+	for key, g := range s.Governors {
+		g.Recent = slices.Clone(g.Recent)
+		s.Governors[key] = g
+	}
 	s.Order = cloneNested(s.Order)
 	s.Parks = cloneNested(s.Parks)
 	s.AutoRetried = cloneNested(s.AutoRetried)

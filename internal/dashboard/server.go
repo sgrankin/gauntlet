@@ -281,7 +281,8 @@ func (d *dash) handleTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := targetData{
-		Circuit: ts.Circuit, Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled, EmergencyChoices: emergencyChoices(ts),
+		Scheduling: ts.Scheduling,
+		Circuit:    ts.Circuit, Pause: ts.Pause, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled, EmergencyChoices: emergencyChoices(ts),
 		baseData:  d.newBase(ts.Name, snap, true, "targets"),
 		Name:      ts.Name,
 		Branch:    ts.Branch,
@@ -1633,6 +1634,7 @@ type runSummary struct {
 }
 
 type targetData struct {
+	Scheduling       *queue.Scheduling
 	Policy           []queue.PolicyAudit
 	Circuit          *queue.Circuit
 	Pause            *queue.Pause

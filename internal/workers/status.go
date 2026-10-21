@@ -249,3 +249,13 @@ func (b *Broker) drainForRemoval(ctx context.Context, worker string, before time
 	b.notify()
 	return true, nil
 }
+
+// Pressure ignores brief pull-poll latency. Sustained ready backlog constrains
+// new speculation while existing jobs and capacity growth continue normally.
+func (b *Broker) Pressure(ctx context.Context) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var n int
+	err := b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM worker_jobs WHERE state='pending' AND owner_epoch=? AND created<?`, b.epoch, b.now().Add(-b.lease).UnixMilli()).Scan(&n)
+	return err != nil || n > 0
+}

@@ -378,17 +378,18 @@ type statusOut struct {
 // JSON names), deliberately duplicated rather than imported — see the
 // package doc.
 type targetStatus struct {
-	Pause            *queue.Pause     `json:"pause,omitempty"`
-	Circuit          *queue.Circuit   `json:"circuit,omitempty"`
-	ControlError     string           `json:"controlError,omitempty"`
-	EmergencyEnabled bool             `json:"emergencyEnabled"`
-	Name             string           `json:"name"`
-	Branch           string           `json:"branch"`
-	Tip              string           `json:"tip"`
-	InFlight         *inFlightStatus  `json:"inFlight"`
-	Pipeline         []pipelineStatus `json:"pipeline"`
-	Waiting          []waitingStatus  `json:"waiting"`
-	Parked           []parkedStatus   `json:"parked"`
+	Scheduling       *queue.Scheduling `json:"scheduling,omitempty"`
+	Pause            *queue.Pause      `json:"pause,omitempty"`
+	Circuit          *queue.Circuit    `json:"circuit,omitempty"`
+	ControlError     string            `json:"controlError,omitempty"`
+	EmergencyEnabled bool              `json:"emergencyEnabled"`
+	Name             string            `json:"name"`
+	Branch           string            `json:"branch"`
+	Tip              string            `json:"tip"`
+	InFlight         *inFlightStatus   `json:"inFlight"`
+	Pipeline         []pipelineStatus  `json:"pipeline"`
+	Waiting          []waitingStatus   `json:"waiting"`
+	Parked           []parkedStatus    `json:"parked"`
 
 	// LiveHook and HookRuns mirror dashboard/api.go's own targetStatus
 	// additions field-for-field: live post-land hook progress
@@ -571,7 +572,8 @@ const (
 
 func buildTargetStatus(p Params, ts queue.TargetSnapshot) targetStatus {
 	out := targetStatus{
-		Pause: ts.Pause, Circuit: ts.Circuit, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
+		Scheduling: ts.Scheduling,
+		Pause:      ts.Pause, Circuit: ts.Circuit, ControlError: ts.ControlError, EmergencyEnabled: ts.EmergencyEnabled,
 		Name:     ts.Name,
 		Branch:   ts.Branch,
 		Tip:      ts.TargetTip,

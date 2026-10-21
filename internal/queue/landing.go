@@ -219,6 +219,7 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 	// fallback's own one-at-a-time walk. delete is a no-op when the flag
 	// was never set (every non-batch mode, or a batch target that never
 	// went red).
+	d.governorFeedback(t, r, core.OutcomeLanded)
 	delete(d.batchFallback, t.Name)
 	delete(d.batchRecovery, t.Name)
 
@@ -310,6 +311,7 @@ func (d *Daemon) finishRun(ctx context.Context, t config.Target, r *run, outcome
 	// concluded paths (move/cancel/skip), whose records carry whatever
 	// finished before the abort.
 	d.materializeChecks(r)
+	d.governorFeedback(t, r, outcome)
 	for i := range r.members {
 		m := &r.members[i]
 		m.rec.Outcome = outcome

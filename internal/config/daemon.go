@@ -690,16 +690,12 @@ type Target struct {
 	// OnBatchRed selects serial recovery or smaller dependency-valid prefixes.
 	OnBatchRed string `kdl:"on-batch-red"` // serial (default) | bisect
 
-	// WindowStart, WindowMax, and WindowHalveOnRed reserve the config
-	// surface for a future adaptive speculation-window governor
-	// (Zuul-style: start small, grow on green, halve on red). Only the
-	// fixed Window above is implemented; setting any of these three is
-	// rejected at load with a "reserved for a future release" error (same
-	// rationale as OnBatchRed's "bisect") so a config that names them
-	// fails loudly instead of silently no-opping.
-	WindowStart      int  `kdl:"window-start"`
-	WindowMax        int  `kdl:"window-max"`
-	WindowHalveOnRed bool `kdl:"window-halve-on-red"`
+	Adaptive *AdaptiveScheduling `kdl:"adaptive"`
+}
+
+type AdaptiveScheduling struct {
+	Start     int `kdl:"start"`
+	Successes int `kdl:"successes"`
 }
 
 // Hook is one named command a target runs, in order, once a candidate
@@ -1569,17 +1565,23 @@ func (d *Daemon) validate() error {
 			return fmt.Errorf("target %q: mode must be one of \"\", \"serial\", \"batch\", \"speculate\", got %q", t.Name, t.Mode)
 		}
 
-		// NOTE: reserved adaptive-window-governor knobs, parsed for forward
-		// compatibility and always rejected regardless of Mode — see
-		// docs/architecture/queue-modes.md ("Deliberately not built").
-		if t.WindowStart != 0 {
-			return fmt.Errorf("target %q: window-start is reserved for a future adaptive-window governor", t.Name)
-		}
-		if t.WindowMax != 0 {
-			return fmt.Errorf("target %q: window-max is reserved for a future adaptive-window governor", t.Name)
-		}
-		if t.WindowHalveOnRed {
-			return fmt.Errorf("target %q: window-halve-on-red is reserved for a future adaptive-window governor", t.Name)
+		if a := t.Adaptive; a != nil {
+			ceiling := t.Window
+			if t.Mode == "batch" {
+				ceiling = t.MaxBatch
+			}
+			if t.Mode != "batch" && t.Mode != "speculate" {
+				return fmt.Errorf("target %q: adaptive requires batch or speculate mode", t.Name)
+			}
+			if a.Start == 0 {
+				a.Start = 1
+			}
+			if a.Successes == 0 {
+				a.Successes = 4
+			}
+			if a.Start < 1 || a.Start > ceiling || a.Successes < 1 || a.Successes > 1000 {
+				return fmt.Errorf("target %q: adaptive start must fit the ceiling; successes must be 1..1000", t.Name)
+			}
 		}
 	}
 
