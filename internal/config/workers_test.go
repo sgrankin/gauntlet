@@ -3,7 +3,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemoteProfilesRequireWorkersAndKeepRuntimeAuthorityOnWorker(t *testing.T) {
@@ -52,6 +54,33 @@ services { allow "container"; }
 	for _, pair := range [][2]string{{"0", "1g"}, {"NaN", "1g"}, {"1", "999999999999999999999999999g"}, {"1", "0"}} {
 		if _, _, err := ResourceValues(pair[0], pair[1]); err == nil {
 			t.Fatalf("accepted invalid resources %v", pair)
+		}
+	}
+}
+
+func TestCapacityPoolConfigBoundsAndProfileReferences(t *testing.T) {
+	base := profileTestBase + `workers {
+ pool "linux" {
+ provider "command"
+ command "/opt/capacity"
+ profiles "ci"
+ cpus "8"
+ memory "16g"
+ slots 2
+ max-nodes 4
+ price-per-hour 0.5
+ max-hourly-cost 2.0
+ }
+}
+executor "ci" kind="remote" {labels "linux";}
+`
+	cfg, err := loadDaemonString(t, base)
+	if err != nil || len(cfg.Workers.Pools) != 1 || cfg.Workers.Pools[0].IdleTimeout != 5*time.Minute {
+		t.Fatalf("pool config: %+v %v", cfg, err)
+	}
+	for _, change := range [][2]string{{`max-nodes 4`, `max-nodes 0`}, {`profiles "ci"`, `profiles "missing"`}, {`slots 2`, `slots 1; urgent-reserve 1`}, {`max-hourly-cost 2.0`, `max-hourly-cost 0.1; warm-nodes 1`}, {`provider "command"`, `provider "azure-vmss"`}} {
+		if _, err := loadDaemonString(t, strings.Replace(base, change[0], change[1], 1)); err == nil {
+			t.Fatalf("accepted invalid pool: %v", change)
 		}
 	}
 }

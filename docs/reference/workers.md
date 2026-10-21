@@ -26,6 +26,8 @@ Remote profiles require a `workers` block. Runtime, image, environment, cache,
 and mount settings belong in worker-local profiles. The daemon's default profile
 remains local/container for operator-owned hooks and deployment commands.
 
+See [capacity pools](capacity.md) for optional autoscaling providers.
+
 ## Worker file
 
 `gauntlet worker -config FILE -state DIRECTORY` loads a worker file:

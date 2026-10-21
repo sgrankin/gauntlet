@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -14,20 +15,25 @@ type Peer struct {
 	Running int       `json:"running"`
 }
 type Demand struct {
+	Worker       string       `json:"worker,omitempty"`
+	Priority     int          `json:"priority"`
+	Image        bool         `json:"image"`
+	Services     bool         `json:"services"`
 	Profile      string       `json:"profile"`
 	Requirements Requirements `json:"requirements"`
 	Pending      int          `json:"pending"`
 	Running      int          `json:"running"`
 }
 type Status struct {
-	Workers []Peer   `json:"workers"`
-	Demand  []Demand `json:"demand"`
+	Workers []Peer       `json:"workers"`
+	Demand  []Demand     `json:"demand"`
+	Pools   []PoolStatus `json:"pools,omitempty"`
 }
 
 func (b *Broker) Status(ctx context.Context) (Status, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var status Status
+	status := Status{Pools: append([]PoolStatus(nil), b.pools...)}
 	rows, err := b.db.QueryContext(ctx, `SELECT data,seen,draining,(SELECT COUNT(*) FROM worker_jobs WHERE worker=worker_peers.id AND state='leased') FROM worker_peers ORDER BY id`)
 	if err != nil {
 		return status, err
@@ -57,7 +63,7 @@ func (b *Broker) Status(ctx context.Context) (Status, error) {
 	if readErr != nil {
 		return status, readErr
 	}
-	rows, err = b.db.QueryContext(ctx, `SELECT json_extract(job,'$.Executor'),needs,state,COUNT(*) FROM worker_jobs WHERE state IN ('pending','leased') AND owner_epoch=? GROUP BY json_extract(job,'$.Executor'),needs,state ORDER BY 1,2,3`, b.epoch)
+	rows, err = b.db.QueryContext(ctx, `SELECT json_extract(job,'$.Executor'),needs,state,CASE WHEN state='leased' THEN worker ELSE '' END,priority,COALESCE(json_extract(job,'$.Image'),'')!='',COALESCE(json_array_length(json_extract(job,'$.ServiceNeeds')),0)>0,COUNT(*) FROM worker_jobs WHERE state IN ('pending','leased') AND owner_epoch=? GROUP BY 1,2,3,4,5,6,7 ORDER BY priority DESC,1,2,3,4`, b.epoch)
 	if err != nil {
 		return status, err
 	}
@@ -66,7 +72,7 @@ func (b *Broker) Status(ctx context.Context) (Status, error) {
 		var data []byte
 		var state string
 		var count int
-		if err = rows.Scan(&demand.Profile, &data, &state, &count); err != nil {
+		if err = rows.Scan(&demand.Profile, &data, &state, &demand.Worker, &demand.Priority, &demand.Image, &demand.Services, &count); err != nil {
 			break
 		}
 		if err = json.Unmarshal(data, &demand.Requirements); err != nil {
@@ -183,4 +189,63 @@ func (b *Broker) KeepRun(ctx context.Context, runID, sha string) error {
 		b.notify()
 	}
 	return err
+}
+
+// drainForRemoval shares Claim's lock. A fresh claim cannot race an idle
+// decision. Offline replacement revokes expired tokens before deleting a node.
+func (b *Broker) drainForRemoval(ctx context.Context, worker string, before time.Time, offline bool) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var data []byte
+	var seen int64
+	err = tx.QueryRowContext(ctx, `SELECT data,seen FROM worker_peers WHERE id=?`, worker).Scan(&data, &seen)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var peer Worker
+	if err = json.Unmarshal(data, &peer); err != nil {
+		return false, err
+	}
+	if offline {
+		if seen >= before.UnixMilli() || b.now().Sub(b.born) < b.grace {
+			return false, nil
+		}
+		var active int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM worker_jobs WHERE worker=? AND state='leased' AND lease_until>=?`, worker, b.now().UnixMilli()).Scan(&active); err != nil {
+			return false, err
+		}
+		if active > 0 {
+			return false, nil
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE worker_jobs SET state='pending',token='',worker='',session='',lease_until=0 WHERE worker=? AND state='leased'`, worker); err != nil {
+			return false, err
+		}
+	} else {
+		if b.now().Sub(time.UnixMilli(seen)) > 2*b.lease || peer.Usage.Slots != 0 || peer.Usage.CPU != 0 || peer.Usage.Memory != 0 {
+			return false, nil
+		}
+		var active int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM worker_jobs WHERE worker=? AND state='leased'`, worker).Scan(&active); err != nil {
+			return false, err
+		}
+		if active > 0 {
+			return false, nil
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE worker_peers SET draining=1 WHERE id=?`, worker); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	b.notify()
+	return true, nil
 }

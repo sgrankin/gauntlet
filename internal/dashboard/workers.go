@@ -33,6 +33,7 @@ type workerView struct {
 }
 type workersPage struct {
 	baseData
+	Pools   []workers.PoolStatus
 	Workers []workerView
 	Demand  []workers.Demand
 	Error   string
@@ -48,6 +49,7 @@ func (d *dash) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		data.Error = "Worker status is unavailable."
 	} else {
+		data.Pools = status.Pools
 		data.Demand = status.Demand
 		for _, peer := range status.Workers {
 			state := "ready"

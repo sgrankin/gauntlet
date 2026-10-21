@@ -10,6 +10,8 @@ ordered publication stream; checks are the expensive part.
 - Keep container images, module caches, and reusable services warm.
 - Run one daemon per repository with separate state directories. Do not run
   competing daemons against the same queue remote.
+- Use [dedicated autoscaling pools](../guides/autoscaling.md) for external providers
+  or Azure VMSS, including scale-to-zero and warm capacity.
 - Deallocate an idle Azure builder while preserving its disks. Wake detection
   must run elsewhere because a stopped daemon cannot discover submissions.
   See [Azure operations](../runbooks/azure-operations.md).

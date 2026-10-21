@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -1404,6 +1405,32 @@ func (d *Daemon) validate() error {
 	if d.Workers != nil {
 		if err := d.Workers.validate(); err != nil {
 			return err
+		}
+		resources := map[string]bool{}
+		for _, pool := range d.Workers.Pools {
+			if pool.Provider == "azure-vmss" {
+				id := strings.ToLower(pool.ResourceID)
+				if resources[id] {
+					return fmt.Errorf("workers: scale sets must belong to one pool")
+				}
+				resources[id] = true
+			}
+			for _, name := range pool.Profiles {
+				found := false
+				for _, profile := range d.Profiles {
+					if profile.Name == name && profile.Kind == "remote" {
+						found = true
+					}
+				}
+				if !found {
+					return fmt.Errorf("worker pool %q: unknown remote profile %q", pool.Name, name)
+				}
+			}
+			for _, name := range append(append([]string{}, pool.ImageProfiles...), pool.ServiceProfiles...) {
+				if !slices.Contains(pool.Profiles, name) {
+					return fmt.Errorf("worker pool %q: capability profile %q not in profiles", pool.Name, name)
+				}
+			}
 		}
 	}
 	if d.Policy != nil {

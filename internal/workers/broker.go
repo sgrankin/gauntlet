@@ -21,6 +21,7 @@ var ErrCapacity = errors.New("worker backlog is full")
 var ErrStale = errors.New("worker attempt was cancelled or reassigned")
 
 type Broker struct {
+	pools        []PoolStatus
 	epoch        string
 	waiters      map[string]int
 	closed       bool

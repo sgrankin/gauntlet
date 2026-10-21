@@ -55,6 +55,11 @@ func startWorkers(ctx context.Context, cancel context.CancelFunc, cfg *config.Da
 		}
 	}
 	runtime := &workerRuntime{Broker: broker, Executor: &workers.Executor{Broker: broker, Root: ctx, Profiles: profiles}}
+	scaler, err := workerScaler(broker, settings, state)
+	if err != nil {
+		broker.Close()
+		return nil, err
+	}
 	listener, err := net.Listen("tcp", settings.Listen)
 	if err != nil {
 		broker.Close()
@@ -96,6 +101,24 @@ func startWorkers(ctx context.Context, cancel context.CancelFunc, cfg *config.Da
 			}
 		}
 	}()
+	if len(settings.Pools) > 0 {
+		runtime.done.Add(1)
+		go func() {
+			defer runtime.done.Done()
+			ticker := time.NewTicker(settings.ScaleInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-maintenanceCtx.Done():
+					return
+				case <-ticker.C:
+					if err := scaler.Tick(maintenanceCtx); err != nil && maintenanceCtx.Err() == nil {
+						fmt.Fprintf(os.Stderr, "gauntlet capacity: %v\n", err)
+					}
+				}
+			}
+		}()
+	}
 	return runtime, nil
 }
 
@@ -217,3 +240,21 @@ func runWorker(args []string) error {
 }
 
 var _ core.Executor = (*workers.Executor)(nil)
+
+func workerScaler(b *workers.Broker, cfg *config.Workers, state string) (*workers.Scaler, error) {
+	var pools []workers.Pool
+	for _, p := range cfg.Pools {
+		cpu, memory, err := config.ResourceValues(p.CPUs, p.Memory)
+		if err != nil {
+			return nil, err
+		}
+		var provider workers.CapacityProvider
+		if p.Provider == "command" {
+			provider = workers.CommandProvider{Command: p.Command}
+		} else {
+			provider = workers.AzureVMSS{ResourceID: p.ResourceID, CLI: p.Command}
+		}
+		pools = append(pools, workers.Pool{Name: p.Name, Provider: provider, Worker: workers.Worker{Profiles: p.Profiles, ImageProfiles: p.ImageProfiles, ServiceProfiles: p.ServiceProfiles, Labels: p.Labels, Capacity: workers.Resources{Slots: p.Slots, CPU: cpu, Memory: memory}, UrgentReserve: p.UrgentReserve}, Warm: p.WarmNodes, Max: p.MaxNodes, IdleTimeout: p.IdleTimeout, StartupTimeout: p.StartupTimeout, PricePerHour: p.PricePerHour, MaxHourlyCost: p.MaxHourlyCost})
+	}
+	return workers.NewScaler(b, pools, filepath.Join(state, "worker-capacity.json"))
+}

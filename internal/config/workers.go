@@ -14,6 +14,8 @@ import (
 )
 
 type Workers struct {
+	ScaleInterval  time.Duration `kdl:"scale-interval,format:units"`
+	Pools          []WorkerPool  `kdl:"pool,multiple"`
 	Listen         string        `kdl:"listen"`
 	TokenEnv       string        `kdl:"token-env"`
 	TLSCert        string        `kdl:"tls-cert"`
@@ -23,6 +25,18 @@ type Workers struct {
 }
 
 func (w *Workers) defaults() {
+	if w.ScaleInterval == 0 {
+		w.ScaleInterval = 30 * time.Second
+	}
+	for i := range w.Pools {
+		p := &w.Pools[i]
+		if p.IdleTimeout == 0 {
+			p.IdleTimeout = 5 * time.Minute
+		}
+		if p.StartupTimeout == 0 {
+			p.StartupTimeout = 10 * time.Minute
+		}
+	}
 	if w.Listen == "" {
 		w.Listen = "127.0.0.1:8081"
 	}
@@ -37,6 +51,19 @@ func (w *Workers) defaults() {
 	}
 }
 func (w *Workers) validate() error {
+	if w.ScaleInterval < time.Second || w.ScaleInterval > time.Hour {
+		return fmt.Errorf("workers: scale-interval must be 1s..1h")
+	}
+	seen := map[string]bool{}
+	for _, p := range w.Pools {
+		if seen[p.Name] {
+			return fmt.Errorf("workers: duplicate pool %q", p.Name)
+		}
+		seen[p.Name] = true
+		if err := p.validate(); err != nil {
+			return fmt.Errorf("worker pool %q: %w", p.Name, err)
+		}
+	}
 	host, _, err := net.SplitHostPort(w.Listen)
 	if err != nil {
 		return fmt.Errorf("workers: invalid listen address")
