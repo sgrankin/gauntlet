@@ -1,0 +1,14 @@
+{{define "content"}}
+<div class="headrow"><h1>Workers</h1><a href="/api/v1/workers">JSON status</a></div>
+{{if .Error}}<p class="tag bad">{{.Error}}</p>{{end}}
+<div class="section"><h2>Fleet</h2>
+{{if .Workers}}<table><thead><tr><th>Worker</th><th>State</th><th>Checks</th><th>Capacity</th><th>Profiles and labels</th><th>Last seen</th></tr></thead><tbody>
+{{range .Workers}}<tr><td>{{.ID}}</td><td>{{.State}}</td><td>{{.Running}}</td><td>{{.Capacity}}</td><td>{{.Profiles}}<br><span class="muted">{{.Labels}}</span></td><td>{{.Seen}}</td></tr>{{end}}
+</tbody></table>{{else}}<p class="muted">No workers have connected. Ready checks remain queued until a matching worker arrives.</p>{{end}}
+</div>
+<div class="section"><h2>Demand</h2>
+{{if .Demand}}<table><thead><tr><th>Profile</th><th>Pending</th><th>Running</th><th>Required labels</th></tr></thead><tbody>
+{{range .Demand}}<tr><td>{{.Profile}}</td><td>{{.Pending}}</td><td>{{.Running}}</td><td>{{range .Requirements.Labels}}{{.}} {{end}}</td></tr>{{end}}
+</tbody></table>{{else}}<p class="muted">No remote checks need capacity.</p>{{end}}
+</div>
+{{end}}

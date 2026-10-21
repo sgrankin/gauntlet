@@ -67,11 +67,13 @@ func TestVerificationProvenanceRoundTrips(t *testing.T) {
 	record.Checks[0].ExecutedRun = "original"
 	record.Checks[0].ExecutedSHA = "old-commit"
 	record.Checks[0].Reused = true
+	record.Checks[0].ExecutionID = "worker-attempt"
+	record.Checks[0].Worker = "vmss-42"
 	if err := s.Emit(t.Context(), core.Event{Record: record}); err != nil {
 		t.Fatal(err)
 	}
 	_, checks, err := s.Run("rebuilt")
-	if err != nil || len(checks) == 0 || checks[0].VerificationID != "inputs-identity" || checks[0].ExecutedRun != "original" || checks[0].ExecutedSHA != "old-commit" || !checks[0].Reused {
+	if err != nil || len(checks) == 0 || checks[0].VerificationID != "inputs-identity" || checks[0].ExecutedRun != "original" || checks[0].ExecutedSHA != "old-commit" || !checks[0].Reused || checks[0].ExecutionID != "worker-attempt" || checks[0].Worker != "vmss-42" {
 		t.Fatalf("provenance: %+v %v", checks, err)
 	}
 }

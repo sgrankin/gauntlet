@@ -845,7 +845,7 @@ func (d *Daemon) finishBatchStart(ctx context.Context, t config.Target, base, ru
 		return
 	}
 	// Spec-load gates, same as startRun's (see SpecRejectReason).
-	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil); reason != "" {
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil, d.cfg.RemoteExecutorProfile); reason != "" {
 		d.rejectBatch(ctx, t, base, runID, links, trials, core.OutcomeRejected, reason, rootSpan)
 		return
 	}
@@ -1278,7 +1278,7 @@ func (d *Daemon) startRun(ctx context.Context, t config.Target, base string, can
 	// (Config.KnownExecutorProfile's / ImageCapableProfile's docs;
 	// docs/architecture/services.md, "The model: a cache entry, not a
 	// supervised unit").
-	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil); reason != "" {
+	if reason := SpecRejectReason(spec, d.cfg.Services != nil, d.cfg.KnownExecutorProfile, d.cfg.ImageCapableProfile, d.cfg.ReceiptNotes != nil, d.cfg.RemoteExecutorProfile); reason != "" {
 		d.rejectRun(ctx, t, cand, runID, base, link.mergeOID, trial, core.OutcomeRejected, reason, rootSpan)
 		return nil, false
 	}

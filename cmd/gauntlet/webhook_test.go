@@ -32,7 +32,7 @@ func TestGitHubWebhookServerWakesReconciliation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	defer func() { cancel(); wg.Wait() }()
-	startDashboard(ctx, cfg, func() *queue.Snapshot { return nil }, nil, nil, t.TempDir(), nil, nil, nil, deployWiring{}, nil, &wg, handler)
+	startDashboard(ctx, cfg, func() *queue.Snapshot { return nil }, nil, nil, t.TempDir(), nil, nil, nil, dashboardWiring{}, nil, &wg, handler)
 	base := "http://" + cfg.Dashboard.Bind
 	waitForServer(t, base+"/deploys")
 	body := `{"repository":{"full_name":"acme/repo"}}`

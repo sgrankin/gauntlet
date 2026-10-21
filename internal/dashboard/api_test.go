@@ -16,6 +16,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/dashboard"
 	"github.com/sgrankin/gauntlet/internal/queue"
+	"github.com/sgrankin/gauntlet/internal/workers"
 )
 
 func decodeJSON(t *testing.T, body string) map[string]any {
@@ -1732,5 +1733,17 @@ func TestSchedulePreviewDoesNotQueueCommand(t *testing.T) {
 	case <-ch.Commands():
 		t.Fatal("preview mutated queue")
 	default:
+	}
+}
+
+func TestWorkerFleetStatusAndPage(t *testing.T) {
+	status := workers.Status{Workers: []workers.Peer{{Online: true, Worker: workers.Worker{ID: "azure-sql-1", Profiles: []string{"sql"}, Capacity: workers.Resources{Slots: 4, CPU: 8000, Memory: 16 << 30}}, Running: 2}}}
+	handler := dashboard.New(func() *queue.Snapshot { return &queue.Snapshot{} }, nil, dashboard.WithWorkers(func(context.Context) (workers.Status, error) { return status, nil }))
+	for _, path := range []string{"/workers", "/api/v1/workers"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("GET", path, nil))
+		if response.Code != 200 || !strings.Contains(response.Body.String(), "azure-sql-1") {
+			t.Fatalf("fleet %s: %d %s", path, response.Code, response.Body.String())
+		}
 	}
 }

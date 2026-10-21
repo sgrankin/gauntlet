@@ -9,8 +9,11 @@ type TestCase struct {
 }
 
 type TestAttempt struct {
-	Command []string   `json:"command,omitempty"`
-	LogPath string     `json:"logPath,omitempty"`
-	Number  int        `json:"number"`
-	Tests   []TestCase `json:"tests"`
+	LogDigest   string     `json:"logDigest,omitempty"`
+	ExecutionID string     `json:"executionId,omitempty"`
+	Worker      string     `json:"worker,omitempty"`
+	Command     []string   `json:"command,omitempty"`
+	LogPath     string     `json:"logPath,omitempty"`
+	Number      int        `json:"number"`
+	Tests       []TestCase `json:"tests"`
 }

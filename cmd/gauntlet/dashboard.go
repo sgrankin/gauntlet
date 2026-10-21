@@ -19,21 +19,16 @@ import (
 	gauntletmcp "github.com/sgrankin/gauntlet/internal/mcp"
 	"github.com/sgrankin/gauntlet/internal/queue"
 	"github.com/sgrankin/gauntlet/internal/services"
+	"github.com/sgrankin/gauntlet/internal/workers"
 )
 
 // dashboardShutdownTimeout bounds the dashboard's graceful shutdown so
 // daemon exit is never hung waiting on a slow client.
 const dashboardShutdownTimeout = 5 * time.Second
 
-// deployWiring is the deploy subsystem's half of the dashboard/MCP wiring:
-// the tracker's published snapshot plus its two operator entry points. Every
-// field is nil when deployment isn't configured (main.go's buildDeployTracker
-// returned nil), in which case both surfaces degrade to their documented
-// "deploy not configured" responses — exactly as store == nil degrades every
-// history-backed view. Grouped into one struct rather than three more
-// positional parameters, which startDashboard's signature is already long
-// on.
-type deployWiring struct {
+// dashboardWiring supplies optional deployment and worker surfaces.
+type dashboardWiring struct {
+	Workers  func(context.Context) (workers.Status, error)
 	Snapshot func() *deploy.Snapshot
 	Retry    func(env string) bool
 	Cancel   func(env string) bool
@@ -84,16 +79,16 @@ type deployWiring struct {
 // nil-safely mirroring hookSnapshot: nil here means both surfaces simply
 // omit the pool entirely (design §10's tuning instrument, S5-style parity).
 //
-// dep carries the deploy subsystem's wiring (see deployWiring above): all
-// three fields nil when no environment is configured, in which case the
-// deploys nav entry is hidden, /deploys says so, and every deploy route on
-// both surfaces answers "deploy not configured".
-func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep deployWiring, drain func(time.Time), wg *sync.WaitGroup, webhook http.Handler, failureHistory ...*flaky.History) {
+// dep supplies optional deployment and worker views.
+func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *queue.Snapshot, store *history.Store, dashCh *dashboard.Channel, logDir string, hookCancel func(target string) bool, hookSnapshot func(target string) (hooks.LiveState, bool), servicesSnapshot func() services.PoolStatus, dep dashboardWiring, drain func(time.Time), wg *sync.WaitGroup, webhook http.Handler, failureHistory ...*flaky.History) {
 	if cfg.Dashboard.Bind == "" {
 		return
 	}
 
 	var opts []dashboard.Option
+	if dep.Workers != nil {
+		opts = append(opts, dashboard.WithWorkers(dep.Workers))
+	}
 	if len(failureHistory) > 0 {
 		opts = append(opts, dashboard.WithFailureHistory(failureHistory[0]))
 	}
@@ -174,7 +169,7 @@ func startDashboard(ctx context.Context, cfg *config.Daemon, snapshot func() *qu
 	// "GET /{$}" for its index rather than a catch-all, so it doesn't
 	// shadow /mcp.
 	mcpParams := gauntletmcp.Params{
-		Snapshot: snapshot, Store: store, LogRoot: logDir,
+		Snapshot: snapshot, Store: store, LogRoot: logDir, Workers: dep.Workers,
 		Retry: retryOrCancel, Cancel: retryOrCancel, HookCancel: hookCancel,
 		Drain: drain,
 	}

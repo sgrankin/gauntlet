@@ -141,6 +141,7 @@ var validSummarizeEfforts = map[string]bool{
 // nodes actually present), so "section present" is encoded as "its required
 // key is non-empty" rather than a nil check.
 type Daemon struct {
+	Workers         *Workers        `kdl:"workers"`
 	Policy          *Policy         `kdl:"policy"`
 	CircuitBreaker  *CircuitBreaker `kdl:"circuit-breaker"`
 	EmergencyMerges bool            `kdl:"emergency-merges"`
@@ -426,9 +427,11 @@ type OTLP struct {
 // capability stays operator-owned here — no per-check mount sources,
 // runtime flags, or resource overrides can come from the repo.
 type Executor struct {
-	Arg  string `kdl:",arg"` // raw first argument; resolved by applyDefaults, never read downstream
-	Kind string `kdl:"kind"` // "local" | "container" (property form ⇒ named profile)
-	Name string `kdl:"-"`    // resolved profile name; "" = the default profile
+	Labels         []string `kdl:"labels"`
+	SupportsImages bool     `kdl:"supports-images"`
+	Arg            string   `kdl:",arg"` // raw first argument; resolved by applyDefaults, never read downstream
+	Kind           string   `kdl:"kind"` // "local" | "container" (property form ⇒ named profile)
+	Name           string   `kdl:"-"`    // resolved profile name; "" = the default profile
 
 	Runtime string  `kdl:"runtime"` // "docker"|"podman"|"container"; default "container"
 	Image   string  `kdl:"image"`   // required when Kind=="container"
@@ -721,6 +724,14 @@ func LoadDaemon(path string) (*Daemon, error) {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 	d.applyDefaults()
+	if d.Workers != nil && d.Workers.TLSCert != "" {
+		if !filepath.IsAbs(d.Workers.TLSCert) {
+			d.Workers.TLSCert = filepath.Join(filepath.Dir(path), d.Workers.TLSCert)
+		}
+		if !filepath.IsAbs(d.Workers.TLSKey) {
+			d.Workers.TLSKey = filepath.Join(filepath.Dir(path), d.Workers.TLSKey)
+		}
+	}
 	if err := d.validate(); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
@@ -803,6 +814,9 @@ func applyExecutorDefaults(e *Executor) {
 }
 
 func (d *Daemon) applyDefaults() {
+	if d.Workers != nil {
+		d.Workers.defaults()
+	}
 	if d.Policy != nil {
 		d.Policy.defaults()
 	}
@@ -1210,7 +1224,17 @@ func validateAppRemote(remote, apiURL, repo string) error {
 // `executor "ci"` for a profile) so an operator can tell which block is at
 // fault.
 func validateExecutor(e *Executor, label string) error {
+	if e.Kind != "remote" && (len(e.Labels) > 0 || e.SupportsImages) {
+		return fmt.Errorf("%s: labels and supports-images are remote-only", label)
+	}
 	switch e.Kind {
+	case "remote":
+		if e.Image != "" || e.Runtime != "" || e.Workdir != "" || len(e.Caches) > 0 || len(e.Mounts) > 0 || len(e.Env) > 0 || len(e.AddHosts) > 0 {
+			return fmt.Errorf("%s: worker runtime settings belong in worker configuration", label)
+		}
+		if _, _, err := ResourceValues(e.CPUs, e.Memory); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
 	case "local":
 		// Container-only options on a local profile are rejected loudly
 		// rather than silently no-opped ("reserved, rejected if set" house
@@ -1350,6 +1374,9 @@ func (d *Daemon) SecretEnvNames() []string {
 	if d.FailureReview != nil {
 		names = append(names, d.FailureReview.TokenEnv)
 	}
+	if d.Workers != nil {
+		names = append(names, d.Workers.TokenEnv)
+	}
 	if g := d.Gerrit; g != nil {
 		names = append(names, g.UsernameEnv, g.TokenEnv)
 	}
@@ -1374,6 +1401,11 @@ func (d *Daemon) SecretEnvNames() []string {
 }
 
 func (d *Daemon) validate() error {
+	if d.Workers != nil {
+		if err := d.Workers.validate(); err != nil {
+			return err
+		}
+	}
 	if d.Policy != nil {
 		if err := d.Policy.validate(); err != nil {
 			return err
@@ -1667,8 +1699,11 @@ func (d *Daemon) validate() error {
 		// A named profile's kind is explicit by construction
 		// (resolveExecutors requires the property), so unlike the default
 		// profile it never defaults — reject anything but the two kinds.
-		if p.Kind != "local" && p.Kind != "container" {
+		if p.Kind != "local" && p.Kind != "container" && p.Kind != "remote" {
 			return fmt.Errorf("%s: kind must be \"local\" or \"container\", got %q", label, p.Kind)
+		}
+		if p.Kind == "remote" && d.Workers == nil {
+			return fmt.Errorf("%s: remote executor requires workers", label)
 		}
 		if err := validateExecutor(p, label); err != nil {
 			return err

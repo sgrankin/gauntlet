@@ -25,7 +25,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 19
+const schemaVersion = 20
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -397,6 +397,10 @@ PRAGMA user_version = 18`); err != nil {
 			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN test_report TEXT NOT NULL DEFAULT '{}'; PRAGMA user_version=19`); err != nil {
 				return fmt.Errorf("history: test reports: %w", err)
 			}
+		case 19:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''; ALTER TABLE checks ADD COLUMN worker TEXT NOT NULL DEFAULT ''; PRAGMA user_version=20`); err != nil {
+				return fmt.Errorf("history: worker provenance: %w", err)
+			}
 		case schemaVersion:
 			return db.Commit()
 		default:
@@ -601,7 +605,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			cr.PeakRSS,
 			cr.UserCPU.Milliseconds(),
 			cr.SysCPU.Milliseconds(),
-			cr.VerificationID, cr.ExecutedRun, cr.ExecutedSHA, cr.Reused, string(report),
+			cr.VerificationID, cr.ExecutedRun, cr.ExecutedSHA, cr.Reused, string(report), cr.ExecutionID, cr.Worker,
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

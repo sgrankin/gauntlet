@@ -47,9 +47,15 @@ type TrialMerge struct {
 
 // CheckJob describes one named check to run against an exported trial tree.
 type CheckJob struct {
-	TestResults  string
-	RetryCommand []string
-	RetryTests   []string
+	RecordLogs        bool
+	HistoryMtimes     bool
+	ServiceSpecs      []byte
+	ServiceNeeds      []string
+	Priority          string
+	PreviousExecution string
+	TestResults       string
+	RetryCommand      []string
+	RetryTests        []string
 	// VerificationID binds retries and results to declared semantic inputs.
 	VerificationID string
 	InputsCapture  bool
@@ -156,8 +162,9 @@ const (
 // is nil. Command-start failures and nonzero exits are CheckFailed; Err is
 // reserved for cancellation and executor infrastructure failures.
 type CheckResult struct {
-	Tests        []TestCase
-	TestAttempts []TestAttempt
+	ExecutionID, Worker string
+	Tests               []TestCase
+	TestAttempts        []TestAttempt
 	// InputsKey is transient output from an input-identity command. VerificationID
 	// binds evidence to inputs; execution provenance survives reuse and restart.
 	InputsKey                string

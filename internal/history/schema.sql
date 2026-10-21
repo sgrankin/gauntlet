@@ -119,6 +119,8 @@ CREATE TABLE checks (
   executed_sha TEXT NOT NULL DEFAULT '',
   reused INTEGER NOT NULL DEFAULT 0,
   test_report TEXT NOT NULL DEFAULT '{}',
+  execution_id TEXT NOT NULL DEFAULT '',
+  worker TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX idx_checks_name ON checks(name);

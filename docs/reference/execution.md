@@ -48,6 +48,9 @@ For socket mounts and testcontainers networking, follow the
 [container guide](../guides/containers.md). Read-only socket mounts do not restrict
 runtime commands; local checks and socket-enabled profiles require trusted code.
 
+Named `kind="remote"` profiles dispatch to [pull workers](../guides/workers.md).
+Worker profile selection and resource settings are in the [worker reference](workers.md).
+
 ## Host capacity
 
 `max-executions` caps bounded commands across targets, queue modes, and profiles,

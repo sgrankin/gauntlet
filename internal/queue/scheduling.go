@@ -401,7 +401,7 @@ func (d *Daemon) applyScheduling(ctx context.Context, cmd core.Command, target c
 	}
 }
 
-func (d *Daemon) runUrgent(r *run) bool {
+func (d *Daemon) runPriority(r *run) int {
 	candidates := maps.Clone(d.external)
 	if candidates == nil {
 		candidates = map[string]core.Candidate{}
@@ -409,10 +409,11 @@ func (d *Daemon) runUrgent(r *run) bool {
 	for _, member := range r.members {
 		candidates[member.cand.Ref] = member.cand
 	}
+	rank := 0
 	for _, member := range r.members {
-		if d.urgent(member.cand.Target, member.cand.Ref, candidates) {
-			return true
-		}
+		rank = max(rank, d.priorityAt(member.cand.Target, member.cand.Ref, candidates, d.clockNow()))
 	}
-	return false
+	return rank
 }
+
+func (d *Daemon) runUrgent(r *run) bool { return d.runPriority(r) >= 3 }

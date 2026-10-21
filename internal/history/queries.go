@@ -21,8 +21,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused, test_report)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused, test_report, execution_id, worker)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -139,6 +139,7 @@ type RunRow struct {
 
 // CheckRow is one row of the checks table, as read back for the dashboard.
 type CheckRow struct {
+	ExecutionID, Worker                      string
 	Tests                                    []core.TestCase
 	TestAttempts                             []core.TestAttempt
 	VerificationID, ExecutedRun, ExecutedSHA string
@@ -378,7 +379,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused, test_report FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused, test_report, execution_id, worker FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -391,7 +392,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 		var c CheckRow
 		var report string
 		var durationMS, waitedMS, materializeMS, userCPUms, sysCPUms int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms, &c.VerificationID, &c.ExecutedRun, &c.ExecutedSHA, &c.Reused, &report); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms, &c.VerificationID, &c.ExecutedRun, &c.ExecutedSHA, &c.Reused, &report, &c.ExecutionID, &c.Worker); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
 		var decoded struct {

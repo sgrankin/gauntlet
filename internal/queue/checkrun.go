@@ -2,9 +2,11 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -19,6 +21,24 @@ import (
 // failure, and starts ready nodes within execution limits. It does not
 // decide whether the run should land or requeue.
 func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
+	remoteGraph := false
+	if d.cfg.RemoteExecutorProfile != nil {
+		for _, check := range r.checks {
+			if d.cfg.RemoteExecutorProfile(check.Executor) {
+				remoteGraph = true
+				break
+			}
+		}
+	}
+	if remoteGraph && d.cfg.KeepExecutions != nil {
+		if err := d.cfg.KeepExecutions(ctx, r.runID, r.chainTip); err != nil {
+			d.controls.LastError = "worker recovery: " + err.Error()
+			return
+		}
+		if strings.HasPrefix(d.controls.LastError, "worker recovery: ") {
+			d.controls.LastError = ""
+		}
+	}
 	if r.verdict != verdictNone {
 		return // already determined; waiting its turn behind a predecessor
 	}
@@ -296,8 +316,10 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	checkCtx, cancel := context.WithCancel(r.rootCtx)
 	spanCtx, span := obs.StartCheck(checkCtx, d.tr, check.Name)
 
+	remote := d.cfg.RemoteExecutorProfile != nil && d.cfg.RemoteExecutorProfile(check.Executor)
 	job := core.CheckJob{
-		TestResults: check.TestResults, RetryCommand: check.RetryCommand,
+		HistoryMtimes: d.cfg.HistoryMtimes,
+		TestResults:   check.TestResults, RetryCommand: check.RetryCommand,
 		GitDir:    d.cfg.SourceGitDir,
 		RunID:     r.runID,
 		Target:    r.target,
@@ -310,6 +332,11 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		MergeSHA:  r.chainTip,
 		Candidate: r.members[0].cand,
 		Clean:     false, // reserved for a future clean-build cache escape hatch; see docs/architecture/queue.md ("Deliberately not built")
+	}
+	if remote {
+		job.ServiceSpecs, _ = json.Marshal(r.services)
+		job.ServiceNeeds = check.Needs
+		job.Priority = []string{"low", "normal", "high", "urgent"}[d.runPriority(r)]
 	}
 	for _, m := range r.members {
 		job.Candidates = append(job.Candidates, m.cand)
@@ -420,7 +447,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		// never a fallback to a shared dir. The dir is removed after
 		// RunCheck returns (child stopped), covering pass/fail/cancel.
 		var materialized time.Duration
-		if isolated {
+		if isolated && !remote {
 			wsDir, took, err := d.materializeNode(spanCtx, chainTree, chainTip)
 			if err != nil {
 				result <- core.CheckResult{Name: check.Name, Command: job.Command, Err: fmt.Errorf("materialize workspace: %w", err)}
@@ -437,10 +464,10 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 		// job.Command is already in scope at every send point below and this
 		// is the one place a CheckResult crosses back from "what was run" to
 		// "what history records" — see core.CheckResult.Command's doc.
-		if len(needs) == 0 || d.cfg.Services == nil {
+		if remote || len(needs) == 0 || d.cfg.Services == nil {
 			res := d.cfg.FailureReview.Run(spanCtx, job, d.exec.RunCheck)
 			res.Command = job.Command
-			res.Materialized = materialized
+			res.Materialized += materialized
 			stampConsumedImage(&res, job)
 			result <- res
 			return
@@ -460,7 +487,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 			return res
 		})
 		res.Command = job.Command
-		res.Materialized = materialized
+		res.Materialized += materialized
 		stampConsumedImage(&res, job)
 		result <- res
 	}()

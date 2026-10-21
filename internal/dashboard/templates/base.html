@@ -213,7 +213,7 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border
 <h1>{{.Title}}</h1>
 <div id="appearance" class="appearance js-only"><label>Theme <select id="color-mode"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark · amber</option></select></label></div>
 </div>
-<nav aria-label="Main navigation"><a href="/"{{if eq .Nav "targets"}} aria-current="page"{{end}}>Targets</a><a href="/checks"{{if eq .Nav "checks"}} aria-current="page"{{end}}>Checks</a>{{if .HasDeploys}}<a href="/deploys"{{if eq .Nav "deploys"}} aria-current="page"{{end}}>Deployments</a>{{end}}</nav>
+<nav aria-label="Main navigation"><a href="/"{{if eq .Nav "targets"}} aria-current="page"{{end}}>Targets</a><a href="/checks"{{if eq .Nav "checks"}} aria-current="page"{{end}}>Checks</a>{{if .HasWorkers}}<a href="/workers"{{if eq .Nav "workers"}} aria-current="page"{{end}}>Workers</a>{{end}}{{if .HasDeploys}}<a href="/deploys"{{if eq .Nav "deploys"}} aria-current="page"{{end}}>Deployments</a>{{end}}</nav>
 </header>
 {{if .Refresh}}<div id="live-controls" class="live-controls js-only">
 <span id="live-status" class="live-status" role="status">Live · every 5s</span>

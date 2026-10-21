@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sgrankin/gauntlet/internal/config"
 	"github.com/sgrankin/gauntlet/internal/core"
@@ -20,12 +21,18 @@ func (d *Daemon) reusableCheck(ctx context.Context, job core.CheckJob, check con
 	if d.cfg.Verification == nil {
 		return fail(fmt.Errorf("input-based checks require a verification store"))
 	}
-	dir, _, err := d.materializeNode(ctx, tree, job.MergeSHA)
-	if err != nil {
-		return fail(err)
+	remote := d.cfg.RemoteExecutorProfile != nil && d.cfg.RemoteExecutorProfile(job.Executor)
+	var dir string
+	var err error
+	if !remote {
+		dir, _, err = d.materializeNode(ctx, tree, job.MergeSHA)
+		if err != nil {
+			return fail(err)
+		}
 	}
 	identityJob := job
 	identityJob.TestResults, identityJob.RetryCommand, identityJob.RetryTests = "", nil, nil
+	identityJob.ServiceNeeds, identityJob.ServiceSpecs = nil, nil
 	identityJob.Dir, identityJob.Command, identityJob.InputsCapture = dir, check.Inputs, true
 	if job.LogPath != "" {
 		identityJob.LogPath = strings.TrimSuffix(job.LogPath, ".log.zst") + ".inputs.log.zst"
@@ -44,16 +51,21 @@ func (d *Daemon) reusableCheck(ctx context.Context, job core.CheckJob, check con
 	key := verification.Key("check-v1", d.cfg.VerificationContext, job.Target, check, svcs, deps, sha256.Sum256([]byte(identity.InputsKey)), job.Image)
 	job.VerificationID = key
 	return d.cfg.Verification.Run(ctx, key, job, func(taskCtx context.Context) core.CheckResult {
-		dir, took, err := d.materializeNode(taskCtx, tree, job.MergeSHA)
-		if err != nil {
-			return core.CheckResult{Name: job.Name, Err: err}
+		var took time.Duration
+		var dir string
+		var err error
+		if !remote {
+			dir, took, err = d.materializeNode(taskCtx, tree, job.MergeSHA)
+			if err != nil {
+				return core.CheckResult{Name: job.Name, Err: err}
+			}
+			defer os.RemoveAll(dir)
 		}
-		defer os.RemoveAll(dir)
 		job.Dir = dir
 		run := func(ctx context.Context, attempt core.CheckJob) core.CheckResult {
 			return d.exec.RunCheck(ctx, attempt)
 		}
-		if len(check.Needs) > 0 && d.cfg.Services != nil {
+		if !remote && len(check.Needs) > 0 && d.cfg.Services != nil {
 			ens, err := d.cfg.Services.EnsureAll(taskCtx, svcs, check.Needs)
 			if err != nil {
 				return core.CheckResult{Name: job.Name, Err: fmt.Errorf("service ensure: %w", err)}
@@ -73,7 +85,8 @@ func (d *Daemon) reusableCheck(ctx context.Context, job core.CheckJob, check con
 			res.Status = core.CheckFailed
 			res.Output += "\ngauntlet: input-based verification requires a passing execution; skipped is not evidence"
 		}
-		res.Command, res.Materialized = job.Command, took
+		res.Command = job.Command
+		res.Materialized += took
 		stampConsumedImage(&res, job)
 		return res
 	}, cleanup)

@@ -42,14 +42,17 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 	if r == nil || r.Classifier == nil || job.OperatorOwned || job.ImageBuild || job.ReceiptCapture || job.InputsCapture || !slices.Contains(r.Checks, job.Name) || res.Err != nil || res.Status != core.CheckFailed || ctx.Err() != nil {
 		return res
 	}
-	attempts := []core.TestAttempt{{Number: 1, Command: slices.Clone(job.Command), LogPath: res.LogPath, Tests: slices.Clone(res.Tests)}}
+	attempts := slices.Clone(res.TestAttempts)
+	if len(attempts) == 0 {
+		attempts = []core.TestAttempt{{Number: 1, Command: slices.Clone(job.Command), LogPath: res.LogPath, Tests: slices.Clone(res.Tests)}}
+	}
 	knownUsed := 0
 	var audit strings.Builder
 	var suspects []string
 	var kind string
 	canonical := res.LogPath
 	totalCPUUser, totalCPUSys, peak := res.UserCPU, res.SysCPU, res.PeakRSS
-	for attempt := 1; ; attempt++ {
+	for attempt := len(attempts); ; attempt++ {
 		fmt.Fprintf(&audit, "\n--- attempt %d: %s ---\n%s\n", attempt, resultWord(res), tail(res.Output, 12000))
 		if res.Err != nil || res.Status != core.CheckFailed || ctx.Err() != nil {
 			break
@@ -138,6 +141,7 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 		failedOutput := res.Output
 		previousTests := res.Tests
 		nextJob := job
+		nextJob.PreviousExecution = res.ExecutionID
 		if job.LogPath != "" {
 			nextJob.LogPath = strings.TrimSuffix(job.LogPath, ".log.zst") + fmt.Sprintf(".attempt-%d.log.zst", attempt+1)
 		}
@@ -154,7 +158,11 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			}
 		}
 		res = run(ctx, nextJob)
-		attempts = append(attempts, core.TestAttempt{Number: attempt + 1, Command: slices.Clone(nextJob.Command), LogPath: res.LogPath, Tests: slices.Clone(res.Tests)})
+		if len(res.TestAttempts) > len(attempts) {
+			attempts = slices.Clone(res.TestAttempts)
+		} else {
+			attempts = append(attempts, core.TestAttempt{Number: attempt + 1, Command: slices.Clone(nextJob.Command), LogPath: res.LogPath, Tests: slices.Clone(res.Tests)})
+		}
 		if len(previousTests) > 0 && res.Err == nil {
 			merged, coverageErr := testreport.MergeRerun(previousTests, res.Tests, requested)
 			res.Tests = merged
@@ -170,10 +178,16 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 		if err := r.History.Record(ctx, job, failedOutput, decision, nil, true, res.Err == nil && res.Status == core.CheckPassed, previousTests); err != nil {
 			log.Printf("failure history: %v", err)
 		}
-		totalCPUUser += res.UserCPU
-		totalCPUSys += res.SysCPU
+		if res.ExecutionID != "" && len(res.TestAttempts) > 1 {
+			totalCPUUser, totalCPUSys = res.UserCPU, res.SysCPU
+		} else {
+			totalCPUUser += res.UserCPU
+			totalCPUSys += res.SysCPU
+		}
 		peak = max(peak, res.PeakRSS)
 		if canonical == "" {
+			canonical = res.LogPath
+		} else if res.ExecutionID != "" && len(res.TestAttempts) > 1 && res.LogPath != "" {
 			canonical = res.LogPath
 		} else if res.LogPath != "" {
 			appendNote(canonical, fmt.Sprintf("\n--- retry attempt %d ---\n", attempt+1))

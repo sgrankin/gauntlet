@@ -36,6 +36,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/queue"
+	"github.com/sgrankin/gauntlet/internal/workers"
 )
 
 // serverName and serverVersion identify this server to connecting MCP
@@ -56,6 +57,7 @@ const defaultRunsLimit = 20
 // tools report "history disabled" and the retry tool reports an error
 // rather than panicking.
 type Params struct {
+	Workers func(context.Context) (workers.Status, error)
 	// Snapshot returns the live queue state, or nil if no reconcile pass has
 	// completed yet (typically Daemon.Snapshot).
 	Snapshot func() *queue.Snapshot
@@ -190,6 +192,13 @@ func New(p Params) http.Handler {
 	}, func(_ context.Context, _ *sdkmcp.CallToolRequest, in statusIn) (*sdkmcp.CallToolResult, statusOut, error) {
 		return nil, handleStatus(p, in), nil
 	})
+
+	if p.Workers != nil {
+		sdkmcp.AddTool(srv, &sdkmcp.Tool{Name: "workers", Description: "Worker profiles, advertised capacity, health, draining state, and queued resource demand."}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, _ struct{}) (*sdkmcp.CallToolResult, workers.Status, error) {
+			status, err := p.Workers(ctx)
+			return nil, status, err
+		})
+	}
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "runs",
@@ -793,6 +802,8 @@ type runOut struct {
 // doesn't render output either — this tool is the one place that surfaces
 // it).
 type checkDetail struct {
+	ExecutionID    string             `json:"executionId,omitempty"`
+	Worker         string             `json:"worker,omitempty"`
 	Tests          []core.TestCase    `json:"tests,omitempty"`
 	TestAttempts   []core.TestAttempt `json:"testAttempts,omitempty"`
 	VerificationID string             `json:"verificationId,omitempty"`
@@ -859,7 +870,7 @@ func handleRun(p Params, in runIn) (runOut, error) {
 	}
 	for _, c := range checks {
 		out.Checks = append(out.Checks, checkDetail{
-			Tests: c.Tests, TestAttempts: c.TestAttempts, VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
+			ExecutionID: c.ExecutionID, Worker: c.Worker, Tests: c.Tests, TestAttempts: c.TestAttempts, VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err, Output: c.Output,
 			LogPath: c.LogPath,

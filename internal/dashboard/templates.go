@@ -55,6 +55,7 @@ func mustParse(page string) *template.Template {
 
 var (
 	failuresTmpl = mustParse("failures.html")
+	workersTmpl  = mustParse("workers.html")
 	indexTmpl    = mustParse("index.html")
 	targetTmpl   = mustParse("target.html")
 	runTmpl      = mustParse("run.html")

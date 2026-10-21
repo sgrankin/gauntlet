@@ -38,6 +38,7 @@ import (
 	"github.com/sgrankin/gauntlet/internal/flaky"
 	"github.com/sgrankin/gauntlet/internal/history"
 	"github.com/sgrankin/gauntlet/internal/queue"
+	"github.com/sgrankin/gauntlet/internal/workers"
 )
 
 // New builds the dashboard's http.Handler. snapshot is called on every
@@ -80,6 +81,7 @@ func (d *dash) mux() *http.ServeMux {
 	mux.HandleFunc("GET /batch/{batchID}", d.handleBatch)
 	mux.HandleFunc("GET /checks", d.handleChecks)
 	mux.HandleFunc("GET /failures", d.handleFailures)
+	mux.HandleFunc("GET /workers", d.handleWorkers)
 	mux.HandleFunc("GET /deploys", d.handleDeploys)
 	mux.HandleFunc("GET /deploy/{runID}", d.handleDeploy)
 	mux.HandleFunc("GET /deploy/{runID}/log/{node}", d.handleDeployLog)
@@ -134,6 +136,7 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 type dash struct {
+	workers           func(context.Context) (workers.Status, error)
 	principalResolver func(*http.Request) (core.Principal, error)
 	failureHistory    *flaky.History
 	snapshot          func() *queue.Snapshot
@@ -1337,6 +1340,7 @@ type baseData struct {
 	// deployment existed — the standing pattern for every optional
 	// subsystem — so the nav link is absent rather than pointing at an
 	// empty page.
+	HasWorkers bool
 	HasDeploys bool
 }
 
@@ -1350,7 +1354,7 @@ func (d *dash) newBase(title string, snap *queue.Snapshot, refresh bool, nav str
 		Nav: nav, CanRetry: d.ch != nil, CanCancelHooks: d.hookCancel != nil,
 		Title: title, Refresh: refresh, GeneratedAt: formatTime(at),
 		Version: d.version, IdiomorphURL: idiomorphURL,
-		HasDeploys: d.deploySnapshot != nil,
+		HasDeploys: d.deploySnapshot != nil, HasWorkers: d.workers != nil,
 	}
 }
 
@@ -1477,6 +1481,9 @@ type memberView struct {
 // all, never a misleading "0 B" or "cpu 0s".
 func checkRowDetail(c history.CheckRow) string {
 	var parts []string
+	if c.Worker != "" {
+		parts = append(parts, "worker "+c.Worker+" · attempt "+c.ExecutionID[:min(12, len(c.ExecutionID))])
+	}
 	if len(c.Tests) > 0 {
 		failed, skipped := 0, 0
 		for _, test := range c.Tests {

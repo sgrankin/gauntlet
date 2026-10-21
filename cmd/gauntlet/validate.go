@@ -102,7 +102,7 @@ func runValidateTo(w io.Writer, args []string) error {
 // "this daemon has a receipt-notes policy configured".
 func crossCheck(cfg *config.Daemon, spec *config.CheckSpec) error {
 	known, imageCapable := executorPredicates(cfg)
-	if reason := queue.SpecRejectReason(spec, len(cfg.Services.Allow) > 0, known, imageCapable, cfg.GitHub.ReceiptNotes != nil); reason != "" {
+	if reason := queue.SpecRejectReason(spec, len(cfg.Services.Allow) > 0, known, imageCapable, cfg.GitHub.ReceiptNotes != nil, remoteExecutorPredicate(cfg)); reason != "" {
 		return errors.New(reason)
 	}
 	return nil

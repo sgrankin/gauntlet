@@ -27,13 +27,15 @@ import (
 // Config supplies queue policy and dependencies. Remote connection and
 // polling belong to the command package.
 type Config struct {
-	Verification        *verification.Manager
-	VerificationContext string
-	Policy              *policy.Engine
-	CircuitBreaker      *config.CircuitBreaker
-	SourceGitDir        string
-	ControlPath         string
-	AllowEmergency      bool
+	KeepExecutions        func(context.Context, string, string) error
+	RemoteExecutorProfile func(string) bool
+	Verification          *verification.Manager
+	VerificationContext   string
+	Policy                *policy.Engine
+	CircuitBreaker        *config.CircuitBreaker
+	SourceGitDir          string
+	ControlPath           string
+	AllowEmergency        bool
 	// FailureReview retries selected failed checks before publishing a red result.
 	FailureReview *flaky.Retrier
 

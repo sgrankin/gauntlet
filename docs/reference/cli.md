@@ -74,6 +74,7 @@ mutating deploy routes are reachable from the dashboard, the MCP tools, or
 |---|---|
 | `gauntlet -config FILE -state DIR` | Run the daemon. |
 | `land`, `land-pr` | Submit Git refs or post GitHub queue requests; see [landing](../guides/landing.md). |
+| `worker` | Run a pull worker with its own config/state; see [workers](../guides/workers.md). |
 | `control` | Pause/resume, priority, and revision-bound emergency requests; see [incidents](../guides/incidents.md). |
 | `validate` | Validate daemon/check configs, profiles, and policy without starting the daemon. |
 | `doctor` | Probe configured host capabilities and credentials; see [validation](../guides/validating.md). |

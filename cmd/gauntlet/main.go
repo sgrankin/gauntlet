@@ -45,6 +45,8 @@ func main() {
 			}
 		case "policy-check":
 			command = runPolicyCheck
+		case "worker":
+			command = runWorker
 		case "control":
 			command = runControl
 		case "land-pr":
@@ -353,7 +355,16 @@ func run() error {
 	// credentials — see config.Daemon.SecretEnvNames's doc for exactly
 	// which names qualify and why, and docs/checks.md for the operator-
 	// facing contract.
-	ex, err := buildExecutor(cfg, scratchDir, token, repoDir, cfg.SecretEnvNames())
+	workerPool, err := startWorkers(ctx, cancel, cfg, *statePath, repo, logsDir)
+	if err != nil {
+		return fmt.Errorf("workers: %w", err)
+	}
+	defer workerPool.Close()
+	var remoteBackend core.Executor
+	if workerPool != nil {
+		remoteBackend = workerPool.Executor
+	}
+	ex, err := buildExecutor(cfg, scratchDir, token, repoDir, cfg.SecretEnvNames(), remoteBackend)
 	if err != nil {
 		return fmt.Errorf("build executor: %w", err)
 	}
@@ -673,26 +684,30 @@ func run() error {
 	verificationEnv := os.Environ()
 	sort.Strings(verificationEnv)
 	verificationContext := verification.Key(cfg, []byte(strings.Join(verificationEnv, "\x00")), versionString())
+	if workerPool != nil {
+		workerPool.Executor.Context = verificationContext
+	}
 	qcfg := queue.Config{
-		Verification:         evidence,
-		VerificationContext:  verificationContext,
-		CircuitBreaker:       cfg.CircuitBreaker,
-		SourceGitDir:         repoDir,
-		ControlPath:          filepath.Join(*statePath, "queue-controls.json"),
-		AllowEmergency:       cfg.EmergencyMerges,
-		FailureReview:        failureReview,
-		Targets:              cfg.Targets,
-		CheckSpec:            cfg.CheckSpec,
-		Committer:            cfg.Committer,
-		MergeMessage:         cfg.MergeMsg,
-		MergeBody:            mergeBody,
-		WorkDir:              trialsDir,
-		LogDir:               logsDir,
-		SeedParks:            seedParks,
-		Slots:                slots,
-		HistoryMtimes:        cfg.Export.Mtimes == "history",
-		KnownExecutorProfile: known,
-		ImageCapableProfile:  imageCapable,
+		RemoteExecutorProfile: remoteExecutorPredicate(cfg),
+		Verification:          evidence,
+		VerificationContext:   verificationContext,
+		CircuitBreaker:        cfg.CircuitBreaker,
+		SourceGitDir:          repoDir,
+		ControlPath:           filepath.Join(*statePath, "queue-controls.json"),
+		AllowEmergency:        cfg.EmergencyMerges,
+		FailureReview:         failureReview,
+		Targets:               cfg.Targets,
+		CheckSpec:             cfg.CheckSpec,
+		Committer:             cfg.Committer,
+		MergeMessage:          cfg.MergeMsg,
+		MergeBody:             mergeBody,
+		WorkDir:               trialsDir,
+		LogDir:                logsDir,
+		SeedParks:             seedParks,
+		Slots:                 slots,
+		HistoryMtimes:         cfg.Export.Mtimes == "history",
+		KnownExecutorProfile:  known,
+		ImageCapableProfile:   imageCapable,
 		// AutoRetryErrors is a *bool defaulted true in config.applyDefaults
 		// (absent-vs-explicit-false needs the pointer); the queue takes the
 		// resolved value.
@@ -717,6 +732,9 @@ func run() error {
 	// Services == nil` gate (byte-identical current behavior for a daemon
 	// with no services block) depends on the field being a genuine nil
 	// interface in that case, so this only assigns when pool is real.
+	if workerPool != nil {
+		qcfg.KeepExecutions = workerPool.Broker.KeepRun
+	}
 	if pool != nil {
 		qcfg.Services = pool
 	}
@@ -861,9 +879,12 @@ func run() error {
 	// pattern for an optional subsystem. dt.Retry/CancelCurrent are
 	// themselves nil-safe, but leaving the closures nil is what makes the
 	// SURFACES report "not configured" rather than a silent no-op.
-	var deployWire deployWiring
+	var deployWire dashboardWiring
 	if dt != nil {
-		deployWire = deployWiring{Snapshot: dt.Snapshot, Retry: dt.Retry, Cancel: dt.CancelCurrent}
+		deployWire = dashboardWiring{Snapshot: dt.Snapshot, Retry: dt.Retry, Cancel: dt.CancelCurrent}
+	}
+	if workerPool != nil {
+		deployWire.Workers = workerPool.Broker.Status
 	}
 	startDashboard(ctx, cfg, d.Snapshot, store, dashCh, logsDir, hookCancel, hookSnapshot, servicesSnapshot, deployWire, beginDrain, &wg, webhook, func() *flaky.History {
 		if failureReview != nil {

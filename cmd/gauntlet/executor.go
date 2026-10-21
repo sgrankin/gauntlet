@@ -40,8 +40,8 @@ import (
 // specified NAME=VALUE, never a bare NAME that would forward from this
 // process's own environment — see executor/container.go), so it has no
 // analogous field and needs no filtering here.
-func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string, secretEnv []string) (core.Executor, error) {
-	def, err := buildOneExecutor(cfg.Executor, scratchDir, token, gitDir, secretEnv)
+func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string, secretEnv []string, remote ...core.Executor) (core.Executor, error) {
+	def, err := buildOneExecutor(cfg.Executor, scratchDir, token, gitDir, secretEnv, remote...)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func buildExecutor(cfg *config.Daemon, scratchDir, token, gitDir string, secretE
 	}
 	named := make(map[string]core.Executor, len(cfg.Profiles))
 	for _, p := range cfg.Profiles {
-		ex, err := buildOneExecutor(p, scratchDir, token, gitDir, secretEnv)
+		ex, err := buildOneExecutor(p, scratchDir, token, gitDir, secretEnv, remote...)
 		if err != nil {
 			return nil, err
 		}
@@ -76,11 +76,11 @@ func executorPredicates(cfg *config.Daemon) (known, imageCapable func(name strin
 	known = func(name string) bool { return profileNames[name] }
 	imageCapable = func(name string) bool {
 		if name == "" {
-			return cfg.Executor.Kind == "container"
+			return cfg.Executor.Kind == "container" || cfg.Executor.Kind == "remote" && cfg.Executor.SupportsImages
 		}
 		for _, p := range cfg.Profiles {
 			if p.Name == name {
-				return p.Kind == "container"
+				return p.Kind == "container" || p.Kind == "remote" && p.SupportsImages
 			}
 		}
 		return false
@@ -92,12 +92,17 @@ func executorPredicates(cfg *config.Daemon) (known, imageCapable func(name strin
 // already rejected any Kind outside the switch, so the default case is
 // unreachable in practice — it still errors rather than panicking, since
 // this constructs from a caller-supplied struct, not only from LoadDaemon.
-func buildOneExecutor(e config.Executor, scratchDir, token, gitDir string, secretEnv []string) (core.Executor, error) {
+func buildOneExecutor(e config.Executor, scratchDir, token, gitDir string, secretEnv []string, remote ...core.Executor) (core.Executor, error) {
 	label := "executor"
 	if e.Name != "" {
 		label = fmt.Sprintf("executor %q", e.Name)
 	}
 	switch e.Kind {
+	case "remote":
+		if len(remote) == 0 || remote[0] == nil {
+			return nil, fmt.Errorf("remote executor backend is unavailable")
+		}
+		return remote[0], nil
 	case "", "local":
 		return executor.LocalExecutor{BaseDir: scratchDir, GitDir: gitDir, Env: envPairs(e.Env), SecretEnv: secretEnv}, nil
 	case "container":
@@ -147,4 +152,14 @@ func envPairs(env []config.EnvVar) []string {
 		out[i] = ev.Name + "=" + ev.Value
 	}
 	return out
+}
+
+func remoteExecutorPredicate(cfg *config.Daemon) func(string) bool {
+	names := map[string]bool{}
+	for _, p := range cfg.Profiles {
+		if p.Kind == "remote" {
+			names[p.Name] = true
+		}
+	}
+	return func(name string) bool { return names[name] }
 }

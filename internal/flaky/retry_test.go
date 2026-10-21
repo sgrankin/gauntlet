@@ -259,3 +259,16 @@ func TestKnownFlakeUsesObservedRecoveriesAndBudget(t *testing.T) {
 		t.Fatal("failed retry did not invalidate fast recovery")
 	}
 }
+
+func TestRecoveredRemoteRetryDoesNotRenewCheckBudget(t *testing.T) {
+	retrier := &Retrier{Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Second, Classifier: classifyFunc(func(context.Context, core.CheckJob, core.CheckResult) (Decision, error) {
+		t.Fatal("recovered retry renewed check budget")
+		return Decision{}, nil
+	})}
+	result := retrier.Run(t.Context(), core.CheckJob{Name: "test"}, func(context.Context, core.CheckJob) core.CheckResult {
+		return core.CheckResult{Status: core.CheckFailed, ExecutionID: "remote-retry", TestAttempts: []core.TestAttempt{{Number: 1}, {Number: 2}}}
+	})
+	if result.Status != core.CheckFailed || len(result.TestAttempts) != 2 {
+		t.Fatalf("lost recovered attempt history: %+v", result)
+	}
+}

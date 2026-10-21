@@ -12,8 +12,31 @@ import (
 
 // SpecRejectReason reports capability or receipt-policy mismatches; empty
 // means accepted. Run construction and the validate command share this gate.
-func SpecRejectReason(spec *config.CheckSpec, hasServices bool, known, imageCapable func(string) bool, receiptPolicy bool) string {
-	if spec.RequiresServices() && !hasServices {
+func SpecRejectReason(spec *config.CheckSpec, hasServices bool, known, imageCapable func(string) bool, receiptPolicy bool, remoteProfiles ...func(string) bool) string {
+	remote := func(name string) bool {
+		return len(remoteProfiles) > 0 && remoteProfiles[0] != nil && remoteProfiles[0](name)
+	}
+	hasRemoteServices := false
+	for _, check := range spec.Checks {
+		if remote(check.Executor) && spec.Workspace != "isolated" {
+			return "remote checks require workspace isolated"
+		}
+		if len(check.Needs) > 0 {
+			if !remote(check.Executor) && !hasServices {
+				return "check spec declares services but this daemon has no services block"
+			}
+			hasRemoteServices = hasRemoteServices || remote(check.Executor)
+		}
+	}
+	for _, image := range spec.Images {
+		if remote(image.Executor) && spec.Workspace != "isolated" {
+			return "remote image builds require workspace isolated"
+		}
+	}
+	if receipt := spec.Receipt(); receipt != nil && remote(receipt.Executor) && spec.Workspace != "isolated" {
+		return "remote receipts require workspace isolated"
+	}
+	if spec.RequiresServices() && !hasServices && !hasRemoteServices {
 		return "check spec declares services but this daemon has no services block"
 	}
 	if chk, prof := unknownExecutorProfile(spec, known); prof != "" {

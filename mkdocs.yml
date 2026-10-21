@@ -59,7 +59,8 @@ nav:
     - Reusable verification: guides/reusable-checks.md
     - Test reports and retries: guides/test-reports.md
     - Writing policy: guides/policy.md
-  - Deployment:
+  - Execution and deployment:
+    - Pull workers: guides/workers.md
     - Using receipts: guides/receipts.md
     - Deployment and promotion: guides/deployment.md
   - Observing and handling failures:
@@ -78,6 +79,7 @@ nav:
     - Commit signing: reference/signing.md
   - Checks and execution:
     - Execution configuration: reference/execution.md
+    - Worker configuration: reference/workers.md
     - Writing checks: reference/checks.md
     - Check environment reference: reference/environment.md
     - Shared services: reference/services.md

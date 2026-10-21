@@ -354,6 +354,7 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/batch/{id}", d.handleAPIBatch)
 	mux.HandleFunc("GET /api/v1/checks", d.handleAPIChecks)
 	mux.HandleFunc("GET /api/v1/failures", d.handleFailureHistory)
+	mux.HandleFunc("GET /api/v1/workers", d.handleAPIWorkers)
 	mux.HandleFunc("GET /api/v1/services", d.handleAPIServices)
 	mux.HandleFunc("GET /api/v1/policy-decisions", func(w http.ResponseWriter, r *http.Request) {
 		snap := d.snapshot()
@@ -877,6 +878,8 @@ type runDetailResponse struct {
 }
 
 type checkJSON struct {
+	ExecutionID    string             `json:"executionId,omitempty"`
+	Worker         string             `json:"worker,omitempty"`
 	Tests          []core.TestCase    `json:"tests,omitempty"`
 	TestAttempts   []core.TestAttempt `json:"testAttempts,omitempty"`
 	VerificationID string             `json:"verificationId,omitempty"`
@@ -957,7 +960,7 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range checks {
 		resp.Checks = append(resp.Checks, checkJSON{
-			Tests: c.Tests, TestAttempts: c.TestAttempts, VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
+			ExecutionID: c.ExecutionID, Worker: c.Worker, Tests: c.Tests, TestAttempts: c.TestAttempts, VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err,
 			Output:  c.Output,
