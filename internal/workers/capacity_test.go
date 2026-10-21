@@ -205,3 +205,38 @@ func TestCapacityPackingAssignsOnceAndReservesUrgentResources(t *testing.T) {
 		t.Fatalf("urgent packing: %d %+v", n, ds)
 	}
 }
+
+func TestCapacityPersistenceFailureCannotMutateProvider(t *testing.T) {
+	_, s, p, _ := capacityFixture(t)
+	s.Pools[0].Warm = 1
+	s.Path = filepath.Join(t.TempDir(), "missing", "state.json")
+	if err := s.Tick(t.Context()); err == nil {
+		t.Fatal("ignored persistence failure")
+	}
+	if len(p.grows) != 0 || len(p.removed) != 0 {
+		t.Fatal("provider mutated without durable intent")
+	}
+}
+func TestCapacityProviderErrorSurvivesRestartUntilReconciled(t *testing.T) {
+	_, s, p, _ := capacityFixture(t)
+	s.Pools[0].Warm = 1
+	p.lost = true
+	tickCapacity(t, s)
+	// Simulate an accepted request whose new inventory has not appeared yet.
+	provisioned := p.inv
+	p.inv = Inventory{Generation: "initial"}
+	restored, err := NewScaler(s.Broker, s.Pools, s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored.Now = s.Now
+	tickCapacity(t, restored)
+	if len(restored.status) != 1 || restored.status[0].Error != "lost response" {
+		t.Fatalf("provider diagnostic lost: %+v", restored.status)
+	}
+	p.inv = provisioned
+	tickCapacity(t, restored)
+	if restored.status[0].Error != "" || restored.state["sql"].Action != nil {
+		t.Fatalf("diagnostic did not clear: %+v", restored.status)
+	}
+}

@@ -51,6 +51,7 @@ type PoolStatus struct {
 type nodeClock struct{ First, Idle time.Time }
 type poolAction struct {
 	Kind    string
+	Error   string
 	At      time.Time
 	Desired int
 	Node    Node
@@ -173,6 +174,7 @@ func (s *Scaler) Tick(ctx context.Context) error {
 				st.Action = nil
 			} else {
 				ps.Action = a.Kind
+				ps.Error = a.Error
 				if now.Sub(a.At) > p.StartupTimeout && !inv.Busy {
 					// Absolute growth and incarnation-bound removal are idempotent.
 					// Retry uncertain requests only after observing a settled pool.
@@ -189,9 +191,11 @@ func (s *Scaler) Tick(ctx context.Context) error {
 					} else {
 						e = p.Provider.Remove(ctx, inv, a.Node)
 					}
+					a.Error = ""
 					if e != nil {
-						ps.Error = e.Error()
+						a.Error = e.Error()
 					}
+					ps.Error = a.Error
 				}
 				s.status = append(s.status, ps)
 				continue
@@ -220,6 +224,7 @@ func (s *Scaler) Tick(ctx context.Context) error {
 			e = p.Provider.Grow(ctx, inv, desired)
 			if e != nil {
 				ps.Error = e.Error()
+				st.Action.Error = ps.Error
 			} // retain intent: the request may have committed
 		} else {
 			// Even at the warm floor, replace nodes that never start or remain offline.
@@ -255,6 +260,7 @@ func (s *Scaler) Tick(ctx context.Context) error {
 				}
 				if e = p.Provider.Remove(ctx, inv, n); e != nil {
 					ps.Error = e.Error()
+					st.Action.Error = ps.Error
 				}
 				break
 			}
