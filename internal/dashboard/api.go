@@ -364,6 +364,7 @@ func (d *dash) mountAPIRoutes(mux *http.ServeMux) {
 		writeJSON(w, 200, snap.Policy)
 	})
 	mux.HandleFunc("/api/v1/retry", d.handleAPIRetry)
+	mux.HandleFunc("POST /api/v1/control/preview", d.handleSchedulePreview)
 	mux.HandleFunc("/api/v1/control", d.handleAPIControl)
 	mux.HandleFunc("/api/v1/cancel", d.handleAPICancel)
 	mux.HandleFunc("/api/v1/hooks/cancel", d.handleAPIHookCancel)
@@ -524,6 +525,7 @@ type pipelineMemberStatus struct {
 type waitingStatus struct {
 	AdmissionBlocked string `json:"admissionBlocked,omitempty"`
 	Urgent           bool   `json:"urgent,omitempty"`
+	Priority         string `json:"priority,omitempty"`
 	Ref              string `json:"ref"`
 	SHA              string `json:"sha"`
 	Seq              int64  `json:"seq"`
@@ -654,7 +656,7 @@ func (d *dash) buildTargetStatus(ts queue.TargetSnapshot) targetStatus {
 	waiting := append([]queue.WaitingEntry(nil), ts.Waiting...)
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].Seq < waiting[j].Seq })
 	for _, we := range waiting {
-		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq, AdmissionBlocked: we.Candidate.AdmissionBlocked, Urgent: we.Urgent})
+		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq, AdmissionBlocked: we.Candidate.AdmissionBlocked, Urgent: we.Urgent, Priority: we.Priority})
 	}
 
 	for _, pe := range ts.Parked {

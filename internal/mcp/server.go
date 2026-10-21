@@ -456,6 +456,7 @@ type pipelineMemberStatus struct {
 type waitingStatus struct {
 	AdmissionBlocked string `json:"admissionBlocked,omitempty"`
 	Urgent           bool   `json:"urgent,omitempty"`
+	Priority         string `json:"priority,omitempty"`
 	Ref              string `json:"ref"`
 	SHA              string `json:"sha"`
 	Seq              int64  `json:"seq"`
@@ -582,7 +583,7 @@ func buildTargetStatus(p Params, ts queue.TargetSnapshot) targetStatus {
 	waiting := append([]queue.WaitingEntry(nil), ts.Waiting...)
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].Seq < waiting[j].Seq })
 	for _, we := range waiting {
-		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq, AdmissionBlocked: we.Candidate.AdmissionBlocked, Urgent: we.Urgent})
+		out.Waiting = append(out.Waiting, waitingStatus{Ref: we.Candidate.Ref, SHA: we.Candidate.SHA, Seq: we.Seq, AdmissionBlocked: we.Candidate.AdmissionBlocked, Urgent: we.Urgent, Priority: we.Priority})
 	}
 
 	for _, pe := range ts.Parked {

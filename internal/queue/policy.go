@@ -112,7 +112,7 @@ func (d *Daemon) policyAdmission(ctx context.Context, t config.Target, cands map
 }
 
 func policyCandidate(c core.Candidate) map[string]any {
-	return map[string]any{"ref": c.Ref, "sha": c.SHA, "version": c.Version, "source": c.Source, "source_base": c.SourceBase, "depends_on": c.DependsOn, "requester": c.Requester, "urgent": c.Urgent}
+	return map[string]any{"ref": c.Ref, "sha": c.SHA, "version": c.Version, "source": c.Source, "source_base": c.SourceBase, "depends_on": c.DependsOn, "requester": c.Requester, "urgent": c.Urgent, "priority": c.Priority, "preempt": c.Preempt}
 }
 func policyMembers(members []core.Candidate) []map[string]any {
 	out := []map[string]any{}
@@ -148,7 +148,7 @@ func (d *Daemon) authorizeCommand(ctx context.Context, cmd core.Command) bool {
 	if cmd.Principal != nil {
 		principal = *cmd.Principal
 	}
-	input := policy.Input{SchemaVersion: 1, Phase: "command", Principal: principal, Target: cmd.Target, Command: policy.Command{Kind: cmd.Kind, ID: cmd.RequestID, Reason: cmd.Reason}, Settings: policy.Settings{EmergencyEnabled: d.cfg.AllowEmergency}, Emergency: policy.Emergency{SkipChecks: cmd.Kind == core.CommandMergeAnyway, OverridePause: cmd.OverridePause}}
+	input := policy.Input{SchemaVersion: 1, Phase: "command", Principal: principal, Target: cmd.Target, Command: policy.Command{Kind: cmd.Kind, ID: cmd.RequestID, Reason: cmd.Reason, Priority: cmd.Priority, Preempt: cmd.Preempt, Before: cmd.Before, After: cmd.After}, Settings: policy.Settings{EmergencyEnabled: d.cfg.AllowEmergency}, Emergency: policy.Emergency{SkipChecks: cmd.Kind == core.CommandMergeAnyway, OverridePause: cmd.OverridePause}}
 	if principal.Source == "github" && len(cmd.Revisions) > 0 {
 		if source, ok := d.cfg.Reviews.(interface {
 			PolicyInput(context.Context, core.Candidate) (policy.Input, error)
@@ -167,6 +167,7 @@ func (d *Daemon) authorizeCommand(ctx context.Context, cmd core.Command) bool {
 			input = prepared
 		}
 	}
+	input.Command.Priority, input.Command.Preempt, input.Command.Before, input.Command.After = cmd.Priority, cmd.Preempt, cmd.Before, cmd.After
 	decision, err := d.cfg.Policy.Decide(ctx, "command", input)
 	if !d.recordPolicyDecision(cmd.Target+":"+cmd.Ref, "", "command:"+cmd.Kind, input, decision, err) {
 		d.controls.LastError = "cannot persist command policy audit"

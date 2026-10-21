@@ -238,8 +238,8 @@ func (d *Daemon) landRun(ctx context.Context, t config.Target, r *run) {
 			detail = "land: delete slot: " + delErr.Error()
 		}
 		urgent := m.cand.Urgent
-		if revision, ok := d.controls.Urgent[m.cand.Ref]; ok && revision.SHA == m.cand.SHA && revision.Version == m.cand.Version {
-			urgent = true
+		if revision, ok := d.controls.Priorities[m.cand.Ref]; ok && revision.Revision.SHA == m.cand.SHA && revision.Revision.Version == m.cand.Version {
+			urgent = revision.Class == "urgent"
 		}
 		if urgent {
 			d.urgentBurst[t.Name]++

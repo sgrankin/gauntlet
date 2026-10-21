@@ -241,3 +241,15 @@ check "receipt" {
 		t.Errorf("Checks[1].Executor = %q, want \"\" (default)", cs.Checks[1].Executor)
 	}
 }
+
+func TestUrgentReserveRequiresBoundedCapacity(t *testing.T) {
+	for _, extra := range []string{"urgent-reserve 1\n", "max-executions 2\nurgent-reserve 2\n", "max-executions 2\nurgent-reserve -1\n"} {
+		if _, err := loadDaemonString(t, profileTestBase+extra); err == nil {
+			t.Errorf("accepted %s", extra)
+		}
+	}
+	cfg, err := loadDaemonString(t, profileTestBase+"max-executions 2\nurgent-reserve 1\n")
+	if err != nil || cfg.UrgentReserve != 1 {
+		t.Fatalf("valid reserve rejected: %+v %v", cfg, err)
+	}
+}

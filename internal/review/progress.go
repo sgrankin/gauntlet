@@ -16,7 +16,7 @@ import (
 var receiptHeader = regexp.MustCompile(`^<!-- gauntlet:request:(\d+):([a-zA-Z0-9]+):([a-f0-9]{64}) -->\n[^\n]*\n\n`)
 
 func requestIdentity(r request) string {
-	data, _ := json.Marshal([]any{r.Action, r.Count, r.Urgent, r.SkipChecks, r.OverridePause, r.Requester, r.Reason})
+	data, _ := json.Marshal([]any{r.Action, r.Count, r.Urgent, r.Priority, r.Preempt, r.SkipChecks, r.OverridePause, r.Requester, r.Reason})
 	return fmt.Sprintf("%d:%x", r.ID, sha256.Sum256(data))
 }
 

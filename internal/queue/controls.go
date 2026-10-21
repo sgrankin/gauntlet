@@ -25,6 +25,9 @@ type Pause struct {
 }
 
 type controlState struct {
+	Scheduled        map[string]string
+	Priorities       map[string]priorityEntry
+	Enqueued         map[string]time.Time
 	Checkpoint       bool
 	Order            map[string]map[string]int64
 	Parks            map[string]map[string]parkEntry
@@ -35,7 +38,6 @@ type controlState struct {
 	Circuits         map[string]Circuit
 	Version          int
 	Pauses           map[string]Pause
-	Urgent           map[string]core.Revision
 	Emergency        map[string]core.Command
 	Audit            []controlAudit
 	LastError        string
@@ -48,9 +50,11 @@ func (s controlState) clone() controlState {
 	s.Order = cloneNested(s.Order)
 	s.Parks = cloneNested(s.Parks)
 	s.AutoRetried = cloneNested(s.AutoRetried)
+	s.Scheduled = maps.Clone(s.Scheduled)
+	s.Priorities = maps.Clone(s.Priorities)
+	s.Enqueued = maps.Clone(s.Enqueued)
 	s.ProcessedReviews = maps.Clone(s.ProcessedReviews)
 	s.Pauses = maps.Clone(s.Pauses)
-	s.Urgent = maps.Clone(s.Urgent)
 	s.Emergency = maps.Clone(s.Emergency)
 	for target, cmd := range s.Emergency {
 		cmd.Revisions = slices.Clone(cmd.Revisions)
@@ -78,7 +82,7 @@ type controlAudit struct {
 }
 
 func loadControls(path string) (controlState, error) {
-	s := controlState{ProcessedReviews: map[string]bool{}, Circuits: map[string]Circuit{}, Version: 1, Pauses: map[string]Pause{}, Urgent: map[string]core.Revision{}, Emergency: map[string]core.Command{}}
+	s := controlState{Priorities: map[string]priorityEntry{}, Enqueued: map[string]time.Time{}, ProcessedReviews: map[string]bool{}, Circuits: map[string]Circuit{}, Version: 1, Pauses: map[string]Pause{}, Emergency: map[string]core.Command{}}
 	if path == "" {
 		return s, nil
 	}
@@ -94,11 +98,17 @@ func loadControls(path string) (controlState, error) {
 	if err != nil || len(data) > 4<<20 {
 		return s, fmt.Errorf("queue controls: cannot read state")
 	}
-	if err := json.Unmarshal(data, &s); err != nil || s.Version != 1 || s.Pauses == nil || s.Urgent == nil || s.Emergency == nil {
+	if err := json.Unmarshal(data, &s); err != nil || s.Version != 1 || s.Pauses == nil || s.Emergency == nil {
 		return s, fmt.Errorf("queue controls: invalid state; refusing to forget incident controls")
 	}
 	if s.Checkpoint && (s.Order == nil || s.Parks == nil || s.AutoRetried == nil) {
 		return s, fmt.Errorf("queue controls: incomplete scheduler checkpoint")
+	}
+	if s.Priorities == nil {
+		s.Priorities = map[string]priorityEntry{}
+	}
+	if s.Enqueued == nil {
+		s.Enqueued = map[string]time.Time{}
 	}
 	if s.ProcessedReviews == nil {
 		s.ProcessedReviews = map[string]bool{}
@@ -188,6 +198,10 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 		d.controls.LastError = "unknown target"
 		return
 	}
+	if cmd.Kind == core.CommandPriority || cmd.Kind == core.CommandMove || cmd.Kind == core.CommandUrgent {
+		d.applyScheduling(ctx, cmd, target, refs)
+		return
+	}
 	next := d.controls.clone()
 	next.LastError = ""
 	if cmd.Kind == core.CommandPause {
@@ -196,7 +210,7 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 	if cmd.Kind == core.CommandResume {
 		delete(next.Pauses, cmd.Target)
 	}
-	if cmd.Kind == core.CommandUrgent || (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) {
+	if cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused {
 		cands := discoverCandidates(cmd.Target, refs)
 		for ref, c := range d.external {
 			if c.Target == cmd.Target {
@@ -219,13 +233,6 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 				return
 			}
 			selected[rev.Ref] = true
-			if cmd.Kind == core.CommandUrgent {
-				if len(next.Urgent) >= 4096 {
-					d.controls.LastError = "priority capacity reached"
-					return
-				}
-				next.Urgent[rev.Ref] = rev
-			}
 		}
 		if cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused {
 			if _, paused := next.Pauses[cmd.Target]; paused && !cmd.OverridePause {
@@ -264,28 +271,7 @@ func (d *Daemon) applyControl(ctx context.Context, cmd core.Command, refs map[st
 }
 
 func (d *Daemon) urgent(target, ref string, cands map[string]core.Candidate) bool {
-	seen := map[string]bool{}
-	var wanted func(string) bool
-	wanted = func(ref string) bool {
-		if seen[ref] {
-			return false
-		}
-		seen[ref] = true
-		c := cands[ref]
-		if c.Urgent {
-			return true
-		}
-		if r, ok := d.controls.Urgent[ref]; ok && r.SHA == c.SHA && r.Version == c.Version {
-			return true
-		}
-		for child, next := range cands {
-			if next.DependsOn == ref && wanted(child) {
-				return true
-			}
-		}
-		return false
-	}
-	return wanted(ref)
+	return d.priorityAt(target, ref, cands, time.Time{}) >= 3
 }
 
 func (d *Daemon) reconcileEmergency(ctx context.Context, t config.Target, tip string, cands map[string]core.Candidate) bool {

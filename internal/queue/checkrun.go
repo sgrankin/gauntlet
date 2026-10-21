@@ -200,7 +200,7 @@ func (d *Daemon) advanceChecks(ctx context.Context, t config.Target, r *run) {
 			continue
 		}
 		capacity--
-		if slotDenied || !d.cfg.Slots.TryAcquire() {
+		if slotDenied || !d.cfg.Slots.TryAcquirePriority(d.runUrgent(r)) {
 			// The daemon-wide cap is saturated: this check stays ready and
 			// starts on a later tick. One denial means denial for every
 			// later ready check this tick too (single semaphore) — no more

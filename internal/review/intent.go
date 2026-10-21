@@ -17,6 +17,8 @@ type parsedCommand struct {
 	Action                            string
 	Count                             int
 	Urgent, SkipChecks, OverridePause bool
+	Preempt                           bool
+	Priority                          string
 	Reason                            string
 }
 
@@ -31,14 +33,20 @@ func parseCommand(body, bot string) (parsedCommand, bool) {
 	seen := map[string]bool{}
 	for _, field := range fields[2:] {
 		switch field {
-		case "urgent", "skip-checks", "override-pause":
+		case "urgent", "high", "normal", "low", "preempt", "skip-checks", "override-pause":
 			if seen[field] {
 				return out, false
 			}
 			seen[field] = true
 			switch field {
-			case "urgent":
-				out.Urgent = true
+			case "urgent", "high", "normal", "low":
+				if out.Priority != "" {
+					return out, false
+				}
+				out.Priority = field
+				out.Urgent = field == "urgent"
+			case "preempt":
+				out.Preempt = true
 			case "skip-checks":
 				out.SkipChecks = true
 			case "override-pause":
@@ -49,7 +57,7 @@ func parseCommand(body, bot string) (parsedCommand, bool) {
 		}
 	}
 	out.Action, out.Count = command(strings.Join(rest, " "), bot)
-	if out.Action == "" || (out.Action == "cancel" || out.Action == "check") && (out.Urgent || out.SkipChecks || out.OverridePause) {
+	if out.Action == "" || (out.Action == "cancel" || out.Action == "check") && (out.Priority != "" || out.Preempt || out.SkipChecks || out.OverridePause) {
 		return out, false
 	}
 	if hasReason {
@@ -58,7 +66,10 @@ func parseCommand(body, bot string) (parsedCommand, bool) {
 			return out, false
 		}
 	}
-	if (out.SkipChecks || out.OverridePause) && out.Reason == "" {
+	if out.Preempt && !out.Urgent {
+		return out, false
+	}
+	if (out.SkipChecks || out.OverridePause || out.Preempt) && out.Reason == "" {
 		return out, false
 	}
 	return out, true

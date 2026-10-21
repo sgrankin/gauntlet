@@ -130,6 +130,7 @@ type CurrentCheck struct {
 // WaitingEntry is a queued-but-not-yet-picked candidate.
 type WaitingEntry struct {
 	Urgent    bool
+	Priority  string
 	Candidate core.Candidate
 	Seq       int64 // FIFO sequence (Daemon.order); lower = earlier
 }
@@ -217,6 +218,15 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		TargetTip:        refs[targetRefName(t)],
 	}
 
+	classes := []string{"low", "normal", "high", "urgent"}
+	ranks := map[string]int{}
+	for ref := range cands {
+		ranks[ref] = d.priorityAt(t.Name, ref, cands, d.clockNow())
+	}
+	for ref, c := range cands {
+		c.Priority = classes[d.ownPriority(c, d.clockNow())]
+		cands[ref] = c
+	}
 	if c, ok := d.controls.Circuits[t.Name]; ok && c.Backoff > 0 {
 		copy := c
 		copy.Failures = append([]InfrastructureFailure(nil), c.Failures...)
@@ -233,7 +243,16 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 	// Target.Window.
 	if l := d.lanes[t.Name]; l != nil {
 		for _, r := range l.runs {
-			ts.Pipeline = append(ts.Pipeline, *buildRunSnapshot(r))
+			view := buildRunSnapshot(r)
+			for i, c := range view.Members {
+				if current, ok := cands[c.Ref]; ok {
+					view.Members[i].Priority = current.Priority
+				}
+			}
+			if current, ok := cands[view.Candidate.Ref]; ok {
+				view.Candidate.Priority = current.Priority
+			}
+			ts.Pipeline = append(ts.Pipeline, *view)
 		}
 		if len(ts.Pipeline) > 0 {
 			head := ts.Pipeline[0]
@@ -269,13 +288,16 @@ func (d *Daemon) buildTargetSnapshot(t config.Target, refs map[string]string) Ta
 		waitingRefs = append(waitingRefs, ref)
 	}
 	sort.Slice(waitingRefs, func(i, j int) bool {
+		if ranks[waitingRefs[i]] != ranks[waitingRefs[j]] {
+			return ranks[waitingRefs[i]] > ranks[waitingRefs[j]]
+		}
 		if order[waitingRefs[i]] != order[waitingRefs[j]] {
 			return order[waitingRefs[i]] < order[waitingRefs[j]]
 		}
 		return waitingRefs[i] < waitingRefs[j] // pickHead's lexical tie-break
 	})
 	for _, ref := range waitingRefs {
-		ts.Waiting = append(ts.Waiting, WaitingEntry{Candidate: cands[ref], Seq: order[ref], Urgent: d.urgent(t.Name, ref, cands)})
+		ts.Waiting = append(ts.Waiting, WaitingEntry{Candidate: cands[ref], Seq: order[ref], Urgent: ranks[ref] == 3, Priority: []string{"low", "normal", "high", "urgent"}[ranks[ref]]})
 	}
 
 	var parkedRefs []string

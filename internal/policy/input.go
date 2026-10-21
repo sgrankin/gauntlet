@@ -4,11 +4,15 @@ import "github.com/sgrankin/gauntlet/internal/core"
 
 type Principal = core.Principal
 type Command struct {
-	Kind   string `json:"kind"`
-	ID     string `json:"id"`
-	Reason string `json:"reason"`
-	Count  int    `json:"count"`
-	Urgent bool   `json:"urgent"`
+	Priority string `json:"priority"`
+	Preempt  bool   `json:"preempt"`
+	Before   string `json:"before"`
+	After    string `json:"after"`
+	Kind     string `json:"kind"`
+	ID       string `json:"id"`
+	Reason   string `json:"reason"`
+	Count    int    `json:"count"`
+	Urgent   bool   `json:"urgent"`
 }
 type Settings struct {
 	Approvals             int      `json:"approvals"`

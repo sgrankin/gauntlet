@@ -146,7 +146,7 @@ func TestControlStateCloneOwnsMutableFields(t *testing.T) {
 	}
 	state.Uncertain = true
 	state.Pauses["main"] = Pause{Reason: "incident"}
-	state.Urgent["ref"] = core.Revision{SHA: "original"}
+	state.Priorities["ref"] = priorityEntry{Revision: core.Revision{SHA: "original"}, Class: "urgent"}
 	state.ProcessedReviews["1"] = true
 	state.Emergency["main"] = core.Command{Revisions: []core.Revision{{SHA: "original"}}}
 	state.Circuits["main"] = Circuit{Failures: []InfrastructureFailure{{Revision: "original"}}}
@@ -154,7 +154,7 @@ func TestControlStateCloneOwnsMutableFields(t *testing.T) {
 	state.PolicyAudit = []PolicyAudit{{Decision: policy.Decision{Version: "policy-version", Requirements: []policy.Requirement{{Name: "original"}}}}}
 	next := state.clone()
 	delete(next.Pauses, "main")
-	delete(next.Urgent, "ref")
+	delete(next.Priorities, "ref")
 	delete(next.ProcessedReviews, "1")
 	next.Emergency["main"].Revisions[0].SHA = "changed"
 	next.Circuits["main"].Failures[0].Revision = "changed"
@@ -163,7 +163,7 @@ func TestControlStateCloneOwnsMutableFields(t *testing.T) {
 	if !next.Uncertain || next.PolicyAudit[0].Decision.Version != "policy-version" {
 		t.Fatal("clone dropped non-persisted state")
 	}
-	if len(state.Pauses) != 1 || len(state.Urgent) != 1 || len(state.ProcessedReviews) != 1 || state.Emergency["main"].Revisions[0].SHA != "original" || state.Circuits["main"].Failures[0].Revision != "original" || state.Audit[0].Command.Revisions[0].SHA != "original" || state.PolicyAudit[0].Decision.Requirements[0].Name != "original" {
+	if len(state.Pauses) != 1 || len(state.Priorities) != 1 || len(state.ProcessedReviews) != 1 || state.Emergency["main"].Revisions[0].SHA != "original" || state.Circuits["main"].Failures[0].Revision != "original" || state.Audit[0].Command.Revisions[0].SHA != "original" || state.PolicyAudit[0].Decision.Requirements[0].Name != "original" {
 		t.Fatal("clone aliases original state")
 	}
 }

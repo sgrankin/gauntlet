@@ -126,6 +126,7 @@ func (d *Daemon) reconcileTarget(ctx context.Context, t config.Target, refs map[
 	d.reviewEmergency(ctx, t, refs, cands)
 	d.policyAdmission(ctx, t, cands, targetTip)
 	d.syncBookkeeping(ctx, t, cands)
+	d.reviewScheduling(ctx, t, refs, cands)
 	if !d.persistScheduler() {
 		return
 	}
@@ -170,6 +171,10 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 	for ref := range order {
 		if _, ok := cands[ref]; !ok {
 			delete(order, ref)
+			delete(d.controls.Enqueued, ref)
+			d.schedulerDirty = true
+			delete(d.controls.Priorities, ref)
+			delete(d.controls.Scheduled, ref)
 		}
 	}
 	for ref, entry := range done {
@@ -195,6 +200,13 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 
 	var newRefs []string
 	for ref := range cands {
+		if d.controls.Enqueued == nil {
+			d.controls.Enqueued = map[string]time.Time{}
+		}
+		if d.controls.Enqueued[ref].IsZero() {
+			d.controls.Enqueued[ref] = d.clockNow()
+			d.schedulerDirty = true
+		}
 		if _, ok := order[ref]; !ok {
 			newRefs = append(newRefs, ref)
 		}
@@ -202,6 +214,12 @@ func (d *Daemon) syncBookkeeping(ctx context.Context, t config.Target, cands map
 	sort.Strings(newRefs) // deterministic sequence assignment within one batch
 	for _, ref := range newRefs {
 		order[ref] = d.seq
+		if d.controls.Enqueued == nil {
+			d.controls.Enqueued = map[string]time.Time{}
+		}
+		if d.controls.Enqueued[ref].IsZero() {
+			d.controls.Enqueued[ref] = d.now()
+		}
 		d.seq++
 		if parked, ok := done[ref]; ok && parked.SHA == cands[ref].SHA {
 			continue // parked at this SHA already (e.g. seeded at boot): not a real "queued" transition
@@ -283,13 +301,18 @@ func (d *Daemon) pickUpTo(target string, cands map[string]core.Candidate, n int,
 		}
 		refs = append(refs, ref)
 	}
+	ranks := map[string]int{}
+	rankAt := d.clockNow()
+	for _, ref := range refs {
+		ranks[ref] = d.priorityAt(target, ref, cands, rankAt)
+	}
 	sort.Slice(refs, func(i, j int) bool {
-		ui, uj := d.urgent(target, refs[i], cands), d.urgent(target, refs[j], cands)
-		if ui != uj {
-			if d.urgentBurst[target] >= 3 {
-				return !ui
-			}
-			return ui
+		pi, pj := ranks[refs[i]], ranks[refs[j]]
+		if (pi == 3) != (pj == 3) && d.urgentBurst[target] >= 3 {
+			return pi != 3
+		}
+		if pi != pj {
+			return pi > pj
 		}
 		if order[refs[i]] != order[refs[j]] {
 			return order[refs[i]] < order[refs[j]]

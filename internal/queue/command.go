@@ -58,7 +58,7 @@ func (d *Daemon) applyCommand(ctx context.Context, cmd core.Command, refs map[st
 		}
 	}
 	switch cmd.Kind {
-	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandMergeAnyway, core.CommandMergePaused:
+	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandPriority, core.CommandMove, core.CommandMergeAnyway, core.CommandMergePaused:
 		d.applyControl(ctx, cmd, refs)
 	case core.CommandRetry:
 		d.applyRetry(ctx, cmd)

@@ -29,6 +29,8 @@ type Candidate struct {
 	Version    string
 	DependsOn  string
 	Urgent     bool
+	Priority   string
+	Preempt    bool
 }
 
 // TrialMerge is the result of trial-merging a Candidate onto the target tip.
@@ -705,6 +707,10 @@ type Principal struct {
 }
 
 type Command struct {
+	Priority      string
+	Preempt       bool
+	Before, After string
+	PlanToken     string
 	Principal     *Principal `json:"-"`
 	RequestID     string
 	Actor         string

@@ -65,6 +65,7 @@ nav:
     - Slack setup: guides/slack.md
     - Telemetry: guides/telemetry.md
     - Failure investigation: guides/failure-review.md
+    - Priorities and reordering: guides/priorities.md
     - Incident controls: guides/incidents.md
 - Reference:
   - Daemon and targets:

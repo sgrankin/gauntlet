@@ -261,7 +261,7 @@ document.addEventListener('DOMContentLoaded', function () {
     gauntletSetColorMode(gauntletColorMode);
     try { localStorage.setItem('gauntlet:color-mode', gauntletColorMode); } catch (e) {}
   });
-  document.body.addEventListener('click', function (ev) {
+  document.body.addEventListener('click', async function (ev) {
     if (ev.target.closest('#dismiss-feedback')) {
       document.getElementById('action-feedback').hidden = true;
       return;
@@ -276,7 +276,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!reason || !reason.trim()) return;
       endpoint = '/api/v1/control';
       payload = {Kind: action, Target: subject, Reason: reason};
-      if (action === 'urgent' || action === 'merge-anyway' || action === 'merge-paused') {
+      if (action === 'priority' || action === 'move' || action === 'urgent' || action === 'merge-anyway' || action === 'merge-paused') {
         var select = document.getElementById('emergency-prefix');
         if (!select || !select.value) return;
         payload.Revisions = JSON.parse(select.value);
@@ -284,6 +284,24 @@ document.addEventListener('DOMContentLoaded', function () {
         payload.OverridePause = action === 'merge-paused' || !!(override && override.checked);
  if (action === 'merge-paused') confirmation = 'Verify and land these exact changes while leaving the queue paused? Current target work will be cancelled.';
         if (action === 'merge-anyway') confirmation = 'Land these ' + payload.Revisions.length + ' exact changes WITHOUT verification? Current target work will be cancelled. This exception is recorded.';
+      }
+      if (action === 'priority' || action === 'move') {
+        payload.Priority = document.getElementById('queue-priority').value;
+        payload.Preempt = document.getElementById('queue-preempt').checked;
+        if (action === 'move') payload[document.getElementById('queue-direction').value] = document.getElementById('queue-anchor').value.trim();
+        gauntletActionPending = true;
+        try {
+          var previewResponse = await fetch('/api/v1/control/preview', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000)});
+          var impact = await previewResponse.json();
+          if (!previewResponse.ok) throw new Error(impact.error || 'Preview failed');
+          if (impact.preemptRequired && !payload.Preempt) throw new Error('This move affects active work. Enable preemption to continue.');
+          payload.PlanToken = impact.token;
+          confirmation = 'Apply queue order: ' + impact.order.join(' → ') + '?';
+          if (impact.preemptRequired) confirmation += '\nRebuild ' + impact.affectedRuns.length + ' active runs (' + impact.runningChecks + ' running, ' + impact.completedChecks + ' completed checks; ' + Math.round(impact.spentSeconds) + ' seconds of recorded work). Matching declared-input verification remains reusable.';
+        } catch (error) {
+          showFeedback(error.message, true);
+          return;
+        } finally { gauntletActionPending = false; }
       }
     } else if (btn.hasAttribute('data-deploy-action')) {
       action = btn.getAttribute('data-deploy-action');
@@ -375,7 +393,7 @@ document.addEventListener('DOMContentLoaded', function () {
       }).finally(function () { clearTimeout(timer); busy = false; });
   }
   window.gauntletRefreshPage = refreshPage;
-  document.body.addEventListener('click', function (ev) {
+  document.body.addEventListener('click', async function (ev) {
     if (ev.target.closest('#pause-updates')) {
       paused = !paused;
       try { sessionStorage.setItem('gauntlet:paused:' + location.pathname, String(paused)); } catch (e) {}

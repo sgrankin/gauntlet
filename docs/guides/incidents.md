@@ -5,11 +5,9 @@ verification and stops new work and publication. Its actor, reason, and timestam
 persist in `queue-controls.json`; restart does not resume it. Resuming rebuilds
 work against the current target. Shutdown drain is a separate lifecycle operation.
 
-Urgency advances explicitly requested revisions and their requested prerequisites
-without preempting current verification. After three urgent landings, eligible
-ordinary work gets a turn. Urgency never requests a prerequisite implicitly.
-GitHub supports `merge urgent` and `merge stack urgent`; normal writer permission
-is required, and the request identity remains in candidate/history metadata.
+[Priority and reordering](priorities.md) controls preserve active verification
+by default; explicit preemption can rebuild an affected suffix. Neither priority
+nor preemption bypasses checks or passes an incident pause.
 
 ## Emergency merge
 

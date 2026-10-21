@@ -48,7 +48,12 @@
 {{if .ControlError}}<p class="tag bad">{{.ControlError}}</p>{{end}}
 {{if .EmergencyChoices}}
 <label>Requested prefix <select id="emergency-prefix">{{range .EmergencyChoices}}<option value="{{.Revisions}}">{{.Label}}</option>{{end}}</select></label>
-<button class="btn js-action" data-control-action="urgent" data-target="{{.Name}}">Prioritize</button>
+<label>Priority <select id="queue-priority"><option>low</option><option selected>normal</option><option>high</option><option>urgent</option></select></label>
+<label><input type="checkbox" id="queue-preempt"> Preempt affected active verification (urgent only)</label>
+<button class="btn js-action" data-control-action="priority" data-target="{{.Name}}">Set priority</button>
+<label>Move <select id="queue-direction"><option value="Before">before</option><option value="After">after</option></select></label>
+<label>Anchor ref <input id="queue-anchor" placeholder="refs/heads/for/…"></label>
+<button class="btn js-action" data-control-action="move" data-target="{{.Name}}">Move selected prefix</button>
 {{if .EmergencyEnabled}}{{if .Pause}}<button class="btn js-action" data-control-action="merge-paused" data-target="{{.Name}}">Verify and merge while paused</button>{{end}}<button class="btn danger js-action" data-control-action="merge-anyway" data-target="{{.Name}}">Merge anyway · skip checks</button>
 <label><input type="checkbox" id="override-pause"> Allow this merge while paused</label>{{end}}
 {{end}}

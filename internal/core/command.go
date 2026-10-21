@@ -7,6 +7,8 @@ const (
 	CommandPause       = "pause"
 	CommandResume      = "resume"
 	CommandUrgent      = "urgent"
+	CommandPriority    = "priority"
+	CommandMove        = "move"
 	CommandMergeAnyway = "merge-anyway"
 	CommandMergePaused = "merge-paused"
 	// CommandRetry clears the park for (Command.Target, Command.Ref) at its

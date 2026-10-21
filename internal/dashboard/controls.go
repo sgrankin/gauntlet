@@ -94,7 +94,7 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch cmd.Kind {
-	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandMergeAnyway, core.CommandMergePaused:
+	case core.CommandPause, core.CommandResume, core.CommandUrgent, core.CommandPriority, core.CommandMove, core.CommandMergeAnyway, core.CommandMergePaused:
 	default:
 		writeJSONError(w, 400, "unknown control")
 		return
@@ -138,7 +138,7 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 409, "explicit pause override required")
 		return
 	}
-	if cmd.Kind == core.CommandUrgent || (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) {
+	if cmd.Kind == core.CommandPriority || cmd.Kind == core.CommandMove || cmd.Kind == core.CommandUrgent || (cmd.Kind == core.CommandMergeAnyway || cmd.Kind == core.CommandMergePaused) {
 		choices := emergencyChoices(target)
 		if len(cmd.Revisions) == 0 {
 			writeJSONError(w, 400, "exact revisions required")
@@ -168,4 +168,39 @@ func (d *dash) handleAPIControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 202, map[string]string{"status": "queued; check target status for acknowledgement"})
+}
+
+func (d *dash) handleSchedulePreview(w http.ResponseWriter, r *http.Request) {
+	var cmd core.Command
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cmd); err != nil {
+		writeJSONError(w, 400, "invalid preview request")
+		return
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		writeJSONError(w, 400, "one preview request required")
+		return
+	}
+	snap := d.snapshot()
+	if snap == nil {
+		writeJSONError(w, 503, "queue starting")
+		return
+	}
+	target, ok := findTarget(snap, cmd.Target)
+	if !ok {
+		writeJSONError(w, 400, "unknown target")
+		return
+	}
+	if cmd.Kind != core.CommandMove && cmd.Kind != core.CommandPriority && cmd.Kind != core.CommandUrgent {
+		writeJSONError(w, 400, "preview supports priority, urgent, and move")
+		return
+	}
+	impact, err := queue.PlanSchedule(target, cmd)
+	if err != nil {
+		writeJSONError(w, 409, err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, impact)
 }

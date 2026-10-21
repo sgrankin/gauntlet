@@ -311,14 +311,15 @@ type lane struct {
 // Daemon is the reconcile loop over N target branches on one core.GitRepo.
 // The zero value is not usable; construct with New.
 type Daemon struct {
-	controls controlState
-	external map[string]core.Candidate
-	git      core.GitRepo
-	exec     core.Executor
-	chans    []core.Channel
-	tr       trace.Tracer
-	cfg      Config
-	now      func() time.Time
+	controls       controlState
+	schedulerDirty bool
+	external       map[string]core.Candidate
+	git            core.GitRepo
+	exec           core.Executor
+	chans          []core.Channel
+	tr             trace.Tracer
+	cfg            Config
+	now            func() time.Time
 
 	// order assigns FIFO sequence numbers; done holds parks by target and ref.
 	// Parks clear on revision/metadata changes or retry. Ordinary refs also

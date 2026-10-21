@@ -55,6 +55,13 @@ including candidate checks and post-land hooks. Unset means unlimited; choose an
 explicit production limit. Long-lived service instances have their own pool cap.
 Waiting for capacity is recorded separately from command duration.
 
+`urgent-reserve N` keeps N of those slots available for urgent queue work.
+It defaults to zero and must be smaller than a positive `max-executions`.
+Ordinary checks, hooks, and deployments cannot consume the reserve; urgent work
+still obeys the total cap. For example, `max-executions 8` with
+`urgent-reserve 1` admits at most seven ordinary invocations. See
+[priorities](../guides/priorities.md).
+
 Demand can approach the sum of each target's `window × max-parallel`. The host
 cap bounds this demand rather than assuming every repository remains serial.
 

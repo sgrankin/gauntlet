@@ -118,7 +118,7 @@ func (g *GitHub) teamMember(ctx context.Context, team, user string) (bool, error
 	return member.State == "active", err
 }
 func (g *GitHub) commandDecision(ctx context.Context, p pull, c comment, parsed parsedCommand, principal policy.Principal, open []pull) (policy.Decision, error) {
-	input := policy.Input{SchemaVersion: 1, Phase: "command", Principal: principal, Command: policy.Command{Kind: parsed.Action, ID: fmt.Sprint(c.ID), Count: parsed.Count, Urgent: parsed.Urgent, Reason: parsed.Reason}, Settings: g.settings(), Emergency: policy.Emergency{SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause}, Candidate: map[string]any{"source": "github", "sha": p.Head.SHA}, Forge: map[string]any{"kind": "github", "pr": p.Number, "draft": p.Draft, "state": p.State}}
+	input := policy.Input{SchemaVersion: 1, Phase: "command", Principal: principal, Command: policy.Command{Kind: parsed.Action, ID: fmt.Sprint(c.ID), Count: parsed.Count, Urgent: parsed.Urgent, Priority: parsed.Priority, Preempt: parsed.Preempt, Reason: parsed.Reason}, Settings: g.settings(), Emergency: policy.Emergency{SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause}, Candidate: map[string]any{"source": "github", "sha": p.Head.SHA}, Forge: map[string]any{"kind": "github", "pr": p.Number, "draft": p.Draft, "state": p.State}}
 	input.Branch = p.Base.Ref
 	if p.Stack != nil {
 		input.Branch = p.Stack.Base.Ref
@@ -301,7 +301,7 @@ func (g *GitHub) readiness(ctx context.Context, p pull, c core.Candidate, r requ
 		facts["teams"].(map[string]map[string]bool)[team][r.Requester] = member
 	}
 	paths, _ := facts["paths"].([]string)
-	input := policy.Input{SchemaVersion: 1, Phase: "admission", Principal: principal, Command: policy.Command{Kind: r.Action, ID: fmt.Sprint(r.ID), Count: r.Count, Urgent: r.Urgent, Reason: r.Reason}, Candidate: map[string]any{"ref": c.Ref, "source": c.Source, "sha": c.SHA, "version": c.Version, "source_base": c.SourceBase, "depends_on": c.DependsOn, "requester": c.Requester, "urgent": c.Urgent}, Target: c.Target, Branch: branch, Forge: facts, Settings: g.settings(), Emergency: policy.Emergency{SkipChecks: skip, OverridePause: r.OverridePause}, Paths: paths, PathsAvailable: g.p.Policy.HasCustom("submission")}
+	input := policy.Input{SchemaVersion: 1, Phase: "admission", Principal: principal, Command: policy.Command{Kind: r.Action, ID: fmt.Sprint(r.ID), Count: r.Count, Urgent: r.Urgent, Priority: r.Priority, Preempt: r.Preempt, Reason: r.Reason}, Candidate: map[string]any{"ref": c.Ref, "source": c.Source, "sha": c.SHA, "version": c.Version, "source_base": c.SourceBase, "depends_on": c.DependsOn, "requester": c.Requester, "urgent": c.Urgent}, Target: c.Target, Branch: branch, Forge: facts, Settings: g.settings(), Emergency: policy.Emergency{SkipChecks: skip, OverridePause: r.OverridePause}, Paths: paths, PathsAvailable: g.p.Policy.HasCustom("submission")}
 	for _, m := range stack {
 		input.Stack = append(input.Stack, map[string]any{"source": "github", "ref": slot(c.Target, m.Number), "sha": m.Head.SHA, "pr": m.Number, "state": m.State, "draft": m.Draft})
 	}

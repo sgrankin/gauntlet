@@ -1716,3 +1716,21 @@ func TestTransportPrincipalCannotBeSpoofedInControlBody(t *testing.T) {
 		t.Fatal("command not queued")
 	}
 }
+
+func TestSchedulePreviewDoesNotQueueCommand(t *testing.T) {
+	candidate := core.Candidate{Ref: "c", SHA: "sha", Version: "v"}
+	snap := &queue.Snapshot{Targets: []queue.TargetSnapshot{{Name: "main", Waiting: []queue.WaitingEntry{{Candidate: candidate}}}}}
+	ch := dashboard.NewChannel()
+	handler := dashboard.New(func() *queue.Snapshot { return snap }, nil, dashboard.WithChannel(ch))
+	body := `{"Kind":"priority","Target":"main","Priority":"urgent","Revisions":[{"ref":"c","sha":"sha","version":"v"}]}`
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest("POST", "/api/v1/control/preview", strings.NewReader(body)))
+	if res.Code != 200 || !strings.Contains(res.Body.String(), `"token"`) {
+		t.Fatalf("%d %s", res.Code, res.Body.String())
+	}
+	select {
+	case <-ch.Commands():
+		t.Fatal("preview mutated queue")
+	default:
+	}
+}

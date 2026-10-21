@@ -653,3 +653,24 @@ func TestGitHubForkHeadUsesBaseRepositoryPullRef(t *testing.T) {
 		t.Fatal("fork branch mistaken for a base-repository prerequisite")
 	}
 }
+
+func TestPriorityCommandModifiers(t *testing.T) {
+	for _, tc := range []struct {
+		body     string
+		valid    bool
+		priority string
+		preempt  bool
+	}{
+		{"@gauntlet merge high", true, "high", false},
+		{"@gauntlet merge stack urgent preempt -- unblock CI", true, "urgent", true},
+		{"@gauntlet merge preempt -- incident", false, "", false},
+		{"@gauntlet merge urgent preempt", false, "", false},
+		{"@gauntlet merge high low", false, "", false},
+		{"@gauntlet check high", false, "", false},
+	} {
+		parsed, ok := parseCommand(tc.body, "gauntlet")
+		if ok != tc.valid || ok && (parsed.Priority != tc.priority || parsed.Preempt != tc.preempt) {
+			t.Errorf("%s: %+v %v", tc.body, parsed, ok)
+		}
+	}
+}

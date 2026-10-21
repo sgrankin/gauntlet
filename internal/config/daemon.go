@@ -233,6 +233,7 @@ type Daemon struct {
 	// to the host. Long-lived shared service containers do not count;
 	// their own instance limits apply.
 	MaxExecutions int `kdl:"max-executions"`
+	UrgentReserve int `kdl:"urgent-reserve"`
 
 	// Summarize is a pointer, unlike every other optional section above:
 	// every one of its fields has its own default (Model, TokenEnv,
@@ -1680,6 +1681,9 @@ func (d *Daemon) validate() error {
 	}
 	// Zero is "left unset" = unlimited (the field doc), so only a negative
 	// value — never a meaningful cap — is rejected.
+	if d.UrgentReserve < 0 || d.UrgentReserve > 0 && (d.MaxExecutions == 0 || d.UrgentReserve >= d.MaxExecutions) {
+		return fmt.Errorf("urgent-reserve must be nonnegative and smaller than a bounded max-executions")
+	}
 	if d.MaxExecutions < 0 {
 		return fmt.Errorf("max-executions must not be negative, got %d", d.MaxExecutions)
 	}

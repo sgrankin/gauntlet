@@ -364,7 +364,7 @@ func run() error {
 	// budget. nil (unset) means unlimited — the pre-cap behavior.
 	var slots *core.Slots
 	if cfg.MaxExecutions > 0 {
-		slots = core.NewSlots(cfg.MaxExecutions)
+		slots = core.NewReservedSlots(cfg.MaxExecutions, cfg.UrgentReserve)
 	}
 
 	// Sweep containers orphaned by a prior gauntlet process that crashed

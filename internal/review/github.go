@@ -123,6 +123,8 @@ type request struct {
 	SkipChecks, OverridePause bool
 	Requester, Reason         string
 	Urgent                    bool
+	Priority                  string
+	Preempt                   bool
 	PR                        pull
 	ID                        int64
 	Action                    string
@@ -291,7 +293,7 @@ func (g *GitHub) latestRequest(ctx context.Context, p pull, permissions map[stri
 			continue
 		}
 		if decision.Allow && c.ID > result.ID {
-			result = request{PR: p, ID: c.ID, Action: action, Count: count, Urgent: parsed.Urgent, SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause, Requester: c.User.Login, Reason: parsed.Reason}
+			result = request{PR: p, ID: c.ID, Action: action, Count: count, Urgent: parsed.Urgent, Priority: parsed.Priority, Preempt: parsed.Preempt, SkipChecks: parsed.SkipChecks, OverridePause: parsed.OverridePause, Requester: c.User.Login, Reason: parsed.Reason}
 		}
 	}
 	if feedback && result.ID != 0 && p.State == "open" {
@@ -555,7 +557,7 @@ func (g *GitHub) scan(ctx context.Context, fetch, bypassChecks bool, inputs map[
 			c := core.Candidate{Ref: slot(target, p.Number), Target: target, User: p.User.Login,
 				RequestID: requestIdentity(r),
 				Topic:     fmt.Sprintf("pr-%d", p.Number), SHA: p.Head.SHA, Source: "github",
-				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL, Urgent: r.Urgent, SkipChecks: r.SkipChecks, OverridePause: r.OverridePause, Requester: r.Requester, RequestReason: r.Reason,
+				SourceBase: sourceBase, DependsOn: previous, ReviewURL: p.HTMLURL, Priority: r.Priority, Preempt: r.Preempt, Urgent: r.Urgent, SkipChecks: r.SkipChecks, OverridePause: r.OverridePause, Requester: r.Requester, RequestReason: r.Reason,
 				Message: fmt.Sprintf("%s (#%d)\n\n%s", p.Title, p.Number, p.Body)}
 			c.Version = version(c)
 			if r.Urgent {

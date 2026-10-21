@@ -41,7 +41,7 @@ has separate bounds. Rego sees data, never an API client or credentials.
 | --- | --- |
 | `schema_version`, `phase` | Version `1` and operation phase |
 | `principal` | Transport-established `source`, `id`, `authenticated`, raw `permission`, configured `teams`, Slack `allowed_by_config` |
-| `command` | `kind`, request `id`, prefix `count`, `urgent`, `reason` |
+| `command` | `kind`, request `id`, prefix `count`, `urgent`, `priority`, `preempt`, `before`, `after`, `reason` |
 | `settings` | Approvals, required host checks, conversation resolution, emergency enablement |
 | `target`, `branch`, `base_sha` | Queue target, real branch, run base |
 | `candidate` | Ref, SHA, version, source, source base, dependency, requester, urgency |

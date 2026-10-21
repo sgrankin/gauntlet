@@ -16,7 +16,7 @@ func cloneNested[V any](in map[string]map[string]V) map[string]map[string]V {
 // Checkpoint scheduler decisions before admitting work and after terminal
 // transitions. Incident controls and scheduling state share one atomic write.
 func (d *Daemon) persistScheduler() bool {
-	if !d.controls.Uncertain && d.controls.Checkpoint && reflect.DeepEqual(d.order, d.controls.Order) && reflect.DeepEqual(d.done, d.controls.Parks) && reflect.DeepEqual(d.autoRetried, d.controls.AutoRetried) {
+	if !d.schedulerDirty && !d.controls.Uncertain && d.controls.Checkpoint && reflect.DeepEqual(d.order, d.controls.Order) && reflect.DeepEqual(d.done, d.controls.Parks) && reflect.DeepEqual(d.autoRetried, d.controls.AutoRetried) {
 		return true
 	}
 	next := d.controls.clone()
@@ -27,5 +27,9 @@ func (d *Daemon) persistScheduler() bool {
 	next.Order = cloneNested(d.order)
 	next.Parks = cloneNested(d.done)
 	next.AutoRetried = cloneNested(d.autoRetried)
-	return d.saveControls(next)
+	if !d.saveControls(next) {
+		return false
+	}
+	d.schedulerDirty = false
+	return true
 }

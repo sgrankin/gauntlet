@@ -26,6 +26,9 @@ a changed target invalidates the trial.
 `max-executions` in [execution configuration](execution.md) bounds host-wide
 command concurrency. `window × max-parallel` can exceed the host's capacity.
 
+See [priorities and reordering](../guides/priorities.md) for FIFO/aging fairness,
+non-preempting priority changes, and explicit suffix preemption.
+
 ## Commit messages
 
 Squash targets use the source head's message, the GitHub PR title/body, or the
