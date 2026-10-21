@@ -40,5 +40,5 @@ func buildFailureReview(cfg *config.Daemon, stateDir string) (*flaky.Retrier, er
 		}
 	}
 	classifier := flaky.Codex{Tools: f.Tools, ToolExecutable: helper, History: history, Client: llm.Codex{Auth: f.Auth, APIURL: f.APIURL, Model: f.Model, Token: token, Executable: executable}, MaxOutputBytes: f.MaxOutputBytes}
-	return &flaky.Retrier{History: history, MaxRunRetries: f.MaxRunRetries, Classifier: classifier, Model: f.Model, Checks: f.Checks, MaxRetries: f.MaxRetries, MinConfidence: f.MinConfidence, Timeout: f.Timeout}, nil
+	return &flaky.Retrier{KnownFlakeRetries: f.KnownFlakeRetries, History: history, MaxRunRetries: f.MaxRunRetries, Classifier: classifier, Model: f.Model, Checks: f.Checks, MaxRetries: f.MaxRetries, MinConfidence: f.MinConfidence, Timeout: f.Timeout}, nil
 }

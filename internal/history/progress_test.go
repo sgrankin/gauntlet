@@ -75,3 +75,17 @@ func TestVerificationProvenanceRoundTrips(t *testing.T) {
 		t.Fatalf("provenance: %+v %v", checks, err)
 	}
 }
+
+func TestTestReportAndAttemptsRoundTrip(t *testing.T) {
+	store := openTestStore(t)
+	record := sampleRecord("test-reports", "main", time.Now())
+	record.Checks[0].Tests = []core.TestCase{{ID: "test", Status: "passed"}}
+	record.Checks[0].TestAttempts = []core.TestAttempt{{Number: 1, Tests: []core.TestCase{{ID: "test", Status: "failed"}}}, {Number: 2, Tests: record.Checks[0].Tests}}
+	if err := store.Emit(t.Context(), core.Event{Record: record}); err != nil {
+		t.Fatal(err)
+	}
+	_, checks, err := store.Run(record.RunID)
+	if err != nil || len(checks[0].Tests) != 1 || checks[0].Tests[0].Status != "passed" || len(checks[0].TestAttempts) != 2 || checks[0].TestAttempts[0].Tests[0].Status != "failed" {
+		t.Fatalf("lost report history: %+v %v", checks, err)
+	}
+}

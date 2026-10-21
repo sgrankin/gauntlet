@@ -6,7 +6,7 @@ import "github.com/sgrankin/gauntlet/internal/config"
 func Specification(spec *config.CheckSpec) map[string]any {
 	nodes := []map[string]any{}
 	for _, c := range spec.Checks {
-		nodes = append(nodes, map[string]any{"name": c.Name, "kind": "check", "executor": c.Executor, "command": c.Command, "after": c.After, "image": c.Image, "needs": c.Needs})
+		nodes = append(nodes, map[string]any{"name": c.Name, "kind": "check", "executor": c.Executor, "command": c.Command, "after": c.After, "image": c.Image, "needs": c.Needs, "inputs": c.Inputs, "test_results": c.TestResults, "retry_command": c.RetryCommand})
 	}
 	for _, image := range spec.Images {
 		nodes = append(nodes, map[string]any{"name": image.Name, "kind": "image", "executor": image.Executor, "command": image.Command})

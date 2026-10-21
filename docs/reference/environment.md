@@ -99,3 +99,11 @@ An opted-in check's `inputs` command receives `GAUNTLET_INPUTS_RESULT_FILE`
 instead of `GAUNTLET_RESULT_FILE`. Exit zero must write 1–4096 bytes identifying
 all semantic inputs. Its workspace is disposable and separate from the check's
 workspace. See [reusable verification](../guides/reusable-checks.md).
+
+## Structured test reports
+
+Checks declaring `test-results` receive `GAUNTLET_TEST_RESULTS_FILE`, a writable
+report path separate from the ordinary result-file protocol. A targeted retry
+also receives `GAUNTLET_RETRY_TESTS_FILE`, containing a JSON array of stable
+failed-test IDs. The latter is empty on initial and full-suite executions.
+See [test reports and retries](../guides/test-reports.md) for formats and coverage.

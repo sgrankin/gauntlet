@@ -111,7 +111,7 @@ func filterSecretEnv(env []string, secret []string) []string {
 }
 
 // RunCheck implements core.Executor.
-func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.CheckResult {
+func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) (result core.CheckResult) {
 	start := time.Now()
 
 	tmpDir, err := os.MkdirTemp(e.BaseDir, "gauntlet-check-")
@@ -133,6 +133,11 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 		}
 	}
 
+	testEnv, capture, err := prepareTestFiles(job, tmpDir, tmpDir)
+	if err != nil {
+		return testFilesError(job.Name, err)
+	}
+	defer func() { capture(&result) }()
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
 	cmd.Dir = job.Dir
 	// Base environment: the daemon's own os.Environ(), with every
@@ -150,6 +155,7 @@ func (e LocalExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.Che
 	// GAUNTLET_* contract, so gauntlet's own values win any collision
 	// (last entry wins for exec.Cmd.Env).
 	cmd.Env = append(base, e.Env...)
+	cmd.Env = append(cmd.Env, testEnv...)
 	cmd.Env = append(cmd.Env,
 		core.EnvBaseSHA+"="+job.BaseSHA,
 		core.EnvMergeSHA+"="+job.MergeSHA,

@@ -1477,6 +1477,21 @@ type memberView struct {
 // all, never a misleading "0 B" or "cpu 0s".
 func checkRowDetail(c history.CheckRow) string {
 	var parts []string
+	if len(c.Tests) > 0 {
+		failed, skipped := 0, 0
+		for _, test := range c.Tests {
+			if test.Status == "failed" {
+				failed++
+			}
+			if test.Status == "skipped" {
+				skipped++
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%d tests, %d failed, %d skipped", len(c.Tests), failed, skipped))
+		if len(c.TestAttempts) > 1 {
+			parts = append(parts, fmt.Sprintf("%d attempts", len(c.TestAttempts)))
+		}
+	}
 	if c.Reused {
 		parts = append(parts, "reused verification from "+c.ExecutedRun+" at "+shortSHA(c.ExecutedSHA))
 	}

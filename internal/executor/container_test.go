@@ -1172,3 +1172,15 @@ func TestParams_RunArgs_NoDeployEnvVarsForCheckJob(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerTestReportPathsAreMounted(t *testing.T) {
+	job := containerJob([]string{"./ci/test"})
+	job.TestResults = "trx"
+	job.RetryTests = []string{"Sql.Test(1)"}
+	args := (Params{Image: "ci", Workdir: "/work"}).runArgs(job, "test", "/host/results")
+	for _, pair := range [][2]string{{"-v", "/host/results:/gauntlet"}, {"-e", core.EnvTestResultsFile + "=/gauntlet/test-results"}, {"-e", core.EnvRetryTestsFile + "=/gauntlet/retry-tests"}} {
+		if !containsPair(args, pair[0], pair[1]) {
+			t.Fatalf("missing report path %v: %v", pair, args)
+		}
+	}
+}

@@ -206,7 +206,7 @@ func New(params Params) (*ContainerExecutor, error) {
 }
 
 // RunCheck implements core.Executor.
-func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) core.CheckResult {
+func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) (result core.CheckResult) {
 	start := time.Now()
 
 	if err := ctx.Err(); err != nil {
@@ -244,6 +244,11 @@ func (c *ContainerExecutor) RunCheck(ctx context.Context, job core.CheckJob) cor
 		}
 	}
 
+	_, capture, err := prepareTestFiles(job, resultDir, containerResultDir)
+	if err != nil {
+		return testFilesError(job.Name, err)
+	}
+	defer func() { capture(&result) }()
 	name := containerName(c.params.Token, job.RunID, job.Name)
 	args := c.params.runArgs(job, name, resultDir)
 
@@ -433,6 +438,12 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		"-v", job.Dir+":"+p.Workdir,
 		"-v", resultDir+":"+containerResultDir,
 	)
+	if job.TestResults != "" {
+		args = append(args, "-e", core.EnvTestResultsFile+"="+containerResultDir+"/test-results", "-e", core.EnvRetryTestsFile+"=")
+	}
+	if len(job.RetryTests) > 0 {
+		args = append(args, "-e", core.EnvRetryTestsFile+"="+containerResultDir+"/retry-tests")
+	}
 	if p.GitDir != "" {
 		args = append(args, "-v", p.GitDir+":"+containerGitDir+":ro")
 	}
@@ -458,6 +469,12 @@ func (p Params) runArgs(job core.CheckJob, name, resultDir string) []string {
 		"-e", resultFileEnv(job)+"="+containerResultFile,
 		"-e", core.EnvRunID+"="+job.RunID,
 	)
+	if job.TestResults != "" {
+		args = append(args, "-e", core.EnvTestResultsFile+"="+containerResultDir+"/test-results", "-e", core.EnvRetryTestsFile+"=")
+	}
+	if len(job.RetryTests) > 0 {
+		args = append(args, "-e", core.EnvRetryTestsFile+"="+containerResultDir+"/retry-tests")
+	}
 	if p.GitDir != "" {
 		args = append(args, "-e", core.EnvGitDir+"="+containerGitDir)
 	}

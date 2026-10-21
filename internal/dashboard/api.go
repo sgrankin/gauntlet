@@ -877,15 +877,17 @@ type runDetailResponse struct {
 }
 
 type checkJSON struct {
-	VerificationID string `json:"verificationId,omitempty"`
-	ExecutedRun    string `json:"executedRun,omitempty"`
-	ExecutedSHA    string `json:"executedSha,omitempty"`
-	Reused         bool   `json:"reused,omitempty"`
-	Seq            int    `json:"seq"`
-	Name           string `json:"name"`
-	Status         string `json:"status"`
-	DurationMs     int64  `json:"durationMs"`
-	Err            string `json:"err"`
+	Tests          []core.TestCase    `json:"tests,omitempty"`
+	TestAttempts   []core.TestAttempt `json:"testAttempts,omitempty"`
+	VerificationID string             `json:"verificationId,omitempty"`
+	ExecutedRun    string             `json:"executedRun,omitempty"`
+	ExecutedSHA    string             `json:"executedSha,omitempty"`
+	Reused         bool               `json:"reused,omitempty"`
+	Seq            int                `json:"seq"`
+	Name           string             `json:"name"`
+	Status         string             `json:"status"`
+	DurationMs     int64              `json:"durationMs"`
+	Err            string             `json:"err"`
 	// Output is the check's (or hook's) captured output, stored verbatim,
 	// straight from the same history.CheckRow/HookRow column the HTML page
 	// and the MCP server already render — added so a JSON/CLI consumer
@@ -955,7 +957,7 @@ func (d *dash) handleAPIRun(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range checks {
 		resp.Checks = append(resp.Checks, checkJSON{
-			VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
+			Tests: c.Tests, TestAttempts: c.TestAttempts, VerificationID: c.VerificationID, ExecutedRun: c.ExecutedRun, ExecutedSHA: c.ExecutedSHA, Reused: c.Reused,
 			Seq: c.Seq, Name: c.Name, Status: c.Status,
 			DurationMs: c.Duration.Milliseconds(), Err: c.Err,
 			Output:  c.Output,

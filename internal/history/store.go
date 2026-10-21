@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ var schemaSQL string
 
 // schemaVersion is the current PRAGMA user_version. Bump it and add a case
 // to migrate's switch whenever schema.sql changes.
-const schemaVersion = 18
+const schemaVersion = 19
 
 // SchemaVersion is schemaVersion, exported so a caller outside this package
 // (gauntlet doctor's history probe) can compare an existing database's
@@ -392,6 +393,10 @@ ALTER TABLE checks ADD COLUMN reused INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version = 18`); err != nil {
 				return fmt.Errorf("history: verification provenance: %w", err)
 			}
+		case 18:
+			if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN test_report TEXT NOT NULL DEFAULT '{}'; PRAGMA user_version=19`); err != nil {
+				return fmt.Errorf("history: test reports: %w", err)
+			}
 		case schemaVersion:
 			return db.Commit()
 		default:
@@ -560,6 +565,10 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 		if cr.Seq > 0 {
 			seq = cr.Seq - 1
 		}
+		report, _ := json.Marshal(struct {
+			Tests    []core.TestCase    `json:"tests,omitempty"`
+			Attempts []core.TestAttempt `json:"attempts,omitempty"`
+		}{cr.Tests, cr.TestAttempts})
 		if _, err := tx.ExecContext(ctx, insertCheckSQL,
 			rec.RunID,
 			seq,
@@ -592,7 +601,7 @@ func (s *Store) writeRecord(ctx context.Context, rec *core.RunRecord) error {
 			cr.PeakRSS,
 			cr.UserCPU.Milliseconds(),
 			cr.SysCPU.Milliseconds(),
-			cr.VerificationID, cr.ExecutedRun, cr.ExecutedSHA, cr.Reused,
+			cr.VerificationID, cr.ExecutedRun, cr.ExecutedSHA, cr.Reused, string(report),
 		); err != nil {
 			return fmt.Errorf("history: insert check: %w", err)
 		}

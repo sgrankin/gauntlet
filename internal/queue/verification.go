@@ -25,6 +25,7 @@ func (d *Daemon) reusableCheck(ctx context.Context, job core.CheckJob, check con
 		return fail(err)
 	}
 	identityJob := job
+	identityJob.TestResults, identityJob.RetryCommand, identityJob.RetryTests = "", nil, nil
 	identityJob.Dir, identityJob.Command, identityJob.InputsCapture = dir, check.Inputs, true
 	if job.LogPath != "" {
 		identityJob.LogPath = strings.TrimSuffix(job.LogPath, ".log.zst") + ".inputs.log.zst"

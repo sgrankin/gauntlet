@@ -57,6 +57,7 @@ nav:
     - Container executor: guides/containers.md
     - Conditional checks: guides/conditional-checks.md
     - Reusable verification: guides/reusable-checks.md
+    - Test reports and retries: guides/test-reports.md
     - Writing policy: guides/policy.md
   - Deployment:
     - Using receipts: guides/receipts.md

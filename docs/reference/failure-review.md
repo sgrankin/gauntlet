@@ -29,6 +29,11 @@ Both authentication modes require Codex CLI. API keys use an isolated temporary
 Codex credential file. There is no separate direct HTTP classification path.
 There is no automatic retry on provider errors.
 
+`known-flake-retries` defaults to 0; values up to `max-retries` permit bounded
+history-backed retries before calling Codex. Two distinct prior retry recoveries
+of the same failure signature are required. These retries share all budgets and
+Rego authorization. See [test reports and targeted retries](../guides/test-reports.md).
+
 For a ChatGPT workspace service account, create a Codex-scoped access token
 and supply it through the daemon's environment:
 
@@ -65,8 +70,8 @@ Under shipped Rego policy, only `retry` above the confidence threshold triggers
 another execution. Custom retry policy can replace this decision; hard budgets
 and actual passing verification remain required. `abort`
 and `abstain`, low confidence, invalid output, or an unavailable model keep the
-failure. A rerun must pass to unblock the queue. Confidence is model-reported,
-not calibrated. Retries preserve the same tested commit, workspace, services,
+failure. A rerun must pass to unblock the queue. Codex confidence is model-reported,
+not calibrated. History-backed decisions identify their observed evidence separately. Retries preserve the same tested commit, workspace, services,
 and successful sibling checks, avoiding a speculation bubble or batch fallback
 when a flaky check recovers. Decisions and every attempt appear in check output
 and full logs. Classifications hold the check's execution slot, so the existing

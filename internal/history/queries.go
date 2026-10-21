@@ -1,7 +1,9 @@
 package history
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/sgrankin/gauntlet/internal/core"
 	"slices"
 	"time"
 )
@@ -19,8 +21,8 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertCheckSQL = `
-INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO checks (run_id, seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused, test_report)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	insertHookSQL = `
 INSERT OR REPLACE INTO hooks (run_id, seq, name, status, duration_ms, err, output, log_path)
@@ -137,6 +139,8 @@ type RunRow struct {
 
 // CheckRow is one row of the checks table, as read back for the dashboard.
 type CheckRow struct {
+	Tests                                    []core.TestCase
+	TestAttempts                             []core.TestAttempt
 	VerificationID, ExecutedRun, ExecutedSHA string
 	Reused                                   bool
 	Seq                                      int
@@ -374,7 +378,7 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused FROM checks WHERE run_id = ? ORDER BY seq`,
+		`SELECT seq, name, status, duration_ms, err, output, log_path, command, blocked_by, waited_ms, image, materialize_ms, peak_rss_bytes, user_cpu_ms, sys_cpu_ms, verification_id, executed_run, executed_sha, reused, test_report FROM checks WHERE run_id = ? ORDER BY seq`,
 		runID,
 	)
 	if err != nil {
@@ -385,10 +389,19 @@ func (s *Store) Run(runID string) (RunRow, []CheckRow, error) {
 	var checks []CheckRow
 	for rows.Next() {
 		var c CheckRow
+		var report string
 		var durationMS, waitedMS, materializeMS, userCPUms, sysCPUms int64
-		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms, &c.VerificationID, &c.ExecutedRun, &c.ExecutedSHA, &c.Reused); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Name, &c.Status, &durationMS, &c.Err, &c.Output, &c.LogPath, &c.Command, &c.BlockedBy, &waitedMS, &c.Image, &materializeMS, &c.PeakRSS, &userCPUms, &sysCPUms, &c.VerificationID, &c.ExecutedRun, &c.ExecutedSHA, &c.Reused, &report); err != nil {
 			return RunRow{}, nil, fmt.Errorf("history: run %s checks: %w", runID, err)
 		}
+		var decoded struct {
+			Tests    []core.TestCase    `json:"tests"`
+			Attempts []core.TestAttempt `json:"attempts"`
+		}
+		if err := json.Unmarshal([]byte(report), &decoded); err != nil {
+			return RunRow{}, nil, fmt.Errorf("history: invalid test report: %w", err)
+		}
+		c.Tests, c.TestAttempts = decoded.Tests, decoded.Attempts
 		c.Duration = time.Duration(durationMS) * time.Millisecond
 		c.Waited = time.Duration(waitedMS) * time.Millisecond
 		c.Materialized = time.Duration(materializeMS) * time.Millisecond

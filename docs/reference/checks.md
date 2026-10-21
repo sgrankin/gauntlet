@@ -34,6 +34,14 @@ queue reconstruction. It requires `workspace "isolated"`. The command writes
 See [reusable checks](../guides/reusable-checks.md) for the dependency contract,
 example, retention, recovery, and provenance.
 
+## Test reports and retries
+
+`test-results "json"`, `"junit"`, or `"trx"` requires a bounded report written
+to `GAUNTLET_TEST_RESULTS_FILE`. An optional `retry-command "./ci/retry-tests"`
+receives failed test IDs through `GAUNTLET_RETRY_TESTS_FILE`; it needs
+`test-results` and operator retry authorization. See [test reports](../guides/test-reports.md)
+for identity, coverage validation, formats, and history.
+
 ## Ordering and parallelism
 
 By default checks run **one at a time, in declaration order** — upgrading

@@ -97,6 +97,8 @@ type CheckSpec struct {
 // tree. See core.CheckJob and docs/reference/checks.md for the environment/verdict
 // contract the executor applies when it runs Command.
 type Check struct {
+	TestResults  string   `kdl:"test-results"`
+	RetryCommand []string `kdl:"retry-command,child"`
 	// Inputs writes an opaque identity for all semantic inputs to this check.
 	Inputs  []string `kdl:"inputs,child"`
 	Name    string   `kdl:",arg"`
@@ -506,6 +508,12 @@ func (cs *CheckSpec) validate() error {
 	}
 
 	for _, c := range cs.Checks {
+		if c.TestResults != "" && c.TestResults != "json" && c.TestResults != "junit" && c.TestResults != "trx" {
+			return fmt.Errorf("check %q: test-results must be json, junit, or trx", c.Name)
+		}
+		if c.RetryCommand != nil && (len(c.RetryCommand) == 0 || c.TestResults == "") {
+			return fmt.Errorf("check %q: retry-command needs test-results and a command", c.Name)
+		}
 		if len(c.Command) == 0 {
 			return fmt.Errorf("check %q: command must not be empty", c.Name)
 		}

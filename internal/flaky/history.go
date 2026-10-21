@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/sgrankin/gauntlet/internal/core"
 	_ "modernc.org/sqlite"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,6 +22,7 @@ type Observation struct {
 	Decision                          Decision
 	Error                             string `json:"error,omitempty"`
 	Retried, Passed                   bool
+	TestIDs                           []string
 	Output                            string
 }
 
@@ -45,13 +47,17 @@ func fingerprint(check, output string) string {
 	sum := sha256.Sum256([]byte(check + "\n" + strings.Join(strings.Fields(output), " ")))
 	return hex.EncodeToString(sum[:])
 }
-func (h *History) Record(ctx context.Context, job core.CheckJob, output string, decision Decision, decisionErr error, retried, passed bool) error {
+func (h *History) Record(ctx context.Context, job core.CheckJob, output string, decision Decision, decisionErr error, retried, passed bool, reports ...[]core.TestCase) error {
 	if h == nil {
 		return nil
 	}
 	o := Observation{At: time.Now().UTC(), Run: job.RunID, Check: job.Name, Revision: job.MergeSHA, Fingerprint: fingerprint(job.Name, output), Decision: decision, Retried: retried, Passed: passed, Output: tail(output, 4096)}
 	if decisionErr != nil {
 		o.Error = decisionErr.Error()
+	}
+	if len(reports) > 0 {
+		o.TestIDs = failedIDs(reports[0])
+		o.Fingerprint = failureSignature(job.Name, output, reports[0])
 	}
 	data, err := json.Marshal(o)
 	if err != nil {
@@ -125,4 +131,74 @@ func (h *History) Recent(ctx context.Context, check string) ([]Observation, erro
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+func failedIDs(tests []core.TestCase) []string {
+	var ids []string
+	for _, test := range tests {
+		if test.Status == "failed" {
+			ids = append(ids, test.ID)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+func failureSignature(check, output string, tests []core.TestCase) string {
+	var failed []core.TestCase
+	for _, test := range tests {
+		if test.Status == "failed" {
+			failed = append(failed, test)
+		}
+	}
+	if len(failed) == 0 {
+		return fingerprint(check, output)
+	}
+	slices.SortFunc(failed, func(a, b core.TestCase) int { return strings.Compare(a.ID, b.ID) })
+	data, _ := json.Marshal(failed)
+	return fingerprint(check, string(data))
+}
+
+// KnownFlake requires two distinct failed-then-passed executions, with no later
+// failed retry for this exact signature. Model labels alone are not evidence.
+func (h *History) KnownFlake(ctx context.Context, job core.CheckJob, res core.CheckResult) (Decision, bool, error) {
+	if h == nil {
+		return Decision{}, false, nil
+	}
+	signature := failureSignature(job.Name, res.Output, res.Tests)
+	rows, err := h.db.QueryContext(ctx, `SELECT data FROM failure_review WHERE check_name=? AND fingerprint=? AND at>=? ORDER BY id DESC LIMIT 20`, job.Name, signature, time.Now().Add(-30*24*time.Hour).Unix())
+	if err != nil {
+		return Decision{}, false, err
+	}
+	defer rows.Close()
+	runs := map[string]bool{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return Decision{}, false, err
+		}
+		var observation Observation
+		if err := json.Unmarshal([]byte(data), &observation); err != nil {
+			return Decision{}, false, err
+		}
+		if observation.Error != "" || !observation.Retried {
+			continue
+		}
+		if !observation.Passed {
+			return Decision{}, false, nil
+		}
+		if observation.Run != "" && observation.Run != job.RunID {
+			runs[observation.Run] = true
+			if len(runs) >= 2 {
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Decision{}, false, err
+	}
+	if len(runs) < 2 {
+		return Decision{}, false, nil
+	}
+	return Decision{Action: "retry", Confidence: 1, Kind: "flake", Reason: "This exact failure signature recovered on retry in at least two distinct prior runs.", Evidence: []string{"observed failed-to-passed executions"}}, true, nil
 }

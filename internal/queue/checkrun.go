@@ -297,6 +297,7 @@ func (d *Daemon) startCheck(ctx context.Context, r *run, idx int) {
 	spanCtx, span := obs.StartCheck(checkCtx, d.tr, check.Name)
 
 	job := core.CheckJob{
+		TestResults: check.TestResults, RetryCommand: check.RetryCommand,
 		GitDir:    d.cfg.SourceGitDir,
 		RunID:     r.runID,
 		Target:    r.target,

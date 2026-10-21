@@ -286,3 +286,15 @@ func TestReusableCheckRequiresIsolatedWorkspace(t *testing.T) {
 		t.Fatalf("isolated inputs: %+v %v", parsed, err)
 	}
 }
+
+func TestStructuredReportAndRetryCommand(t *testing.T) {
+	spec, err := ParseChecks([]byte("check \"sql\" {\n command \"./ci/test\"\n test-results \"trx\"\n retry-command \"./ci/retry\"\n}\n"))
+	if err != nil || spec.Checks[0].TestResults != "trx" || len(spec.Checks[0].RetryCommand) != 1 {
+		t.Fatalf("report config: %+v %v", spec, err)
+	}
+	for _, body := range []string{"test-results \"guess\"", "retry-command \"./ci/retry\""} {
+		if _, err := ParseChecks([]byte("check \"sql\" {\n command \"true\"\n" + body + "\n}\n")); err == nil {
+			t.Errorf("accepted %s", body)
+		}
+	}
+}

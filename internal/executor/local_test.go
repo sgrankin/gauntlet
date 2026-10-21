@@ -804,3 +804,23 @@ func TestLocalExecutorInputsIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalTestReportFailureAndRetrySelection(t *testing.T) {
+	job := baseJob(t, []string{"sh", "-c", `printf '%s' '{"tests":[{"id":"flaky","status":"failed"}]}' > "$GAUNTLET_TEST_RESULTS_FILE"`})
+	job.TestResults = "json"
+	res := (LocalExecutor{}).RunCheck(t.Context(), job)
+	if res.Err != nil || res.Status != core.CheckFailed || len(res.Tests) != 1 {
+		t.Fatalf("exit zero ignored failed test: %+v", res)
+	}
+	job.Command = []string{"sh", "-c", `test "$(cat "$GAUNTLET_RETRY_TESTS_FILE")" = '["flaky"]' && printf '%s' '{"tests":[{"id":"flaky","status":"passed"}]}' > "$GAUNTLET_TEST_RESULTS_FILE"`}
+	job.RetryTests = []string{"flaky"}
+	res = (LocalExecutor{}).RunCheck(t.Context(), job)
+	if res.Err != nil || res.Status != core.CheckPassed {
+		t.Fatalf("retry metadata unavailable: %+v", res)
+	}
+	job.Command = []string{"true"}
+	res = (LocalExecutor{}).RunCheck(t.Context(), job)
+	if res.Status != core.CheckFailed {
+		t.Fatal("missing report cleared check")
+	}
+}

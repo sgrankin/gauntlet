@@ -90,15 +90,22 @@ func evidence(job core.CheckJob, res core.CheckResult, maxBytes int) string {
 	for _, arg := range job.Command[:min(len(job.Command), 32)] {
 		command = append(command, tail(arg, 256))
 	}
+	failedTests := []core.TestCase{}
+	for _, test := range res.Tests {
+		if test.Status == "failed" && len(failedTests) < 32 {
+			failedTests = append(failedTests, core.TestCase{ID: tail(test.ID, 512), Status: test.Status, Message: tail(test.Message, 512)})
+		}
+	}
 	data := struct {
-		Candidates []member `json:"candidates"`
-		Base       string   `json:"base_sha"`
-		Check      string   `json:"check"`
-		Command    []string `json:"command"`
-		Target     string   `json:"target"`
-		TestedSHA  string   `json:"tested_sha"`
-		Output     string   `json:"output_tail"`
-	}{members, job.BaseSHA, tail(job.Name, 256), command, tail(job.Target, 256), job.MergeSHA, tail(res.Output, maxBytes)}
+		Candidates  []member        `json:"candidates"`
+		FailedTests []core.TestCase `json:"failed_tests,omitempty"`
+		Base        string          `json:"base_sha"`
+		Check       string          `json:"check"`
+		Command     []string        `json:"command"`
+		Target      string          `json:"target"`
+		TestedSHA   string          `json:"tested_sha"`
+		Output      string          `json:"output_tail"`
+	}{members, failedTests, job.BaseSHA, tail(job.Name, 256), command, tail(job.Target, 256), job.MergeSHA, tail(res.Output, maxBytes)}
 	b, _ := json.Marshal(data)
 	return string(b)
 }

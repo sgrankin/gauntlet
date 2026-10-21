@@ -194,3 +194,68 @@ retry := {"allow":true,"requirements":[]}`, time.Second, policy.Options{Replace:
 		t.Fatalf("policy bypassed budget or actual verdict: %d %+v", count, result)
 	}
 }
+
+func TestSubsetRetryKeepsCoverageAndPassingSiblings(t *testing.T) {
+	for _, status := range []string{"passed", "skipped", "missing"} {
+		t.Run(status, func(t *testing.T) {
+			retrier := &Retrier{Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Second, Classifier: classifyFunc(func(context.Context, core.CheckJob, core.CheckResult) (Decision, error) {
+				return Decision{Action: "retry", Confidence: 1, Reason: "transient"}, nil
+			})}
+			job := core.CheckJob{Name: "test", TestResults: "json", Command: []string{"all"}, RetryCommand: []string{"subset"}}
+			calls := 0
+			result := retrier.Run(t.Context(), job, func(_ context.Context, attempt core.CheckJob) core.CheckResult {
+				calls++
+				if calls == 1 {
+					return core.CheckResult{Status: core.CheckFailed, Tests: []core.TestCase{{ID: "green", Status: "passed"}, {ID: "red", Status: "failed"}}}
+				}
+				if len(attempt.Command) != 1 || attempt.Command[0] != "subset" || len(attempt.RetryTests) != 1 || attempt.RetryTests[0] != "red" {
+					t.Fatalf("not an exact subset request: %+v", attempt)
+				}
+				test := core.TestCase{ID: "red", Status: status}
+				if status == "missing" {
+					test = core.TestCase{ID: "other", Status: "passed"}
+				}
+				return core.CheckResult{Status: core.CheckPassed, Tests: []core.TestCase{test}}
+			})
+			if (result.Status == core.CheckPassed) != (status == "passed") || len(result.Tests) != 2 || result.Tests[0].Status != "passed" || len(result.TestAttempts) != 2 {
+				t.Fatalf("coverage or provenance lost: %+v", result)
+			}
+		})
+	}
+}
+
+func TestKnownFlakeUsesObservedRecoveriesAndBudget(t *testing.T) {
+	history, err := OpenHistory(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer history.Close()
+	failure := core.CheckResult{Status: core.CheckFailed, Output: "timestamp changes", Tests: []core.TestCase{{ID: "db/test", Status: "failed", Message: "temporary timeout"}}}
+	for _, run := range []string{"one", "two"} {
+		if err := history.Record(t.Context(), core.CheckJob{Name: "test", RunID: run}, failure.Output, Decision{Action: "retry", Confidence: 1, Reason: "recovered"}, nil, true, true, failure.Tests); err != nil {
+			t.Fatal(err)
+		}
+	}
+	classifications := 0
+	retrier := &Retrier{History: history, KnownFlakeRetries: 1, MaxRunRetries: 2, Checks: []string{"test"}, MaxRetries: 1, MinConfidence: .8, Timeout: time.Second, Classifier: classifyFunc(func(context.Context, core.CheckJob, core.CheckResult) (Decision, error) {
+		classifications++
+		return Decision{}, errors.New("must not call model")
+	})}
+	count := 0
+	result := retrier.Run(t.Context(), core.CheckJob{Name: "test", RunID: "three"}, func(context.Context, core.CheckJob) core.CheckResult {
+		count++
+		if count == 1 {
+			return failure
+		}
+		return core.CheckResult{Status: core.CheckPassed, Tests: []core.TestCase{{ID: "db/test", Status: "passed"}}}
+	})
+	if classifications != 0 || result.Status != core.CheckPassed || count != 2 {
+		t.Fatalf("known flake did not take bounded history path: %+v", result)
+	}
+	if err := history.Record(t.Context(), core.CheckJob{Name: "test", RunID: "four"}, failure.Output, Decision{}, nil, true, false, failure.Tests); err != nil {
+		t.Fatal(err)
+	}
+	if _, known, err := history.KnownFlake(t.Context(), core.CheckJob{Name: "test", RunID: "five"}, failure); err != nil || known {
+		t.Fatal("failed retry did not invalidate fast recovery")
+	}
+}

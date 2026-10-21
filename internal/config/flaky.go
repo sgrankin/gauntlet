@@ -11,18 +11,19 @@ import (
 // FailureReview is operator-owned: only named, repeatable checks may send
 // failure output to a model and retry inside their existing queue run.
 type FailureReview struct {
-	Tools          bool          `kdl:"tools"`
-	MaxRunRetries  int           `kdl:"max-run-retries"`
-	Auth           string        `kdl:"auth"`
-	Model          string        `kdl:"model"`
-	TokenEnv       string        `kdl:"token-env"`
-	APIURL         string        `kdl:"api-url"`
-	Codex          string        `kdl:"codex"`
-	Checks         []string      `kdl:"checks"`
-	MaxRetries     int           `kdl:"max-retries"`
-	MinConfidence  float64       `kdl:"min-confidence"`
-	Timeout        time.Duration `kdl:"timeout,format:units"`
-	MaxOutputBytes int           `kdl:"max-output-bytes"`
+	KnownFlakeRetries int           `kdl:"known-flake-retries"`
+	Tools             bool          `kdl:"tools"`
+	MaxRunRetries     int           `kdl:"max-run-retries"`
+	Auth              string        `kdl:"auth"`
+	Model             string        `kdl:"model"`
+	TokenEnv          string        `kdl:"token-env"`
+	APIURL            string        `kdl:"api-url"`
+	Codex             string        `kdl:"codex"`
+	Checks            []string      `kdl:"checks"`
+	MaxRetries        int           `kdl:"max-retries"`
+	MinConfidence     float64       `kdl:"min-confidence"`
+	Timeout           time.Duration `kdl:"timeout,format:units"`
+	MaxOutputBytes    int           `kdl:"max-output-bytes"`
 }
 
 func (f *FailureReview) defaults() {
@@ -81,6 +82,9 @@ func (f *FailureReview) validate() error {
 	}
 	if f.MaxRunRetries < 1 || f.MaxRunRetries > 20 {
 		return fmt.Errorf("failure-review: max-run-retries must be 1..20")
+	}
+	if f.KnownFlakeRetries < 0 || f.KnownFlakeRetries > f.MaxRetries {
+		return fmt.Errorf("failure-review: known-flake-retries must be 0..max-retries")
 	}
 	if f.MaxRetries < 1 || f.MaxRetries > 3 {
 		return fmt.Errorf("failure-review: max-retries must be 1..3")

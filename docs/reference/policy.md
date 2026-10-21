@@ -15,7 +15,7 @@ revision binding, required receipts, signing, retention, retry budgets, and CAS.
 | `submission` | Candidate admission and freshly validated landing |
 | `execution` | Before materializing/running candidate check or deployment graphs |
 | `deployment` | Before tracked desired-ref promotion, lane admission, and observed-ref publication |
-| `retry` | After a valid Codex classification, before spending a retry |
+| `retry` | After a valid Codex or observed-history decision, before spending a retry |
 
 Custom queries are `data.gauntlet.<entry point>`. Each returns `allow` and
 `requirements`, an array of `{name, satisfied, reason}` objects. Any unsatisfied
@@ -53,7 +53,7 @@ has separate bounds. Rego sees data, never an API client or credentials.
 | `adapter_validated` | An adapter without the shared fact contract owns source validation; source identity is retained |
 | `execution` | Graph kind, nodes (name/kind/executor/command/dependencies), services; check workspace and parallelism |
 | `deployment` | Environment/mode/source, proposed desired SHA and prior observed SHA; custom rules also receive current fetched refs and source tip |
-| `retry` | Classifier action, confidence/threshold, kind, check, attempt, reason, evidence |
+| `retry` | Decision `source` (`codex` or `history`), action, confidence/threshold, kind, check, attempt, reason, evidence, failed `test_ids`, `verification_id` |
 
 Facts vary by entry point; unavailable fields are empty rather than fabricated.
 For execution, `stack` contains the tested candidates; deployment execution uses

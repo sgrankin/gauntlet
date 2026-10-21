@@ -13,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/sgrankin/gauntlet/internal/core"
 	"github.com/sgrankin/gauntlet/internal/policy"
+	"github.com/sgrankin/gauntlet/internal/testreport"
 )
 
 type Classifier interface {
@@ -23,15 +24,16 @@ type Classifier interface {
 // workspace, services, and execution slot until a final result is available.
 // It must only be configured for commands whose effects are safe to repeat.
 type Retrier struct {
-	Policy        *policy.Engine
-	History       *History
-	MaxRunRetries int
-	Classifier    Classifier
-	Model         string
-	Checks        []string
-	MaxRetries    int
-	MinConfidence float64
-	Timeout       time.Duration
+	KnownFlakeRetries int
+	Policy            *policy.Engine
+	History           *History
+	MaxRunRetries     int
+	Classifier        Classifier
+	Model             string
+	Checks            []string
+	MaxRetries        int
+	MinConfidence     float64
+	Timeout           time.Duration
 }
 
 func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.Context, core.CheckJob) core.CheckResult) core.CheckResult {
@@ -40,6 +42,8 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 	if r == nil || r.Classifier == nil || job.OperatorOwned || job.ImageBuild || job.ReceiptCapture || job.InputsCapture || !slices.Contains(r.Checks, job.Name) || res.Err != nil || res.Status != core.CheckFailed || ctx.Err() != nil {
 		return res
 	}
+	attempts := []core.TestAttempt{{Number: 1, Command: slices.Clone(job.Command), LogPath: res.LogPath, Tests: slices.Clone(res.Tests)}}
+	knownUsed := 0
 	var audit strings.Builder
 	var suspects []string
 	var kind string
@@ -55,7 +59,18 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			break
 		}
 		cctx, cancel := context.WithTimeout(ctx, r.Timeout)
-		decision, err := r.Classifier.Classify(cctx, job, res)
+		var decision Decision
+		var known bool
+		var err error
+		if knownUsed < r.KnownFlakeRetries {
+			decision, known, err = r.History.KnownFlake(cctx, job, res)
+		}
+		if err != nil || !known {
+			decision, err = r.Classifier.Classify(cctx, job, res)
+			known = false
+		} else {
+			knownUsed++
+		}
 		if cctx.Err() != nil {
 			err = cctx.Err()
 		}
@@ -64,7 +79,7 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			err = decision.Validate()
 		}
 		if err != nil {
-			if e := r.History.Record(ctx, job, res.Output, decision, err, false, false); e != nil {
+			if e := r.History.Record(ctx, job, res.Output, decision, err, false, false, res.Tests); e != nil {
 				log.Printf("failure history: %v", e)
 			}
 			note := fmt.Sprintf("gauntlet failure review: decision unavailable or invalid (%v); keeping failure.\n", err)
@@ -87,18 +102,22 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 		if engine == nil {
 			engine = policy.Default()
 		}
-		verdict, policyErr := engine.Decide(ctx, "retry", policy.Input{SchemaVersion: 1, Phase: "retry", Retry: map[string]any{"action": decision.Action, "confidence": decision.Confidence, "min_confidence": r.MinConfidence, "kind": decision.Kind, "check": job.Name, "attempt": attempt, "reason": decision.Reason, "evidence": decision.Evidence}})
+		source, model := "codex", r.Model
+		if known {
+			source, model = "history", "observed-history"
+		}
+		verdict, policyErr := engine.Decide(ctx, "retry", policy.Input{SchemaVersion: 1, Phase: "retry", Retry: map[string]any{"action": decision.Action, "confidence": decision.Confidence, "min_confidence": r.MinConfidence, "kind": decision.Kind, "check": job.Name, "attempt": attempt, "reason": decision.Reason, "evidence": decision.Evidence, "source": source, "test_ids": testreport.Failed(res.Tests), "verification_id": job.VerificationID}})
 		retry := policyErr == nil && verdict.Allow && ctx.Err() == nil
 		if policyErr != nil {
 			fmt.Fprintf(&audit, "gauntlet retry policy unavailable: %v\n", policyErr)
 		} else if !verdict.Allow {
 			fmt.Fprintf(&audit, "gauntlet retry policy: %s\n", verdict.Reason())
 		}
-		note := fmt.Sprintf("gauntlet failure review: model=%q %s confidence=%.3f threshold=%.3f; %s; retry=%t\n", r.Model, decision.Action, decision.Confidence, r.MinConfidence, strings.Join(strings.Fields(decision.Reason), " "), retry)
+		note := fmt.Sprintf("gauntlet failure review: model=%q %s confidence=%.3f threshold=%.3f; %s; retry=%t\n", model, decision.Action, decision.Confidence, r.MinConfidence, strings.Join(strings.Fields(decision.Reason), " "), retry)
 		audit.WriteString(note)
 		appendNote(canonical, note)
 		if !retry {
-			if err := r.History.Record(ctx, job, res.Output, decision, nil, false, false); err != nil {
+			if err := r.History.Record(ctx, job, res.Output, decision, nil, false, false, res.Tests); err != nil {
 				log.Printf("failure history: %v", err)
 			}
 			break
@@ -117,16 +136,38 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			}
 		}
 		failedOutput := res.Output
+		previousTests := res.Tests
 		nextJob := job
 		if job.LogPath != "" {
 			nextJob.LogPath = strings.TrimSuffix(job.LogPath, ".log.zst") + fmt.Sprintf(".attempt-%d.log.zst", attempt+1)
 		}
+		requested := testreport.Failed(previousTests)
+		if len(job.RetryCommand) > 0 && len(requested) > 0 {
+			nextJob.Command = slices.Clone(job.RetryCommand)
+			nextJob.RetryTests = slices.Clone(requested)
+		} else {
+			requested = nil
+			for _, test := range previousTests {
+				if test.Status != "skipped" {
+					requested = append(requested, test.ID)
+				}
+			}
+		}
 		res = run(ctx, nextJob)
+		attempts = append(attempts, core.TestAttempt{Number: attempt + 1, Command: slices.Clone(nextJob.Command), LogPath: res.LogPath, Tests: slices.Clone(res.Tests)})
+		if len(previousTests) > 0 && res.Err == nil {
+			merged, coverageErr := testreport.MergeRerun(previousTests, res.Tests, requested)
+			res.Tests = merged
+			if coverageErr != nil {
+				res.Status = core.CheckFailed
+				res.Output += "\ngauntlet: " + coverageErr.Error()
+			}
+		}
 		if res.Err == nil && res.Status == core.CheckSkipped {
 			res.Status = core.CheckFailed
 			res.Output += "\ngauntlet: a skipped retry cannot clear the original failure."
 		}
-		if err := r.History.Record(ctx, job, failedOutput, decision, nil, true, res.Err == nil && res.Status == core.CheckPassed); err != nil {
+		if err := r.History.Record(ctx, job, failedOutput, decision, nil, true, res.Err == nil && res.Status == core.CheckPassed, previousTests); err != nil {
 			log.Printf("failure history: %v", err)
 		}
 		totalCPUUser += res.UserCPU
@@ -139,6 +180,7 @@ func (r *Retrier) Run(ctx context.Context, job core.CheckJob, run func(context.C
 			appendLog(canonical, res.LogPath)
 		}
 	}
+	res.TestAttempts = attempts
 	res.SuspectedRefs = suspects
 	res.FailureKind = kind
 	res.Output = tail(audit.String(), 65536)
